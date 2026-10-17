@@ -1,0 +1,28 @@
+{
+  "name": "@cloudbrowser/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "wrangler dev --port 8788 --persist-to ../../.wrangler/state",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "deploy": "wrangler deploy && wrangler deploy -c wrangler.reaper.jsonc"
+  },
+  "dependencies": {
+    "@cloudbrowser/contracts": "workspace:*",
+    "@cloudbrowser/db": "workspace:*",
+    "@cloudbrowser/executors": "workspace:*",
+    "drizzle-orm": "^0.45.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "@types/node": "^22.18.0",
+    "typescript": "~5.9.3",
+    "vitest": "^3.2.7",
+    "wrangler": "^4.151.1"
+  }
+}

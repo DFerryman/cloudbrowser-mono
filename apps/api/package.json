@@ -1,0 +1,29 @@
+{
+  "name": "@cloudbrowser/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8787 --persist-to ../../.wrangler/state",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@cloudbrowser/contracts": "workspace:*",
+    "@cloudbrowser/db": "workspace:*",
+    "@hono/zod-openapi": "^1.6.3",
+    "better-auth": "^1.7.10",
+    "drizzle-orm": "^0.45.4",
+    "hono": "^4.13.13",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@cloudbrowser/engine": "workspace:*",
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "@types/node": "^22.18.0",
+    "typescript": "~5.9.3",
+    "vitest": "^3.2.7",
+    "wrangler": "^4.151.1"
+  }
+}

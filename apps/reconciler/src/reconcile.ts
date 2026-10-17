@@ -1,0 +1,215 @@
+import { newId, schema, type Db } from '@cloudbrowser/db';
+import type { Executor, ExecutorKind, OpContext } from '@cloudbrowser/executors';
+import { and, eq, gte, inArray, ne, sql } from 'drizzle-orm';
+
+const { regions, resources, operations, driftFindings, quotaSnapshots, spendSnapshots, controlFlags, caps, browserInstances, auditLog } =
+  schema;
+
+export interface ReconcilerDeps {
+  db: Db;
+  /** Read-only credentials: the reconciler never changes provider resources. */
+  executor(kind: ExecutorKind): Executor;
+  envName: string;
+  now(): Date;
+}
+
+/** Assumed active hours per running browser per day, for the month projection (page 12). */
+const ACTIVE_HOURS_PER_DAY = 8;
+
+function ctx(deps: ReconcilerDeps, purpose: string): OpContext {
+  return {
+    operationId: `reconciler:${purpose}`,
+    step: purpose,
+    token: purpose,
+    tags: { 'cb:managed': 'true', 'cb:env': deps.envName, 'cb:instance': '-', 'cb:op': 'reconciler', 'cb:gen': '0' },
+    deadline: Date.now() + 30_000,
+  };
+}
+
+async function openFinding(
+  deps: ReconcilerDeps,
+  f: { kind: string; executor: string; region: string; providerId: string; resourceKind?: string; instanceId?: string | null; detail: string },
+) {
+  const { db } = deps;
+  const [existing] = await db
+    .select({ id: driftFindings.id })
+    .from(driftFindings)
+    .where(and(eq(driftFindings.providerId, f.providerId), eq(driftFindings.kind, f.kind), eq(driftFindings.status, 'open')));
+  if (existing) return false;
+  await db.insert(driftFindings).values({
+    id: newId(),
+    kind: f.kind,
+    executor: f.executor,
+    region: f.region,
+    providerId: f.providerId,
+    resourceKind: f.resourceKind ?? null,
+    instanceId: f.instanceId ?? null,
+    status: 'open',
+    detail: f.detail,
+    createdAt: deps.now(),
+  });
+  return true;
+}
+
+async function freezeCreates(deps: ReconcilerDeps, reason: string) {
+  const at = deps.now();
+  await deps.db.batch([
+    deps.db
+      .insert(controlFlags)
+      .values({ key: 'creation_freeze', value: 'true', reason, updatedAt: at })
+      .onConflictDoUpdate({ target: controlFlags.key, set: { value: 'true', reason, updatedAt: at } }),
+    deps.db.insert(auditLog).values({ actor: 'reconciler', action: 'circuit_breaker.tripped', target: 'global', detail: { reason }, createdAt: at }),
+  ]);
+}
+
+/**
+ * Ledger vs provider, every 5 minutes (page 10, "Ledger and reconciler"). Findings and the circuit
+ * breaker are recorded here; corrective changes are left to the engine and the reaper.
+ */
+export async function reconcileLedger(deps: ReconcilerDeps) {
+  const { db } = deps;
+  const summary = { adopted: 0, orphans: 0, missing: 0, frozen: false };
+  const targets = await db
+    .selectDistinct({ executor: regions.executor, providerRegion: regions.providerRegion })
+    .from(regions)
+    .where(eq(regions.enabled, true));
+
+  for (const t of targets) {
+    const executor = deps.executor(t.executor as ExecutorKind);
+    const observed = (await executor.listManaged(ctx(deps, 'list'), t.providerRegion)).filter(
+      (r) => r.tags['cb:env'] === deps.envName,
+    );
+    const ledger = await db
+      .select()
+      .from(resources)
+      .where(and(eq(resources.executor, t.executor), eq(resources.region, t.providerRegion), ne(resources.state, 'deleted')));
+    const byProviderId = new Map(ledger.filter((r) => r.providerId).map((r) => [r.providerId!, r]));
+    const seen = new Set<string>();
+
+    for (const r of observed) {
+      seen.add(r.providerId);
+      if (byProviderId.has(r.providerId)) continue;
+      const opId = r.tags['cb:op'];
+      const [op] = opId ? await db.select().from(operations).where(eq(operations.id, opId)) : [];
+      // Created by a known operation (e.g. after a database restore): adopt it.
+      const pending = op
+        ? ledger.find((l) => !l.providerId && l.createdByOp === op.id && l.kind === r.kind && l.state === 'pending')
+        : undefined;
+      if (op && pending) {
+        await db
+          .update(resources)
+          .set({ providerId: r.providerId, state: 'active', lastSeenAt: deps.now() })
+          .where(eq(resources.id, pending.id));
+        summary.adopted++;
+        continue;
+      }
+      if (op) {
+        await db.insert(resources).values({
+          id: newId(),
+          instanceId: op.instanceId,
+          kind: r.kind,
+          executor: t.executor,
+          providerId: r.providerId,
+          region: t.providerRegion,
+          zone: r.zone,
+          createdByOp: op.id,
+          requestToken: `adopted:${r.providerId}`,
+          state: 'active',
+          tags: r.tags,
+          firstSeenAt: deps.now(),
+          lastSeenAt: deps.now(),
+        });
+        summary.adopted++;
+        continue;
+      }
+      if (
+        await openFinding(deps, {
+          kind: 'orphan',
+          executor: t.executor,
+          region: t.providerRegion,
+          providerId: r.providerId,
+          resourceKind: r.kind,
+          detail: `unknown ${r.kind} tagged cb:op=${opId ?? '-'}`,
+        })
+      ) {
+        summary.orphans++;
+      }
+    }
+
+    for (const l of ledger) {
+      if (l.state !== 'active' || !l.providerId || seen.has(l.providerId)) continue;
+      if (
+        await openFinding(deps, {
+          kind: 'missing',
+          executor: t.executor,
+          region: t.providerRegion,
+          providerId: l.providerId,
+          resourceKind: l.kind,
+          instanceId: l.instanceId,
+          detail: `ledger says active, provider has no ${l.kind}`,
+        })
+      ) {
+        summary.missing++;
+      }
+    }
+
+    if (observed.length > ledger.filter((l) => l.providerId).length + 2) {
+      await freezeCreates(deps, `${t.executor}/${t.providerRegion}: ${observed.length} managed resources, ledger has ${ledger.length}`);
+      summary.frozen = true;
+    }
+  }
+
+  // Too many creates in 10 minutes also trips the breaker.
+  const [limit] = await db
+    .select()
+    .from(caps)
+    .where(and(eq(caps.scope, 'global'), eq(caps.metric, 'creates_per_10_min')));
+  const [{ n } = { n: 0 }] = await db
+    .select({ n: sql<number>`count(*)` })
+    .from(operations)
+    .where(and(eq(operations.kind, 'create'), gte(operations.createdAt, new Date(deps.now().getTime() - 600_000))));
+  if (limit && n > limit.limit) {
+    await freezeCreates(deps, `${n} creates in 10 minutes (cap ${limit.limit})`);
+    summary.frozen = true;
+  }
+  return summary;
+}
+
+/** Hourly: provider quotas and the month's spend projection for the spend guard (page 10). */
+export async function snapshotQuotasAndSpend(deps: ReconcilerDeps) {
+  const { db } = deps;
+  const at = deps.now();
+  const targets = await db
+    .selectDistinct({ executor: regions.executor, providerRegion: regions.providerRegion })
+    .from(regions)
+    .where(eq(regions.enabled, true));
+  let vmHourCents = 0;
+  for (const t of targets) {
+    const executor = deps.executor(t.executor as ExecutorKind);
+    vmHourCents = Math.max(vmHourCents, executor.capabilities.vmHourCents);
+    const qs = await executor.quotas(ctx(deps, 'quotas'), t.providerRegion);
+    if (qs.length) {
+      await db.insert(quotaSnapshots).values(
+        qs.map((q) => ({ executor: t.executor, region: t.providerRegion, metric: q.metric, limit: q.limit, used: q.used, takenAt: at })),
+      );
+    }
+  }
+
+  const [{ cents } = { cents: 0 }] = await db
+    .select({ cents: sql<number>`coalesce(sum(${resources.monthlyCostEstimate}), 0)` })
+    .from(resources)
+    .where(inArray(resources.state, ['active', 'superseded', 'pending']));
+  const [{ running } = { running: 0 }] = await db
+    .select({ running: sql<number>`count(*)` })
+    .from(browserInstances)
+    .where(inArray(browserInstances.status, ['running', 'starting', 'creating']));
+  const daysInMonth = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 0)).getUTCDate();
+  const runningHoursCents = Math.round(running * ACTIVE_HOURS_PER_DAY * daysInMonth * vmHourCents);
+  await db.insert(spendSnapshots).values({
+    month: at.toISOString().slice(0, 7),
+    activeMonthlyCents: Number(cents),
+    runningHoursCents,
+    projectedCents: Number(cents) + runningHoursCents,
+    takenAt: at,
+  });
+}

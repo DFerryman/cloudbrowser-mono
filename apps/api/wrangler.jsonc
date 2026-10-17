@@ -1,0 +1,31 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "cloudbrowser",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // The web app is served from the same Worker, so /api is same-origin (no CORS).
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "vars": {
+    // Set to your real origin, e.g. https://app.example.com (see docs/deploy-cloudflare.md).
+    "APP_URL": "http://localhost:8787",
+    "ENVIRONMENT": "development",
+    "EMAIL_FROM": "CloudBrowser <no-reply@example.com>"
+  },
+  "services": [{ "binding": "ENGINE", "service": "cloudbrowser-engine" }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cloudbrowser",
+      // Replace with the id printed by `wrangler d1 create cloudbrowser`.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "../../packages/db/migrations"
+    }
+  ],
+  "observability": { "enabled": true }
+}

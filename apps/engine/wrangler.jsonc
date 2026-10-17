@@ -1,0 +1,27 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "cloudbrowser-engine",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // Internal only: reached by the api through a service binding, never from the internet.
+  "workers_dev": false,
+  "preview_urls": false,
+  "triggers": { "crons": ["* * * * *"] },
+  "vars": {
+    "ENGINE_MODE": "worker",
+    "ENV_NAME": "dev",
+    "GATEWAY_URL": "wss://connect.invalid",
+    "FAKE_DELAY_MS": "700"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cloudbrowser",
+      // Replace with the id printed by `wrangler d1 create cloudbrowser` (see docs/deploy-cloudflare.md).
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "../../packages/db/migrations"
+    }
+  ],
+  "observability": { "enabled": true }
+}

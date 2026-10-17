@@ -1,0 +1,39 @@
+import { newId } from './ids.js';
+
+/** Deadlines per operation kind, in minutes (page 10, "Operations"). */
+export const OPERATION_DEADLINE_MIN: Record<string, number> = {
+  create: 20,
+  start: 15,
+  stop: 5,
+  recover: 60,
+  restore: 60,
+  change_ip: 20,
+  delete: 5,
+  undelete: 5,
+  purge: 60,
+};
+
+/** Values for a new `operations` row. The api inserts user operations; the engine inserts idle stops. */
+export function operationRow(input: {
+  instanceId: string;
+  userId: string | null;
+  kind: string;
+  params?: Record<string, unknown>;
+  id?: string;
+  now?: Date;
+}) {
+  const now = input.now ?? new Date();
+  return {
+    id: input.id ?? newId(now.getTime()),
+    instanceId: input.instanceId,
+    userId: input.userId,
+    kind: input.kind,
+    status: 'queued',
+    step: null,
+    attempt: 0,
+    deadlineAt: new Date(now.getTime() + (OPERATION_DEADLINE_MIN[input.kind] ?? 20) * 60_000),
+    params: input.params ?? null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
