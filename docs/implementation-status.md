@@ -37,9 +37,22 @@ Cloudflare deployment.
   interface and builds a new VM there; it runs automatically when a start has waited 30 minutes for
   capacity. The old VM, interface and volume are released 7 days later; the IP never is. Purge
   destroys the archive key first, so archives are unreadable before R2 deletes them.
+- **Billing with Creem** (page 6): plans Personal and Pro (seat-based, 2–50 browsers) with a pure
+  `planLimits` function; hosted checkout (`POST /v1/billing/checkout`), the Creem customer portal,
+  Personal → Pro upgrades and Pro browser counts with explicit proration, refusing to drop below
+  the browsers in use. Webhooks are HMAC-verified over the raw body, stored by event id and
+  processed from a queue; every event re-fetches the subscription from Creem, so duplicates and
+  order do not matter. Entitlements become caps under `billing:<user>`; access is never granted
+  from the checkout redirect. Grace of 7 days for failed payments, access until period end after
+  cancel, revocation on a full refund or dispute; when access ends the engine sleeps every browser
+  within a minute, data and IPs are kept 30 days (emails on day 1, 14, 28), then the browsers are
+  deleted. Active hours are metered per user and month; browsers sleep 10 minutes after they run
+  out (warning in the session view, banner at 80%). Volume size and snapshot retention follow the
+  plan. A nightly re-sync logs drift. Billing is off until Creem is configured, and the pilot keeps
+  its free plan until the `billing_required` flag is set.
 - **Reconciler** (`apps/reconciler`): ledger vs provider by tag, adoption, orphan and missing
   findings, circuit breaker, quota and spend snapshots feeding the spend guard.
-- **API** (`apps/api`): the page 2 API surface except billing/downloads/admin — Better Auth
+- **API** (`apps/api`): the page 2 API surface except downloads/admin — Better Auth
   email codes sent with Cloudflare Email Service (invite-only), Workers Rate Limiting on sign-in and
   writes, the IP echo endpoint, Idempotency-Key on lifecycle calls, admission checks (plan, region,
   global caps, quota headroom, spend guard, creation freeze), viewer sessions with take-over and
@@ -103,6 +116,9 @@ Cloud), because Cloudflare does not offer VMs with a dedicated static egress IP.
 | `agent.v1` / `viewer.v1` protobuf with Buf | JSON text frames, zod in `packages/contracts/src/protocol.ts`, mirrored in Go | The payload the gateway relays most (neko v3 signaling) is JSON already; no codegen toolchain for two languages. |
 | Engine → gateway via `agent_commands` + `NOTIFY` | `agent_commands` + a `cloudbrowser-agent-commands` queue message | No binding from engine to gateway, so no deploy-order cycle; heartbeats are a delivery backstop. |
 | S3 archives with per-instance keys wrapped by KMS | **R2** (presigned PUT/GET via the S3 API) with per-instance keys wrapped by a Worker secret (`ARCHIVE_MASTER_KEY`, AES-256-GCM) | Same envelope scheme without a KMS: the plain key exists only in the gateway's frame to the agent, never in D1. Presigned URLs keep archive bytes off the Workers. |
+| pg-boss job for Creem webhooks; nightly reconciliation job | `cloudbrowser-billing` queue consumed by the api Worker; the api's 5-minute cron (lost events, period ends, notices, deletion after 30 days) and its 03:00 UTC run (re-sync from Creem) | Same asynchronous, idempotent processing with Cloudflare primitives. |
+| Entitlements written into the user's `caps` | Caps under a separate `billing:<user>` scope, between the pilot defaults and operator overrides | The pilot's defaults and per-user overrides keep working unchanged; billing never overwrites an operator's override. |
+| Running-hours cap enforced by the engine | The engine meters `running` time per user and month every minute (at most 5 minutes per tick if a run is missed) and sleeps browsers 10 minutes after the hours run out | The session view gets the deadline from the heartbeat and warns the user; starts are refused with `hours_exhausted`. |
 | Random bootstrap token stored hashed | HMAC-derived token (Worker secret `BOOTSTRAP_SECRET`), only the hash stored | `create_vm` can mint it after a crash without the token ever being written down. |
 
 Considered and **not** used:
@@ -126,5 +142,8 @@ Considered and **not** used:
 - Agent: browser container supervision through containerd, neko credentials per wake.
 - Manual backups ("Back up now") and pre-upgrade snapshots; showing a `restore` in progress as its
   own browser state.
-- Billing with Creem (page 6), landing and pricing pages, billing screen.
+- Landing and public pricing pages; hour packs and the *Always-on* add-on (after launch, page 6);
+  60 fps for Pro (applied once the browser image is built); growing existing volumes online after an
+  upgrade; verifying Creem's signed success-redirect parameters (not needed for access, which comes
+  only from webhooks); confirming every Creem payload against recorded test-mode fixtures.
 - Admin console (`/admin`), passkeys/TOTP/OAuth, dashboard thumbnails, dependency-cruiser and `buf breaking` in CI.

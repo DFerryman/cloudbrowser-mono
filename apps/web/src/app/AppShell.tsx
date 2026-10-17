@@ -1,6 +1,7 @@
 import { cn, Menu, MenuItem, MenuSeparator, Skeleton } from '@cloudbrowser/ui';
 import { Globe, LayoutGrid, LogOut, Settings } from 'lucide-react';
 import { NavLink, Navigate, Outlet, useLocation } from 'react-router';
+import { BillingBanner } from '../features/billing/BillingBanner.js';
 import { useMe } from '../features/instances/hooks.js';
 import { api, isUnauthenticated } from '../lib/api.js';
 import { useLiveEvents } from '../lib/events.js';
@@ -106,6 +107,7 @@ export function AppShell() {
 
       <main className="min-w-0 flex-1">
         <div className="mx-auto w-full max-w-[1200px] px-4 py-6 md:px-6">
+          <BillingBanner />
           <Outlet />
         </div>
       </main>

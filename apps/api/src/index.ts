@@ -6,6 +6,9 @@ import { OpenAPIHono } from '@hono/zod-openapi';
 import type { ViewerTokenClaims } from '@cloudbrowser/contracts';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { createDb } from '@cloudbrowser/db';
+import { creemFrom } from './billing/creem.js';
+import { billingSweep } from './billing/sweep.js';
+import { processWebhook, receiveWebhook } from './billing/webhooks.js';
 import type { MiddlewareHandler } from 'hono';
 import { createAuth } from './auth.js';
 import type { AppEnv, Env } from './env.js';
@@ -62,6 +65,15 @@ app.get('/api/echo/ip', (c) => {
   return c.text(c.req.header('cf-connecting-ip') ?? '');
 });
 
+/**
+ * Creem webhooks (page 6): signature over the raw body, stored by event id, processed from the
+ * `cloudbrowser-billing` queue. Outside /api/v1: no session, no origin check.
+ */
+app.post('/api/webhooks/creem', async (c) => {
+  const status = await receiveWebhook(c.env, c.get('db'), await c.req.text(), c.req.header('creem-signature'));
+  return c.text(status === 200 ? 'ok' : 'rejected', status as 200 | 400 | 401);
+});
+
 /** State-changing requests must come from our own origin (page 1, "Security"). */
 const sameOrigin: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
@@ -96,7 +108,35 @@ app.doc31('/api/v1/openapi.json', {
 app.use('/api/v1/*', sameOrigin, requireUser, limitWrites);
 app.route('/api/v1', v1);
 
-export default app;
+export default {
+  fetch: app.fetch,
+
+  /** `cloudbrowser-billing`: one message per new Creem webhook event. */
+  async queue(batch: MessageBatch<{ eventId: string }>, env: Env) {
+    const creem = creemFrom(env);
+    const db = createDb(env.DB);
+    for (const msg of batch.messages) {
+      if (!creem) {
+        msg.ack(); // billing not configured; the stored event waits for the cron once it is
+        continue;
+      }
+      try {
+        await processWebhook(env, db, creem, msg.body.eventId);
+        msg.ack();
+      } catch (e) {
+        console.error('billing webhook failed', msg.body.eventId, e);
+        msg.retry({ delaySeconds: 30 });
+      }
+    }
+  },
+
+  /** Every 5 minutes: billing sweep; the 03:00–03:04 UTC run also reconciles with Creem. */
+  async scheduled(controller: ScheduledController, env: Env) {
+    const at = new Date(controller.scheduledTime);
+    const nightly = at.getUTCHours() === 3 && at.getUTCMinutes() < 5;
+    console.log('billing sweep', JSON.stringify(await billingSweep(env, createDb(env.DB), creemFrom(env), new Date(), { nightly })));
+  },
+} satisfies ExportedHandler<Env, { eventId: string }>;
 
 /** RPC entrypoint for the session gateway's service binding (`entrypoint: "Internal"`). */
 export class Internal extends WorkerEntrypoint<Env> {

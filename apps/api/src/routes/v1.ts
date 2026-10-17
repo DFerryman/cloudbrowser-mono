@@ -24,7 +24,11 @@ import { turnIceServers } from '../turn.js';
 import { eventRow, newId, schema } from '@cloudbrowser/db';
 import { and, asc, desc, eq, isNull, ne } from 'drizzle-orm';
 import type { AppEnv } from '../env.js';
-import { admitCreate, admitIpChange, admitStart, entitlementsFor, regionAcceptingNew, usage } from '../limits.js';
+import { activeTime, admitCreate, admitIpChange, admitStart, entitlementsFor, regionAcceptingNew, usage } from '../limits.js';
+import { billingRoute } from './billing.js';
+
+/** Same as the engine's: running browsers sleep this long after the month's hours run out. */
+const HOURS_GRACE_MS = 10 * 60_000;
 import { enqueueOperation, notifyUser, replayed, requireIdempotencyKey } from '../ops.js';
 import { problem } from '../problem.js';
 import { toInstances, toOperation } from '../views.js';
@@ -610,7 +614,11 @@ v1.openapi(
 );
 
 const HeartbeatBody = z.object({ input: z.boolean() });
-const HeartbeatResult = z.object({ sleepAt: z.string().nullable() });
+const HeartbeatResult = z.object({
+  sleepAt: z.string().nullable(),
+  /** `hours`: the plan's active hours are used up; the browser sleeps at `sleepAt` regardless of input. */
+  reason: z.enum(['idle', 'hours']).optional(),
+});
 
 v1.openapi(
   createRoute({
@@ -641,7 +649,13 @@ v1.openapi(
     const [h] = await db.select().from(instanceHealth).where(eq(instanceHealth.instanceId, s.instanceId));
     if (!inst || inst.status !== 'running') return c.json({ sleepAt: null }, 200);
     const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, h?.lastInputAt?.getTime() ?? 0);
-    return c.json({ sleepAt: new Date(last + inst.idleTimeoutS * 1000).toISOString() }, 200);
+    const idleAt = last + inst.idleTimeoutS * 1000;
+    // Out of active hours: the engine puts the browser to sleep 10 minutes after they ran out (page 6).
+    const { exhaustedAt } = await activeTime(db, inst.userId, now);
+    const hoursAt = exhaustedAt ? exhaustedAt.getTime() + HOURS_GRACE_MS : Infinity;
+    return hoursAt < idleAt
+      ? c.json({ sleepAt: new Date(hoursAt).toISOString(), reason: 'hours' as const }, 200)
+      : c.json({ sleepAt: new Date(idleAt).toISOString(), reason: 'idle' as const }, 200);
   },
 );
 
@@ -730,3 +744,4 @@ v1.openapi(
 );
 
 v1.route('/', eventsRoute);
+v1.route('/', billingRoute);

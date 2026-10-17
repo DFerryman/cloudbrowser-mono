@@ -32,6 +32,28 @@ export async function runPending(deps: EngineDeps, limit = 20): Promise<number> 
 }
 
 /**
+ * Asks the engine to put a browser to sleep (a `stop` operation with the given reason). Returns
+ * false if another operation was admitted at the same moment (unique index); the caller retries
+ * on its next round.
+ */
+export async function requestStop(deps: EngineDeps, inst: { id: string; userId: string }, reason: string): Promise<boolean> {
+  const { db } = deps;
+  const now = deps.now();
+  const row = operationRow({ instanceId: inst.id, userId: null, kind: 'stop', params: { reason }, now });
+  try {
+    await db.batch([
+      db.insert(operations).values(row),
+      db.update(browserInstances).set({ desiredState: 'stopped', updatedAt: now }).where(eq(browserInstances.id, inst.id)),
+      db.insert(events).values(eventRow(inst.userId, 'operation.updated', { operationId: row.id, instanceId: inst.id }, now)),
+    ]);
+    deps.notify(inst.userId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Puts running browsers to sleep after `idle_timeout` without input (page 2, flow C). Viewer
  * heartbeats carry whether there was input since the last one.
  */
@@ -64,21 +86,7 @@ export async function idleStops(deps: EngineDeps): Promise<string[]> {
     if (busy.has(inst.id)) continue;
     const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, inst.lastInputAt?.getTime() ?? 0);
     if (now.getTime() - last < inst.idleTimeoutS * 1000) continue;
-    const row = operationRow({ instanceId: inst.id, userId: null, kind: 'stop', params: { reason: 'idle' }, now });
-    try {
-      await db.batch([
-        db.insert(operations).values(row),
-        db
-          .update(browserInstances)
-          .set({ desiredState: 'stopped', updatedAt: now })
-          .where(eq(browserInstances.id, inst.id)),
-        db.insert(events).values(eventRow(inst.userId, 'operation.updated', { operationId: row.id, instanceId: inst.id }, now)),
-      ]);
-      deps.notify(inst.userId);
-      stopped.push(inst.id);
-    } catch {
-      // Another operation was admitted at the same moment (unique index); skip this round.
-    }
+    if (await requestStop(deps, inst, 'idle')) stopped.push(inst.id);
   }
   // End viewer sessions that stopped sending heartbeats.
   await db

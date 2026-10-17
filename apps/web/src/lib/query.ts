@@ -14,6 +14,7 @@ export const queryClient = new QueryClient({
 /** One key per resource (page 1, "Rendering and data"). */
 export const keys = {
   me: ['me'] as const,
+  billing: ['billing'] as const,
   regions: ['regions'] as const,
   instances: ['instances'] as const,
   instance: (id: string) => ['instance', id] as const,

@@ -352,6 +352,8 @@ export const instanceHealth = sqliteTable('instance_health', {
   agentReadyAt: ts('agent_ready_at'),
   /** Highest Chrome major version that opened this profile (never downgrade, page 4). */
   chromeMajor: integer('chrome_major'),
+  /** Last time the engine counted this browser's running minutes (page 6, active hours). */
+  meteredAt: ts('metered_at'),
 });
 
 /**
@@ -510,3 +512,84 @@ export const archiveKeys = sqliteTable('archive_keys', {
   createdAt: ts('created_at').notNull(),
   destroyedAt: ts('destroyed_at'),
 });
+
+// ---------------------------------------------------------------------------------------------
+// Billing (page 6). Creem is the source of truth; these are mirrors re-synced on every webhook.
+// Owner: api.
+// ---------------------------------------------------------------------------------------------
+
+/** The Creem customer of each user, linked on `checkout.completed`. */
+export const billingCustomers = sqliteTable('billing_customers', {
+  userId: text('user_id')
+    .primaryKey()
+    .references(() => user.id),
+  creemCustomerId: text('creem_customer_id').notNull().unique(),
+  createdAt: ts('created_at').notNull(),
+});
+
+/** Mirror of a Creem subscription, refreshed from the Creem API (never from a webhook body alone). */
+export const subscriptions = sqliteTable(
+  'subscriptions',
+  {
+    id: text('id').primaryKey(), // Creem subscription id
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id),
+    plan: text('plan').notNull(), // PlanKey
+    productId: text('product_id').notNull(),
+    /** The subscription item carrying the units (browsers) of a seat-based product. */
+    itemId: text('item_id'),
+    units: integer('units').notNull().default(1),
+    status: text('status').notNull(),
+    currentPeriodEnd: ts('current_period_end'),
+    /** First time we saw `past_due`/`unpaid`; the 7-day grace period runs from here. */
+    pastDueSince: ts('past_due_since'),
+    /** When access ended (expired, paused, refunded, or period end after cancel). Data is kept 30 days. */
+    accessEndedAt: ts('access_ended_at'),
+    /** Set by us on a full refund or a dispute: no access whatever Creem's status says. */
+    revokedAt: ts('revoked_at'),
+    revokedReason: text('revoked_reason'),
+    syncedAt: ts('synced_at').notNull(),
+    createdAt: ts('created_at').notNull(),
+  },
+  (t) => [index('subscriptions_user_idx').on(t.userId)],
+);
+
+/** Every Creem webhook, keyed by its event id: duplicates are ignored (page 6). */
+export const webhookEvents = sqliteTable('webhook_events', {
+  id: text('id').primaryKey(),
+  type: text('type').notNull(),
+  payload: json<Record<string, unknown>>('payload').notNull(),
+  receivedAt: ts('received_at').notNull(),
+  processedAt: ts('processed_at'),
+  attempts: integer('attempts').notNull().default(0),
+  error: text('error'),
+});
+
+/** One row per checkout we start; its id is Creem's `request_id`, echoed back for correlation. */
+export const checkoutAttempts = sqliteTable('checkout_attempts', {
+  id: text('id').primaryKey(),
+  userId: text('user_id')
+    .notNull()
+    .references(() => user.id),
+  plan: text('plan').notNull(),
+  browsers: integer('browsers').notNull(),
+  checkoutId: text('checkout_id'),
+  createdAt: ts('created_at').notNull(),
+});
+
+/**
+ * Active (running) time per user and calendar month (UTC), metered by the engine every minute.
+ * `exhaustedAt` is set when the plan's hours run out: running browsers sleep 10 minutes later.
+ * Owner: engine.
+ */
+export const activeUsage = sqliteTable(
+  'active_usage',
+  {
+    userId: text('user_id').notNull(),
+    month: text('month').notNull(), // YYYY-MM
+    seconds: integer('seconds').notNull().default(0),
+    exhaustedAt: ts('exhausted_at'),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.month] })],
+);

@@ -1,88 +1,9 @@
-
-import { newArchiveKey } from '@cloudbrowser/db';
-import { createTestD1 } from '@cloudbrowser/db/testing';
-import engine from '@cloudbrowser/engine';
-import { beforeEach, describe, expect, it } from 'vitest';
 import { verifyViewerToken } from '@cloudbrowser/contracts';
-import app from '../src/index.js';
+import { newArchiveKey } from '@cloudbrowser/db';
+import { beforeEach, describe, expect, it } from 'vitest';
+import engine from '@cloudbrowser/engine';
 import { internalApi } from '../src/internal.js';
-
-const ORIGIN = 'http://app.test';
-
-function setup() {
-  const d1 = createTestD1();
-  const pending: Promise<unknown>[] = [];
-  const ctx = {
-    waitUntil: (p: Promise<unknown>) => void pending.push(p),
-    passThroughOnException() {},
-    props: {},
-  } as unknown as ExecutionContext;
-  // In-process stand-ins for the Cloudflare bindings.
-  const emails: { to: string; text: string }[] = [];
-  const hits = new Map<string, number>();
-  const limiter = (max: number) => ({
-    limit: async ({ key }: { key: string }) => {
-      hits.set(key, (hits.get(key) ?? 0) + 1);
-      return { success: hits.get(key)! <= max };
-    },
-  });
-  const hub = { idFromName: (n: string) => n, get: () => ({ fetch: async () => new Response(null, { status: 204 }) }) };
-  const queue = {
-    send: async (body: { operationId: string }) => {
-      const msg = { id: body.operationId, body, ack() {}, retry() {} };
-      await engine.queue!({ messages: [msg], queue: 'ops' } as never, engineEnv as never, ctx);
-    },
-  };
-  const engineEnv = { DB: d1, ENGINE_MODE: 'worker' as const, ENV_NAME: 'test', FAKE_DELAY_MS: '0', OPERATIONS: queue, EVENT_HUB: hub };
-  const env = {
-    DB: d1,
-    APP_URL: ORIGIN,
-    ENVIRONMENT: 'test',
-    EMAIL: { send: async (m: { to: string; text: string }) => void emails.push(m) },
-    OPERATIONS: queue,
-    EVENT_HUB: hub,
-    AUTH_LIMITER: limiter(5),
-    API_LIMITER: limiter(60),
-    BETTER_AUTH_SECRET: 'test-secret-test-secret-test-secret',
-    ASSETS: { fetch: async () => new Response('<html>app</html>') },
-    ENGINE: { fetch: (url: string, init?: RequestInit) => engine.fetch!(new Request(url, init) as never, engineEnv, ctx) },
-  };
-  let cookie = '';
-  const call = async (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => {
-    const res = await app.fetch(
-      new Request(`${ORIGIN}${path}`, {
-        method,
-        headers: {
-          origin: ORIGIN,
-          ...(cookie ? { cookie } : {}),
-          ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
-          ...headers,
-        },
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-      }),
-      env as never,
-      ctx,
-    );
-    const setCookie = res.headers.getSetCookie?.() ?? [];
-    if (setCookie.length) cookie = setCookie.map((c) => c.split(';')[0]).join('; ');
-    const text = await res.text();
-    const json = res.headers.get('content-type')?.includes('json');
-    return { status: res.status, body: text ? (json ? JSON.parse(text) : text) : null };
-  };
-  const settle = async () => {
-    while (pending.length) await pending.shift();
-  };
-  return { d1, call, settle, emails, env, engineEnv, ctx };
-}
-
-async function signIn(t: ReturnType<typeof setup>, email: string) {
-  await t.call('POST', '/api/auth/email-otp/send-verification-otp', { email, type: 'sign-in' });
-  await t.settle();
-  const sent = t.emails.filter((m) => m.to === email).pop();
-  if (!sent) return null;
-  const otp = sent.text.match(/(\d{6})/)![1];
-  return t.call('POST', '/api/auth/sign-in/email-otp', { email, otp });
-}
+import { setup, signIn } from './helpers.js';
 
 let t: ReturnType<typeof setup>;
 beforeEach(async () => {

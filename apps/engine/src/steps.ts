@@ -1,4 +1,4 @@
-import { eventRow, newArchiveKey, newId, schema, sha256Hex } from '@cloudbrowser/db';
+import { eventRow, newArchiveKey, newId, schema, sha256Hex, userCaps } from '@cloudbrowser/db';
 import type { ResourceKind } from '@cloudbrowser/executors';
 import { and, eq, inArray, ne } from 'drizzle-orm';
 import {
@@ -16,6 +16,12 @@ const { browserInstances, instanceHealth, ipAddresses, placements, resources, au
 
 /** Default data volume size; plans set it later (page 6). */
 const VOLUME_GB = 20;
+
+/** Volume size from the owner's plan (20 GB Personal and pilot, 30 GB Pro; page 6). Never shrinks. */
+async function volumeGb(env: StepEnv, atLeast = 0): Promise<number> {
+  const planned = (await userCaps(env.deps.db, env.instance.userId)).get('storage_gb') ?? VOLUME_GB;
+  return Math.max(planned, atLeast);
+}
 const MAX_IP_ROUNDS = 3;
 const OLD_IP_KEEP_DAYS = 30;
 
@@ -279,7 +285,7 @@ async function createVolume(env: StepEnv): Promise<StepOutcome> {
   const { zone } = result<{ zone: string }>(env, 'create_nic');
   const ctx = env.ctx('create_volume');
   await ledgerPending(env, 'volume', ctx.token, 1, zone);
-  const vol = await env.executor.ensureVolume(ctx, env.region.providerRegion, zone, VOLUME_GB);
+  const vol = await env.executor.ensureVolume(ctx, env.region.providerRegion, zone, await volumeGb(env));
   await ledgerActive(env, ctx.token, vol.volumeId, vol.zone);
   return { result: { volumeId: vol.volumeId } };
 }
@@ -602,7 +608,8 @@ async function restoreVolume(env: StepEnv): Promise<StepOutcome> {
   const p = await loadPlacement(env);
   const ctx = env.ctx('restore_volume');
   await ledgerPending(env, 'volume', ctx.token, p.generation, p.zone);
-  const vol = await env.executor.ensureVolumeFromSnapshot(ctx, p.providerRegion, p.zone ?? '', b.location ?? '', VOLUME_GB);
+  const size = await volumeGb(env, Math.ceil((b.sizeBytes ?? 0) / 1024 ** 3));
+  const vol = await env.executor.ensureVolumeFromSnapshot(ctx, p.providerRegion, p.zone ?? '', b.location ?? '', size);
   await ledgerActive(env, ctx.token, vol.volumeId, vol.zone);
   return { result: { volumeId: vol.volumeId } };
 }

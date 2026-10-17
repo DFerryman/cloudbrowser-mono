@@ -623,3 +623,68 @@ describe('backups, restore and recover', () => {
   });
 });
 
+
+describe('plans and active hours', () => {
+  beforeEach(async () => {
+    await w.settle(await w.newInstance());
+  });
+
+  const setCaps = (limits: Record<string, number>) =>
+    w.db.insert(schema.caps).values(Object.entries(limits).map(([metric, limit]) => ({ scope: 'billing:u1', metric, limit })));
+  const usageRow = async () => (await w.db.select().from(schema.activeUsage))[0];
+  const stopReasons = async () =>
+    (await w.db.select().from(operations).where(eq(operations.kind, 'stop'))).map((o) => (o.params as { reason?: string }).reason);
+
+  it('meters running time per user and month, and not while asleep', async () => {
+    const { meterAndEnforce } = await import('../src/entitlements.js');
+    await meterAndEnforce(w.deps()); // opens the window
+    w.advance(60_000);
+    await meterAndEnforce(w.deps());
+    w.advance(60_000);
+    await meterAndEnforce(w.deps());
+    expect((await usageRow())?.seconds).toBe(120);
+    expect((await usageRow())?.month).toBe('2026-10');
+
+    await w.settle(await w.enqueue('inst1', 'stop'));
+    w.advance(30 * 60_000);
+    await meterAndEnforce(w.deps());
+    expect((await usageRow())?.seconds).toBe(120); // asleep: not billed, window closed
+  });
+
+  it('warns when the hours run out and puts browsers to sleep 10 minutes later', async () => {
+    const { meterAndEnforce } = await import('../src/entitlements.js');
+    await setCaps({ instances: 1, running: 1, hours_per_month: 1 });
+    await w.db.insert(schema.activeUsage).values({ userId: 'u1', month: '2026-10', seconds: 3540 });
+    await meterAndEnforce(w.deps());
+    w.advance(60_000);
+    await meterAndEnforce(w.deps()); // crosses 3600 s
+    expect((await usageRow())?.exhaustedAt).toBeTruthy();
+    expect(await stopReasons()).toEqual([]);
+    w.advance(9 * 60_000);
+    await meterAndEnforce(w.deps());
+    expect(await stopReasons()).toEqual([]);
+    w.advance(60_000);
+    await meterAndEnforce(w.deps());
+    expect(await stopReasons()).toEqual(['hours']);
+  });
+
+  it('puts browsers to sleep within a minute when the subscription ends', async () => {
+    const { meterAndEnforce } = await import('../src/entitlements.js');
+    await setCaps({ instances: 0, running: 0, hours_per_month: 0 });
+    await meterAndEnforce(w.deps());
+    expect(await stopReasons()).toEqual(['plan']); // the running cap acts at once; the hours grace does not apply
+    expect((await w.instance()).desiredState).toBe('stopped');
+  });
+
+  it('sizes new volumes by plan and keeps snapshots as long as the plan says', async () => {
+    const { expiredBackups } = await import('../src/reaper.js');
+    await setCaps({ instances: 3, running: 3, storage_gb: 30 });
+    await w.settle(await w.newInstance('inst2'));
+    const p = (await w.placement('inst2'))!;
+    expect(w.store.records.get(p.volumeId!)?.attrs.sizeGb).toBe(30);
+    const now = new Date('2026-10-30T00:00:00Z');
+    const snaps = [0, 10].map((d) => ({ id: `s${d}`, kind: 'snapshot', createdAt: new Date(now.getTime() - d * 86_400_000) }));
+    expect(expiredBackups(snaps, now)).toEqual(['s10']);
+    expect(expiredBackups(snaps, now, 14)).toEqual([]);
+  });
+});

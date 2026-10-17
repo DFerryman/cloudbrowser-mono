@@ -2,6 +2,7 @@ import { Button, Section, Select } from '@cloudbrowser/ui';
 import { PageHeader, signOut } from '../../app/AppShell.js';
 import { api } from '../../lib/api.js';
 import { useI18n, type Locale } from '../../lib/i18n.js';
+import { BillingSection } from '../billing/BillingSection.js';
 import { useMe } from '../instances/hooks.js';
 
 export function AccountPage() {
@@ -26,6 +27,7 @@ export function AccountPage() {
             </Select>
           </div>
         </Section>
+        <BillingSection />
         <Section title={t('account.security')} description={t('account.securityBody')}>
           <div className="flex flex-wrap gap-2">
             <Button

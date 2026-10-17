@@ -1,5 +1,5 @@
 import type { ConnectInfo, Instance, ViewerSession } from '@cloudbrowser/contracts';
-import { Button, cn, Menu, MenuItem, RegionIpChip, StatusBadge } from '@cloudbrowser/ui';
+import { Button, cn, Menu, MenuItem, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
   ArrowLeft,
@@ -31,6 +31,8 @@ import { regionInfo, STATUS_TONE, statusKey } from '../instances/status.js';
 const HEARTBEAT_MS = 15_000;
 const IDLE_WARNING_MS = 60_000;
 
+type HeartbeatResult = { sleepAt: string | null; reason?: 'idle' | 'hours' };
+
 /**
  * Live session (`/b/:id`, page 1 and page 5). The dark frame keeps attention on the remote page.
  * While browsers run on the fake executor the stream area shows a simulated Chrome; the real
@@ -50,6 +52,8 @@ export function SessionPage() {
   const [openError, setOpenError] = useState<unknown>(null);
   const [takenOver, setTakenOver] = useState(false);
   const [sleepAt, setSleepAt] = useState<number | null>(null);
+  /** `hours`: the month's active hours ran out; input does not keep the browser awake. */
+  const [sleepReason, setSleepReason] = useState<'idle' | 'hours'>('idle');
   const [now, setNow] = useState(Date.now());
   const [fullscreen, setFullscreen] = useState(false);
   const viewerRef = useRef<RemoteBrowserHandle>(null);
@@ -92,9 +96,10 @@ export function SessionPage() {
     if (!session || takenOver) return;
     const beat = async () => {
       try {
-        const r = await api<{ sleepAt: string | null }>('POST', `/sessions/${session.id}/heartbeat`, { body: { input: hadInput.current } });
+        const r = await api<HeartbeatResult>('POST', `/sessions/${session.id}/heartbeat`, { body: { input: hadInput.current } });
         hadInput.current = false;
         setSleepAt(r.sleepAt ? Date.parse(r.sleepAt) : null);
+        setSleepReason(r.reason ?? 'idle');
       } catch (e) {
         if (e instanceof ApiError && e.status === 409) setTakenOver(true);
       }
@@ -103,6 +108,12 @@ export function SessionPage() {
     const h = setInterval(beat, HEARTBEAT_MS);
     return () => clearInterval(h);
   }, [session, takenOver, status]);
+
+  // Out of active hours: say so once, while there is still time to finish up (page 6).
+  const toast = useToast();
+  useEffect(() => {
+    if (sleepReason === 'hours' && sleepAt) toast(t('session.hoursOut', { minutes: Math.max(1, Math.round((sleepAt - Date.now()) / 60_000)) }), 'error');
+  }, [sleepReason]);
 
   useEffect(() => {
     if (!sleepAt) return;
@@ -138,8 +149,11 @@ export function SessionPage() {
   const stayAwake = () => {
     hadInput.current = true;
     if (session) {
-      void api<{ sleepAt: string | null }>('POST', `/sessions/${session.id}/heartbeat`, { body: { input: true } })
-        .then((r) => setSleepAt(r.sleepAt ? Date.parse(r.sleepAt) : null))
+      void api<HeartbeatResult>('POST', `/sessions/${session.id}/heartbeat`, { body: { input: true } })
+        .then((r) => {
+          setSleepAt(r.sleepAt ? Date.parse(r.sleepAt) : null);
+          setSleepReason(r.reason ?? 'idle');
+        })
         .catch(() => {});
     }
   };
@@ -217,6 +231,8 @@ export function SessionPage() {
           );
         } else if (connect.data?.mode === 'webrtc' && (viewer.state === 'connecting' || viewer.state === 'agent-offline')) {
           overlay = <Overlay message={t('overlay.connecting')} busy />;
+        } else if (sleepReason === 'hours' && idleLeft < IDLE_WARNING_MS) {
+          overlay = <Overlay message={t('overlay.hoursEnding', { seconds: Math.max(0, Math.ceil(idleLeft / 1000)) })} />;
         } else if (idleLeft < IDLE_WARNING_MS) {
           overlay = (
             <Overlay

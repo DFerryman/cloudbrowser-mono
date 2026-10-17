@@ -32,6 +32,16 @@ export interface Env {
   TURN_KEY_API_TOKEN?: string;
   /** `on` returns WebRTC connect info even for `fake` placements (local runs with a real agent and neko). */
   LIVE_VIEW?: string;
+  /** Creem billing webhooks are processed asynchronously through this queue (page 6). */
+  BILLING?: Queue<{ eventId: string }>;
+  /** Creem (page 6): https://test-api.creem.io or https://api.creem.io. Billing is off until all are set. */
+  CREEM_API_BASE?: string;
+  CREEM_API_KEY?: string;
+  CREEM_WEBHOOK_SECRET?: string;
+  CREEM_PRODUCT_PERSONAL_MONTHLY?: string;
+  CREEM_PRODUCT_PERSONAL_YEARLY?: string;
+  CREEM_PRODUCT_PRO_MONTHLY?: string;
+  CREEM_PRODUCT_PRO_YEARLY?: string;
   /** Wraps per-browser archive keys (base64, 32 bytes); same value as the engine's. Secret. */
   ARCHIVE_MASTER_KEY?: string;
 }

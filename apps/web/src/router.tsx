@@ -1,13 +1,14 @@
 import { createBrowserRouter, Navigate, Outlet, useLocation } from 'react-router';
 import { AppShell } from './app/AppShell.js';
 import { AccountPage } from './features/account/AccountPage.js';
+import { BillingSuccessPage } from './features/billing/BillingSuccessPage.js';
 import { SignInPage } from './features/auth/SignInPage.js';
 import { BrowsersPage } from './features/instances/BrowsersPage.js';
 import { useMe } from './features/instances/hooks.js';
 import { isUnauthenticated } from './lib/api.js';
 import { useLiveEvents } from './lib/events.js';
 
-/** Routes from page 1, "Information architecture". Landing, pricing and billing come later. */
+/** Routes from page 1, "Information architecture". Landing and pricing pages come later. */
 export const router = createBrowserRouter([
   { path: '/', element: <Navigate to="/browsers" replace /> },
   { path: '/sign-in', element: <SignInPage /> },
@@ -28,6 +29,7 @@ export const router = createBrowserRouter([
         lazy: async () => ({ Component: (await import('./features/instances/SettingsPage.js')).SettingsPage }),
       },
       { path: '/settings', element: <AccountPage /> },
+      { path: '/billing/success', element: <BillingSuccessPage /> },
     ],
   },
   { path: '*', element: <Navigate to="/browsers" replace /> },

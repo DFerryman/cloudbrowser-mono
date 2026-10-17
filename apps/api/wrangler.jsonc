@@ -18,14 +18,30 @@
     // Must be on a domain onboarded to Cloudflare Email Service (Email Sending).
     "EMAIL_FROM": "no-reply@example.com",
     // Public URL of the session gateway Worker (apps/gateway), e.g. wss://connect.example.com.
-    "GATEWAY_URL": "ws://localhost:8790"
+    "GATEWAY_URL": "ws://localhost:8790",
+    // Billing with Creem (page 6). Off until the API base, the four product ids and the secrets
+    // CREEM_API_KEY and CREEM_WEBHOOK_SECRET are all set. Test mode: https://test-api.creem.io
+    "CREEM_API_BASE": "",
+    "CREEM_PRODUCT_PERSONAL_MONTHLY": "",
+    "CREEM_PRODUCT_PERSONAL_YEARLY": "",
+    "CREEM_PRODUCT_PRO_MONTHLY": "",
+    "CREEM_PRODUCT_PRO_YEARLY": ""
   },
+  // Billing sweep every 5 minutes (period ends, notices, deletion after 30 days); 03:00 UTC run
+  // also reconciles every subscription with Creem.
+  "triggers": { "crons": ["*/5 * * * *"] },
   // Cloudflare Email Service: sign-in codes.
   "send_email": [{ "name": "EMAIL" }],
   // Synchronous calls to the engine (IP checks).
   "services": [{ "binding": "ENGINE", "service": "cloudbrowser-engine" }],
-  // Operation dispatch to the engine.
-  "queues": { "producers": [{ "binding": "OPERATIONS", "queue": "cloudbrowser-operations" }] },
+  // Operation dispatch to the engine; Creem webhooks are processed from cloudbrowser-billing.
+  "queues": {
+    "producers": [
+      { "binding": "OPERATIONS", "queue": "cloudbrowser-operations" },
+      { "binding": "BILLING", "queue": "cloudbrowser-billing" }
+    ],
+    "consumers": [{ "queue": "cloudbrowser-billing", "max_batch_size": 10, "max_batch_timeout": 2, "max_retries": 10 }]
+  },
   // Per-user SSE fan-out, hosted by the engine Worker.
   "durable_objects": {
     "bindings": [{ "name": "EVENT_HUB", "class_name": "EventHub", "script_name": "cloudbrowser-engine" }]

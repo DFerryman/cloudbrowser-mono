@@ -10,6 +10,7 @@ import type { OperationMessage } from '@cloudbrowser/db';
 import { makeDeps, type Env } from './deps.js';
 import { reaperTick } from './reaper.js';
 import { runOperation } from './runner.js';
+import { meterAndEnforce } from './entitlements.js';
 import { checkInstanceIp, dailySnapshots, idleStops, periodicIpChecks, runPending } from './scheduler.js';
 
 export type { Env } from './deps.js';
@@ -17,6 +18,7 @@ export { EventHub } from './event-hub.js';
 export { runOperation } from './runner.js';
 export { reaperTick } from './reaper.js';
 export { runPending, idleStops, checkInstanceIp, dailySnapshots } from './scheduler.js';
+export { meterAndEnforce } from './entitlements.js';
 export type { EngineDeps } from './context.js';
 
 /** Queues accept delays up to 12 hours; longer waits are picked up by the cron sweep. */
@@ -66,6 +68,7 @@ export default {
       return;
     }
     await idleStops(deps);
+    await meterAndEnforce(deps);
     await runPending(deps);
     const minute = new Date(controller.scheduledTime).getUTCMinutes();
     if (minute % 5 === 0) await periodicIpChecks(deps);

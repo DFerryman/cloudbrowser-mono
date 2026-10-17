@@ -23,7 +23,10 @@ export function useLiveEvents(enabled: boolean) {
     };
     es.addEventListener('instance.updated', onInstance);
     es.addEventListener('operation.updated', onOperation);
-    es.addEventListener('entitlements.updated', () => void queryClient.invalidateQueries({ queryKey: keys.me }));
+    es.addEventListener('entitlements.updated', () => {
+      void queryClient.invalidateQueries({ queryKey: keys.me });
+      void queryClient.invalidateQueries({ queryKey: keys.billing });
+    });
     return () => es.close();
   }, [enabled]);
 }

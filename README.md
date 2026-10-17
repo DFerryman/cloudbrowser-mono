@@ -60,6 +60,11 @@ also run `pnpm --filter @cloudbrowser/web dev` (Vite on :5173 proxies `/api` to 
 Backups: the daily snapshot runs when the engine's 1-minute cron fires at minute 7 of an hour. Profile archives need real R2 credentials (see
 `docs/deploy-cloudflare.md`); without them they are skipped locally.
 
+Billing: without Creem settings the app runs on the free pilot plan. To try Creem test mode
+locally, put `CREEM_API_BASE=https://test-api.creem.io`, `CREEM_API_KEY`, `CREEM_WEBHOOK_SECRET` and
+the four `CREEM_PRODUCT_*` ids in `apps/api/.dev.vars`, and expose the webhook with
+`cloudflared tunnel --url http://localhost:8787` (webhook URL: `<tunnel>/api/webhooks/creem`).
+
 ### With a real agent (agent ↔ gateway ↔ engine)
 
 ```bash

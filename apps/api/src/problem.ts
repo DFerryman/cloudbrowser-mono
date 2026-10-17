@@ -18,6 +18,9 @@ const TITLES: Record<ErrorType, string> = {
   ip_change_limit: 'IP change limit reached',
   viewer_unavailable: 'Live view unavailable',
   rate_limited: 'Too many requests',
+  hours_exhausted: 'Active hours used up',
+  billing_unavailable: 'Billing is not available',
+  too_many_browsers: 'Delete browsers first',
   internal: 'Something went wrong',
 };
 

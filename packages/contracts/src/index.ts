@@ -8,3 +8,4 @@ export * from './events.js';
 export * from './protocol.js';
 export * from './viewer-token.js';
 export * from './backups.js';
+export * from './billing.js';

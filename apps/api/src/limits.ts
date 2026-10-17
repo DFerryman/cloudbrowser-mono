@@ -1,9 +1,10 @@
 import type { Entitlements } from '@cloudbrowser/contracts';
-import { schema, type Db } from '@cloudbrowser/db';
+import { billingRequired, schema, usageMonth, userCaps as sharedUserCaps, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, ne, notInArray, sql } from 'drizzle-orm';
+import { planOf } from './billing/sync.js';
 import { problem } from './problem.js';
 
-const { caps, browserInstances, operations, controlFlags, spendSnapshots, quotaSnapshots, regions } = schema;
+const { caps, browserInstances, operations, controlFlags, spendSnapshots, quotaSnapshots, regions, activeUsage } = schema;
 
 /** Statuses that hold a browser slot (a dedicated IP and a volume). */
 const HOLDS_SLOT = sql`${browserInstances.status} NOT IN ('purged', 'failed', 'deleting')`;
@@ -18,20 +19,32 @@ export async function capsFor(db: Db, scopes: string[]): Promise<Map<string, num
   return out;
 }
 
-export async function userCaps(db: Db, userId: string) {
-  return capsFor(db, ['user:default', `user:${userId}`]);
-}
+/** Pilot defaults, then what the subscription buys, then operator overrides (page 6). */
+export const userCaps = sharedUserCaps;
 
-/** The pilot has a single invite-only plan; Creem-backed plans replace this (page 6). */
-export async function entitlementsFor(db: Db, userId: string): Promise<Entitlements> {
+/**
+ * The invite-only pilot runs on `user:default` caps (plan `pilot`). A Creem subscription writes
+ * its own caps (plan `personal`/`pro`); once billing is required, no subscription means `none`.
+ */
+export async function entitlementsFor(db: Db, userId: string, now = new Date()): Promise<Entitlements> {
   const c = await userCaps(db, userId);
   return {
-    plan: 'pilot',
+    plan: await planOf(db, userId, now, await billingRequired(db)),
     maxBrowsers: c.get('instances') ?? 0,
     maxRunning: c.get('running') ?? 0,
     idleTimeoutMaxS: c.get('idle_timeout_max_s') ?? 1800,
     ipChangesPerMonth: c.get('ip_changes_per_month') ?? 0,
+    hoursPerMonth: c.get('hours_per_month') ?? null,
   };
+}
+
+/** Active seconds this month (metered by the engine) and when the hours ran out, if they did. */
+export async function activeTime(db: Db, userId: string, now = new Date()) {
+  const [row] = await db
+    .select()
+    .from(activeUsage)
+    .where(and(eq(activeUsage.userId, userId), eq(activeUsage.month, usageMonth(now))));
+  return { seconds: row?.seconds ?? 0, exhaustedAt: row?.exhaustedAt ?? null };
 }
 
 async function count(db: Db, where: ReturnType<typeof and>) {
@@ -43,6 +56,7 @@ export async function usage(db: Db, userId: string) {
   return {
     browsers: await count(db, and(eq(browserInstances.userId, userId), HOLDS_SLOT)),
     running: await count(db, and(eq(browserInstances.userId, userId), inArray(browserInstances.status, RUNNING_STATUSES))),
+    hoursUsed: Math.round(((await activeTime(db, userId)).seconds / 3600) * 10) / 10,
   };
 }
 
@@ -125,6 +139,13 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
 /** Running caps, checked before every start (page 10). */
 export async function admitStart(db: Db, userId: string, instanceId: string, regionId: string) {
   const c = await userCaps(db, userId);
+  if ((c.get('running') ?? 0) === 0) {
+    throw problem(403, 'plan_limit', 'Your plan does not include running browsers. Renew it to wake this one; its data and IP are kept.', { limit: 'running' });
+  }
+  const hours = c.get('hours_per_month');
+  if (hours !== undefined && (await activeTime(db, userId)).seconds >= hours * 3600) {
+    throw problem(429, 'hours_exhausted', `This month’s ${hours} active hours are used up. Browsers keep their data and IP.`, { limit: 'hours_per_month' });
+  }
   const others = and(ne(browserInstances.id, instanceId), inArray(browserInstances.status, RUNNING_STATUSES));
   const mine = await count(db, and(eq(browserInstances.userId, userId), others));
   if (mine >= (c.get('running') ?? 0)) {

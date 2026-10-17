@@ -4,7 +4,7 @@ Everything in the control plane runs on Cloudflare. Five Workers share one D1 da
 
 | Worker | Config | Public? | Triggers | Cloudflare products |
 |---|---|---|---|---|
-| `cloudbrowser` (api + web) | `apps/api/wrangler.jsonc` | Yes: your app domain | HTTP | Static assets, D1, Email Service, Queues (producer), Durable Object binding, Rate Limiting |
+| `cloudbrowser` (api + web) | `apps/api/wrangler.jsonc` | Yes: your app domain | HTTP, Queue (billing), cron every 5 min | Static assets, D1, Email Service, Queues (producer + billing consumer), Durable Object binding, Rate Limiting |
 | `cloudbrowser-engine` | `apps/engine/wrangler.jsonc` | No | Queue, cron every minute, service binding | D1, Queues (consumer + producer), Durable Object `EventHub`, R2 (presigned archive URLs) |
 | `cloudbrowser-reaper` | `apps/engine/wrangler.reaper.jsonc` | No | cron every 15 min | D1, Durable Object binding, R2 (deletes archives) |
 | `cloudbrowser-reconciler` | `apps/reconciler/wrangler.jsonc` | No | cron every 5 min | D1 |
@@ -26,6 +26,7 @@ pnpm exec wrangler login
 pnpm exec wrangler d1 create cloudbrowser
 pnpm exec wrangler queues create cloudbrowser-operations
 pnpm exec wrangler queues create cloudbrowser-agent-commands
+pnpm exec wrangler queues create cloudbrowser-billing
 pnpm exec wrangler r2 bucket create cloudbrowser-archives
 ```
 
@@ -98,6 +99,44 @@ Optional:
 - `ENV_NAME` (`prod`/`staging`) in the engine, reaper and reconciler configs: the `cb:env` tag on
   provider resources, same value in all three.
 
+## 3b. Billing with Creem (optional for the pilot)
+
+The pilot runs without payments: invited users get the `user:default` caps (plan *pilot*).
+Billing turns on when every value below is set; until then `/v1/billing/*` answers 503 and the
+account page shows the pilot plan.
+
+1. **Creem dashboard (test mode first):** create four products and note their ids:
+   *Personal monthly* ($29/month) and *Personal yearly* ($290/year) as fixed-price products;
+   *Pro monthly* ($25/month) and *Pro yearly* ($250/year) as **seat-based** products (price per
+   unit, units = browsers). Submit the store for review early; it can take days.
+2. **Webhook:** Developers → Webhooks → add `https://<your app domain>/api/webhooks/creem` and copy
+   the signing secret. Every event type can be enabled; unknown ones are stored and ignored.
+3. **API key:** Developers → API keys (test mode keys only work against `https://test-api.creem.io`).
+4. `apps/api/wrangler.jsonc` → `vars`: `CREEM_API_BASE` (`https://test-api.creem.io`, later
+   `https://api.creem.io`) and the four `CREEM_PRODUCT_*` ids. Secrets:
+
+```bash
+cd apps/api
+pnpm exec wrangler secret put CREEM_API_KEY
+pnpm exec wrangler secret put CREEM_WEBHOOK_SECRET
+```
+
+5. **Require a plan** once you sell (no free tier, page 6): users without a subscription then get
+   no browsers. Leave it off during the invite-only pilot.
+
+```sql
+INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', unixepoch() * 1000)
+  ON CONFLICT (key) DO UPDATE SET value = excluded.value;
+```
+
+What happens automatically: webhooks are verified, stored by event id and processed from the
+`cloudbrowser-billing` queue (every event re-fetches the subscription from Creem, so order and
+duplicates do not matter); the api's 5-minute cron retries lost events, applies period ends and
+the 7-day grace for failed payments, emails users on day 1, 14 and 28 after access ends and
+deletes their browsers on day 30 (restorable 7 more days); at 03:00 UTC it re-syncs every
+subscription and logs drift to `audit_log` (`billing.drift`). The engine meters active hours every
+minute and puts browsers to sleep 10 minutes after a plan's hours run out.
+
 ## 4. Migrate and deploy
 
 ```bash
@@ -131,6 +170,9 @@ UPDATE caps SET "limit" = 3 WHERE scope = 'user:default' AND metric = 'instances
 INSERT INTO caps VALUES ('user:<user id>', 'instances', 5);    -- per-user override
 UPDATE control_flags SET value = 'false' WHERE key = 'creation_freeze';   -- clear the circuit breaker
 SELECT * FROM drift_findings WHERE status = 'open';
+SELECT * FROM subscriptions;                                   -- billing mirror (Creem is the source of truth)
+SELECT * FROM webhook_events WHERE processed_at IS NULL;      -- Creem events not applied yet (with error)
+SELECT * FROM active_usage WHERE month = strftime('%Y-%m', 'now');   -- active seconds per user
 ```
 
 For chaos testing on staging, set `FAKE_FAULTS` on the engine, e.g.

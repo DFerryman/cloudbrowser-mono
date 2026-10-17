@@ -22,6 +22,9 @@ export const ErrorType = z.enum([
   'ip_change_limit',
   'viewer_unavailable',
   'rate_limited',
+  'hours_exhausted',
+  'billing_unavailable',
+  'too_many_browsers',
   'internal',
 ]);
 export type ErrorType = z.infer<typeof ErrorType>;

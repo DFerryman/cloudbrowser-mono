@@ -1,4 +1,4 @@
-import { operationRow, schema } from '@cloudbrowser/db';
+import { operationRow, schema, userCaps } from '@cloudbrowser/db';
 import type { ExecutorKind } from '@cloudbrowser/executors';
 import { and, eq, isNull, lt, lte, ne, sql } from 'drizzle-orm';
 import { readContext, type EngineDeps } from './context.js';
@@ -116,12 +116,12 @@ const ARCHIVE_KEEP_LAST = 10;
 const ARCHIVE_DAILY_DAYS = 14;
 
 /** Which of one instance's complete backups are past retention. Pure, so it is unit-tested. */
-export function expiredBackups(list: { id: string; kind: string; createdAt: Date }[], now: Date): string[] {
+export function expiredBackups(list: { id: string; kind: string; createdAt: Date }[], now: Date, snapshotDays = SNAPSHOT_KEEP_DAYS): string[] {
   const out: string[] = [];
   const byNewest = [...list].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   const snaps = byNewest.filter((b) => b.kind === 'snapshot');
   for (const s of snaps.slice(1)) {
-    if (now.getTime() - s.createdAt.getTime() > SNAPSHOT_KEEP_DAYS * 86_400_000) out.push(s.id);
+    if (now.getTime() - s.createdAt.getTime() > snapshotDays * 86_400_000) out.push(s.id);
   }
   const archives = byNewest.filter((b) => b.kind === 'archive');
   const dailyKept = new Set<string>();
@@ -147,7 +147,10 @@ async function expireBackups(deps: EngineDeps, env: (kind: ExecutorKind) => Para
   for (const b of all) byInstance.set(b.instanceId, [...(byInstance.get(b.instanceId) ?? []), b]);
   let expired = 0;
   for (const [instanceId, list] of byInstance) {
-    for (const id of expiredBackups(list, now)) {
+    // Snapshot retention follows the owner's plan: 7 days, 14 on Pro (page 6).
+    const [owner] = await db.select({ userId: browserInstances.userId }).from(browserInstances).where(eq(browserInstances.id, instanceId));
+    const days = owner ? ((await userCaps(db, owner.userId)).get('snapshot_retention_days') ?? SNAPSHOT_KEEP_DAYS) : SNAPSHOT_KEEP_DAYS;
+    for (const id of expiredBackups(list, now, days)) {
       const b = list.find((x) => x.id === id)!;
       if (b.kind === 'snapshot') {
         const [r] = await db.select().from(resources).where(and(eq(resources.instanceId, instanceId), eq(resources.providerId, b.location ?? '')));
