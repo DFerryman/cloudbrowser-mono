@@ -1,0 +1,20 @@
+{
+  "name": "@cloudbrowser/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8790 --persist-to ../../.wrangler/state",
+    "typecheck": "tsc -p tsconfig.json",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@cloudbrowser/contracts": "workspace:*",
+    "@cloudbrowser/db": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "typescript": "~5.9.3",
+    "wrangler": "^4.151.1"
+  }
+}

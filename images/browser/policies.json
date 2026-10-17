@@ -1,0 +1,15 @@
+{
+  "ProxySettings": { "ProxyMode": "direct" },
+  "WebRtcIPHandlingPolicy": "default_public_interface_only",
+  "DnsOverHttpsMode": "off",
+  "DefaultGeolocationSetting": 2,
+  "RestoreOnStartup": 1,
+  "BrowserSignin": 0,
+  "MetricsReportingEnabled": false,
+  "PromotionalTabsEnabled": false,
+  "DefaultBrowserSettingEnabled": false,
+  "BackgroundModeEnabled": false,
+  "HardwareAccelerationModeEnabled": false,
+  "DownloadDirectory": "/data/downloads",
+  "PromptForDownloadLocation": false
+}

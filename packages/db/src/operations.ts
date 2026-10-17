@@ -42,3 +42,8 @@ export function operationRow(input: {
 export interface OperationMessage {
   operationId: string;
 }
+
+/** Body of a message on the `cloudbrowser-agent-commands` queue: deliver this instance's pending commands. */
+export interface AgentCommandsMessage {
+  instanceId: string;
+}

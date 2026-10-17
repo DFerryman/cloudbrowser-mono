@@ -15,9 +15,11 @@ import {
   Region,
   UpdateInstanceBody,
   ViewerSession,
+  signViewerToken,
   type BrowserLocale,
   type RegionId,
 } from '@cloudbrowser/contracts';
+import { turnIceServers } from '../turn.js';
 import { eventRow, newId, schema } from '@cloudbrowser/db';
 import { and, asc, desc, eq, isNull, ne } from 'drizzle-orm';
 import type { AppEnv } from '../env.js';
@@ -494,9 +496,27 @@ v1.openapi(
       .select()
       .from(placements)
       .where(and(eq(placements.instanceId, s.instanceId), eq(placements.status, 'current')));
-    if (p?.executor === 'fake') return c.json({ mode: 'simulated' as const }, 200);
-    // The session gateway and TURN credentials arrive with services/gateway (page 5).
-    throw problem(503, 'viewer_unavailable', 'The live view is not available yet.');
+    if (p?.executor === 'fake' && c.env.LIVE_VIEW !== 'on') return c.json({ mode: 'simulated' as const }, 200);
+    if (!c.env.GATEWAY_URL || !c.env.VIEWER_TOKEN_PRIVATE_KEY) {
+      throw problem(503, 'viewer_unavailable', 'The live view is not configured.');
+    }
+    // A 60 s single-use token for the gateway, and short-lived TURN credentials (pages 2 and 5).
+    const token = await signViewerToken(JSON.parse(c.env.VIEWER_TOKEN_PRIVATE_KEY) as JsonWebKey, {
+      jti: newId(),
+      sid: s.id,
+      iid: s.instanceId,
+      uid: s.userId,
+      exp: Math.floor(Date.now() / 1000) + 60,
+    });
+    return c.json(
+      {
+        mode: 'webrtc' as const,
+        gatewayUrl: `${c.env.GATEWAY_URL.replace(/\/$/, '')}/v1/stream/${s.instanceId}`,
+        token,
+        iceServers: await turnIceServers(c.env, 3600),
+      },
+      200,
+    );
   },
 );
 

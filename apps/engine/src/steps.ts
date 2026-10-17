@@ -9,8 +9,9 @@ import {
   type StepEnv,
   type StepOutcome,
 } from './context.js';
+import { bootstrapToken } from './agent.js';
 
-const { browserInstances, instanceHealth, ipAddresses, placements, resources, auditLog, events } = schema;
+const { browserInstances, instanceHealth, ipAddresses, placements, resources, auditLog, events, agentCredentials } = schema;
 
 /** Default data volume size; plans set it later (page 6). */
 const VOLUME_GB = 20;
@@ -103,10 +104,30 @@ async function screenIp(env: StepEnv): Promise<StepOutcome> {
   return { result: { address } };
 }
 
+/** How long a new or woken VM may take until its agent reports `ready` (page 10: create step 8). */
+const AGENT_START_TIMEOUT_MS = 10 * 60_000;
+/** How long the engine waits for a command reply before giving up on it. */
+const COMMAND_TIMEOUT_MS = 60_000;
+const COMMAND_POLL_MS = 2_000;
+
 async function awaitAgent(env: StepEnv): Promise<StepOutcome> {
   const p = await loadPlacement(env);
-  const status = await env.agent.status(env.instance.id, p.generation);
-  return status === 'ready' ? {} : { wait: 3_000, reason: 'waiting for the agent' };
+  // The agent must report ready after this operation began, so a stale report from before a stop does not count.
+  const status = await env.agent.status(env.instance.id, p.generation, env.op.createdAt);
+  if (status === 'ready') return {};
+  if (env.deps.now().getTime() - env.op.createdAt.getTime() > AGENT_START_TIMEOUT_MS) {
+    throw new StepFailed('The browser did not start in time.');
+  }
+  return { wait: 3_000, reason: 'waiting for the agent' };
+}
+
+/** Sends a command once per step and round, then waits for its reply without blocking the worker. */
+async function command(env: StepEnv, step: string, kind: Parameters<StepEnv['agent']['send']>[0]['kind'], payload: Record<string, unknown>) {
+  const id = `${env.op.id}:${step}:${env.round}`;
+  await env.agent.send({ id, instanceId: env.instance.id, kind, payload });
+  const reply = await env.agent.reply(id);
+  const timedOut = env.deps.now().getTime() - reply.createdAt.getTime() > COMMAND_TIMEOUT_MS;
+  return { reply, timedOut };
 }
 
 async function verifyBinding(env: StepEnv): Promise<StepOutcome> {
@@ -137,8 +158,13 @@ async function verifyBinding(env: StepEnv): Promise<StepOutcome> {
 async function verifyIpInChrome(env: StepEnv): Promise<StepOutcome> {
   const p = await loadPlacement(env);
   const { db, now } = env.deps;
-  const { observed } = await env.agent.checkIpFromChrome(env.instance.id, placementRef(p));
-  const ok = observed.length > 0 && observed.every((a) => a === p.ipAddress);
+  const { reply, timedOut } = await command(env, 'verify_ip_in_chrome', 'ip_check', { expected: p.ipAddress });
+  if (reply.status === 'pending') {
+    if (timedOut) throw new StepFailed('Network paused: the IP check inside Chrome did not answer.');
+    return { wait: COMMAND_POLL_MS, reason: 'waiting for the IP check' };
+  }
+  const observed = Array.isArray(reply.result?.observed) ? (reply.result.observed as string[]) : [];
+  const ok = reply.status === 'succeeded' && observed.length > 0 && observed.every((a) => a === p.ipAddress);
   const lastIpCheck = { ok, expected: p.ipAddress, observed, checkedAt: now().toISOString() };
   await db
     .insert(instanceHealth)
@@ -158,9 +184,11 @@ async function ensureRunning(env: StepEnv): Promise<StepOutcome> {
 
 async function prepareShutdown(env: StepEnv): Promise<StepOutcome> {
   if (!(await currentPlacement(env))) return { result: { skipped: true } };
-  // If the agent does not ack, the VM is stopped anyway; Chrome's stores are journaled (page 2, flow C).
-  const acked = await env.agent.prepareShutdown(env.instance.id);
-  return { result: { acked } };
+  // If the agent does not ack within 60 s, the VM is stopped anyway; Chrome's stores are
+  // journaled (page 2, flow C).
+  const { reply, timedOut } = await command(env, 'prepare_shutdown', 'prepare_shutdown', {});
+  if (reply.status === 'pending' && !timedOut) return { wait: COMMAND_POLL_MS, reason: 'waiting for Chrome to close' };
+  return { result: { acked: reply.status === 'succeeded' } };
 }
 
 async function ensureStopped(env: StepEnv): Promise<StepOutcome> {
@@ -228,10 +256,21 @@ async function createVolume(env: StepEnv): Promise<StepOutcome> {
   return { result: { volumeId: vol.volumeId } };
 }
 
+/**
+ * Single-use agent bootstrap token, valid 15 minutes (page 10, create step 6). It is derived from a
+ * secret, so create_vm can put it in the VM's user data without the token ever being stored; only
+ * its hash is kept, in `agent_credentials`.
+ */
 async function issueBootstrap(env: StepEnv): Promise<StepOutcome> {
-  // The single-use token itself is minted in create_vm, so it is never written to the journal.
-  // Its hash moves to `agent_credentials` when services/agent lands.
-  return { result: { expiresAt: new Date(env.deps.now().getTime() + 15 * 60_000).toISOString() } };
+  const token = await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, env.op.id, 1);
+  const at = env.deps.now();
+  const expiresAt = new Date(at.getTime() + 15 * 60_000);
+  const values = { generation: 1, bootstrapHash: await sha256Hex(token), bootstrapExpiresAt: expiresAt, credentialHash: null, activatedAt: null };
+  await env.deps.db
+    .insert(agentCredentials)
+    .values({ instanceId: env.instance.id, createdAt: at, ...values })
+    .onConflictDoUpdate({ target: agentCredentials.instanceId, set: values });
+  return { result: { expiresAt: expiresAt.toISOString() } };
 }
 
 async function createVm(env: StepEnv): Promise<StepOutcome> {
@@ -239,13 +278,13 @@ async function createVm(env: StepEnv): Promise<StepOutcome> {
   const { nicId, zone } = result<{ nicId: string; zone: string }>(env, 'create_nic');
   const { volumeId } = result<{ volumeId: string }>(env, 'create_volume');
   const ctx = env.ctx('create_vm');
-  const bootstrapToken = crypto.randomUUID();
   await ledgerPending(env, 'vm', ctx.token, 1, zone);
   const vm = await env.executor.ensureVm(ctx, env.region.providerRegion, {
     zone,
     nicId,
     volumeId,
-    bootstrapToken,
+    instanceId: env.instance.id,
+    bootstrapToken: await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, env.op.id, 1),
     gatewayUrl: env.deps.gatewayUrl,
   });
   await ledgerActive(env, ctx.token, vm.vmId, vm.zone);
@@ -267,7 +306,7 @@ async function createVm(env: StepEnv): Promise<StepOutcome> {
       createdAt: env.deps.now(),
     })
     .onConflictDoNothing();
-  return { result: { vmId: vm.vmId, bootstrapHash: await sha256Hex(bootstrapToken) } };
+  return { result: { vmId: vm.vmId } };
 }
 
 // --- change_ip ---------------------------------------------------------------------------------
@@ -383,10 +422,14 @@ export async function deleteLedgerResources(
 
 async function purgeResources(env: StepEnv): Promise<StepOutcome> {
   const deleted = await deleteLedgerResources(env, env.instance.id);
-  await env.deps.db
-    .update(placements)
-    .set({ status: 'superseded' })
-    .where(eq(placements.instanceId, env.instance.id));
+  await env.deps.db.batch([
+    env.deps.db.update(placements).set({ status: 'superseded' }).where(eq(placements.instanceId, env.instance.id)),
+    // The VM is gone; its agent identity is revoked so it can never connect again.
+    env.deps.db
+      .update(agentCredentials)
+      .set({ credentialHash: null, bootstrapHash: null, rotatedAt: env.deps.now() })
+      .where(eq(agentCredentials.instanceId, env.instance.id)),
+  ]);
   return { result: { deleted } };
 }
 

@@ -347,6 +347,60 @@ export const instanceHealth = sqliteTable('instance_health', {
     checkedAt: string;
     detail?: string;
   }>('last_ip_check'),
+  /** Placement generation of the agent that last reported `ready`, and when. */
+  agentReadyGeneration: integer('agent_ready_generation'),
+  agentReadyAt: ts('agent_ready_at'),
+  /** Highest Chrome major version that opened this profile (never downgrade, page 4). */
+  chromeMajor: integer('chrome_major'),
+});
+
+/**
+ * Each VM's identity for the gateway (page 2). The engine issues a single-use bootstrap token
+ * (15 min, in the VM's user data); the api swaps it for a long-lived credential on first connect.
+ * Only hashes are stored. Owner: engine (bootstrap), api (activation and rotation).
+ */
+export const agentCredentials = sqliteTable('agent_credentials', {
+  instanceId: text('instance_id')
+    .primaryKey()
+    .references(() => browserInstances.id),
+  generation: integer('generation').notNull(),
+  bootstrapHash: text('bootstrap_hash'),
+  bootstrapExpiresAt: ts('bootstrap_expires_at'),
+  credentialHash: text('credential_hash'),
+  createdAt: ts('created_at').notNull(),
+  activatedAt: ts('activated_at'),
+  rotatedAt: ts('rotated_at'),
+});
+
+/**
+ * Durable commands to agents. The engine creates them and pokes the gateway through the
+ * `cloudbrowser-agent-commands` queue; the gateway delivers pending ones whenever the agent is
+ * connected; the api records replies. Owner: engine (create), gateway (delivered_at), api (reply).
+ */
+export const agentCommands = sqliteTable(
+  'agent_commands',
+  {
+    /** Deterministic: `<operation id>:<step>:<round>`, so a retried step finds its command. */
+    id: text('id').primaryKey(),
+    instanceId: text('instance_id')
+      .notNull()
+      .references(() => browserInstances.id),
+    kind: text('kind').notNull(),
+    payload: json<Record<string, unknown>>('payload').notNull(),
+    status: text('status').notNull(), // pending | delivered | succeeded | failed
+    reply: json<Record<string, unknown>>('reply'),
+    createdAt: ts('created_at').notNull(),
+    deliveredAt: ts('delivered_at'),
+    completedAt: ts('completed_at'),
+  },
+  (t) => [index('agent_commands_pending_idx').on(t.instanceId, t.status)],
+);
+
+/** Redeemed viewer token ids: each 60 s token works once (page 2). Owner: api; pruned by the reaper. */
+export const viewerTokens = sqliteTable('viewer_tokens', {
+  jti: text('jti').primaryKey(),
+  sessionId: text('session_id').notNull(),
+  redeemedAt: ts('redeemed_at').notNull(),
 });
 
 /** Owner: api. */

@@ -2,7 +2,9 @@
 import { createTestD1 } from '@cloudbrowser/db/testing';
 import engine from '@cloudbrowser/engine';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { verifyViewerToken } from '@cloudbrowser/contracts';
 import app from '../src/index.js';
+import { internalApi } from '../src/internal.js';
 
 const ORIGIN = 'http://app.test';
 
@@ -69,7 +71,7 @@ function setup() {
   const settle = async () => {
     while (pending.length) await pending.shift();
   };
-  return { d1, call, settle, emails };
+  return { d1, call, settle, emails, env };
 }
 
 async function signIn(t: ReturnType<typeof setup>, email: string) {
@@ -212,6 +214,73 @@ describe('browsers', () => {
     const doc = await t.call('GET', '/api/v1/openapi.json');
     expect(doc.status).toBe(200);
     expect(Object.keys(doc.body.paths)).toContain('/api/v1/instances/{id}/ip-change-requests');
+  });
+});
+
+describe('gateway internal API and live view', () => {
+  let keys: { privateJwk: JsonWebKey; publicJwk: JsonWebKey };
+  beforeEach(async () => {
+    await signIn(t, 'pilot@example.com');
+    const pair = (await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify'])) as CryptoKeyPair;
+    keys = { privateJwk: await crypto.subtle.exportKey('jwk', pair.privateKey), publicJwk: await crypto.subtle.exportKey('jwk', pair.publicKey) };
+  });
+
+  async function createRunning() {
+    const created = await t.call('POST', '/api/v1/instances', { name: 'Work', regionId: 'tyo1' }, { 'idempotency-key': 'g1' });
+    await t.settle();
+    return created.body.instanceId as string;
+  }
+
+  it('swaps a bootstrap token once for a long-lived agent credential', async () => {
+    const id = await createRunning();
+    const row = t.d1.sqlite.prepare(`SELECT attrs FROM fake_provider_resources WHERE kind = 'vm'`).get() as { attrs: string };
+    const { bootstrapToken } = JSON.parse(row.attrs).userData;
+    const api = internalApi(t.env as never);
+
+    const first = await api.authenticateAgent({ instanceId: id, bootstrap: bootstrapToken });
+    expect(first.ok && first.credential).toBeTruthy();
+    expect(await api.authenticateAgent({ instanceId: id, bootstrap: bootstrapToken })).toEqual({ ok: false, reason: 'invalid_token' });
+    expect(await api.authenticateAgent({ instanceId: id, credential: first.ok ? first.credential : '' })).toEqual({ ok: true, generation: 1 });
+    expect((await api.authenticateAgent({ instanceId: id, credential: 'nope' })).ok).toBe(false);
+  });
+
+  it('records agent readiness, heartbeats and command replies', async () => {
+    const id = await createRunning();
+    const api = internalApi(t.env as never);
+    await api.agentMessage(id, 1, { t: 'event', kind: 'ready', data: { chromeMajor: 141 } });
+    await api.agentMessage(id, 1, { t: 'event', kind: 'heartbeat', data: { viewers: 1, lastInputAt: new Date().toISOString() } });
+    const h = t.d1.sqlite.prepare('SELECT * FROM instance_health WHERE instance_id = ?').get(id) as Record<string, unknown>;
+    expect(h.agent_ready_generation).toBe(1);
+    expect(h.chrome_major).toBe(141);
+    expect(h.viewers).toBe(1);
+
+    t.d1.sqlite
+      .prepare(`INSERT INTO agent_commands (id, instance_id, kind, payload, status, created_at) VALUES ('c1', ?, 'ip_check', '{}', 'delivered', 0)`)
+      .run(id);
+    await api.agentMessage(id, 1, { t: 'reply', commandId: 'c1', ok: true, result: { observed: ['203.0.113.5'] } });
+    const c = t.d1.sqlite.prepare(`SELECT status, reply FROM agent_commands WHERE id = 'c1'`).get() as { status: string; reply: string };
+    expect(c.status).toBe('succeeded');
+    expect(JSON.parse(c.reply).observed).toEqual(['203.0.113.5']);
+    await expect(api.agentMessage(id, 1, { t: 'bogus' })).rejects.toThrow();
+  });
+
+  it('issues a 60 s viewer token that the gateway can verify and redeem once', async () => {
+    Object.assign(t.env, { LIVE_VIEW: 'on', GATEWAY_URL: 'wss://connect.test', VIEWER_TOKEN_PRIVATE_KEY: JSON.stringify(keys.privateJwk) });
+    const id = await createRunning();
+    const open = await t.call('POST', `/api/v1/instances/${id}/sessions`);
+    const info = (await t.call('GET', `/api/v1/sessions/${open.body.session.id}/connect`)).body;
+    expect(info.mode).toBe('webrtc');
+    expect(info.gatewayUrl).toBe(`wss://connect.test/v1/stream/${id}`);
+
+    const claims = await verifyViewerToken(keys.publicJwk, info.token);
+    expect(claims?.iid).toBe(id);
+    expect(await verifyViewerToken(keys.publicJwk, info.token, Date.now() + 61_000)).toBeNull();
+    const tampered = info.token.slice(0, -2) + (info.token.endsWith('A') ? 'BB' : 'AA');
+    expect(await verifyViewerToken(keys.publicJwk, tampered)).toBeNull();
+
+    const api = internalApi(t.env as never);
+    expect(await api.redeemViewerToken(claims!)).toBe(true);
+    expect(await api.redeemViewerToken(claims!)).toBe(false);
   });
 });
 

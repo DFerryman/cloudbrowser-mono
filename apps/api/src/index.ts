@@ -3,10 +3,13 @@
  * /api/auth, and the built web app as static assets for every other path (page 2).
  */
 import { OpenAPIHono } from '@hono/zod-openapi';
+import type { ViewerTokenClaims } from '@cloudbrowser/contracts';
+import { WorkerEntrypoint } from 'cloudflare:workers';
 import { createDb } from '@cloudbrowser/db';
 import type { MiddlewareHandler } from 'hono';
 import { createAuth } from './auth.js';
-import type { AppEnv } from './env.js';
+import type { AppEnv, Env } from './env.js';
+import { internalApi } from './internal.js';
 import { problem, ProblemError } from './problem.js';
 import { v1 } from './routes/v1.js';
 
@@ -94,3 +97,16 @@ app.use('/api/v1/*', sameOrigin, requireUser, limitWrites);
 app.route('/api/v1', v1);
 
 export default app;
+
+/** RPC entrypoint for the session gateway's service binding (`entrypoint: "Internal"`). */
+export class Internal extends WorkerEntrypoint<Env> {
+  authenticateAgent(input: { instanceId: string; bootstrap?: string; credential?: string }) {
+    return internalApi(this.env).authenticateAgent(input);
+  }
+  agentMessage(instanceId: string, generation: number, frame: unknown) {
+    return internalApi(this.env).agentMessage(instanceId, generation, frame);
+  }
+  redeemViewerToken(claims: ViewerTokenClaims) {
+    return internalApi(this.env).redeemViewerToken(claims);
+  }
+}

@@ -10,7 +10,11 @@
   "triggers": { "crons": ["* * * * *"] },
   // Operation dispatch: the api enqueues, this Worker consumes (and re-enqueues deferred ones).
   "queues": {
-    "producers": [{ "binding": "OPERATIONS", "queue": "cloudbrowser-operations" }],
+    "producers": [
+      { "binding": "OPERATIONS", "queue": "cloudbrowser-operations" },
+      // Pokes the gateway to deliver new agent commands.
+      { "binding": "AGENT_COMMANDS", "queue": "cloudbrowser-agent-commands" }
+    ],
     "consumers": [{ "queue": "cloudbrowser-operations", "max_batch_size": 5, "max_batch_timeout": 1, "max_retries": 10 }]
   },
   // Per-user SSE fan-out; the api binds to this class with script_name "cloudbrowser-engine".
@@ -19,7 +23,8 @@
   "vars": {
     "ENGINE_MODE": "worker",
     "ENV_NAME": "dev",
-    "GATEWAY_URL": "wss://connect.invalid",
+    // Written into each VM's user data: the session gateway's public URL.
+    "GATEWAY_URL": "ws://localhost:8790",
     "FAKE_DELAY_MS": "700"
   },
   "d1_databases": [

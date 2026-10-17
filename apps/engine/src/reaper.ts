@@ -5,7 +5,7 @@ import { readContext, type EngineDeps } from './context.js';
 import { runPending } from './scheduler.js';
 import { deleteLedgerResources } from './steps.js';
 
-const { browserInstances, operations, resources, driftFindings, events, idempotencyKeys, auditLog } = schema;
+const { browserInstances, operations, resources, driftFindings, events, idempotencyKeys, auditLog, viewerTokens } = schema;
 
 const ORPHAN_GRACE_MS = 24 * 3_600_000;
 
@@ -96,11 +96,13 @@ export async function reaperTick(deps: EngineDeps) {
     summary.orphans++;
   }
 
-  // 5. Housekeeping: the SSE change feed and idempotency keys live for 24 h.
+  // 5. Housekeeping: the SSE change feed, idempotency keys and viewer tokens live for 24 h.
   const dayAgo = new Date(now.getTime() - 86_400_000);
   await db.batch([
     db.delete(events).where(lt(events.createdAt, dayAgo)),
     db.delete(idempotencyKeys).where(lt(idempotencyKeys.createdAt, dayAgo)),
+    // Redeemed viewer tokens only need to outlive their 60 s validity.
+    db.delete(viewerTokens).where(lt(viewerTokens.redeemedAt, dayAgo)),
   ]);
   return summary;
 }

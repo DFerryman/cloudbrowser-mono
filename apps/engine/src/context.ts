@@ -24,6 +24,10 @@ export interface EngineDeps {
   now(): Date;
   /** Tells the user's EventHub (Durable Object) that new rows are in the `events` feed. */
   notify(userId: string): void;
+  /** Derives single-use agent bootstrap tokens (Worker secret BOOTSTRAP_SECRET). */
+  bootstrapSecret: string;
+  /** Waits between polls in synchronous calls such as an on-demand IP check. */
+  sleep(ms: number): Promise<void>;
 }
 
 /** The step asks to be called again later without counting as a failure (e.g. waiting for the agent). */

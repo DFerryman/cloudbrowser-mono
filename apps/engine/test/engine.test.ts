@@ -3,8 +3,8 @@ import { createTestD1 } from '@cloudbrowser/db/testing';
 import { ExecutorError, FakeExecutor, MemoryFakeStore, type Executor, type FaultPlan } from '@cloudbrowser/executors';
 import { and, eq, ne } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { FakeAgentBridge } from '../src/agent.js';
-import { readContext, type EngineDeps, type EngineMode } from '../src/context.js';
+import { FakeAgentBridge, GatewayAgentBridge } from '../src/agent.js';
+import { placementRef, readContext, type EngineDeps, type EngineMode } from '../src/context.js';
 import { reaperTick } from '../src/reaper.js';
 import { runOperation } from '../src/runner.js';
 import { checkInstanceIp, idleStops } from '../src/scheduler.js';
@@ -17,6 +17,9 @@ class World {
   clock = new Date('2026-10-01T00:00:00Z');
   faults: FaultPlan = () => null;
   random: () => number = Math.random;
+  /** `gateway` uses the real agent bridge (agent_commands); the test plays the agent. */
+  agentMode: 'fake' | 'gateway' = 'fake';
+  pokes: string[] = [];
 
   constructor() {
     this.db = createDb(createTestD1());
@@ -28,16 +31,27 @@ class World {
 
   deps(mode: EngineMode = 'worker'): EngineDeps {
     const ex: Executor = this.executor(mode === 'reaper' ? 'reaper' : 'runtime');
+    const now = () => this.clock;
+    const placementOf = async (id: string) => {
+      const p = await this.placement(id);
+      return p ? placementRef(p) : null;
+    };
+    const agent =
+      this.agentMode === 'gateway'
+        ? new GatewayAgentBridge(this.db, async (m) => void this.pokes.push(m.instanceId), now)
+        : new FakeAgentBridge(this.executor('runtime'), () => readContext('agent', 'test'), placementOf, now);
     return {
       db: this.db,
       mode,
       executor: () => ex,
-      agent: () => new FakeAgentBridge(this.executor('runtime'), () => readContext('agent', 'test')),
+      agent: () => agent,
       envName: 'test',
       gatewayUrl: 'wss://gw.test',
       workerId: `${mode}-test`,
-      now: () => this.clock,
+      now,
       notify: () => {},
+      bootstrapSecret: 'test-secret',
+      sleep: async () => {},
     };
   }
 
@@ -365,3 +379,113 @@ describe('credentials', () => {
     expect(w.liveProvider()).toHaveLength(4);
   });
 });
+
+describe('real agent through the gateway', () => {
+  beforeEach(() => {
+    w.agentMode = 'gateway';
+  });
+
+  /** Plays the api: what it records when the agent reports `ready`. */
+  async function agentReady(generation = 1) {
+    await w.db
+      .insert(schema.instanceHealth)
+      .values({ instanceId: 'inst1', agentReadyGeneration: generation, agentReadyAt: w.clock })
+      .onConflictDoUpdate({ target: schema.instanceHealth.instanceId, set: { agentReadyGeneration: generation, agentReadyAt: w.clock } });
+  }
+
+  /** Plays the agent: answers every pending command of a kind. */
+  async function answer(kind: string, result: Record<string, unknown>, ok = true) {
+    const pending = await w.db.select().from(schema.agentCommands).where(eq(schema.agentCommands.kind, kind));
+    for (const c of pending.filter((x) => x.status === 'pending')) {
+      await w.db
+        .update(schema.agentCommands)
+        .set({ status: ok ? 'succeeded' : 'failed', reply: result, completedAt: w.clock })
+        .where(eq(schema.agentCommands.id, c.id));
+    }
+  }
+
+  it('waits for the agent and the in-Chrome IP check before showing Running', async () => {
+    const op = await w.newInstance();
+    expect((await runOperation(w.deps(), op)).state).toBe('deferred');
+    expect((await w.instance()).status).toBe('creating');
+
+    // The VM's user data carries a bootstrap token whose hash the engine stored.
+    const vm = w.liveProvider().find((r) => r.kind === 'vm')!;
+    const userData = vm.attrs.userData as { bootstrapToken: string; instanceId: string };
+    expect(userData.instanceId).toBe('inst1');
+    const [cred] = await w.db.select().from(schema.agentCredentials);
+    const { sha256Hex } = await import('@cloudbrowser/db');
+    expect(cred?.bootstrapHash).toBe(await sha256Hex(userData.bootstrapToken));
+
+    w.advance(5_000);
+    await agentReady();
+    expect((await runOperation(w.deps(), op)).state).toBe('deferred'); // ip_check sent, waiting for reply
+    expect(w.pokes).toContain('inst1');
+
+    const ip = (await w.placement())!.ipAddress!;
+    await answer('ip_check', { observed: [ip] });
+    w.advance(3_000);
+    expect(await runOperation(w.deps(), op)).toEqual({ state: 'succeeded' });
+    expect((await w.instance()).status).toBe('running');
+  });
+
+  it('fails closed when Chrome sees another address', async () => {
+    const op = await w.newInstance();
+    await runOperation(w.deps(), op);
+    await agentReady();
+    w.advance(3_000);
+    await runOperation(w.deps(), op);
+    await answer('ip_check', { observed: ['192.0.2.1'] });
+    w.advance(3_000);
+    const r = await runOperation(w.deps(), op);
+    expect(r.state).toBe('failed');
+    expect((await w.instance()).statusReason).toMatch(/Chrome saw 192\.0\.2\.1/);
+  });
+
+  it('stops the VM anyway when the agent does not acknowledge shutdown within 60 s', async () => {
+    const op = await w.newInstance();
+    await runOperation(w.deps(), op);
+    await agentReady();
+    w.advance(3_000);
+    await runOperation(w.deps(), op);
+    await answer('ip_check', { observed: [(await w.placement())!.ipAddress!] });
+    w.advance(3_000);
+    await runOperation(w.deps(), op);
+
+    const stop = await w.enqueue('inst1', 'stop');
+    expect((await runOperation(w.deps(), stop)).state).toBe('deferred');
+    w.advance(61_000);
+    expect(await w.settle(stop)).toEqual({ state: 'succeeded' });
+    expect((await w.instance()).status).toBe('sleeping');
+    const [shutdown] = await w.db.select().from(schema.agentCommands).where(eq(schema.agentCommands.kind, 'prepare_shutdown'));
+    expect(shutdown?.status).toBe('pending');
+  });
+
+  it('a wake needs a fresh ready report, not the one from before the stop', async () => {
+    const op = await w.newInstance();
+    w.advance(-1_000); // a report older than the operation
+    await agentReady();
+    w.advance(2_000);
+    await runOperation(w.deps(), op);
+    expect((await w.instance()).status).toBe('creating');
+  });
+
+  it('pauses the network when the agent has not reported an IP check for 15 minutes', async () => {
+    const op = await w.newInstance();
+    await runOperation(w.deps(), op);
+    await agentReady();
+    w.advance(3_000);
+    await runOperation(w.deps(), op);
+    await answer('ip_check', { observed: [(await w.placement())!.ipAddress!] });
+    w.advance(3_000);
+    await runOperation(w.deps(), op);
+
+    const { periodicIpChecks } = await import('../src/scheduler.js');
+    await periodicIpChecks(w.deps());
+    expect((await w.instance()).status).toBe('running');
+    w.advance(16 * 60_000);
+    await periodicIpChecks(w.deps());
+    expect((await w.instance()).status).toBe('needs_attention');
+  });
+});
+

@@ -93,6 +93,7 @@ export const en = {
     'This browser runs on the fake executor used in development. Its lifecycle, dedicated IP, sleep and wake are real in the control plane, but there is no VM or video stream yet. The live WebRTC view arrives with the session gateway and agent.',
   'session.fakeIp': 'Websites would see {ip} ({region}).',
   'session.focusHint': 'Click to control the browser',
+  'session.viewerPending': 'Your browser is running and the gateway is ready. The live video viewer is the next piece to be built.',
   'overlay.waking': 'Starting your browser…',
   'overlay.wakingHint': 'Usually about a minute.',
   'overlay.creating': 'Creating your browser…',

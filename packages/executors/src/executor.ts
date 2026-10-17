@@ -84,6 +84,8 @@ export interface VolumeRef {
 }
 
 export interface VmSpec {
+  /** Our instance id, written to user data with the gateway URL and the bootstrap token. */
+  instanceId: string;
   zone: string;
   nicId: string;
   volumeId: string;

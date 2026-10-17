@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  check:
+  typescript:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,3 +19,19 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/agent/go.mod
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome
+      - run: go vet ./...
+        working-directory: services/agent
+      - run: go test -race ./...
+        working-directory: services/agent
+        env:
+          CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}

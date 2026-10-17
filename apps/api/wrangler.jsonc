@@ -16,7 +16,9 @@
     "APP_URL": "http://localhost:8787",
     "ENVIRONMENT": "development",
     // Must be on a domain onboarded to Cloudflare Email Service (Email Sending).
-    "EMAIL_FROM": "no-reply@example.com"
+    "EMAIL_FROM": "no-reply@example.com",
+    // Public URL of the session gateway Worker (apps/gateway), e.g. wss://connect.example.com.
+    "GATEWAY_URL": "ws://localhost:8790"
   },
   // Cloudflare Email Service: sign-in codes.
   "send_email": [{ "name": "EMAIL" }],

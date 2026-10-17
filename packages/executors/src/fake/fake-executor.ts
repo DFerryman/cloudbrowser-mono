@@ -224,7 +224,13 @@ export class FakeExecutor implements Executor {
         region,
         spec.zone,
         'running',
-        { nicId: spec.nicId, volumeId: spec.volumeId, terminationProtection: true },
+        {
+          nicId: spec.nicId,
+          volumeId: spec.volumeId,
+          terminationProtection: true,
+          // What a real VM receives as user data; `scripts/dev-agent.sh` reads it to start a local agent.
+          userData: { instanceId: spec.instanceId, gatewayUrl: spec.gatewayUrl, bootstrapToken: spec.bootstrapToken },
+        },
         'i',
       );
       await this.store.update(spec.volumeId, { state: 'in-use' });

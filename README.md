@@ -21,6 +21,13 @@ apps/
   engine/       Worker: queue consumer running operations (journal, leases, ledger, retries),
                 EventHub Durable Object for SSE; reaper mode = only deleter
   reconciler/   Worker: ledger vs provider, orphans, circuit breaker, quota and spend snapshots
+  gateway/      Worker: session gateway, one InstanceGateway Durable Object per browser
+                (agent tunnel + viewer WebSockets, hibernation), delivers agent commands
+services/
+  agent/        Go: in-VM agent (gateway tunnel, Chrome over CDP, IP checks, neko relay, nftables)
+images/
+  browser/      neko v3 + Chrome container (policies, fonts, flags)
+  vm/           Packer golden VM image (agent unit, nftables rules)
 packages/
   contracts/    zod schemas shared by api and web (OpenAPI is generated from them)
   db/           Drizzle schema + D1 migrations (single schema authority)
@@ -49,6 +56,21 @@ Service sends (the message is printed in the log) and, with `ENVIRONMENT=develop
 code is also logged. Queues, the Durable Object and the rate limiters all run locally. For frontend work with hot reload,
 also run `pnpm --filter @cloudbrowser/web dev` (Vite on :5173 proxies `/api` to :8787).
 
+### With a real agent (agent ↔ gateway ↔ engine)
+
+```bash
+echo AGENT_MODE=gateway > apps/engine/.dev.vars                 # fake VMs, real agents
+cd apps/gateway && pnpm exec wrangler dev --port 8790 --inspector-port 9231 \
+  --persist-to ../../.wrangler/state                            # second terminal
+# create a browser in the app; it waits at "Starting Chrome", then:
+scripts/dev-agent.sh <instance id>                              # third terminal
+```
+
+The agent swaps the bootstrap token from the fake VM's user data for a credential, reports
+`ready`, answers the engine's IP check through the gateway and the browser turns *Running*.
+For the viewer path, add keys from `node scripts/gen-viewer-keys.mjs` (private key and
+`LIVE_VIEW=on` in `apps/api/.dev.vars`, public key in `apps/gateway/.dev.vars`).
+
 Cron handlers (idle sleep, IP checks, reaper, reconciler) can be triggered locally with
 `wrangler dev --test-scheduled` and `curl "http://localhost:<port>/__scheduled?cron=*+*+*+*+*"`.
 
@@ -58,6 +80,7 @@ Cron handlers (idle sleep, IP checks, reaper, reconciler) can be triggered local
 pnpm typecheck   # all workspaces
 pnpm test        # engine fault-injection + lifecycle, api end-to-end (Better Auth + engine), reconciler
 pnpm build       # web bundle
+cd services/agent && go test -race ./...   # set CHROME_BIN to also run the CDP test against Chrome
 ```
 
 Tests run the production `drizzle-orm/d1` code against an in-memory SQLite D1 shim

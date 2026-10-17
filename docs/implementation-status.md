@@ -33,6 +33,26 @@ Cloudflare deployment.
   writes, the IP echo endpoint, Idempotency-Key on lifecycle calls, admission checks (plan, region,
   global caps, quota headroom, spend guard, creation freeze), viewer sessions with take-over and
   idle heartbeats, IP verify, IP change requests, SSE with `Last-Event-ID` resume.
+- **Session gateway** (`apps/gateway`): a Worker on `connect.example.com` plus one `InstanceGateway`
+  Durable Object per browser (WebSocket hibernation). Agents authenticate with a single-use
+  bootstrap token (swapped for a long-lived credential) or that credential, checked through the
+  api's `Internal` RPC entrypoint; viewers with a 60 s single-use Ed25519 token verified locally and
+  redeemed once. It relays neko signaling and IME text, enforces one controller at a time, and
+  delivers `agent_commands` (poked through the `cloudbrowser-agent-commands` queue, with every agent
+  heartbeat as a backstop).
+- **Agent** (`services/agent`, Go): outbound tunnel with reconnect and backoff, credential stored
+  0600, `ready`/heartbeat/IP-check events, commands (`prepare_shutdown`, `ip_check`,
+  `restart_chrome`, `set_firewall`), IP check from a throwaway Chrome browser context over CDP,
+  fail-closed nftables switch, neko relay, CDP `Input.insertText` for IME. Tested against a fake
+  gateway and against a real headless Chromium.
+- **Engine ↔ agent**: `issue_bootstrap` stores only the token's hash; `await_agent` needs a `ready`
+  report newer than the operation; `verify_ip_in_chrome` and `prepare_shutdown` are commands with
+  60 s timeouts (the VM is stopped anyway without an ack); real agents self-check every 5 minutes and
+  the engine pauses the network if the last check failed or is older than 15 minutes.
+- **Live view plumbing**: `GET /v1/sessions/:id/connect` returns the gateway URL, a viewer token and
+  Cloudflare Realtime TURN credentials for real placements (or with `LIVE_VIEW=on`).
+- **Images** (`images/`): browser image (neko v3 + Chrome, policies, fonts, flags) and Packer golden
+  VM image (agent unit, nftables rules). Written, not built yet.
 - **Web** (`apps/web`, `packages/ui`): design tokens from page 1, app shell, sign-in, dashboard with
   live status, create dialog (region, permanence note, advanced options, four progress steps,
   auto-open when ready), session view (44 px toolbar, region/IP chip, every state overlay, idle
@@ -61,6 +81,10 @@ Cloud), because Cloudflare does not offer VMs with a dedicated static egress IP.
 | Per-service database roles | Separate Workers and bindings; ownership noted per table | D1 has no roles. |
 | next-intl, locale in URL | Small typed i18n, locale in local storage | Fewer moving parts for the pilot. |
 | Generated `openapi-fetch` client | Web imports the zod types from `packages/contracts` | Same contract, no codegen step yet. |
+| Go session gateway on ECS with an `agent_sessions` registry | `cloudbrowser-gateway` Worker + `InstanceGateway` Durable Object per instance | Routing by instance id is what a Durable Object gives; hibernation makes idle tunnels free; no registry needed. |
+| `agent.v1` / `viewer.v1` protobuf with Buf | JSON text frames, zod in `packages/contracts/src/protocol.ts`, mirrored in Go | The payload the gateway relays most (neko v3 signaling) is JSON already; no codegen toolchain for two languages. |
+| Engine → gateway via `agent_commands` + `NOTIFY` | `agent_commands` + a `cloudbrowser-agent-commands` queue message | No binding from engine to gateway, so no deploy-order cycle; heartbeats are a delivery backstop. |
+| Random bootstrap token stored hashed | HMAC-derived token (Worker secret `BOOTSTRAP_SECRET`), only the hash stored | `create_vm` can mint it after a crash without the token ever being written down. |
 
 Considered and **not** used:
 
@@ -74,12 +98,13 @@ Considered and **not** used:
 
 ## Not built yet (next phases)
 
-- **Real browsers**: `aws-ec2` / `oci-compute` executors and golden VM image (Phase 1, after the
-  provider trial on page 11), `services/agent` (Go), `images/browser` (neko + Chrome),
-  `agent_credentials` / `agent_commands`.
-- **Live view**: `services/gateway` (Go), `packages/viewer` (WebRTC, IME, clipboard, uploads,
-  downloads), Cloudflare Realtime TURN credentials. Until then `/sessions/:id/connect` returns
-  `simulated` and the session view shows a placeholder.
+- **Real browsers**: `aws-ec2` / `oci-compute` executors (Phase 1, after the provider trial on
+  page 11); building and signing the images.
+- **Live view client**: `packages/viewer` (WebRTC, keyboard, IME, clipboard, uploads, downloads).
+  The gateway, tokens and TURN credentials are in place; the session view shows a notice for real
+  connect info and a simulated Chrome on the fake executor.
+- Agent: R2 archive upload on `prepare_shutdown`, browser container supervision through
+  containerd, neko credentials per wake.
 - `recover` and `restore` operations, backups (provider snapshots, R2 archives with per-instance keys).
 - Billing with Creem (page 6), landing and pricing pages, billing screen.
 - Admin console (`/admin`), passkeys/TOTP/OAuth, dashboard thumbnails, dependency-cruiser and `buf breaking` in CI.

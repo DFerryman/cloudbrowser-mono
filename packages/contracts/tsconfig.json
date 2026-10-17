@@ -1,4 +1,8 @@
 {
   "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // WebCrypto and TextEncoder types; consumers compile this source with their own runtime types.
+    "lib": ["ES2023", "DOM"]
+  },
   "include": ["src"]
 }

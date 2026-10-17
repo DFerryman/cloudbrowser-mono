@@ -286,6 +286,8 @@ export function SessionPage() {
         onWheel={() => (hadInput.current = true)}
       >
         {i?.status === 'running' && connect.data?.mode === 'simulated' ? <SimulatedChrome instance={i} regionName={regionName} /> : null}
+        {/* The gateway issues real connect info; the WebRTC viewer (packages/viewer, page 5) renders it next. */}
+        {i?.status === 'running' && connect.data?.mode === 'webrtc' ? <Overlay message={t('session.viewerPending')} /> : null}
         {i?.status === 'running' && connect.isError ? <Overlay message={errorMessage(connect.error)} /> : null}
         {overlay}
       </div>

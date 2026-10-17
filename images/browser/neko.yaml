@@ -1,0 +1,19 @@
+# neko v3 configuration (page 5). Confirm the keys against the neko v3 reference for the pinned
+# version. TURN credentials, the owner password and the API token are passed as NEKO_* environment
+# variables by the agent at each wake; they are never baked into the image.
+desktop:
+  screen: "1920x1080@30"
+capture:
+  video:
+    codec: h264
+server:
+  bind: "127.0.0.1:8080"   # reached only by the agent on the same VM
+webrtc:
+  icelite: false           # full ICE: the VM accepts no inbound connections, media uses TURN relay candidates
+  estimator:
+    enabled: true          # automatic quality switching
+member:
+  provider: object         # one owner account per browser
+session:
+  implicit_hosting: true
+  merciful_reconnect: true

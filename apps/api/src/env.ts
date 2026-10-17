@@ -23,6 +23,15 @@ export interface Env {
   ENVIRONMENT?: string;
   /** Sender on a domain onboarded to Cloudflare Email Service, e.g. no-reply@example.com. */
   EMAIL_FROM?: string;
+  /** Public WebSocket URL of the session gateway, e.g. wss://connect.example.com. */
+  GATEWAY_URL?: string;
+  /** Ed25519 private key (JWK JSON) that signs 60 s viewer tokens. Secret. */
+  VIEWER_TOKEN_PRIVATE_KEY?: string;
+  /** Cloudflare Realtime TURN key: viewers and neko get short-lived credentials from it. */
+  TURN_KEY_ID?: string;
+  TURN_KEY_API_TOKEN?: string;
+  /** `on` returns WebRTC connect info even for `fake` placements (local runs with a real agent and neko). */
+  LIVE_VIEW?: string;
 }
 
 export type SessionUser = { id: string; email: string; name: string };

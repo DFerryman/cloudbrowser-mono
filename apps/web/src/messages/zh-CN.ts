@@ -95,6 +95,7 @@ export const zhCN: Messages = {
     '此浏览器运行在开发用的模拟执行器上。控制面中的生命周期、独享 IP、休眠和唤醒都是真实的，但还没有虚拟机和视频流。实时 WebRTC 画面将随会话网关和代理一起上线。',
   'session.fakeIp': '网站看到的 IP 将是 {ip}（{region}）。',
   'session.focusHint': '点击以控制浏览器',
+  'session.viewerPending': '你的浏览器正在运行，会话网关已就绪。实时视频查看器是接下来要构建的部分。',
   'overlay.waking': '正在启动你的浏览器…',
   'overlay.wakingHint': '通常需要约一分钟。',
   'overlay.creating': '正在创建你的浏览器…',

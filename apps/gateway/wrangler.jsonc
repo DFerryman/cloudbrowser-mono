@@ -1,0 +1,30 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  // Session gateway: agent tunnels and viewers (page 2). Give it its own hostname, e.g.
+  // connect.example.com (Settings → Domains & Routes), and set the api's GATEWAY_URL to wss://<it>.
+  "name": "cloudbrowser-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    // Ed25519 public key (JWK JSON) from `node scripts/gen-viewer-keys.mjs`.
+    "VIEWER_TOKEN_PUBLIC_KEY": ""
+  },
+  // Agent auth, agent messages and viewer-token redemption go through the api's Internal entrypoint.
+  "services": [{ "binding": "API", "service": "cloudbrowser", "entrypoint": "Internal" }],
+  "durable_objects": { "bindings": [{ "name": "INSTANCE_GATEWAY", "class_name": "InstanceGateway" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["InstanceGateway"] }],
+  "queues": {
+    "consumers": [{ "queue": "cloudbrowser-agent-commands", "max_batch_size": 20, "max_batch_timeout": 1 }]
+  },
+  // Reads and marks pending agent_commands only.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cloudbrowser",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "../../packages/db/migrations"
+    }
+  ],
+  "observability": { "enabled": true }
+}
