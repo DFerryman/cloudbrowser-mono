@@ -472,3 +472,41 @@ export const fakeProviderResources = sqliteTable(
   },
   (t) => [index('fake_token_idx').on(t.clientToken), index('fake_region_idx').on(t.region)],
 );
+
+/**
+ * Provider snapshots and R2 archives (page 4). Owner: engine; the reaper marks expired ones deleted.
+ * `location` is the snapshot id for snapshots and the R2 object key for archives.
+ */
+export const backups = sqliteTable(
+  'backups',
+  {
+    id: text('id').primaryKey(),
+    instanceId: text('instance_id')
+      .notNull()
+      .references(() => browserInstances.id),
+    kind: text('kind').notNull(), // snapshot | archive
+    reason: text('reason').notNull(), // daily | sleep | manual | recover | pre_upgrade
+    status: text('status').notNull(), // pending | complete | failed | deleted
+    location: text('location'),
+    sizeBytes: integer('size_bytes'),
+    generation: integer('generation').notNull(),
+    createdAt: ts('created_at').notNull(),
+    completedAt: ts('completed_at'),
+    deletedAt: ts('deleted_at'),
+  },
+  (t) => [index('backups_instance_idx').on(t.instanceId, t.createdAt)],
+);
+
+/**
+ * One archive key per instance, wrapped with the master key (Worker secret ARCHIVE_MASTER_KEY,
+ * standing in for KMS). Destroying it on purge makes every archive of the instance unreadable.
+ * Owner: engine. The api unwraps it only to hand it to the agent inside a command, never stored.
+ */
+export const archiveKeys = sqliteTable('archive_keys', {
+  instanceId: text('instance_id')
+    .primaryKey()
+    .references(() => browserInstances.id),
+  wrappedKey: text('wrapped_key'),
+  createdAt: ts('created_at').notNull(),
+  destroyedAt: ts('destroyed_at'),
+});

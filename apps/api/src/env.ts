@@ -32,6 +32,8 @@ export interface Env {
   TURN_KEY_API_TOKEN?: string;
   /** `on` returns WebRTC connect info even for `fake` placements (local runs with a real agent and neko). */
   LIVE_VIEW?: string;
+  /** Wraps per-browser archive keys (base64, 32 bytes); same value as the engine's. Secret. */
+  ARCHIVE_MASTER_KEY?: string;
 }
 
 export type SessionUser = { id: string; email: string; name: string };

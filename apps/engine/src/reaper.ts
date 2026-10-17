@@ -5,7 +5,7 @@ import { readContext, type EngineDeps } from './context.js';
 import { runPending } from './scheduler.js';
 import { deleteLedgerResources } from './steps.js';
 
-const { browserInstances, operations, resources, driftFindings, events, idempotencyKeys, auditLog, viewerTokens } = schema;
+const { browserInstances, operations, resources, driftFindings, events, idempotencyKeys, auditLog, viewerTokens, backups } = schema;
 
 const ORPHAN_GRACE_MS = 24 * 3_600_000;
 
@@ -17,7 +17,7 @@ export async function reaperTick(deps: EngineDeps) {
   if (deps.mode !== 'reaper') throw new Error('reaperTick needs the reaper credentials');
   const { db } = deps;
   const now = deps.now();
-  const summary = { purgesQueued: 0, purgesRun: 0, failedCleanups: 0, released: 0, orphans: 0 };
+  const summary = { purgesQueued: 0, purgesRun: 0, failedCleanups: 0, released: 0, orphans: 0, backupsExpired: 0 };
 
   // 1. Purge soft-deleted instances after 7 days.
   const expired = await db
@@ -96,7 +96,11 @@ export async function reaperTick(deps: EngineDeps) {
     summary.orphans++;
   }
 
-  // 5. Housekeeping: the SSE change feed, idempotency keys and viewer tokens live for 24 h.
+  // 5. Backups past their retention (page 4): snapshots after 7 days (the newest is always kept),
+  //    archives beyond the last 10 unless they are the newest of a day in the last 14 days.
+  summary.backupsExpired = await expireBackups(deps, env);
+
+  // 6. Housekeeping: the SSE change feed, idempotency keys and viewer tokens live for 24 h.
   const dayAgo = new Date(now.getTime() - 86_400_000);
   await db.batch([
     db.delete(events).where(lt(events.createdAt, dayAgo)),
@@ -105,4 +109,55 @@ export async function reaperTick(deps: EngineDeps) {
     db.delete(viewerTokens).where(lt(viewerTokens.redeemedAt, dayAgo)),
   ]);
   return summary;
+}
+
+const SNAPSHOT_KEEP_DAYS = 7;
+const ARCHIVE_KEEP_LAST = 10;
+const ARCHIVE_DAILY_DAYS = 14;
+
+/** Which of one instance's complete backups are past retention. Pure, so it is unit-tested. */
+export function expiredBackups(list: { id: string; kind: string; createdAt: Date }[], now: Date): string[] {
+  const out: string[] = [];
+  const byNewest = [...list].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  const snaps = byNewest.filter((b) => b.kind === 'snapshot');
+  for (const s of snaps.slice(1)) {
+    if (now.getTime() - s.createdAt.getTime() > SNAPSHOT_KEEP_DAYS * 86_400_000) out.push(s.id);
+  }
+  const archives = byNewest.filter((b) => b.kind === 'archive');
+  const dailyKept = new Set<string>();
+  archives.forEach((a, i) => {
+    if (i < ARCHIVE_KEEP_LAST) return;
+    const day = a.createdAt.toISOString().slice(0, 10);
+    const recent = now.getTime() - a.createdAt.getTime() <= ARCHIVE_DAILY_DAYS * 86_400_000;
+    const newerSameDay = archives.slice(0, i).some((x) => x.createdAt.toISOString().slice(0, 10) === day);
+    if (recent && !newerSameDay && !dailyKept.has(day)) {
+      dailyKept.add(day);
+      return;
+    }
+    out.push(a.id);
+  });
+  return out;
+}
+
+async function expireBackups(deps: EngineDeps, env: (kind: ExecutorKind) => Parameters<typeof deleteLedgerResources>[0]) {
+  const { db } = deps;
+  const now = deps.now();
+  const all = await db.select().from(backups).where(eq(backups.status, 'complete'));
+  const byInstance = new Map<string, typeof all>();
+  for (const b of all) byInstance.set(b.instanceId, [...(byInstance.get(b.instanceId) ?? []), b]);
+  let expired = 0;
+  for (const [instanceId, list] of byInstance) {
+    for (const id of expiredBackups(list, now)) {
+      const b = list.find((x) => x.id === id)!;
+      if (b.kind === 'snapshot') {
+        const [r] = await db.select().from(resources).where(and(eq(resources.instanceId, instanceId), eq(resources.providerId, b.location ?? '')));
+        if (r) await deleteLedgerResources(env(r.executor as ExecutorKind), instanceId, (x) => x.id === r.id);
+      } else if (deps.deleteArchive && b.location) {
+        await deps.deleteArchive(b.location);
+      }
+      await db.update(backups).set({ status: 'deleted', deletedAt: now }).where(eq(backups.id, id));
+      expired++;
+    }
+  }
+  return expired;
 }

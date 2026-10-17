@@ -1,5 +1,5 @@
 import { OPERATION_STEPS, type OperationKind } from '@cloudbrowser/contracts';
-import { eventRow, schema } from '@cloudbrowser/db';
+import { eventRow, operationRow, schema } from '@cloudbrowser/db';
 import { ExecutorError, type ErrorClass, type ResourceKind } from '@cloudbrowser/executors';
 import { and, eq, inArray, isNull, lt, lte, or } from 'drizzle-orm';
 import {
@@ -25,7 +25,11 @@ const TRANSITIONAL_STATUS: Partial<Record<OperationKind, string>> = {
   start: 'starting',
   stop: 'stopping',
   delete: 'stopping',
+  recover: 'starting',
 };
+
+/** A start that waited this long for capacity hands over to `recover` in another zone (page 10). */
+const RECOVER_AFTER_MS = 30 * 60_000;
 
 export type RunResult =
   | { state: 'succeeded' }
@@ -80,6 +84,8 @@ export async function runOperation(deps: EngineDeps, operationId: string): Promi
   if (!env) return fail(deps, op, null, 'invalid', 'Instance or region not found.');
 
   if (now > op.deadlineAt) {
+    // A start that ran out of time waiting for capacity moves the browser to another zone instead of failing.
+    if (op.kind === 'start' && env.instance.status === 'waiting_capacity') return handOverToRecover(deps, op, env);
     return fail(deps, op, env, 'deadline', deadlineReason(op.kind as OperationKind));
   }
 
@@ -271,8 +277,11 @@ async function handleError(deps: EngineDeps, op: OperationRow, env: StepEnv, ste
       return defer(deps, op, backoffMs(attempt), attempt);
     }
     case 'capacity': {
-      // Honest state, never "Running" (page 10, rule 6). `recover` into another zone takes over
-      // after 30 minutes once it is implemented; until then the deadline ends in Needs attention.
+      // Honest state, never "Running" (page 10, rule 6). After 30 minutes the start ends and
+      // `recover` brings the browser up in another zone of the same region, with the same IP.
+      if (op.kind === 'start' && deps.now().getTime() - op.createdAt.getTime() > RECOVER_AFTER_MS) {
+        return handOverToRecover(deps, op, env);
+      }
       if (env.instance.status !== 'waiting_capacity') {
         await setInstanceStatus(deps, env, 'waiting_capacity', `${env.region.name} is short of capacity right now.`);
       }
@@ -292,6 +301,29 @@ async function handleError(deps: EngineDeps, op: OperationRow, env: StepEnv, ste
     case 'invalid':
       return fail(deps, op, env, cls, 'Something went wrong on our side. We have been alerted.');
   }
+}
+
+async function handOverToRecover(deps: EngineDeps, op: OperationRow, env: StepEnv): Promise<RunResult> {
+  const { db } = deps;
+  const at = deps.now();
+  const recover = operationRow({ instanceId: op.instanceId, userId: op.userId, kind: 'recover', params: { reason: 'capacity', after: op.id }, now: at });
+  await db.batch([
+    db
+      .update(operations)
+      .set({ status: 'failed', finishedAt: at, updatedAt: at, leaseOwner: null, leaseExpiresAt: null, errorClass: 'capacity', error: 'Handed over to recover.' })
+      .where(eq(operations.id, op.id)),
+    db.insert(operations).values(recover),
+    db.insert(auditLog).values({
+      actor: 'engine',
+      action: 'operation.start.recover',
+      target: `instance:${op.instanceId}`,
+      detail: { operationId: op.id, recoverId: recover.id },
+      createdAt: at,
+    }),
+    db.insert(events).values(eventRow(env.instance.userId, 'operation.updated', { operationId: recover.id, instanceId: op.instanceId }, at)),
+  ]);
+  deps.notify(env.instance.userId);
+  return { state: 'failed', reason: 'Handed over to recover.' };
 }
 
 function deadlineReason(kind: OperationKind): string {

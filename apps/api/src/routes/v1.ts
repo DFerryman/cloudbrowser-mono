@@ -1,6 +1,7 @@
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import {
   Accepted,
+  Backup,
   ConnectInfo,
   CreateInstanceBody,
   DEFAULT_IDLE_TIMEOUT_S,
@@ -29,7 +30,7 @@ import { problem } from '../problem.js';
 import { toInstances, toOperation } from '../views.js';
 import { eventsRoute } from './events.js';
 
-const { browserInstances, regions, operations, viewerSessions, instanceHealth, placements, events, auditLog } = schema;
+const { browserInstances, regions, operations, viewerSessions, instanceHealth, placements, events, auditLog, backups } = schema;
 
 export const v1 = new OpenAPIHono<AppEnv>({
   defaultHook: (result) => {
@@ -398,6 +399,94 @@ v1.openapi(
           actor: `user:${user.id}`,
           action: 'ip.change_requested',
           target: `instance:${row.id}`,
+          createdAt: new Date(),
+        }),
+      ],
+    });
+    return c.json(result, 202);
+  },
+);
+
+// --- backups (page 4) ---------------------------------------------------------------------------
+
+const BackupParams = z.object({ id: z.string().min(1).max(64), backupId: z.string().min(1).max(128) });
+
+function toBackup(b: typeof backups.$inferSelect): Backup {
+  return {
+    id: b.id,
+    kind: b.kind as Backup['kind'],
+    reason: b.reason as Backup['reason'],
+    status: b.status as Backup['status'],
+    sizeBytes: b.sizeBytes ?? null,
+    createdAt: b.createdAt.toISOString(),
+    restorableWhen: b.kind === 'snapshot' ? 'sleeping' : 'running',
+  };
+}
+
+v1.openapi(
+  createRoute({
+    method: 'get',
+    path: '/instances/{id}/backups',
+    tags: ['backups'],
+    description: 'Daily volume snapshots and the encrypted profile archives taken at each sleep, newest first.',
+    request: { params: IdParam },
+    responses: { 200: jsonResponse(z.array(Backup), 'Backups'), ...errors },
+  }),
+  async (c) => {
+    const row = await ownedInstance(c, c.req.valid('param').id);
+    const rows = await c
+      .get('db')
+      .select()
+      .from(backups)
+      .where(and(eq(backups.instanceId, row.id), isNull(backups.deletedAt)))
+      .orderBy(desc(backups.createdAt));
+    return c.json(rows.map(toBackup), 200);
+  },
+);
+
+v1.openapi(
+  createRoute({
+    method: 'post',
+    path: '/instances/{id}/backups/{backupId}/restore',
+    tags: ['backups'],
+    description: 'Restore a snapshot while the browser sleeps, or an archive while it runs. The current data is replaced.',
+    request: { params: BackupParams, headers: IdempotencyHeader },
+    responses: { ...accepted, ...errors },
+  }),
+  async (c) => {
+    const db = c.get('db');
+    const user = c.get('user');
+    const { id, backupId } = c.req.valid('param');
+    const key = requireIdempotencyKey(c);
+    const route = `POST /v1/instances/${id}/backups/${backupId}/restore`;
+    const earlier = await replayed(db, user.id, key, route);
+    if (earlier) return c.json(earlier, 202);
+    const row = await ownedInstance(c, id);
+    const [b] = await db
+      .select()
+      .from(backups)
+      .where(and(eq(backups.id, backupId), eq(backups.instanceId, row.id), isNull(backups.deletedAt)));
+    if (!b || b.status !== 'complete') throw problem(404, 'not_found', 'Backup not found.');
+    const when = toBackup(b).restorableWhen;
+    if (row.status !== when) {
+      throw problem(
+        409,
+        'invalid_state',
+        when === 'sleeping' ? 'Put the browser to sleep before restoring a snapshot.' : 'Start the browser before restoring an archive.',
+      );
+    }
+    const result = await enqueueOperation(c, {
+      instanceId: row.id,
+      kind: 'restore',
+      key,
+      route,
+      params: { backupId: b.id },
+      after: [
+        db.insert(auditLog).values({
+          actor: `user:${user.id}`,
+          action: 'backup.restore_requested',
+          target: `instance:${row.id}`,
+          detail: { backupId: b.id, kind: b.kind },
           createdAt: new Date(),
         }),
       ],

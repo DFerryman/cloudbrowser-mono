@@ -19,6 +19,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/archive"
 	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/protocol"
 )
 
@@ -56,6 +57,7 @@ type Config struct {
 	GatewayURL     string // wss://connect.example.com
 	BootstrapToken string // from user data; single use
 	StateDir       string // /data/agent: the long-lived credential lives here (mode 0600)
+	ProfileDir     string // /data/profile: Chrome's user data dir, archived at each sleep (page 4)
 	EchoURLs       []string
 	ExpectedIP     string // optional; reported with checks
 	Generation     int    // placement generation, from user data
@@ -265,8 +267,13 @@ func (a *Agent) command(ctx context.Context, in protocol.Incoming) {
 		cancel()
 		if err != nil {
 			reply.OK, reply.Error = false, err.Error()
+			break
 		}
-		// Archive backups to a presigned R2 URL are added with backups (page 4).
+		reply.Result = a.archiveProfile(ctx, in.Payload)
+	case protocol.CmdRestoreArchive:
+		if err := a.restoreProfile(ctx, in.Payload); err != nil {
+			reply.OK, reply.Error = false, err.Error()
+		}
 	case protocol.CmdRestartChrome:
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		_ = a.browser.Close(cctx)
@@ -288,6 +295,71 @@ func (a *Agent) command(ctx context.Context, in protocol.Incoming) {
 	if err := a.write(ctx, reply); err != nil {
 		a.log.Warn("reply", "err", err)
 	}
+}
+
+// archiveSpec is the archive part of a command payload; the gateway adds the key on delivery.
+func archiveSpec(payload map[string]any) (spec map[string]any, key []byte, err error) {
+	spec, _ = payload["archive"].(map[string]any)
+	if spec == nil {
+		return nil, nil, nil
+	}
+	k, _ := spec["key"].(string)
+	key, err = archive.ParseKey(k)
+	return spec, key, err
+}
+
+// archiveProfile uploads an encrypted archive of the closed profile. A failed archive never blocks
+// the sleep: the reply says archived=false and the engine marks the backup failed.
+func (a *Agent) archiveProfile(ctx context.Context, payload map[string]any) map[string]any {
+	spec, key, err := archiveSpec(payload)
+	if spec == nil {
+		return map[string]any{"archived": false}
+	}
+	putURL, _ := spec["putUrl"].(string)
+	if err == nil && putURL == "" {
+		err = errors.New("no upload URL")
+	}
+	if err == nil && a.cfg.ProfileDir == "" {
+		err = errors.New("no profile directory")
+	}
+	if err != nil {
+		a.log.Error("archive", "err", err)
+		return map[string]any{"archived": false, "detail": err.Error()}
+	}
+	cctx, cancel := context.WithTimeout(ctx, 4*time.Minute)
+	defer cancel()
+	size, err := archive.Upload(cctx, a.cfg.ProfileDir, key, putURL)
+	if err != nil {
+		a.log.Error("archive", "err", err)
+		return map[string]any{"archived": false, "detail": err.Error()}
+	}
+	return map[string]any{"archived": true, "sizeBytes": size}
+}
+
+// restoreProfile closes Chrome, swaps the archived profile in and starts Chrome again. If the
+// archive cannot be read, the current profile stays and Chrome restarts on it.
+func (a *Agent) restoreProfile(ctx context.Context, payload map[string]any) error {
+	spec, key, err := archiveSpec(payload)
+	if spec == nil {
+		return errors.New("archives are not configured")
+	}
+	if err != nil {
+		return err
+	}
+	getURL, _ := spec["getUrl"].(string)
+	if getURL == "" || a.cfg.ProfileDir == "" {
+		return errors.New("no download URL or profile directory")
+	}
+	cctx, cancel := context.WithTimeout(ctx, 9*time.Minute)
+	defer cancel()
+	if err := a.browser.Close(cctx); err != nil {
+		a.log.Warn("close chrome before restore", "err", err)
+	}
+	restoreErr := archive.Restore(cctx, getURL, key, a.cfg.ProfileDir)
+	if _, err := a.browser.Start(cctx); err != nil {
+		return fmt.Errorf("start chrome: %w", err)
+	}
+	return restoreErr
 }
 
 func (a *Agent) openViewer(ctx context.Context, sessionID string) {

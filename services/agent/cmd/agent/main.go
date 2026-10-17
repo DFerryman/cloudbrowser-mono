@@ -31,6 +31,7 @@ func main() {
 	var (
 		userDataPath = flag.String("user-data", "/var/lib/cloud/instance/user-data.txt", "JSON user data written by the engine")
 		stateDir     = flag.String("state-dir", "/data/agent", "where the long-lived credential is kept")
+		profileDir   = flag.String("profile-dir", "/data/profile", "Chrome's user data dir; archived at each sleep")
 		cdp          = flag.String("cdp", "http://127.0.0.1:9222", "Chrome DevTools endpoint (loopback only)")
 		nekoWS       = flag.String("neko-ws", "", "neko WebSocket URL with the owner token (loopback only)")
 		echo         = flag.String("echo", "https://app.example.com/api/echo/ip", "comma-separated IP echo URLs")
@@ -78,6 +79,7 @@ func main() {
 		BootstrapToken: ud.BootstrapToken,
 		Generation:     ud.Generation,
 		StateDir:       *stateDir,
+		ProfileDir:     *profileDir,
 		EchoURLs:       strings.Split(*echo, ","),
 		ExpectedIP:     *expectedIP,
 	}, browser, nk, fw, log)

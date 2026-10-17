@@ -12,7 +12,7 @@ import { z } from 'zod';
 export const AGENT_PROTOCOL_VERSION = 1;
 
 /** Commands the engine sends to an agent (stored in `agent_commands`). */
-export const AgentCommandKind = z.enum(['prepare_shutdown', 'ip_check', 'restart_chrome', 'set_firewall']);
+export const AgentCommandKind = z.enum(['prepare_shutdown', 'ip_check', 'restart_chrome', 'set_firewall', 'restore_archive']);
 export type AgentCommandKind = z.infer<typeof AgentCommandKind>;
 
 /** Events an agent reports (stored by the api in `instance_health` and `audit_log`). */

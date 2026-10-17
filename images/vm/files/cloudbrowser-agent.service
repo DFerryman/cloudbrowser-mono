@@ -8,6 +8,7 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/cloudbrowser-agent \
   --user-data /var/lib/cloud/instance/user-data.txt \
   --state-dir /data/agent \
+  --profile-dir /data/profile \
   --nft-dir /etc/cloudbrowser/nft \
   --echo https://app.example.com/api/echo/ip
 Restart=always

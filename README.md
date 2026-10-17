@@ -57,6 +57,9 @@ Service sends (the message is printed in the log) and, with `ENVIRONMENT=develop
 code is also logged. Queues, the Durable Object and the rate limiters all run locally. For frontend work with hot reload,
 also run `pnpm --filter @cloudbrowser/web dev` (Vite on :5173 proxies `/api` to :8787).
 
+Backups: the daily snapshot runs when the engine's 1-minute cron fires at minute 7 of an hour. Profile archives need real R2 credentials (see
+`docs/deploy-cloudflare.md`); without them they are skipped locally.
+
 ### With a real agent (agent ↔ gateway ↔ engine)
 
 ```bash

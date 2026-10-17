@@ -1,4 +1,5 @@
 
+import { newArchiveKey } from '@cloudbrowser/db';
 import { createTestD1 } from '@cloudbrowser/db/testing';
 import engine from '@cloudbrowser/engine';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -71,7 +72,7 @@ function setup() {
   const settle = async () => {
     while (pending.length) await pending.shift();
   };
-  return { d1, call, settle, emails, env };
+  return { d1, call, settle, emails, env, engineEnv, ctx };
 }
 
 async function signIn(t: ReturnType<typeof setup>, email: string) {
@@ -210,6 +211,31 @@ describe('browsers', () => {
     expect((await t.call('GET', `/api/v1/instances/${id}`)).body.status).toBe('sleeping');
   });
 
+  it('lists backups and restores a snapshot only while the browser sleeps', async () => {
+    const created = await t.call('POST', '/api/v1/instances', { name: 'Work', regionId: 'tyo1' }, { 'idempotency-key': 'b1' });
+    await t.settle();
+    const id = created.body.instanceId;
+    expect((await t.call('GET', `/api/v1/instances/${id}/backups`)).body).toEqual([]);
+
+    // The engine's daily snapshot runs at minute 7 of its 1-minute cron.
+    await engine.scheduled!({ scheduledTime: Date.UTC(2026, 9, 1, 3, 7), cron: '* * * * *', noRetry() {} } as never, t.engineEnv as never, t.ctx);
+    const list = (await t.call('GET', `/api/v1/instances/${id}/backups`)).body;
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ kind: 'snapshot', reason: 'daily', status: 'complete', restorableWhen: 'sleeping' });
+
+    const path = `/api/v1/instances/${id}/backups/${list[0].id}/restore`;
+    expect((await t.call('POST', path, undefined, { 'idempotency-key': 'r0' })).body.type).toBe('invalid_state');
+    expect((await t.call('POST', `/api/v1/instances/${id}/backups/nope/restore`, undefined, { 'idempotency-key': 'r1' })).status).toBe(404);
+
+    await t.call('POST', `/api/v1/instances/${id}/stop`, undefined, { 'idempotency-key': 's1' });
+    await t.settle();
+    const restored = await t.call('POST', path, undefined, { 'idempotency-key': 'r2' });
+    expect(restored.status).toBe(202);
+    await t.settle();
+    expect((await t.call('GET', `/api/v1/operations/${restored.body.operationId}`)).body.status).toBe('succeeded');
+    expect((await t.call('GET', `/api/v1/instances/${id}`)).body.status).toBe('sleeping');
+  });
+
   it('serves the OpenAPI document', async () => {
     const doc = await t.call('GET', '/api/v1/openapi.json');
     expect(doc.status).toBe(200);
@@ -262,6 +288,19 @@ describe('gateway internal API and live view', () => {
     expect(c.status).toBe('succeeded');
     expect(JSON.parse(c.reply).observed).toEqual(['203.0.113.5']);
     await expect(api.agentMessage(id, 1, { t: 'bogus' })).rejects.toThrow();
+  });
+
+  it('hands the gateway the plain archive key only while it exists', async () => {
+    const id = await createRunning();
+    const master = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
+    const api = internalApi({ ...t.env, ARCHIVE_MASTER_KEY: master } as never);
+    expect(await api.archiveKey(id)).toBeNull();
+    const { key, wrapped } = await newArchiveKey(master);
+    t.d1.sqlite.prepare('INSERT INTO archive_keys (instance_id, wrapped_key, created_at) VALUES (?, ?, 0)').run(id, wrapped);
+    expect(await api.archiveKey(id)).toBe(key);
+    expect(await internalApi(t.env as never).archiveKey(id)).toBeNull(); // no master key configured
+    t.d1.sqlite.prepare('UPDATE archive_keys SET wrapped_key = NULL, destroyed_at = 1 WHERE instance_id = ?').run(id);
+    expect(await api.archiveKey(id)).toBeNull();
   });
 
   it('issues a 60 s viewer token that the gateway can verify and redeem once', async () => {

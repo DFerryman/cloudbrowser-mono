@@ -25,8 +25,9 @@ echo "$USER_DATA" > "$DIR/user-data.json"
 echo "agent for $INSTANCE, fake egress IP $IP" >&2
 # Build, then exec the binary itself, so stopping this script stops the agent (go run would leave
 # its child running).
+mkdir -p "$DIR/profile/Default"
 go build -o "$DIR/agent" ./services/agent/cmd/agent
 exec "$DIR/agent" \
-  --user-data "$DIR/user-data.json" --state-dir "$DIR" \
+  --user-data "$DIR/user-data.json" --state-dir "$DIR" --profile-dir "$DIR/profile" \
   --fake-egress-ip "$IP" --expected-ip "$IP" --nft-dir "" \
   --echo "http://localhost:8787/api/echo/ip" "$@"

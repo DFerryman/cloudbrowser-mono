@@ -9,6 +9,8 @@ export interface InternalApi {
   authenticateAgent(input: { instanceId: string; bootstrap?: string; credential?: string }): Promise<AgentAuth>;
   agentMessage(instanceId: string, generation: number, frame: unknown): Promise<GatewayToAgent | null>;
   redeemViewerToken(claims: ViewerTokenClaims): Promise<boolean>;
+  /** Plain archive key of the instance, or null when archives are off or the key is destroyed. */
+  archiveKey(instanceId: string): Promise<string | null>;
 }
 
 export interface Env {

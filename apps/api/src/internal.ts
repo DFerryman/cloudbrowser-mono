@@ -5,12 +5,12 @@
  * the internet.
  */
 import { AgentFrame, type GatewayToAgent, type ViewerTokenClaims } from '@cloudbrowser/contracts';
-import { createDb, eventRow, schema, sha256Hex, type Db } from '@cloudbrowser/db';
+import { createDb, eventRow, schema, sha256Hex, unwrapArchiveKey, type Db } from '@cloudbrowser/db';
 import { and, eq, isNull } from 'drizzle-orm';
 import type { Env } from './env.js';
 import { turnIceServers } from './turn.js';
 
-const { agentCredentials, agentCommands, instanceHealth, browserInstances, operations, viewerSessions, viewerTokens, auditLog, events } = schema;
+const { archiveKeys, agentCredentials, agentCommands, instanceHealth, browserInstances, operations, viewerSessions, viewerTokens, auditLog, events } = schema;
 
 export type AgentAuth =
   | { ok: true; generation: number; credential?: string }
@@ -143,11 +143,23 @@ export async function redeemViewerToken(db: Db, claims: ViewerTokenClaims, now =
   }
 }
 
+/**
+ * The instance's archive key in plain form, for the gateway to add to an archive or restore command
+ * as it delivers it (page 4). Only the wrapped key is stored; null once the key is destroyed.
+ */
+export async function archiveKey(env: Env, db: Db, instanceId: string): Promise<string | null> {
+  if (!env.ARCHIVE_MASTER_KEY) return null;
+  const [row] = await db.select().from(archiveKeys).where(eq(archiveKeys.instanceId, instanceId));
+  if (!row?.wrappedKey || row.destroyedAt) return null;
+  return unwrapArchiveKey(env.ARCHIVE_MASTER_KEY, row.wrappedKey);
+}
+
 export function internalApi(env: Env) {
   const db = createDb(env.DB);
   return {
     authenticateAgent: (input: { instanceId: string; bootstrap?: string; credential?: string }) => authenticateAgent(db, input),
     agentMessage: (instanceId: string, generation: number, frame: unknown) => agentMessage(env, db, instanceId, generation, frame),
     redeemViewerToken: (claims: ViewerTokenClaims) => redeemViewerToken(db, claims),
+    archiveKey: (instanceId: string) => archiveKey(env, db, instanceId),
   };
 }

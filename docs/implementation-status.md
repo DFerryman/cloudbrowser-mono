@@ -19,20 +19,31 @@ Cloudflare deployment.
   `fake` executor with client-token idempotency, tag guardrails, credential modes (runtime cannot
   delete; reaper cannot create; read-only), and fault injection.
 - **Engine** (`apps/engine`): consumes the `cloudbrowser-operations` queue; hosts the `EventHub`
-  Durable Object for SSE; `create`, `start`, `stop`, `change_ip`, `delete`, `undelete`, `purge`
+  Durable Object for SSE; `create`, `start`, `stop`, `change_ip`, `delete`, `undelete`, `purge`,
+  `restore` and `recover`
   with the write-ahead step journal, leases, ledger-before-call, lookup on unknown outcomes, retries
   per error class, IP screening (never reuse an address), binding check and in-Chrome IP check,
   honest states (*Waiting for capacity*, *Provider issue*, *Needs attention*, *Failed*), idle sleep,
   5-minute IP checks with fail-closed status, change-IP rollback, and a separate **reaper**
   deployment (purge after 7 days, failed-create cleanup, rejected/superseded IPs after 30 days,
   orphans after 24 h).
+- **Backups and recovery** (page 4, page 10): a daily provider snapshot of each volume (cron, kept
+  7 days, the newest always kept); an encrypted profile archive at each sleep (the agent closes
+  Chrome, packs the profile without caches, zstd, chunked AES-256-GCM with a per-browser key, and
+  PUTs it to a presigned R2 URL; the last 10 plus one a day for 14 days are kept). Snapshots restore
+  while asleep (new volume from the snapshot, swapped in, IP unchanged); archives restore while
+  running (the agent swaps the profile and restarts Chrome; a bad archive leaves the profile as it
+  was). `recover` snapshots the volume, restores it in another zone, moves the same IP to a new
+  interface and builds a new VM there; it runs automatically when a start has waited 30 minutes for
+  capacity. The old VM, interface and volume are released 7 days later; the IP never is. Purge
+  destroys the archive key first, so archives are unreadable before R2 deletes them.
 - **Reconciler** (`apps/reconciler`): ledger vs provider by tag, adoption, orphan and missing
   findings, circuit breaker, quota and spend snapshots feeding the spend guard.
-- **API** (`apps/api`): the page 2 API surface except billing/backups/downloads/admin — Better Auth
+- **API** (`apps/api`): the page 2 API surface except billing/downloads/admin — Better Auth
   email codes sent with Cloudflare Email Service (invite-only), Workers Rate Limiting on sign-in and
   writes, the IP echo endpoint, Idempotency-Key on lifecycle calls, admission checks (plan, region,
   global caps, quota headroom, spend guard, creation freeze), viewer sessions with take-over and
-  idle heartbeats, IP verify, IP change requests, SSE with `Last-Event-ID` resume.
+  idle heartbeats, IP verify, IP change requests, backups list and restore, SSE with `Last-Event-ID` resume.
 - **Session gateway** (`apps/gateway`): a Worker on `connect.example.com` plus one `InstanceGateway`
   Durable Object per browser (WebSocket hibernation). Agents authenticate with a single-use
   bootstrap token (swapped for a long-lived credential) or that credential, checked through the
@@ -41,8 +52,8 @@ Cloudflare deployment.
   delivers `agent_commands` (poked through the `cloudbrowser-agent-commands` queue, with every agent
   heartbeat as a backstop).
 - **Agent** (`services/agent`, Go): outbound tunnel with reconnect and backoff, credential stored
-  0600, `ready`/heartbeat/IP-check events, commands (`prepare_shutdown`, `ip_check`,
-  `restart_chrome`, `set_firewall`), IP check from a throwaway Chrome browser context over CDP,
+  0600, `ready`/heartbeat/IP-check events, commands (`prepare_shutdown` with the profile archive,
+  `restore_archive`, `ip_check`, `restart_chrome`, `set_firewall`), IP check from a throwaway Chrome browser context over CDP,
   fail-closed nftables switch, neko relay, CDP `Input.insertText` for IME. Tested against a fake
   gateway and against a real headless Chromium.
 - **Engine ↔ agent**: `issue_bootstrap` stores only the token's hash; `await_agent` needs a `ready`
@@ -64,7 +75,7 @@ Cloudflare deployment.
   live status, create dialog (region, permanence note, advanced options, four progress steps,
   auto-open when ready), session view (44 px toolbar, region/IP chip, every state overlay, idle
   warning, fullscreen with Keyboard Lock), browser settings (identity, verify IP, request new IP,
-  behavior, activity, delete with type-to-confirm), account page, Simplified Chinese and English.
+  backups with restore, behavior, activity, delete with type-to-confirm), account page, Simplified Chinese and English.
 
 ## Deviations from the plan, and why
 
@@ -91,6 +102,7 @@ Cloud), because Cloudflare does not offer VMs with a dedicated static egress IP.
 | Go session gateway on ECS with an `agent_sessions` registry | `cloudbrowser-gateway` Worker + `InstanceGateway` Durable Object per instance | Routing by instance id is what a Durable Object gives; hibernation makes idle tunnels free; no registry needed. |
 | `agent.v1` / `viewer.v1` protobuf with Buf | JSON text frames, zod in `packages/contracts/src/protocol.ts`, mirrored in Go | The payload the gateway relays most (neko v3 signaling) is JSON already; no codegen toolchain for two languages. |
 | Engine → gateway via `agent_commands` + `NOTIFY` | `agent_commands` + a `cloudbrowser-agent-commands` queue message | No binding from engine to gateway, so no deploy-order cycle; heartbeats are a delivery backstop. |
+| S3 archives with per-instance keys wrapped by KMS | **R2** (presigned PUT/GET via the S3 API) with per-instance keys wrapped by a Worker secret (`ARCHIVE_MASTER_KEY`, AES-256-GCM) | Same envelope scheme without a KMS: the plain key exists only in the gateway's frame to the agent, never in D1. Presigned URLs keep archive bytes off the Workers. |
 | Random bootstrap token stored hashed | HMAC-derived token (Worker secret `BOOTSTRAP_SECRET`), only the hash stored | `create_vm` can mint it after a crash without the token ever being written down. |
 
 Considered and **not** used:
@@ -111,8 +123,8 @@ Considered and **not** used:
   Smooth motion), pausing video after 60 s in a hidden tab, touch gestures, sending quality
   aggregates to `viewer_sessions`. The neko event names and data-channel opcodes follow neko v3 and
   are confirmed against the pinned image when it is built.
-- Agent: R2 archive upload on `prepare_shutdown`, browser container supervision through
-  containerd, neko credentials per wake.
-- `recover` and `restore` operations, backups (provider snapshots, R2 archives with per-instance keys).
+- Agent: browser container supervision through containerd, neko credentials per wake.
+- Manual backups ("Back up now") and pre-upgrade snapshots; showing a `restore` in progress as its
+  own browser state.
 - Billing with Creem (page 6), landing and pricing pages, billing screen.
 - Admin console (`/admin`), passkeys/TOTP/OAuth, dashboard thumbnails, dependency-cruiser and `buf breaking` in CI.

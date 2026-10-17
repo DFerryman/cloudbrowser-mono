@@ -109,4 +109,7 @@ export class Internal extends WorkerEntrypoint<Env> {
   redeemViewerToken(claims: ViewerTokenClaims) {
     return internalApi(this.env).redeemViewerToken(claims);
   }
+  archiveKey(instanceId: string) {
+    return internalApi(this.env).archiveKey(instanceId);
+  }
 }

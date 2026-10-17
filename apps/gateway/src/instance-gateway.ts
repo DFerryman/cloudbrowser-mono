@@ -150,7 +150,14 @@ export class InstanceGateway extends DurableObject<Env> {
       .bind(instanceId)
       .all<CommandRow>();
     for (const c of results) {
-      this.send(agent, { t: 'command', id: c.id, kind: c.kind as never, payload: JSON.parse(c.payload) });
+      const payload = JSON.parse(c.payload) as Record<string, unknown>;
+      // The archive key is added on delivery and lives only in this frame, never in D1 (page 4).
+      const archive = payload.archive as Record<string, unknown> | undefined;
+      if (archive && typeof archive === 'object') {
+        const key = await this.env.API.archiveKey(instanceId);
+        payload.archive = key ? { ...archive, key } : null;
+      }
+      this.send(agent, { t: 'command', id: c.id, kind: c.kind as never, payload });
       await this.env.DB.prepare(`UPDATE agent_commands SET status = 'delivered', delivered_at = ? WHERE id = ? AND status = 'pending'`)
         .bind(Date.now(), c.id)
         .run();

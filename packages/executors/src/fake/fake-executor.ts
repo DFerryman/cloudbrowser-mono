@@ -14,6 +14,7 @@ import {
   type QuotaSnapshot,
   type ResourceKind,
   type RunState,
+  type SnapshotRef,
   type VmRef,
   type VmSpec,
   type VolumeRef,
@@ -47,6 +48,9 @@ const DEFAULT_IP_PREFIX: Record<string, string> = {
 };
 
 const MUTATING: ReadonlySet<keyof Executor> = new Set([
+  'snapshot',
+  'ensureVolumeFromSnapshot',
+  'swapVolume',
   'allocateIp',
   'ensureNetworkInterface',
   'ensureVolume',
@@ -190,20 +194,60 @@ export class FakeExecutor implements Executor {
     });
   }
 
-  ensureNetworkInterface(ctx: OpContext, region: string, ip: IpAllocation): Promise<NetworkInterfaceRef> {
+  zones(region: string): string[] {
+    return [`${region}a`, `${region}c`, `${region}d`];
+  }
+
+  ensureNetworkInterface(ctx: OpContext, region: string, ip: IpAllocation, zone?: string): Promise<NetworkInterfaceRef> {
     return this.call('ensureNetworkInterface', ctx, async () => {
-      await this.mustGet(ip.allocationId, 'ip');
+      const addr = await this.mustGet(ip.allocationId, 'ip');
       const rec = await this.createOnce(
         ctx,
         'network_interface',
         region,
-        `${region}a`,
+        zone ?? this.zones(region)[0]!,
         'available',
         { ipAllocationId: ip.allocationId, extraPublicAddresses: [] },
         'eni',
       );
-      await this.store.update(ip.allocationId, { state: 'associated' });
+      // An address has one association: moving it here detaches it from its previous interface.
+      const previous = addr.attrs.nicId as string | undefined;
+      if (previous && previous !== rec.id) {
+        const old = await this.store.get(previous);
+        if (old) await this.store.update(previous, { attrs: { ...old.attrs, ipAllocationId: undefined } });
+      }
+      await this.store.update(ip.allocationId, { state: 'associated', attrs: { ...addr.attrs, nicId: rec.id } });
       return { nicId: rec.id, zone: rec.zone! };
+    });
+  }
+
+  snapshot(ctx: OpContext, region: string, volumeId: string): Promise<SnapshotRef> {
+    return this.call('snapshot', ctx, async () => {
+      const vol = await this.mustGet(volumeId, 'volume');
+      const rec = await this.createOnce(ctx, 'snapshot', region, null, 'completed', { volumeId, sizeGb: vol.attrs.sizeGb }, 'snap');
+      return { snapshotId: rec.id, sizeGb: rec.attrs.sizeGb as number };
+    });
+  }
+
+  ensureVolumeFromSnapshot(ctx: OpContext, region: string, zone: string, snapshotId: string, sizeGb: number): Promise<VolumeRef> {
+    return this.call('ensureVolumeFromSnapshot', ctx, async () => {
+      await this.mustGet(snapshotId, 'snapshot');
+      const rec = await this.createOnce(ctx, 'volume', region, zone, 'available', { sizeGb, encrypted: true, fromSnapshot: snapshotId }, 'vol');
+      return { volumeId: rec.id, zone: rec.zone!, sizeGb };
+    });
+  }
+
+  swapVolume(ctx: OpContext, p: Placement, volumeId: string): Promise<void> {
+    return this.call('swapVolume', ctx, async () => {
+      const vm = await this.mustGet(p.vmId, 'vm');
+      if (vm.state !== 'stopped') throw new ExecutorError('invalid', 'swapVolume needs a stopped VM');
+      const next = await this.mustGet(volumeId, 'volume');
+      if (next.zone !== vm.zone) throw new ExecutorError('invalid', 'volume and VM are in different zones');
+      const current = vm.attrs.volumeId as string;
+      if (current === volumeId) return;
+      await this.store.update(current, { state: 'available' });
+      await this.store.update(volumeId, { state: 'in-use' });
+      await this.store.update(vm.id, { attrs: { ...vm.attrs, volumeId } });
     });
   }
 
@@ -246,7 +290,8 @@ export class FakeExecutor implements Executor {
       const previous = nic.attrs.ipAllocationId as string | undefined;
       if (previous && previous !== ip.allocationId) await this.store.update(previous, { state: 'allocated' });
       await this.store.update(nicId, { attrs: { ...nic.attrs, ipAllocationId: ip.allocationId } });
-      await this.store.update(ip.allocationId, { state: 'associated' });
+      const addr = await this.mustGet(ip.allocationId, 'ip');
+      await this.store.update(ip.allocationId, { state: 'associated', attrs: { ...addr.attrs, nicId } });
     });
   }
 

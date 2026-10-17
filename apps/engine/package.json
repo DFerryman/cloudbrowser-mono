@@ -16,6 +16,7 @@
     "@cloudbrowser/contracts": "workspace:*",
     "@cloudbrowser/db": "workspace:*",
     "@cloudbrowser/executors": "workspace:*",
+    "aws4fetch": "^1.0.20",
     "drizzle-orm": "^0.45.4"
   },
   "devDependencies": {

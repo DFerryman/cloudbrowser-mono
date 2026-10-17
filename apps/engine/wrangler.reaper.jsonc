@@ -15,6 +15,8 @@
     "ENGINE_MODE": "reaper",
     "ENV_NAME": "dev"
   },
+  // Deletes expired and purged archives (page 4). Only the reaper deletes.
+  "r2_buckets": [{ "binding": "ARCHIVES", "bucket_name": "cloudbrowser-archives" }],
   "d1_databases": [
     {
       "binding": "DB",

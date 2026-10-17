@@ -9,7 +9,8 @@ import { reaperTick } from '../src/reaper.js';
 import { runOperation } from '../src/runner.js';
 import { checkInstanceIp, idleStops } from '../src/scheduler.js';
 
-const { browserInstances, operations, resources, ipAddresses, placements, user } = schema;
+const { browserInstances, operations, resources, ipAddresses, placements, user, backups } = schema;
+const MASTER_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
 
 class World {
   db: Db;
@@ -20,6 +21,8 @@ class World {
   /** `gateway` uses the real agent bridge (agent_commands); the test plays the agent. */
   agentMode: 'fake' | 'gateway' = 'fake';
   pokes: string[] = [];
+  archives: { presignPut(k: string): Promise<string>; presignGet(k: string): Promise<string> } | null = null;
+  deletedArchives: string[] = [];
 
   constructor() {
     this.db = createDb(createTestD1());
@@ -33,7 +36,8 @@ class World {
     const ex: Executor = this.executor(mode === 'reaper' ? 'reaper' : 'runtime');
     const now = () => this.clock;
     const placementOf = async (id: string) => {
-      const p = await this.placement(id);
+      const rows = await this.db.select().from(placements).where(eq(placements.instanceId, id));
+      const p = rows.find((r) => r.status === 'building') ?? rows.find((r) => r.status === 'current');
       return p ? placementRef(p) : null;
     };
     const agent =
@@ -52,6 +56,9 @@ class World {
       notify: () => {},
       bootstrapSecret: 'test-secret',
       sleep: async () => {},
+      archives: this.archives,
+      archiveMasterKey: this.archives ? MASTER_KEY : null,
+      deleteArchive: async (key: string) => void this.deletedArchives.push(key),
     };
   }
 
@@ -486,6 +493,133 @@ describe('real agent through the gateway', () => {
     w.advance(16 * 60_000);
     await periodicIpChecks(w.deps());
     expect((await w.instance()).status).toBe('needs_attention');
+  });
+});
+
+describe('backups, restore and recover', () => {
+  beforeEach(async () => {
+    await w.settle(await w.newInstance());
+  });
+
+  async function placements_() {
+    return w.db.select().from(placements).where(eq(placements.instanceId, 'inst1'));
+  }
+
+  it('takes one provider snapshot a day and restores it while the browser sleeps', async () => {
+    const { dailySnapshots } = await import('../src/scheduler.js');
+    expect(await dailySnapshots(w.deps())).toBe(1);
+    expect(await dailySnapshots(w.deps())).toBe(0); // not again within 23 h
+    const [snap] = await w.db.select().from(backups);
+    expect(snap?.kind).toBe('snapshot');
+
+    const restoreWhileRunning = await w.enqueue('inst1', 'restore');
+    await w.db.update(operations).set({ params: { backupId: snap!.id } }).where(eq(operations.id, restoreWhileRunning));
+    // The api only allows snapshot restores while asleep; the engine's swap refuses a running VM too.
+    expect((await w.settle(restoreWhileRunning)).state).toBe('failed');
+    await w.db.update(browserInstances).set({ status: 'running', statusReason: null }).where(eq(browserInstances.id, 'inst1'));
+
+    await w.settle(await w.enqueue('inst1', 'stop'));
+    const before = (await w.placement())!;
+    const op = await w.enqueue('inst1', 'restore');
+    await w.db.update(operations).set({ params: { backupId: snap!.id } }).where(eq(operations.id, op));
+    expect(await w.settle(op)).toEqual({ state: 'succeeded' });
+    const after = (await w.placement())!;
+    expect(after.volumeId).not.toBe(before.volumeId);
+    expect(after.ipAddress).toBe(before.ipAddress);
+    expect((await w.instance()).status).toBe('sleeping');
+    const old = await w.db.select().from(resources).where(eq(resources.providerId, before.volumeId!));
+    expect(old[0]?.state).toBe('superseded');
+    await w.expectLedgerMatchesProvider();
+  });
+
+  it('recovers into another zone with the same IP and data', async () => {
+    const before = (await w.placement())!;
+    expect(await w.settle(await w.enqueue('inst1', 'recover'))).toEqual({ state: 'succeeded' });
+    const after = (await w.placement())!;
+    expect(after.generation).toBe(2);
+    expect(after.zone).not.toBe(before.zone);
+    expect(after.ipAddress).toBe(before.ipAddress);
+    expect(after.ipAllocationId).toBe(before.ipAllocationId);
+    const newVolume = w.store.records.get(after.volumeId!)!;
+    expect(newVolume.attrs.fromSnapshot).toBeTruthy();
+    expect((await w.instance()).status).toBe('running');
+    expect((await placements_()).find((p) => p.generation === 1)?.status).toBe('superseded');
+    // The IP moved: the old interface no longer has a public address.
+    expect((await w.executor('runtime').verifyEgress(readContext('t', 'test'), placementRef(after))).ok).toBe(true);
+    await w.expectLedgerMatchesProvider();
+
+    // Old VM, interface and volume go 7 days later, never the IP.
+    w.advance(8 * 86_400_000);
+    await reaperTick(w.deps('reaper'));
+    const live = w.liveProvider();
+    expect(live.find((r) => r.id === before.vmId)).toBeUndefined();
+    expect(live.find((r) => r.id === before.ipAllocationId)).toBeDefined();
+  });
+
+  it('hands a start over to recover after 30 minutes without capacity', async () => {
+    await w.settle(await w.enqueue('inst1', 'stop'));
+    w.faults = (m) => (m === 'ensureRunning' ? 'capacity' : null);
+    const start = await w.enqueue('inst1', 'start');
+    await runOperation(w.deps(), start);
+    expect((await w.instance()).status).toBe('waiting_capacity');
+    w.advance(31 * 60_000);
+    expect((await runOperation(w.deps(), start)).state).toBe('failed');
+    const [recover] = await w.db.select().from(operations).where(eq(operations.kind, 'recover'));
+    expect(recover?.finishedAt).toBeNull();
+    w.faults = () => null;
+    expect(await w.settle(recover!.id)).toEqual({ state: 'succeeded' });
+    expect((await w.instance()).status).toBe('running');
+  });
+
+  it('archives the profile through the agent when the browser goes to sleep', async () => {
+    w.agentMode = 'gateway';
+    w.archives = { presignPut: async (k) => `https://r2.test/put/${k}`, presignGet: async (k) => `https://r2.test/get/${k}` };
+    const stop = await w.enqueue('inst1', 'stop');
+    expect((await runOperation(w.deps(), stop)).state).toBe('deferred');
+    const [cmd] = await w.db.select().from(schema.agentCommands).where(eq(schema.agentCommands.kind, 'prepare_shutdown'));
+    const archive = (cmd!.payload as { archive: { putUrl: string; objectKey: string } }).archive;
+    expect(archive.putUrl).toBe(`https://r2.test/put/${archive.objectKey}`);
+    expect(JSON.stringify(cmd!.payload)).not.toMatch(/key"\s*:/); // the archive key is never stored in the command
+    const [keyRow] = await w.db.select().from(schema.archiveKeys);
+    expect(keyRow?.wrappedKey).toBeTruthy();
+
+    await w.db
+      .update(schema.agentCommands)
+      .set({ status: 'succeeded', reply: { archived: true, sizeBytes: 12345 } })
+      .where(eq(schema.agentCommands.id, cmd!.id));
+    w.advance(3_000);
+    expect(await w.settle(stop)).toEqual({ state: 'succeeded' });
+    const [b] = await w.db.select().from(backups).where(eq(backups.kind, 'archive'));
+    expect(b).toMatchObject({ status: 'complete', sizeBytes: 12345, reason: 'sleep' });
+
+    // Purge destroys the archive key and deletes the archives.
+    w.agentMode = 'fake';
+    w.archives = null;
+    await w.settle(await w.enqueue('inst1', 'delete'));
+    w.advance(8 * 86_400_000);
+    await reaperTick(w.deps('reaper'));
+    const [destroyed] = await w.db.select().from(schema.archiveKeys);
+    expect(destroyed?.wrappedKey).toBeNull();
+    expect(destroyed?.destroyedAt).not.toBeNull();
+    expect(w.deletedArchives).toContain(archive.objectKey);
+  });
+
+  it('keeps the newest snapshot, 7 days of snapshots, the last 10 archives and one archive a day for 14 days', async () => {
+    const { expiredBackups } = await import('../src/reaper.js');
+    const now = new Date('2026-10-30T12:00:00Z');
+    const day = (d: number, h = 12) => new Date(Date.UTC(2026, 9, 30 - d, h));
+    const list = [
+      ...[0, 3, 6, 8, 10].map((d) => ({ id: `s${d}`, kind: 'snapshot', createdAt: day(d) })),
+      // 12 archives today, then one each on days 1..20
+      ...Array.from({ length: 12 }, (_, i) => ({ id: `a0-${i}`, kind: 'archive', createdAt: day(0, 11 - i * 0.5) })),
+      ...Array.from({ length: 20 }, (_, i) => ({ id: `a${i + 1}`, kind: 'archive', createdAt: day(i + 1) })),
+    ];
+    const expired = new Set(expiredBackups(list, now));
+    expect([...expired].filter((x) => x.startsWith('s')).sort()).toEqual(['s10', 's8']);
+    expect(expired.has('a0-0')).toBe(false); // among the newest 10
+    expect(expired.has('a0-11')).toBe(true); // older than the newest 10, and today already has newer ones
+    expect(expired.has('a13')).toBe(false); // newest of its day, within 14 days
+    expect(expired.has('a15')).toBe(true); // older than 14 days
   });
 });
 

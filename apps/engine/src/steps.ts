@@ -1,6 +1,6 @@
-import { eventRow, newId, schema, sha256Hex } from '@cloudbrowser/db';
+import { eventRow, newArchiveKey, newId, schema, sha256Hex } from '@cloudbrowser/db';
 import type { ResourceKind } from '@cloudbrowser/executors';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, eq, inArray, ne } from 'drizzle-orm';
 import {
   placementRef,
   RestartFrom,
@@ -9,9 +9,10 @@ import {
   type StepEnv,
   type StepOutcome,
 } from './context.js';
-import { bootstrapToken } from './agent.js';
+import { bootstrapToken, type CommandReply } from './agent.js';
+import { archiveObjectKey } from './archives.js';
 
-const { browserInstances, instanceHealth, ipAddresses, placements, resources, auditLog, events, agentCredentials } = schema;
+const { browserInstances, instanceHealth, ipAddresses, placements, resources, auditLog, events, agentCredentials, backups, archiveKeys } = schema;
 
 /** Default data volume size; plans set it later (page 6). */
 const VOLUME_GB = 20;
@@ -111,7 +112,10 @@ const COMMAND_TIMEOUT_MS = 60_000;
 const COMMAND_POLL_MS = 2_000;
 
 async function awaitAgent(env: StepEnv): Promise<StepOutcome> {
-  const p = await loadPlacement(env);
+  return awaitAgentFor(env, await loadPlacement(env));
+}
+
+async function awaitAgentFor(env: StepEnv, p: PlacementRow): Promise<StepOutcome> {
   // The agent must report ready after this operation began, so a stale report from before a stop does not count.
   const status = await env.agent.status(env.instance.id, p.generation, env.op.createdAt);
   if (status === 'ready') return {};
@@ -122,16 +126,25 @@ async function awaitAgent(env: StepEnv): Promise<StepOutcome> {
 }
 
 /** Sends a command once per step and round, then waits for its reply without blocking the worker. */
-async function command(env: StepEnv, step: string, kind: Parameters<StepEnv['agent']['send']>[0]['kind'], payload: Record<string, unknown>) {
+async function command(
+  env: StepEnv,
+  step: string,
+  kind: Parameters<StepEnv['agent']['send']>[0]['kind'],
+  payload: Record<string, unknown>,
+  timeoutMs = COMMAND_TIMEOUT_MS,
+) {
   const id = `${env.op.id}:${step}:${env.round}`;
   await env.agent.send({ id, instanceId: env.instance.id, kind, payload });
   const reply = await env.agent.reply(id);
-  const timedOut = env.deps.now().getTime() - reply.createdAt.getTime() > COMMAND_TIMEOUT_MS;
+  const timedOut = env.deps.now().getTime() - reply.createdAt.getTime() > timeoutMs;
   return { reply, timedOut };
 }
 
 async function verifyBinding(env: StepEnv): Promise<StepOutcome> {
-  const p = await loadPlacement(env);
+  return verifyBindingFor(env, await loadPlacement(env));
+}
+
+async function verifyBindingFor(env: StepEnv, p: PlacementRow): Promise<StepOutcome> {
   const ref = placementRef(p);
   let check = await env.executor.verifyEgress(env.ctx('verify_binding'), ref);
   if (!check.ok) {
@@ -156,7 +169,10 @@ async function verifyBinding(env: StepEnv): Promise<StepOutcome> {
 }
 
 async function verifyIpInChrome(env: StepEnv): Promise<StepOutcome> {
-  const p = await loadPlacement(env);
+  return verifyIpFor(env, await loadPlacement(env));
+}
+
+async function verifyIpFor(env: StepEnv, p: PlacementRow): Promise<StepOutcome> {
   const { db, now } = env.deps;
   const { reply, timedOut } = await command(env, 'verify_ip_in_chrome', 'ip_check', { expected: p.ipAddress });
   if (reply.status === 'pending') {
@@ -182,12 +198,24 @@ async function ensureRunning(env: StepEnv): Promise<StepOutcome> {
   return {};
 }
 
+/**
+ * Graceful Chrome close, then an encrypted archive of the profile to R2 (page 2, flow C; page 4).
+ * If the agent does not ack within 60 s (5 min while archiving), the VM is stopped anyway; Chrome's
+ * stores are journaled.
+ */
 async function prepareShutdown(env: StepEnv): Promise<StepOutcome> {
-  if (!(await currentPlacement(env))) return { result: { skipped: true } };
-  // If the agent does not ack within 60 s, the VM is stopped anyway; Chrome's stores are
-  // journaled (page 2, flow C).
-  const { reply, timedOut } = await command(env, 'prepare_shutdown', 'prepare_shutdown', {});
+  const p = await currentPlacement(env);
+  if (!p) return { result: { skipped: true } };
+  const archive = await prepareArchive(env, p, 'sleep');
+  const { reply, timedOut } = await command(
+    env,
+    'prepare_shutdown',
+    'prepare_shutdown',
+    archive ? { archive: { putUrl: archive.putUrl, objectKey: archive.objectKey } } : {},
+    archive ? ARCHIVE_TIMEOUT_MS : COMMAND_TIMEOUT_MS,
+  );
   if (reply.status === 'pending' && !timedOut) return { wait: COMMAND_POLL_MS, reason: 'waiting for Chrome to close' };
+  if (archive) await settleArchive(env, archive.backupId, reply);
   return { result: { acked: reply.status === 'succeeded' } };
 }
 
@@ -262,10 +290,15 @@ async function createVolume(env: StepEnv): Promise<StepOutcome> {
  * its hash is kept, in `agent_credentials`.
  */
 async function issueBootstrap(env: StepEnv): Promise<StepOutcome> {
-  const token = await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, env.op.id, 1);
+  return issueBootstrapFor(env, 1);
+}
+
+/** A new bootstrap for `generation`; replacing the credential stops an older generation's agent from connecting. */
+async function issueBootstrapFor(env: StepEnv, generation: number): Promise<StepOutcome> {
+  const token = await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, env.op.id, generation);
   const at = env.deps.now();
   const expiresAt = new Date(at.getTime() + 15 * 60_000);
-  const values = { generation: 1, bootstrapHash: await sha256Hex(token), bootstrapExpiresAt: expiresAt, credentialHash: null, activatedAt: null };
+  const values = { generation, bootstrapHash: await sha256Hex(token), bootstrapExpiresAt: expiresAt, credentialHash: null, activatedAt: null };
   await env.deps.db
     .insert(agentCredentials)
     .values({ instanceId: env.instance.id, createdAt: at, ...values })
@@ -429,8 +462,303 @@ async function purgeResources(env: StepEnv): Promise<StepOutcome> {
       .update(agentCredentials)
       .set({ credentialHash: null, bootstrapHash: null, rotatedAt: env.deps.now() })
       .where(eq(agentCredentials.instanceId, env.instance.id)),
+    // Destroying the archive key makes every archive unreadable, even before R2 deletes them (page 4).
+    env.deps.db
+      .update(archiveKeys)
+      .set({ wrappedKey: null, destroyedAt: env.deps.now() })
+      .where(eq(archiveKeys.instanceId, env.instance.id)),
   ]);
+  const left = await env.deps.db
+    .select()
+    .from(backups)
+    .where(and(eq(backups.instanceId, env.instance.id), ne(backups.status, 'deleted')));
+  for (const b of left) {
+    if (b.kind === 'archive' && b.location && env.deps.deleteArchive) await env.deps.deleteArchive(b.location);
+  }
+  await env.deps.db
+    .update(backups)
+    .set({ status: 'deleted', deletedAt: env.deps.now() })
+    .where(eq(backups.instanceId, env.instance.id));
   return { result: { deleted } };
+}
+
+// --- backups (page 4) --------------------------------------------------------------------------
+
+/** Archiving a profile takes longer than a plain Chrome close. */
+const ARCHIVE_TIMEOUT_MS = 5 * 60_000;
+const RESTORE_ARCHIVE_TIMEOUT_MS = 15 * 60_000;
+const SUPERSEDED_KEEP_MS = 7 * 86_400_000;
+
+/** The instance's archive key, created on first use and wrapped with the master key. */
+export async function ensureArchiveKey(env: Pick<StepEnv, 'deps'>, instanceId: string) {
+  const { db, archiveMasterKey, now } = env.deps;
+  if (!archiveMasterKey) return false;
+  const [row] = await db.select().from(archiveKeys).where(eq(archiveKeys.instanceId, instanceId));
+  if (row?.wrappedKey) return true;
+  if (row?.destroyedAt) return false;
+  const { wrapped } = await newArchiveKey(archiveMasterKey);
+  await db.insert(archiveKeys).values({ instanceId, wrappedKey: wrapped, createdAt: now() }).onConflictDoNothing();
+  return true;
+}
+
+/** Records a pending archive backup and presigns its upload; null when archives are not configured. */
+async function prepareArchive(env: StepEnv, p: PlacementRow, reason: 'sleep' | 'manual') {
+  const store = env.deps.archives;
+  if (!store || !(await ensureArchiveKey(env, env.instance.id))) return null;
+  const backupId = `${env.op.id}-archive`;
+  const objectKey = archiveObjectKey(env.instance.id, backupId);
+  await env.deps.db
+    .insert(backups)
+    .values({
+      id: backupId,
+      instanceId: env.instance.id,
+      kind: 'archive',
+      reason,
+      status: 'pending',
+      location: objectKey,
+      generation: p.generation,
+      createdAt: env.deps.now(),
+    })
+    .onConflictDoNothing();
+  return { backupId, objectKey, putUrl: await store.presignPut(objectKey) };
+}
+
+async function settleArchive(env: StepEnv, backupId: string, reply: CommandReply) {
+  const archived = reply.status === 'succeeded' && reply.result?.archived === true;
+  await env.deps.db
+    .update(backups)
+    .set({
+      status: archived ? 'complete' : 'failed',
+      sizeBytes: typeof reply.result?.sizeBytes === 'number' ? reply.result.sizeBytes : null,
+      completedAt: env.deps.now(),
+    })
+    .where(and(eq(backups.id, backupId), eq(backups.status, 'pending')));
+}
+
+/** A provider snapshot of the current volume, in the ledger and in `backups`. */
+export async function snapshotVolume(
+  env: { deps: StepEnv['deps']; executor: StepEnv['executor']; instance: { id: string }; op?: { id: string } | null; tags: StepEnv['tags'] },
+  p: PlacementRow,
+  reason: string,
+  token: string,
+) {
+  const { db, now } = env.deps;
+  await db
+    .insert(resources)
+    .values({
+      id: newId(),
+      instanceId: env.instance.id,
+      kind: 'snapshot',
+      executor: env.executor.kind,
+      providerId: null,
+      region: p.providerRegion,
+      zone: null,
+      createdByOp: env.op?.id ?? null,
+      requestToken: token,
+      state: 'pending',
+      tags: env.tags('snapshot', p.generation),
+      monthlyCostEstimate: env.executor.capabilities.monthlyCostCents.snapshot ?? 0,
+      firstSeenAt: now(),
+    })
+    .onConflictDoNothing();
+  const ctx = { operationId: env.op?.id ?? 'scheduler', step: 'snapshot', token, tags: env.tags('snapshot', p.generation), deadline: Date.now() + 120_000 };
+  const snap = await env.executor.snapshot(ctx, p.providerRegion, p.volumeId ?? '');
+  const at = now();
+  await db.batch([
+    db.update(resources).set({ providerId: snap.snapshotId, state: 'active', lastSeenAt: at }).where(eq(resources.requestToken, token)),
+    db
+      .insert(backups)
+      .values({
+        id: `snap-${snap.snapshotId}`,
+        instanceId: env.instance.id,
+        kind: 'snapshot',
+        reason,
+        status: 'complete',
+        location: snap.snapshotId,
+        sizeBytes: snap.sizeGb * 1024 ** 3,
+        generation: p.generation,
+        createdAt: at,
+        completedAt: at,
+      })
+      .onConflictDoNothing(),
+  ]);
+  return snap;
+}
+
+async function loadBackup(env: StepEnv) {
+  const backupId = String((env.op.params as { backupId?: string } | null)?.backupId ?? '');
+  const [b] = await env.deps.db
+    .select()
+    .from(backups)
+    .where(and(eq(backups.id, backupId), eq(backups.instanceId, env.instance.id), eq(backups.status, 'complete')));
+  if (!b) throw new StepFailed('That backup no longer exists.');
+  return b;
+}
+
+/** restore, snapshot: a new volume from the snapshot, in the VM's zone. */
+async function restoreVolume(env: StepEnv): Promise<StepOutcome> {
+  const b = await loadBackup(env);
+  if (b.kind !== 'snapshot') return { result: { skipped: true } };
+  const p = await loadPlacement(env);
+  const ctx = env.ctx('restore_volume');
+  await ledgerPending(env, 'volume', ctx.token, p.generation, p.zone);
+  const vol = await env.executor.ensureVolumeFromSnapshot(ctx, p.providerRegion, p.zone ?? '', b.location ?? '', VOLUME_GB);
+  await ledgerActive(env, ctx.token, vol.volumeId, vol.zone);
+  return { result: { volumeId: vol.volumeId } };
+}
+
+/** restore, snapshot: swap the volumes while the VM is stopped; the old one is kept 7 days. */
+async function swapVolume(env: StepEnv): Promise<StepOutcome> {
+  const restored = env.results.restore_volume as { volumeId?: string; skipped?: boolean } | undefined;
+  if (!restored?.volumeId) return { result: { skipped: true } };
+  const p = await loadPlacement(env);
+  const { db, now } = env.deps;
+  await env.executor.swapVolume(env.ctx('swap_volume'), placementRef(p), restored.volumeId);
+  await db.batch([
+    db.update(placements).set({ volumeId: restored.volumeId }).where(eq(placements.id, p.id)),
+    db
+      .update(resources)
+      .set({ state: 'superseded', releaseAfter: new Date(now().getTime() + SUPERSEDED_KEEP_MS) })
+      .where(and(eq(resources.instanceId, env.instance.id), eq(resources.providerId, p.volumeId ?? ''))),
+  ]);
+  return { result: { previousVolumeId: p.volumeId } };
+}
+
+/** restore, archive: the agent closes Chrome, unpacks the archive into the profile and restarts Chrome. */
+async function restoreArchive(env: StepEnv): Promise<StepOutcome> {
+  const b = await loadBackup(env);
+  if (b.kind !== 'archive') return { result: { skipped: true } };
+  if (!env.deps.archives) throw new StepFailed('Archive restore is not configured.');
+  const { reply, timedOut } = await command(
+    env,
+    'restore_archive',
+    'restore_archive',
+    { archive: { getUrl: await env.deps.archives.presignGet(b.location ?? ''), objectKey: b.location } },
+    RESTORE_ARCHIVE_TIMEOUT_MS,
+  );
+  if (reply.status === 'pending') {
+    if (timedOut) throw new StepFailed('Restoring the archive took too long.');
+    return { wait: COMMAND_POLL_MS * 2, reason: 'restoring the archive' };
+  }
+  if (reply.status === 'failed') throw new StepFailed(`Restoring the archive failed: ${reply.error ?? 'unknown error'}`);
+  return { result: { restored: true } };
+}
+
+// --- recover (page 10) -------------------------------------------------------------------------
+
+async function loadBuilding(env: StepEnv): Promise<PlacementRow> {
+  const [p] = await env.deps.db
+    .select()
+    .from(placements)
+    .where(and(eq(placements.instanceId, env.instance.id), eq(placements.status, 'building')));
+  if (!p) throw new StepFailed('The replacement machine is missing.');
+  return p;
+}
+
+/** Stop the old VM if it still runs (best effort), then snapshot its volume. */
+async function recoverSnapshot(env: StepEnv): Promise<StepOutcome> {
+  const p = await loadPlacement(env);
+  await env.executor.ensureStopped(env.ctx('snapshot_volume', 'stop'), placementRef(p)).catch(() => undefined);
+  const snap = await snapshotVolume(env, p, 'recover', env.ctx('snapshot_volume').token);
+  const zones = env.executor.zones(p.providerRegion);
+  const target = zones.find((z) => z !== p.zone) ?? p.zone ?? zones[0]!;
+  return { result: { snapshotId: snap.snapshotId, sizeGb: snap.sizeGb, zone: target, generation: p.generation + 1 } };
+}
+
+function recoverPlan(env: StepEnv) {
+  return result<{ snapshotId: string; sizeGb: number; zone: string; generation: number }>(env, 'snapshot_volume');
+}
+
+async function recoverVolume(env: StepEnv): Promise<StepOutcome> {
+  const plan = recoverPlan(env);
+  const ctx = env.ctx('restore_volume');
+  await ledgerPending(env, 'volume', ctx.token, plan.generation, plan.zone);
+  const vol = await env.executor.ensureVolumeFromSnapshot(ctx, env.region.providerRegion, plan.zone, plan.snapshotId, plan.sizeGb);
+  await ledgerActive(env, ctx.token, vol.volumeId, vol.zone);
+  return { result: { volumeId: vol.volumeId } };
+}
+
+/** A new interface in the target zone; the same static IP moves to it (never a different IP). */
+async function recoverNic(env: StepEnv): Promise<StepOutcome> {
+  const plan = recoverPlan(env);
+  const p = await loadPlacement(env);
+  const ctx = env.ctx('create_nic');
+  await ledgerPending(env, 'network_interface', ctx.token, plan.generation, plan.zone);
+  const nic = await env.executor.ensureNetworkInterface(
+    ctx,
+    p.providerRegion,
+    { allocationId: p.ipAllocationId ?? '', address: p.ipAddress ?? '' },
+    plan.zone,
+  );
+  await ledgerActive(env, ctx.token, nic.nicId, nic.zone);
+  return { result: { nicId: nic.nicId } };
+}
+
+async function recoverBootstrap(env: StepEnv): Promise<StepOutcome> {
+  return issueBootstrapFor(env, recoverPlan(env).generation);
+}
+
+async function recoverVm(env: StepEnv): Promise<StepOutcome> {
+  const plan = recoverPlan(env);
+  const p = await loadPlacement(env);
+  const { nicId } = result<{ nicId: string }>(env, 'create_nic');
+  const { volumeId } = result<{ volumeId: string }>(env, 'restore_volume');
+  const ctx = env.ctx('create_vm');
+  await ledgerPending(env, 'vm', ctx.token, plan.generation, plan.zone);
+  const vm = await env.executor.ensureVm(ctx, p.providerRegion, {
+    zone: plan.zone,
+    nicId,
+    volumeId,
+    instanceId: env.instance.id,
+    bootstrapToken: await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, env.op.id, plan.generation),
+    gatewayUrl: env.deps.gatewayUrl,
+  });
+  await ledgerActive(env, ctx.token, vm.vmId, vm.zone);
+  await env.deps.db
+    .insert(placements)
+    .values({
+      id: newId(),
+      instanceId: env.instance.id,
+      generation: plan.generation,
+      executor: env.executor.kind,
+      providerRegion: p.providerRegion,
+      zone: vm.zone,
+      vmId: vm.vmId,
+      volumeId,
+      networkId: nicId,
+      ipAllocationId: p.ipAllocationId,
+      ipAddress: p.ipAddress,
+      status: 'building',
+      createdAt: env.deps.now(),
+    })
+    .onConflictDoNothing();
+  return { result: { vmId: vm.vmId } };
+}
+
+/** The new generation becomes current; the old VM, interface and volume are kept 7 days, then removed. */
+async function finishRecover(env: StepEnv): Promise<StepOutcome> {
+  const { db, now } = env.deps;
+  const old = await loadPlacement(env);
+  const next = await loadBuilding(env);
+  const keep = new Date(now().getTime() + SUPERSEDED_KEEP_MS);
+  const oldIds = [old.vmId, old.networkId, old.volumeId].filter((x): x is string => !!x);
+  await db.batch([
+    db.update(placements).set({ status: 'superseded' }).where(eq(placements.id, old.id)),
+    db.update(placements).set({ status: 'current' }).where(eq(placements.id, next.id)),
+    db
+      .update(resources)
+      .set({ state: 'superseded', releaseAfter: keep })
+      .where(and(eq(resources.instanceId, env.instance.id), inArray(resources.providerId, oldIds))),
+    db.insert(auditLog).values({
+      actor: 'engine',
+      action: 'instance.recovered',
+      target: `instance:${env.instance.id}`,
+      detail: { fromZone: old.zone, toZone: next.zone, generation: next.generation, ip: next.ipAddress },
+      createdAt: now(),
+    }),
+  ]);
+  env.placement = { ...next, status: 'current' };
+  return finishWithStatus(env, 'running', { lastActiveAt: now() });
 }
 
 // --- table -------------------------------------------------------------------------------------
@@ -491,6 +819,23 @@ export const HANDLERS: Record<string, Record<string, Handler>> = {
       }
       return finishWithStatus(env, 'sleeping', { deletedAt: null, purgeAfter: null });
     },
+  },
+  restore: {
+    restore_volume: restoreVolume,
+    swap_volume: swapVolume,
+    restore_archive: restoreArchive,
+    finish: (env) => finishWithStatus(env, env.instance.status),
+  },
+  recover: {
+    snapshot_volume: recoverSnapshot,
+    restore_volume: recoverVolume,
+    create_nic: recoverNic,
+    issue_bootstrap: recoverBootstrap,
+    create_vm: recoverVm,
+    await_agent: async (env) => awaitAgentFor(env, await loadBuilding(env)),
+    verify_binding: async (env) => verifyBindingFor(env, await loadBuilding(env)),
+    verify_ip_in_chrome: async (env) => verifyIpFor(env, await loadBuilding(env)),
+    finish: finishRecover,
   },
   purge: {
     delete_resources: purgeResources,

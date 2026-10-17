@@ -1,11 +1,11 @@
-import { IDLE_TIMEOUT_OPTIONS_S, SCREEN_SIZES, type BrowserLocale, type Instance } from '@cloudbrowser/contracts';
+import { IDLE_TIMEOUT_OPTIONS_S, SCREEN_SIZES, type Backup, type BrowserLocale, type Instance } from '@cloudbrowser/contracts';
 import { Button, Dialog, Input, Label, RegionIpChip, Section, Select, Skeleton, StatusBadge, useToast } from '@cloudbrowser/ui';
 import { ShieldCheck, ShieldAlert } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { PageHeader } from '../../app/AppShell.js';
 import { useI18n } from '../../lib/i18n.js';
-import { useInstance, useLifecycle, useMe, useRecentSessions, useUpdateInstance, useVerifyIp } from './hooks.js';
+import { useBackups, useInstance, useLifecycle, useMe, useRecentSessions, useRestoreBackup, useUpdateInstance, useVerifyIp } from './hooks.js';
 import { regionInfo, STATUS_TONE, statusKey } from './status.js';
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
@@ -25,6 +25,89 @@ export function SettingsPage() {
   if (instance.isPending) return <Skeleton className="h-96 max-w-[720px]" />;
   if (instance.isError) return <p className="text-sm text-error">{t('error.not_found')}</p>;
   return <Settings instance={instance.data} />;
+}
+
+function size(bytes: number | null) {
+  if (bytes == null) return '';
+  if (bytes < 1 << 20) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  if (bytes < 1 << 30) return `${(bytes / (1 << 20)).toFixed(1)} MB`;
+  return `${(bytes / (1 << 30)).toFixed(1)} GB`;
+}
+
+/** Snapshots restore while the browser sleeps, archives while it runs (page 4). */
+function Backups({ instance: i, fmt }: { instance: Instance; fmt: (iso: string | null) => string }) {
+  const { t, errorMessage } = useI18n();
+  const toast = useToast();
+  const backups = useBackups(i.id);
+  const restore = useRestoreBackup();
+  const [pick, setPick] = useState<Backup | null>(null);
+  const list = (backups.data ?? []).filter((b) => b.status !== 'pending');
+
+  return (
+    <div className="mt-4">
+      <h3 className="mb-1 text-sm font-medium">{t('backups.title')}</h3>
+      {backups.isPending ? (
+        <Skeleton className="h-16" />
+      ) : list.length ? (
+        <ul className="divide-y divide-border text-sm">
+          {list.map((b) => (
+            <li key={b.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+              <span className="min-w-0">
+                {fmt(b.createdAt)} · {t(`backups.kind.${b.kind}`)}
+                <span className="text-muted">
+                  {' '}
+                  · {t(`backups.reason.${b.reason}`)}
+                  {b.sizeBytes ? ` · ${size(b.sizeBytes)}` : ''}
+                </span>
+                {b.status === 'failed' ? <span className="text-error"> · {t('backups.failed')}</span> : null}
+              </span>
+              {b.status === 'complete' ? (
+                <Button
+                  disabled={i.status !== b.restorableWhen || restore.isPending}
+                  title={i.status !== b.restorableWhen ? t(`backups.when.${b.restorableWhen}`) : undefined}
+                  onClick={() => setPick(b)}
+                >
+                  {t('backups.restore')}
+                </Button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm text-muted">{t('backups.none')}</p>
+      )}
+      <Dialog
+        open={pick !== null}
+        onOpenChange={(o) => !o && setPick(null)}
+        title={t('backups.confirmTitle')}
+        description={pick ? t('backups.confirmBody', { time: fmt(pick.createdAt) }) : ''}
+        closeLabel={t('common.cancel')}
+      >
+        <div className="flex justify-end gap-2">
+          <Button onClick={() => setPick(null)}>{t('common.cancel')}</Button>
+          <Button
+            variant="danger"
+            disabled={restore.isPending}
+            onClick={() =>
+              pick &&
+              restore.mutate(
+                { id: i.id, backupId: pick.id },
+                {
+                  onSuccess: () => {
+                    setPick(null);
+                    toast(t('backups.started'));
+                  },
+                  onError: (e) => toast(errorMessage(e), 'error'),
+                },
+              )
+            }
+          >
+            {t('backups.restore')}
+          </Button>
+        </div>
+      </Dialog>
+    </div>
+  );
 }
 
 function Settings({ instance: i }: { instance: Instance }) {
@@ -110,6 +193,7 @@ function Settings({ instance: i }: { instance: Instance }) {
 
         <Section title={t('settings.persistence')} description={t('settings.persistenceBody')}>
           <StatusBadge tone={STATUS_TONE[i.status]} label={t(statusKey(i.status))} />
+          <Backups instance={i} fmt={fmt} />
         </Section>
 
         <Section title={t('settings.behavior')}>

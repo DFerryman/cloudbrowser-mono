@@ -16,3 +16,4 @@ export function createDb(d1: D1Database): Db {
 export function eventRow(userId: string, type: string, data: Record<string, unknown>, now = new Date()) {
   return { userId, type, data, createdAt: now };
 }
+export { newArchiveKey, wrapArchiveKey, unwrapArchiveKey } from './archive-keys.js';

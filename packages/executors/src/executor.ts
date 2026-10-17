@@ -94,6 +94,11 @@ export interface VmSpec {
   gatewayUrl: string;
 }
 
+export interface SnapshotRef {
+  snapshotId: string;
+  sizeGb: number;
+}
+
 export interface VmRef {
   vmId: string;
   zone: string;
@@ -145,8 +150,14 @@ export interface Executor {
 
   // Every method converges to the requested state and is safe to call again with the same token.
   allocateIp(ctx: OpContext, region: string): Promise<IpAllocation>;
-  /** Creates the interface in an outbound-only subnet and associates the static IP with it. */
-  ensureNetworkInterface(ctx: OpContext, region: string, ip: IpAllocation): Promise<NetworkInterfaceRef>;
+  /** Availability zones a placement may use in a region (recover moves to another one). */
+  zones(region: string): string[];
+  /**
+   * Creates the interface in an outbound-only subnet of `zone` (default: the first zone) and
+   * associates the static IP with it. If the IP was associated elsewhere, it moves here: this is
+   * how `recover` keeps the same IP on a new VM (page 10).
+   */
+  ensureNetworkInterface(ctx: OpContext, region: string, ip: IpAllocation, zone?: string): Promise<NetworkInterfaceRef>;
   ensureVolume(ctx: OpContext, region: string, zone: string, sizeGb: number): Promise<VolumeRef>;
   ensureVm(ctx: OpContext, region: string, spec: VmSpec): Promise<VmRef>;
   /** Associates `allocationId` with the interface in place of whatever address it had. */
@@ -154,6 +165,12 @@ export interface Executor {
   ensureRunning(ctx: OpContext, p: Placement): Promise<RunState>;
   /** Stop, never terminate. */
   ensureStopped(ctx: OpContext, p: Placement): Promise<RunState>;
+  /** Provider snapshot of a data volume (page 4: daily, and before a Chrome major upgrade). */
+  snapshot(ctx: OpContext, region: string, volumeId: string): Promise<SnapshotRef>;
+  /** A new encrypted volume from a snapshot, in `zone`. */
+  ensureVolumeFromSnapshot(ctx: OpContext, region: string, zone: string, snapshotId: string, sizeGb: number): Promise<VolumeRef>;
+  /** Detaches the current data volume of a stopped VM and attaches `volumeId` instead. */
+  swapVolume(ctx: OpContext, p: Placement, volumeId: string): Promise<void>;
   describe(ctx: OpContext, p: Placement): Promise<ObservedState>;
   /** Provider side: the static IP is the VM's only public address. */
   verifyEgress(ctx: OpContext, p: Placement): Promise<BindingCheck>;

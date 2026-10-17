@@ -1,4 +1,4 @@
-import type { Accepted, Instance, IpCheck, Me, Region } from '@cloudbrowser/contracts';
+import type { Accepted, Backup, Instance, IpCheck, Me, Region } from '@cloudbrowser/contracts';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api.js';
 import { keys, queryClient } from '../../lib/query.js';
@@ -12,6 +12,9 @@ export const useInstance = (id: string) =>
 export type RecentSession = { id: string; startedAt: string; endedAt: string | null; country: string | null; userAgent: string | null };
 export const useRecentSessions = (id: string) =>
   useQuery({ queryKey: keys.sessions(id), queryFn: () => api<RecentSession[]>('GET', `/instances/${id}/sessions`) });
+
+export const useBackups = (id: string) =>
+  useQuery({ queryKey: keys.backups(id), queryFn: () => api<Backup[]>('GET', `/instances/${id}/backups`) });
 
 const refresh = (instanceId?: string) => {
   void queryClient.invalidateQueries({ queryKey: keys.instances });
@@ -62,5 +65,14 @@ export function useVerifyIp() {
   return useMutation({
     mutationFn: (id: string) => api<IpCheck>('POST', `/instances/${id}/ip/verify`),
     onSettled: (_d, _e, id) => refresh(id),
+  });
+}
+
+/** Replaces the browser's data with a backup; the result arrives over SSE like any operation. */
+export function useRestoreBackup() {
+  return useMutation({
+    mutationFn: ({ id, backupId }: { id: string; backupId: string }) =>
+      api<Accepted>('POST', `/instances/${id}/backups/${backupId}/restore`, { idempotent: true }),
+    onSettled: (_d, _e, v) => refresh(v.id),
   });
 }

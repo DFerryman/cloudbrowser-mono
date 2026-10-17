@@ -5,8 +5,8 @@ Everything in the control plane runs on Cloudflare. Five Workers share one D1 da
 | Worker | Config | Public? | Triggers | Cloudflare products |
 |---|---|---|---|---|
 | `cloudbrowser` (api + web) | `apps/api/wrangler.jsonc` | Yes: your app domain | HTTP | Static assets, D1, Email Service, Queues (producer), Durable Object binding, Rate Limiting |
-| `cloudbrowser-engine` | `apps/engine/wrangler.jsonc` | No | Queue, cron every minute, service binding | D1, Queues (consumer + producer), Durable Object `EventHub` |
-| `cloudbrowser-reaper` | `apps/engine/wrangler.reaper.jsonc` | No | cron every 15 min | D1, Durable Object binding |
+| `cloudbrowser-engine` | `apps/engine/wrangler.jsonc` | No | Queue, cron every minute, service binding | D1, Queues (consumer + producer), Durable Object `EventHub`, R2 (presigned archive URLs) |
+| `cloudbrowser-reaper` | `apps/engine/wrangler.reaper.jsonc` | No | cron every 15 min | D1, Durable Object binding, R2 (deletes archives) |
 | `cloudbrowser-reconciler` | `apps/reconciler/wrangler.jsonc` | No | cron every 5 min | D1 |
 | `cloudbrowser-gateway` | `apps/gateway/wrangler.jsonc` | Yes: `connect.` domain | HTTP (WebSocket), Queue | Durable Object `InstanceGateway`, Queues (consumer), service binding to the api's `Internal` entrypoint, D1 |
 
@@ -26,6 +26,7 @@ pnpm exec wrangler login
 pnpm exec wrangler d1 create cloudbrowser
 pnpm exec wrangler queues create cloudbrowser-operations
 pnpm exec wrangler queues create cloudbrowser-agent-commands
+pnpm exec wrangler r2 bucket create cloudbrowser-archives
 ```
 
 Copy the D1 `database_id` into **all five** configs (each has the placeholder
@@ -63,6 +64,32 @@ openssl rand -base64 48 | pnpm exec wrangler secret put BOOTSTRAP_SECRET   # der
 - `apps/api/wrangler.jsonc` and `apps/engine/wrangler.jsonc` → `GATEWAY_URL`: `wss://connect.example.com`.
 - **TURN (live view):** Dashboard → Realtime → TURN → create a key, then on the api Worker set
   `TURN_KEY_ID` (var) and `TURN_KEY_API_TOKEN` (secret). Without them viewers get no relay servers.
+
+**Profile archives (R2).** Each sleep uploads an encrypted archive of the Chrome profile; the VM
+uploads straight to R2 through a 15-minute presigned URL, so the engine needs an R2 S3 API token:
+
+1. Dashboard → R2 → **Manage API tokens** → *Create API token*: permission **Object Read & Write**,
+   limited to the bucket `cloudbrowser-archives`. Note the Access Key ID and Secret Access Key.
+2. `apps/engine/wrangler.jsonc` → `R2_ACCOUNT_ID`: your account id (R2 overview page).
+   `R2_ARCHIVE_BUCKET` is already `cloudbrowser-archives`.
+3. Secrets:
+
+```bash
+cd apps/engine
+pnpm exec wrangler secret put R2_ACCESS_KEY_ID
+pnpm exec wrangler secret put R2_SECRET_ACCESS_KEY
+openssl rand -base64 32 > /tmp/archive-master-key          # keep a copy in your password manager
+pnpm exec wrangler secret put ARCHIVE_MASTER_KEY < /tmp/archive-master-key
+cd ../api
+pnpm exec wrangler secret put ARCHIVE_MASTER_KEY < /tmp/archive-master-key   # the same value
+rm /tmp/archive-master-key
+```
+
+`ARCHIVE_MASTER_KEY` wraps each browser's own archive key; the api unwraps it only for the gateway
+as it delivers an archive or restore command. Losing it makes every archive unreadable (snapshots
+are unaffected); never rotate it by overwriting. Until all of these are set, archives are skipped
+and only the daily provider snapshots are taken. The reaper's `ARCHIVES` R2 binding deletes
+expired archives and needs no token.
 
 Optional:
 - `ratelimits` in `apps/api/wrangler.jsonc`: `namespace_id` values `1001`/`1002` must be unique in

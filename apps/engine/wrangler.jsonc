@@ -25,7 +25,12 @@
     "ENV_NAME": "dev",
     // Written into each VM's user data: the session gateway's public URL.
     "GATEWAY_URL": "ws://localhost:8790",
-    "FAKE_DELAY_MS": "700"
+    "FAKE_DELAY_MS": "700",
+    // Profile archives (page 4): the agent uploads to presigned R2 URLs. Archives are off until
+    // these are set together with the secrets R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY and
+    // ARCHIVE_MASTER_KEY (see docs/deploy-cloudflare.md).
+    "R2_ACCOUNT_ID": "",
+    "R2_ARCHIVE_BUCKET": "cloudbrowser-archives"
   },
   "d1_databases": [
     {

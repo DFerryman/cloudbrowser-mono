@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -51,7 +53,7 @@ type fakeNeko struct{ sent chan json.RawMessage }
 type fakeNekoSession struct{ n *fakeNeko }
 
 func (s fakeNekoSession) Send(m json.RawMessage) error { s.n.sent <- m; return nil }
-func (s fakeNekoSession) Close()                        {}
+func (s fakeNekoSession) Close()                       {}
 func (n *fakeNeko) Open(_ context.Context, _ string, toViewer func(json.RawMessage)) (NekoSession, error) {
 	go toViewer(json.RawMessage(`{"event":"system/init"}`))
 	return fakeNekoSession{n}, nil
@@ -220,5 +222,64 @@ func TestFailsClosedWhenChromeSeesAnotherAddress(t *testing.T) {
 	}
 	if len(fw.modes) != 1 || fw.modes[0] != "closed" {
 		t.Fatalf("firewall modes %v", fw.modes)
+	}
+}
+
+func TestArchivesOnShutdownAndRestores(t *testing.T) {
+	var mu sync.Mutex
+	var stored []byte
+	r2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Method == http.MethodPut {
+			stored, _ = io.ReadAll(r.Body)
+			return
+		}
+		_, _ = w.Write(stored)
+	}))
+	defer r2.Close()
+
+	g, srv := newGateway(t)
+	profile := filepath.Join(t.TempDir(), "profile")
+	_ = os.MkdirAll(filepath.Join(profile, "Default"), 0o700)
+	_ = os.WriteFile(filepath.Join(profile, "Default", "Cookies"), []byte("v1"), 0o600)
+	browser := &fakeBrowser{ip: "203.0.113.7"}
+	a := New(Config{
+		InstanceID: "inst1", GatewayURL: "ws" + srv.URL[len("http"):], BootstrapToken: "boot",
+		StateDir: t.TempDir(), ProfileDir: profile, EchoURLs: []string{"https://echo.test"}, Heartbeat: time.Hour,
+	}, browser, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = a.Run(ctx) }()
+	<-g.auths
+	c := <-g.conns
+
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	send(t, c, map[string]any{"t": "command", "id": "c1", "kind": "prepare_shutdown", "payload": map[string]any{
+		"archive": map[string]any{"putUrl": r2.URL + "/x.cbar", "objectKey": "x.cbar", "key": key},
+	}})
+	r := readUntil(t, c, func(m map[string]any) bool { return m["t"] == "reply" })
+	res := r["result"].(map[string]any)
+	if r["ok"] != true || res["archived"] != true || res["sizeBytes"].(float64) <= 0 {
+		t.Fatalf("shutdown reply %v", r)
+	}
+
+	_ = os.WriteFile(filepath.Join(profile, "Default", "Cookies"), []byte("v2"), 0o600)
+	send(t, c, map[string]any{"t": "command", "id": "c2", "kind": "restore_archive", "payload": map[string]any{
+		"archive": map[string]any{"getUrl": r2.URL + "/x.cbar", "objectKey": "x.cbar", "key": key},
+	}})
+	r = readUntil(t, c, func(m map[string]any) bool { return m["t"] == "reply" })
+	if r["ok"] != true {
+		t.Fatalf("restore reply %v", r)
+	}
+	if b, _ := os.ReadFile(filepath.Join(profile, "Default", "Cookies")); string(b) != "v1" {
+		t.Fatalf("cookies after restore = %q", b)
+	}
+
+	// Without a key (archives off, or the key destroyed) the browser still sleeps; nothing is archived.
+	send(t, c, map[string]any{"t": "command", "id": "c3", "kind": "prepare_shutdown", "payload": map[string]any{"archive": nil}})
+	r = readUntil(t, c, func(m map[string]any) bool { return m["t"] == "reply" })
+	if r["ok"] != true || r["result"].(map[string]any)["archived"] != false {
+		t.Fatalf("keyless shutdown %v", r)
 	}
 }

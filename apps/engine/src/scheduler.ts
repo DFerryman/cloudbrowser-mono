@@ -1,10 +1,11 @@
 import { eventRow, operationRow, schema } from '@cloudbrowser/db';
 import type { ExecutorKind } from '@cloudbrowser/executors';
-import { and, asc, eq, isNull, lt, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
 import { placementRef, readContext, type EngineDeps } from './context.js';
 import { runOperation } from './runner.js';
+import { snapshotVolume } from './steps.js';
 
-const { operations, browserInstances, instanceHealth, viewerSessions, placements, events, auditLog } = schema;
+const { operations, browserInstances, instanceHealth, viewerSessions, placements, events, auditLog, backups } = schema;
 
 /** Runs every operation that is due and not leased by another worker. */
 export async function runPending(deps: EngineDeps, limit = 20): Promise<number> {
@@ -197,3 +198,50 @@ export async function periodicIpChecks(deps: EngineDeps) {
     }
   }
 }
+
+
+/**
+ * Daily provider snapshot of every browser's volume (page 4). On AWS a Data Lifecycle Manager
+ * policy on our tag can do this instead; the engine does it so every executor gets the same
+ * schedule and the snapshots are in the ledger. Runs hourly and skips volumes snapshotted within
+ * the last 23 hours.
+ */
+export async function dailySnapshots(deps: EngineDeps): Promise<number> {
+  const { db } = deps;
+  const now = deps.now();
+  const rows = await db
+    .select({ inst: browserInstances, placement: placements })
+    .from(browserInstances)
+    .innerJoin(placements, and(eq(placements.instanceId, browserInstances.id), eq(placements.status, 'current')))
+    .where(inArray(browserInstances.status, ['running', 'sleeping', 'needs_attention', 'waiting_capacity']));
+  let taken = 0;
+  for (const { inst, placement } of rows) {
+    const [recent] = await db
+      .select({ id: backups.id })
+      .from(backups)
+      .where(and(eq(backups.instanceId, inst.id), eq(backups.kind, 'snapshot'), gte(backups.createdAt, new Date(now.getTime() - 23 * 3_600_000))));
+    if (recent) continue;
+    const executor = deps.executor(placement.executor as ExecutorKind);
+    const tags = (kind: string, generation: number) => ({
+      'cb:managed': 'true' as const,
+      'cb:env': deps.envName,
+      'cb:instance': inst.id,
+      'cb:op': 'daily-snapshot',
+      'cb:gen': String(generation),
+      'cb:kind': kind as never,
+    });
+    try {
+      await snapshotVolume(
+        { deps, executor, instance: inst, op: null, tags },
+        placement,
+        'daily',
+        `daily:${inst.id}:${now.toISOString().slice(0, 10)}`,
+      );
+      taken++;
+    } catch (e) {
+      console.error('daily snapshot failed', inst.id, e);
+    }
+  }
+  return taken;
+}
+

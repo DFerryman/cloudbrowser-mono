@@ -2,6 +2,7 @@ import type { Db } from '@cloudbrowser/db';
 import { schema } from '@cloudbrowser/db';
 import type { Executor, ExecutorKind, OpContext, Placement, ResourceKind, ResourceTags } from '@cloudbrowser/executors';
 import type { AgentBridge } from './agent.js';
+import type { ArchiveStore } from './archives.js';
 
 export type OperationRow = typeof schema.operations.$inferSelect;
 export type InstanceRow = typeof schema.browserInstances.$inferSelect;
@@ -28,6 +29,12 @@ export interface EngineDeps {
   bootstrapSecret: string;
   /** Waits between polls in synchronous calls such as an on-demand IP check. */
   sleep(ms: number): Promise<void>;
+  /** Archive backups in R2; null when R2 credentials are not configured (archives are skipped). */
+  archives: ArchiveStore | null;
+  /** Wraps per-instance archive keys (Worker secret ARCHIVE_MASTER_KEY); null disables archives. */
+  archiveMasterKey: string | null;
+  /** Deletes an archive object (reaper only, through the R2 binding). */
+  deleteArchive?: (objectKey: string) => Promise<void>;
 }
 
 /** The step asks to be called again later without counting as a failure (e.g. waiting for the agent). */

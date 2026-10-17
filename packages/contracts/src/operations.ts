@@ -38,8 +38,20 @@ export const OPERATION_STEPS = {
   delete: ['prepare_shutdown', 'ensure_stopped', 'finish'],
   undelete: ['finish'],
   purge: ['delete_resources', 'finish'],
-  recover: [],
-  restore: [],
+  // A new VM generation in another zone of the same region, with the same IP and data (page 10).
+  recover: [
+    'snapshot_volume',
+    'restore_volume',
+    'create_nic',
+    'issue_bootstrap',
+    'create_vm',
+    'await_agent',
+    'verify_binding',
+    'verify_ip_in_chrome',
+    'finish',
+  ],
+  // From a provider snapshot (swapped in while asleep) or an archive (unpacked by the agent while running).
+  restore: ['restore_volume', 'swap_volume', 'restore_archive', 'finish'],
 } as const satisfies Record<OperationKind, readonly string[]>;
 
 export type OperationStep<K extends OperationKind = OperationKind> = (typeof OPERATION_STEPS)[K][number];

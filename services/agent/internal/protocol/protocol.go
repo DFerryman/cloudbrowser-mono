@@ -67,4 +67,5 @@ const (
 	CmdIPCheck         = "ip_check"
 	CmdRestartChrome   = "restart_chrome"
 	CmdSetFirewall     = "set_firewall"
+	CmdRestoreArchive  = "restore_archive"
 )
