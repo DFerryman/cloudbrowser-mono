@@ -28,7 +28,36 @@ app.use('/api/*', async (c, next) => {
   c.header('x-content-type-options', 'nosniff');
 });
 
-app.on(['GET', 'POST'], '/api/auth/*', (c) => c.get('auth').handler(c.req.raw));
+/**
+ * Sign-in throttling with the Workers Rate Limiting binding, per client IP and per email, on top of
+ * Better Auth's own limits and the OTP attempt cap. Cloudflare's limiter is per location and
+ * eventually consistent, which is fine for slowing down abuse.
+ */
+const limitSignIn: MiddlewareHandler<AppEnv> = async (c, next) => {
+  const limiter = c.env.AUTH_LIMITER;
+  if (limiter && c.req.method === 'POST' && /\/(email-otp\/send-verification-otp|sign-in\/email-otp)$/.test(c.req.path)) {
+    const ip = c.req.header('cf-connecting-ip') ?? 'unknown';
+    const email = String(((await c.req.raw.clone().json().catch(() => ({}))) as { email?: unknown }).email ?? '')
+      .trim()
+      .toLowerCase();
+    const checks = [limiter.limit({ key: `ip:${ip}` }), ...(email ? [limiter.limit({ key: `email:${email}` })] : [])];
+    if ((await Promise.all(checks)).some((r) => !r.success)) {
+      return c.json({ code: 'TOO_MANY_REQUESTS', message: 'Too many attempts. Try again in a minute.' }, 429);
+    }
+  }
+  await next();
+};
+
+app.on(['GET', 'POST'], '/api/auth/*', limitSignIn, (c) => c.get('auth').handler(c.req.raw));
+
+/**
+ * IP echo for the agent's in-Chrome IP check (page 3): hosted on Cloudflare, outside the browser
+ * provider, it returns the address the request came from.
+ */
+app.get('/api/echo/ip', (c) => {
+  c.header('cache-control', 'no-store');
+  return c.text(c.req.header('cf-connecting-ip') ?? '');
+});
 
 /** State-changing requests must come from our own origin (page 1, "Security"). */
 const sameOrigin: MiddlewareHandler<AppEnv> = async (c, next) => {
@@ -47,12 +76,21 @@ const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
   await next();
 };
 
+/** Per-user limit on API writes (page 2: rate limits per user), via the Workers Rate Limiting binding. */
+const limitWrites: MiddlewareHandler<AppEnv> = async (c, next) => {
+  if (c.env.API_LIMITER && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
+    const { success } = await c.env.API_LIMITER.limit({ key: `user:${c.get('user').id}` });
+    if (!success) throw problem(429, 'rate_limited');
+  }
+  await next();
+};
+
 app.get('/api/v1/health', (c) => c.json({ ok: true }));
 app.doc31('/api/v1/openapi.json', {
   openapi: '3.1.0',
   info: { title: 'CloudBrowser API', version: '1.0.0' },
 });
-app.use('/api/v1/*', sameOrigin, requireUser);
+app.use('/api/v1/*', sameOrigin, requireUser, limitWrites);
 app.route('/api/v1', v1);
 
 export default app;

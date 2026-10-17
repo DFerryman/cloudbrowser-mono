@@ -175,6 +175,7 @@ export const en = {
   'error.creation_frozen': 'New browsers are temporarily unavailable.',
   'error.ip_change_limit': 'You have used this month’s IP change requests.',
   'error.viewer_unavailable': 'The live view is not available yet.',
+  'error.rate_limited': 'Too many requests. Wait a moment and try again.',
   'error.internal': 'Something went wrong. Please try again.',
 
   'time.justNow': 'just now',

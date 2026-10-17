@@ -4,7 +4,7 @@ import * as schema from './schema.js';
 export * as schema from './schema.js';
 export type { Fingerprint } from './schema.js';
 export { newId, sha256Hex } from './ids.js';
-export { operationRow, OPERATION_DEADLINE_MIN } from './operations.js';
+export { operationRow, OPERATION_DEADLINE_MIN, type OperationMessage } from './operations.js';
 
 export type Db = DrizzleD1Database<typeof schema>;
 

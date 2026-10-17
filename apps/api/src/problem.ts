@@ -17,6 +17,7 @@ const TITLES: Record<ErrorType, string> = {
   creation_frozen: 'Temporarily unavailable',
   ip_change_limit: 'IP change limit reached',
   viewer_unavailable: 'Live view unavailable',
+  rate_limited: 'Too many requests',
   internal: 'Something went wrong',
 };
 

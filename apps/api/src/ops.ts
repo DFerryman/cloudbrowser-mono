@@ -84,15 +84,23 @@ export async function enqueueOperation(
     if (running) throw problem(409, 'operation_in_progress', undefined, { operationId: running.id });
     throw e;
   }
-  kickEngine(c, op.id);
+  dispatch(c, op.id);
+  notifyUser(c, user.id);
   return { operationId: op.id, instanceId: input.instanceId };
 }
 
-export function kickEngine(c: Context<AppEnv>, operationId: string) {
+/**
+ * Hands the operation to the engine through Cloudflare Queues. The send happens after the D1 batch
+ * commits; if it is lost, the engine's 1-minute cron sweep runs the operation anyway.
+ */
+function dispatch(c: Context<AppEnv>, operationId: string) {
+  c.executionCtx.waitUntil(c.env.OPERATIONS.send({ operationId }).catch((e) => console.error('enqueue failed', operationId, e)));
+}
+
+/** Wakes the user's EventHub so open SSE streams read the new `events` rows now. */
+export function notifyUser(c: Context<AppEnv>, userId: string) {
+  const stub = c.env.EVENT_HUB.get(c.env.EVENT_HUB.idFromName(userId));
   c.executionCtx.waitUntil(
-    c.env.ENGINE.fetch(`https://engine/operations/${operationId}/run`, { method: 'POST' }).catch((e) =>
-      // The engine's cron picks the operation up within a minute anyway.
-      console.error('engine kick failed', e),
-    ),
+    stub.fetch(`https://hub/notify?userId=${encodeURIComponent(userId)}`, { method: 'POST' }).catch((e) => console.error('notify failed', e)),
   );
 }

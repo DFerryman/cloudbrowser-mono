@@ -119,6 +119,7 @@ export async function runOperation(deps: EngineDeps, operationId: string): Promi
         .where(eq(operations.id, op.id)),
       db.insert(events).values(eventRow(env.instance.userId, 'operation.updated', { operationId: op.id, instanceId: op.instanceId }, at)),
     ]);
+    deps.notify(env.instance.userId);
     op.step = step;
 
     let outcome: StepOutcome;
@@ -169,6 +170,7 @@ export async function runOperation(deps: EngineDeps, operationId: string): Promi
       createdAt: at,
     }),
   ]);
+  deps.notify(env.instance.userId);
   return { state: 'succeeded' };
 }
 
@@ -235,6 +237,7 @@ async function setInstanceStatus(deps: EngineDeps, env: StepEnv, status: string,
       .where(eq(browserInstances.id, env.instance.id)),
     db.insert(events).values(eventRow(env.instance.userId, 'instance.updated', { instanceId: env.instance.id }, at)),
   ]);
+  deps.notify(env.instance.userId);
   env.instance.status = status;
 }
 
@@ -350,24 +353,9 @@ async function fail(
         : []),
     ];
     await db.batch([...stmts, ...extra]);
+    deps.notify(env.instance.userId);
   } else {
     await db.batch(stmts);
   }
   return { state: 'failed', reason };
-}
-
-/**
- * Runs an operation until it finishes or defers beyond `budgetMs`, sleeping in-process for short
- * waits. Used right after the api enqueues an operation, so most operations finish without
- * waiting for the next cron tick.
- */
-export async function runUntilSettled(deps: EngineDeps, operationId: string, budgetMs = 25_000): Promise<RunResult> {
-  const until = Date.now() + budgetMs;
-  for (;;) {
-    const r = await runOperation(deps, operationId);
-    if (r.state !== 'deferred') return r;
-    const wait = r.notBefore.getTime() - deps.now().getTime();
-    if (Date.now() + wait > until) return r;
-    await deps.sleep(Math.max(0, wait) + 10);
-  }
 }

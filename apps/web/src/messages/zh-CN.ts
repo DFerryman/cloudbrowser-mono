@@ -176,6 +176,7 @@ export const zhCN: Messages = {
   'error.creation_frozen': '暂时无法新建浏览器。',
   'error.ip_change_limit': '本月的 IP 更换次数已用完。',
   'error.viewer_unavailable': '实时画面暂不可用。',
+  'error.rate_limited': '请求过于频繁，请稍后再试。',
   'error.internal': '出错了，请重试。',
 
   'time.justNow': '刚刚',

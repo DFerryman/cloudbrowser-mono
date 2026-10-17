@@ -1,7 +1,7 @@
 
 import { createTestD1 } from '@cloudbrowser/db/testing';
 import engine from '@cloudbrowser/engine';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import app from '../src/index.js';
 
 const ORIGIN = 'http://app.test';
@@ -14,11 +14,32 @@ function setup() {
     passThroughOnException() {},
     props: {},
   } as unknown as ExecutionContext;
-  const engineEnv = { DB: d1, ENGINE_MODE: 'worker' as const, ENV_NAME: 'test', FAKE_DELAY_MS: '0' };
+  // In-process stand-ins for the Cloudflare bindings.
+  const emails: { to: string; text: string }[] = [];
+  const hits = new Map<string, number>();
+  const limiter = (max: number) => ({
+    limit: async ({ key }: { key: string }) => {
+      hits.set(key, (hits.get(key) ?? 0) + 1);
+      return { success: hits.get(key)! <= max };
+    },
+  });
+  const hub = { idFromName: (n: string) => n, get: () => ({ fetch: async () => new Response(null, { status: 204 }) }) };
+  const queue = {
+    send: async (body: { operationId: string }) => {
+      const msg = { id: body.operationId, body, ack() {}, retry() {} };
+      await engine.queue!({ messages: [msg], queue: 'ops' } as never, engineEnv as never, ctx);
+    },
+  };
+  const engineEnv = { DB: d1, ENGINE_MODE: 'worker' as const, ENV_NAME: 'test', FAKE_DELAY_MS: '0', OPERATIONS: queue, EVENT_HUB: hub };
   const env = {
     DB: d1,
     APP_URL: ORIGIN,
-    ENVIRONMENT: 'development',
+    ENVIRONMENT: 'test',
+    EMAIL: { send: async (m: { to: string; text: string }) => void emails.push(m) },
+    OPERATIONS: queue,
+    EVENT_HUB: hub,
+    AUTH_LIMITER: limiter(5),
+    API_LIMITER: limiter(60),
     BETTER_AUTH_SECRET: 'test-secret-test-secret-test-secret',
     ASSETS: { fetch: async () => new Response('<html>app</html>') },
     ENGINE: { fetch: (url: string, init?: RequestInit) => engine.fetch!(new Request(url, init) as never, engineEnv, ctx) },
@@ -42,22 +63,21 @@ function setup() {
     const setCookie = res.headers.getSetCookie?.() ?? [];
     if (setCookie.length) cookie = setCookie.map((c) => c.split(';')[0]).join('; ');
     const text = await res.text();
-    return { status: res.status, body: text ? JSON.parse(text) : null };
+    const json = res.headers.get('content-type')?.includes('json');
+    return { status: res.status, body: text ? (json ? JSON.parse(text) : text) : null };
   };
   const settle = async () => {
     while (pending.length) await pending.shift();
   };
-  return { d1, call, settle };
+  return { d1, call, settle, emails };
 }
 
 async function signIn(t: ReturnType<typeof setup>, email: string) {
-  const log = vi.spyOn(console, 'log').mockImplementation(() => {});
   await t.call('POST', '/api/auth/email-otp/send-verification-otp', { email, type: 'sign-in' });
   await t.settle();
-  const line = log.mock.calls.map((c) => String(c[0])).find((l) => l.includes(email));
-  log.mockRestore();
-  if (!line) return null;
-  const otp = line.match(/(\d{6})$/)![1];
+  const sent = t.emails.filter((m) => m.to === email).pop();
+  if (!sent) return null;
+  const otp = sent.text.match(/(\d{6})/)![1];
   return t.call('POST', '/api/auth/sign-in/email-otp', { email, otp });
 }
 
@@ -76,6 +96,20 @@ describe('auth', () => {
     expect(me.status).toBe(200);
     expect(me.body.user.email).toBe('pilot@example.com');
     expect(me.body.entitlements.maxBrowsers).toBe(2);
+  });
+
+  it('throttles sign-in code requests', async () => {
+    const statuses = [];
+    for (let i = 0; i < 7; i++) {
+      statuses.push((await t.call('POST', '/api/auth/email-otp/send-verification-otp', { email: 'pilot@example.com', type: 'sign-in' })).status);
+    }
+    expect(statuses.slice(0, 5).every((s) => s === 200)).toBe(true);
+    expect(statuses.at(-1)).toBe(429);
+  });
+
+  it('echoes the caller IP for the agent IP check', async () => {
+    const res = await t.call('GET', '/api/echo/ip', undefined, { 'cf-connecting-ip': '203.0.113.9' });
+    expect(res.body).toBe('203.0.113.9');
   });
 
   it('never sends a code to an address that was not invited', async () => {

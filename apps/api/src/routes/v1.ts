@@ -22,7 +22,7 @@ import { eventRow, newId, schema } from '@cloudbrowser/db';
 import { and, asc, desc, eq, isNull, ne } from 'drizzle-orm';
 import type { AppEnv } from '../env.js';
 import { admitCreate, admitIpChange, admitStart, entitlementsFor, regionAcceptingNew, usage } from '../limits.js';
-import { enqueueOperation, replayed, requireIdempotencyKey } from '../ops.js';
+import { enqueueOperation, notifyUser, replayed, requireIdempotencyKey } from '../ops.js';
 import { problem } from '../problem.js';
 import { toInstances, toOperation } from '../views.js';
 import { eventsRoute } from './events.js';
@@ -237,6 +237,7 @@ v1.openapi(
         .where(eq(browserInstances.id, row.id)),
       db.insert(events).values(eventRow(user.id, 'instance.updated', { instanceId: row.id }, now)),
     ]);
+    notifyUser(c, user.id);
     return c.json(await oneInstance(db, row.id), 200);
   },
 );

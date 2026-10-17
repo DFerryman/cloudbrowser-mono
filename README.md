@@ -4,8 +4,9 @@ Persistent cloud browsers: each browser is a real Chrome in its own cloud VM wit
 stable IP** in Tokyo or US West, **persistent encrypted data**, and a **low-latency live view**.
 The design lives in the Notion plan *Persistent Cloud Browser — Implementation Plan*.
 
-This repository holds **Phase 0 (Foundations)** of that plan, adapted to run on Cloudflare
-Workers + D1. Browsers run on the in-memory **`fake` executor**, so the whole lifecycle (create →
+This repository holds **Phase 0 (Foundations)** of that plan, with the control plane on
+Cloudflare: Workers, D1, Queues, Durable Objects, Email Service, Workers Rate Limiting and static
+assets. Browsers run on the in-memory **`fake` executor**, so the whole lifecycle (create →
 open → sleep → wake → change IP → delete → purge) works end to end with no cloud spend. See
 [`docs/implementation-status.md`](docs/implementation-status.md) for what is built and what is next,
 and [`docs/deploy-cloudflare.md`](docs/deploy-cloudflare.md) to deploy.
@@ -15,8 +16,10 @@ and [`docs/deploy-cloudflare.md`](docs/deploy-cloudflare.md) to deploy.
 ```
 apps/
   web/          Vite + React SPA: sign-in, dashboard, create dialog, session view, settings (zh-CN + en)
-  api/          Worker: Hono REST + SSE under /api, Better Auth (email codes), serves apps/web/dist
-  engine/       Worker: operations runner (journal, leases, ledger, retries); reaper mode = only deleter
+  api/          Worker: Hono REST + SSE under /api, Better Auth (email codes via Email Service),
+                rate limits, IP echo; serves apps/web/dist
+  engine/       Worker: queue consumer running operations (journal, leases, ledger, retries),
+                EventHub Durable Object for SSE; reaper mode = only deleter
   reconciler/   Worker: ledger vs provider, orphans, circuit breaker, quota and spend snapshots
 packages/
   contracts/    zod schemas shared by api and web (OpenAPI is generated from them)
@@ -41,8 +44,9 @@ cd apps/api && pnpm exec wrangler dev -c wrangler.jsonc -c ../engine/wrangler.js
   --persist-to ../../.wrangler/state
 ```
 
-Open http://localhost:8787, sign in with the invited email; with `ENVIRONMENT=development` and no
-`RESEND_API_KEY`, the 6-digit code is printed in the wrangler log. For frontend work with hot reload,
+Open http://localhost:8787 and sign in with the invited email. `wrangler dev` simulates Email
+Service sends (the message is printed in the log) and, with `ENVIRONMENT=development`, the 6-digit
+code is also logged. Queues, the Durable Object and the rate limiters all run locally. For frontend work with hot reload,
 also run `pnpm --filter @cloudbrowser/web dev` (Vite on :5173 proxies `/api` to :8787).
 
 Cron handlers (idle sleep, IP checks, reaper, reconciler) can be triggered locally with

@@ -15,9 +15,24 @@
     // Set to your real origin, e.g. https://app.example.com (see docs/deploy-cloudflare.md).
     "APP_URL": "http://localhost:8787",
     "ENVIRONMENT": "development",
-    "EMAIL_FROM": "CloudBrowser <no-reply@example.com>"
+    // Must be on a domain onboarded to Cloudflare Email Service (Email Sending).
+    "EMAIL_FROM": "no-reply@example.com"
   },
+  // Cloudflare Email Service: sign-in codes.
+  "send_email": [{ "name": "EMAIL" }],
+  // Synchronous calls to the engine (IP checks).
   "services": [{ "binding": "ENGINE", "service": "cloudbrowser-engine" }],
+  // Operation dispatch to the engine.
+  "queues": { "producers": [{ "binding": "OPERATIONS", "queue": "cloudbrowser-operations" }] },
+  // Per-user SSE fan-out, hosted by the engine Worker.
+  "durable_objects": {
+    "bindings": [{ "name": "EVENT_HUB", "class_name": "EventHub", "script_name": "cloudbrowser-engine" }]
+  },
+  // Workers Rate Limiting (per Cloudflare location; period must be 10 or 60 seconds).
+  "ratelimits": [
+    { "name": "AUTH_LIMITER", "namespace_id": "1001", "simple": { "limit": 5, "period": 60 } },
+    { "name": "API_LIMITER", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } }
+  ],
   "d1_databases": [
     {
       "binding": "DB",

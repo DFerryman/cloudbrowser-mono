@@ -22,8 +22,8 @@ export interface EngineDeps {
   gatewayUrl: string;
   workerId: string;
   now(): Date;
-  /** Sleeps between in-process retries; replaced in tests. */
-  sleep(ms: number): Promise<void>;
+  /** Tells the user's EventHub (Durable Object) that new rows are in the `events` feed. */
+  notify(userId: string): void;
 }
 
 /** The step asks to be called again later without counting as a failure (e.g. waiting for the agent). */

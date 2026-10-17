@@ -1,10 +1,14 @@
-import { createDb } from '@cloudbrowser/db';
+import { createDb, type OperationMessage } from '@cloudbrowser/db';
 import { createExecutor, type Executor, type ExecutorKind } from '@cloudbrowser/executors';
 import { FakeAgentBridge, type AgentBridge } from './agent.js';
 import { readContext, type EngineDeps, type EngineMode } from './context.js';
 
 export interface Env {
   DB: D1Database;
+  /** Operation dispatch (Cloudflare Queues). The worker deployment produces and consumes. */
+  OPERATIONS?: Queue<OperationMessage>;
+  /** Per-user SSE fan-out (Durable Object class EventHub, defined in this Worker). */
+  EVENT_HUB?: DurableObjectNamespace;
   ENGINE_MODE?: EngineMode;
   ENV_NAME?: string;
   GATEWAY_URL?: string;
@@ -12,7 +16,7 @@ export interface Env {
   FAKE_FAULTS?: string;
 }
 
-export function makeDeps(env: Env): EngineDeps {
+export function makeDeps(env: Env, waitUntil: (p: Promise<unknown>) => void = () => {}): EngineDeps {
   const mode: EngineMode = env.ENGINE_MODE === 'reaper' ? 'reaper' : 'worker';
   const envName = env.ENV_NAME ?? 'dev';
   const executors = new Map<ExecutorKind, Executor>();
@@ -41,6 +45,13 @@ export function makeDeps(env: Env): EngineDeps {
     gatewayUrl: env.GATEWAY_URL ?? 'wss://connect.invalid',
     workerId: `${mode}-${crypto.randomUUID()}`,
     now: () => new Date(),
-    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    notify(userId) {
+      const hub = env.EVENT_HUB;
+      if (!hub) return;
+      const stub = hub.get(hub.idFromName(userId));
+      waitUntil(
+        stub.fetch(`https://hub/notify?userId=${encodeURIComponent(userId)}`, { method: 'POST' }).catch((e) => console.error('notify failed', e)),
+      );
+    },
   };
 }

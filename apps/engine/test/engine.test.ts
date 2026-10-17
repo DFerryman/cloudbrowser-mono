@@ -37,7 +37,7 @@ class World {
       gatewayUrl: 'wss://gw.test',
       workerId: `${mode}-test`,
       now: () => this.clock,
-      sleep: async () => {},
+      notify: () => {},
     };
   }
 

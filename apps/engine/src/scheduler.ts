@@ -73,6 +73,7 @@ export async function idleStops(deps: EngineDeps): Promise<string[]> {
           .where(eq(browserInstances.id, inst.id)),
         db.insert(events).values(eventRow(inst.userId, 'operation.updated', { operationId: row.id, instanceId: inst.id }, now)),
       ]);
+      deps.notify(inst.userId);
       stopped.push(inst.id);
     } catch {
       // Another operation was admitted at the same moment (unique index); skip this round.
@@ -137,6 +138,7 @@ export async function checkInstanceIp(deps: EngineDeps, instanceId: string) {
   } else {
     await db.batch(stmts);
   }
+  deps.notify(inst.userId);
   return lastIpCheck;
 }
 

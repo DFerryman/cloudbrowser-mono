@@ -1,3 +1,2 @@
-# Copy to .dev.vars for `wrangler dev`. In production set these with `wrangler secret put`.
+# Copy to .dev.vars for `wrangler dev`. In production set it with `wrangler secret put BETTER_AUTH_SECRET`.
 BETTER_AUTH_SECRET=change-me-to-a-long-random-string
-# RESEND_API_KEY=re_...

@@ -1,35 +1,36 @@
 /**
  * The engine Worker. Two deployments share this code (page 2):
- *  - worker mode (wrangler.jsonc): runs operations; triggered by the api over a service binding
- *    right after it enqueues one, and every minute by cron as a safety net.
+ *  - worker mode (wrangler.jsonc): consumes the `cloudbrowser-operations` queue and runs each
+ *    operation; a 1-minute cron is the safety net (lost messages, expired leases), puts idle
+ *    browsers to sleep and runs the 5-minute IP checks. It also hosts the EventHub Durable Object.
  *  - reaper mode (wrangler.reaper.jsonc): the only deleter, every 15 minutes.
  * Neither deployment has a public URL.
  */
+import type { OperationMessage } from '@cloudbrowser/db';
 import { makeDeps, type Env } from './deps.js';
 import { reaperTick } from './reaper.js';
-import { runUntilSettled } from './runner.js';
+import { runOperation } from './runner.js';
 import { checkInstanceIp, idleStops, periodicIpChecks, runPending } from './scheduler.js';
 
 export type { Env } from './deps.js';
-export { runOperation, runUntilSettled } from './runner.js';
+export { EventHub } from './event-hub.js';
+export { runOperation } from './runner.js';
 export { reaperTick } from './reaper.js';
 export { runPending, idleStops, checkInstanceIp } from './scheduler.js';
 export type { EngineDeps } from './context.js';
+
+/** Queues accept delays up to 12 hours; longer waits are picked up by the cron sweep. */
+const MAX_DELAY_S = 12 * 3600;
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 export default {
+  /** Service binding from the api: synchronous IP checks only. */
   async fetch(req, env, ctx) {
-    const deps = makeDeps(env);
+    const deps = makeDeps(env, (p) => ctx.waitUntil(p));
     const url = new URL(req.url);
     if (deps.mode !== 'worker') return json({ error: 'not found' }, 404);
-
-    const run = url.pathname.match(/^\/operations\/([^/]+)\/run$/);
-    if (req.method === 'POST' && run) {
-      ctx.waitUntil(runUntilSettled(deps, run[1]!).catch((e) => console.error('run failed', e)));
-      return json({ accepted: true }, 202);
-    }
     const ipCheck = url.pathname.match(/^\/instances\/([^/]+)\/ip-check$/);
     if (req.method === 'POST' && ipCheck) {
       const result = await checkInstanceIp(deps, ipCheck[1]!);
@@ -38,8 +39,28 @@ export default {
     return json({ error: 'not found' }, 404);
   },
 
-  async scheduled(controller, env) {
-    const deps = makeDeps(env);
+  /** One message per operation. A deferred operation is re-enqueued with a delay (backoff, capacity waits). */
+  async queue(batch, env, ctx) {
+    const deps = makeDeps(env, (p) => ctx.waitUntil(p));
+    for (const msg of batch.messages) {
+      try {
+        const r = await runOperation(deps, msg.body.operationId);
+        if (r.state === 'deferred' && env.OPERATIONS) {
+          const delaySeconds = Math.ceil((r.notBefore.getTime() - Date.now()) / 1000);
+          if (delaySeconds <= MAX_DELAY_S) await env.OPERATIONS.send(msg.body, { delaySeconds: Math.max(1, delaySeconds) });
+        }
+        // `busy` means another worker holds the lease or the operation is not due; the holder or
+        // the cron sweep finishes it.
+        msg.ack();
+      } catch (e) {
+        console.error('operation run failed', msg.body.operationId, e);
+        msg.retry({ delaySeconds: 10 });
+      }
+    }
+  },
+
+  async scheduled(controller, env, ctx) {
+    const deps = makeDeps(env, (p) => ctx.waitUntil(p));
     if (deps.mode === 'reaper') {
       console.log('reaper', JSON.stringify(await reaperTick(deps)));
       return;
@@ -48,4 +69,4 @@ export default {
     await runPending(deps);
     if (new Date(controller.scheduledTime).getUTCMinutes() % 5 === 0) await periodicIpChecks(deps);
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<Env, OperationMessage>;

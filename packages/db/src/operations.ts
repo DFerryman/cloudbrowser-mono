@@ -37,3 +37,8 @@ export function operationRow(input: {
     updatedAt: now,
   };
 }
+
+/** Body of a message on the `cloudbrowser-operations` queue (api and engine produce, engine consumes). */
+export interface OperationMessage {
+  operationId: string;
+}

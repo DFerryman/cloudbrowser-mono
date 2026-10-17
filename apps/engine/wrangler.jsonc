@@ -8,6 +8,14 @@
   "workers_dev": false,
   "preview_urls": false,
   "triggers": { "crons": ["* * * * *"] },
+  // Operation dispatch: the api enqueues, this Worker consumes (and re-enqueues deferred ones).
+  "queues": {
+    "producers": [{ "binding": "OPERATIONS", "queue": "cloudbrowser-operations" }],
+    "consumers": [{ "queue": "cloudbrowser-operations", "max_batch_size": 5, "max_batch_timeout": 1, "max_retries": 10 }]
+  },
+  // Per-user SSE fan-out; the api binds to this class with script_name "cloudbrowser-engine".
+  "durable_objects": { "bindings": [{ "name": "EVENT_HUB", "class_name": "EventHub" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["EventHub"] }],
   "vars": {
     "ENGINE_MODE": "worker",
     "ENV_NAME": "dev",
