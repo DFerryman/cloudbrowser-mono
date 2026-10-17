@@ -32,6 +32,7 @@ packages/
   contracts/    zod schemas shared by api and web (OpenAPI is generated from them)
   db/           Drizzle schema + D1 migrations (single schema authority)
   executors/    Executor interface + `fake` executor (aws-ec2 / oci-compute / fly-machines later)
+  viewer/       Live-view client: neko v3 over the gateway, WebRTC, input, IME, clipboard, stats
   ui/           Design tokens and components
 ```
 
@@ -70,6 +71,19 @@ The agent swaps the bootstrap token from the fake VM's user data for a credentia
 `ready`, answers the engine's IP check through the gateway and the browser turns *Running*.
 For the viewer path, add keys from `node scripts/gen-viewer-keys.mjs` (private key and
 `LIVE_VIEW=on` in `apps/api/.dev.vars`, public key in `apps/gateway/.dev.vars`).
+
+### Live view end to end (real Chromium, fake neko)
+
+With the stack above, viewer keys and `LIVE_VIEW=on`:
+
+```bash
+node packages/viewer/e2e/neko-bridge.mjs                                   # stands in for neko's WebSocket
+scripts/dev-agent.sh <instance id> --neko-ws ws://127.0.0.1:8099/api/ws    # instead of the plain agent
+node packages/viewer/e2e/run.mjs <instance id> <wrangler log> shot.png
+```
+
+The runner signs in to the real web app, opens the session view and checks that the fake neko's
+WebRTC video plays and that mouse, click, key and scroll input arrives over the data channel.
 
 Cron handlers (idle sleep, IP checks, reaper, reconciler) can be triggered locally with
 `wrangler dev --test-scheduled` and `curl "http://localhost:<port>/__scheduled?cron=*+*+*+*+*"`.

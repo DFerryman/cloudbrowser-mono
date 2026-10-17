@@ -9,7 +9,8 @@
 # the agent reports the instance's fake IP as what Chrome sees (no Chrome or neko locally).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-INSTANCE="${1:?usage: scripts/dev-agent.sh <instance id>}"
+INSTANCE="${1:?usage: scripts/dev-agent.sh <instance id> [extra agent flags, e.g. --neko-ws ws://127.0.0.1:8099/api/ws]}"
+shift
 STATE=.wrangler/state
 d1() { (cd apps/api && pnpm exec wrangler d1 execute cloudbrowser --local --persist-to "../../$STATE" --json --command "$1"); }
 
@@ -28,4 +29,4 @@ go build -o "$DIR/agent" ./services/agent/cmd/agent
 exec "$DIR/agent" \
   --user-data "$DIR/user-data.json" --state-dir "$DIR" \
   --fake-egress-ip "$IP" --expected-ip "$IP" --nft-dir "" \
-  --echo "http://localhost:8787/api/echo/ip"
+  --echo "http://localhost:8787/api/echo/ip" "$@"

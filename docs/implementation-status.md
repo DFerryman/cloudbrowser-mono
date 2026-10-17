@@ -51,6 +51,13 @@ Cloudflare deployment.
   the engine pauses the network if the last check failed or is older than 15 minutes.
 - **Live view plumbing**: `GET /v1/sessions/:id/connect` returns the gateway URL, a viewer token and
   Cloudflare Realtime TURN credentials for real placements (or with `LIVE_VIEW=on`).
+- **Live view** (`packages/viewer`, session view): neko v3 signaling through the gateway, a
+  receive-only RTCPeerConnection (relay-only when TURN servers are present), input on the data
+  channel (pointer coalesced per frame, wheel, buttons, keys with X11 keysyms, Cmd→Ctrl on macOS,
+  release-all on blur), IME text through the agent, paste (local clipboard → remote, then Ctrl+V)
+  and remote clipboard → local, remote cursor drawn locally, remote screen size following the
+  viewport (debounced, at most every 5 s), stats every 2 s with the toolbar indicator, reconnect with
+  backoff and a fresh single-use token, take-over. Verified end to end in Chromium against a fake neko.
 - **Images** (`images/`): browser image (neko v3 + Chrome, policies, fonts, flags) and Packer golden
   VM image (agent unit, nftables rules). Written, not built yet.
 - **Web** (`apps/web`, `packages/ui`): design tokens from page 1, app shell, sign-in, dashboard with
@@ -100,9 +107,10 @@ Considered and **not** used:
 
 - **Real browsers**: `aws-ec2` / `oci-compute` executors (Phase 1, after the provider trial on
   page 11); building and signing the images.
-- **Live view client**: `packages/viewer` (WebRTC, keyboard, IME, clipboard, uploads, downloads).
-  The gateway, tokens and TURN credentials are in place; the session view shows a notice for real
-  connect info and a simulated Chrome on the fake executor.
+- **Live view extras**: file upload and download channels, quality modes (Auto / Sharp text /
+  Smooth motion), pausing video after 60 s in a hidden tab, touch gestures, sending quality
+  aggregates to `viewer_sessions`. The neko event names and data-channel opcodes follow neko v3 and
+  are confirmed against the pinned image when it is built.
 - Agent: R2 archive upload on `prepare_shutdown`, browser container supervision through
   containerd, neko credentials per wake.
 - `recover` and `restore` operations, backups (provider snapshots, R2 archives with per-instance keys).

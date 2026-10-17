@@ -15,7 +15,10 @@ import {
   Settings,
   Upload,
   Volume2,
+  VolumeX,
 } from 'lucide-react';
+import { COMBOS, qualityLevel, type ViewerState, type ViewerStats } from '@cloudbrowser/viewer';
+import { RemoteBrowserView, type RemoteBrowserHandle } from '@cloudbrowser/viewer/react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { api, ApiError } from '../../lib/api.js';
@@ -49,6 +52,10 @@ export function SessionPage() {
   const [sleepAt, setSleepAt] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now());
   const [fullscreen, setFullscreen] = useState(false);
+  const viewerRef = useRef<RemoteBrowserHandle>(null);
+  const [viewer, setViewer] = useState<{ state: ViewerState; attempt: number }>({ state: 'connecting', attempt: 0 });
+  const [stats, setStats] = useState<ViewerStats | null>(null);
+  const [muted, setMuted] = useState(true);
 
   const open = useCallback(async () => {
     setOpenError(null);
@@ -56,6 +63,7 @@ export function SessionPage() {
       const r = await api<{ session: ViewerSession; operationId: string | null }>('POST', `/instances/${id}/sessions`);
       setSession(r.session);
       setTakenOver(false);
+      setViewer({ state: 'connecting', attempt: 0 });
       void queryClient.invalidateQueries({ queryKey: keys.instance(id) });
     } catch (e) {
       setOpenError(e);
@@ -144,7 +152,7 @@ export function SessionPage() {
   let overlay: ReactNode = null;
   if (instance.isError) {
     overlay = <Overlay message={errorMessage(instance.error)} action={<Button onClick={() => navigate('/browsers')}>{t('session.back')}</Button>} />;
-  } else if (takenOver) {
+  } else if (takenOver || viewer.state === 'taken-over') {
     overlay = <Overlay message={t('overlay.elsewhere')} action={<Button variant="primary" onClick={() => void open()}>{t('overlay.useHere')}</Button>} />;
   } else if (openError && status !== 'running') {
     overlay = <Overlay message={errorMessage(openError)} action={<Button onClick={() => void open()}>{t('common.retry')}</Button>} />;
@@ -199,7 +207,17 @@ export function SessionPage() {
         overlay = <Overlay message={t('overlay.deleted')} action={<Button onClick={() => navigate('/browsers')}>{t('session.back')}</Button>} />;
         break;
       case 'running':
-        if (idleLeft < IDLE_WARNING_MS) {
+        if (connect.data?.mode === 'webrtc' && viewer.state === 'reconnecting') {
+          overlay = (
+            <Overlay
+              message={t('overlay.reconnecting', { attempt: viewer.attempt })}
+              busy
+              action={<Button onClick={() => viewerRef.current?.reconnect()}>{t('overlay.retryNow')}</Button>}
+            />
+          );
+        } else if (connect.data?.mode === 'webrtc' && (viewer.state === 'connecting' || viewer.state === 'agent-offline')) {
+          overlay = <Overlay message={t('overlay.connecting')} busy />;
+        } else if (idleLeft < IDLE_WARNING_MS) {
           overlay = (
             <Overlay
               message={t('overlay.idle', { seconds: Math.max(0, Math.ceil(idleLeft / 1000)) })}
@@ -214,6 +232,8 @@ export function SessionPage() {
         break;
     }
   }
+
+  const live = i?.status === 'running' && connect.data?.mode === 'webrtc' && viewer.state === 'live';
 
   const disabledTool = (label: string, Icon: typeof Upload) => (
     <Button key={label} size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" disabled aria-label={label} title={`${label} · ${t('session.needsStream')}`}>
@@ -243,18 +263,73 @@ export function SessionPage() {
         <div className="ml-auto flex items-center gap-0.5">
           {i && i.status !== 'running' ? (
             <StatusBadge className="mr-2 hidden text-zinc-300 md:inline-flex" tone={STATUS_TONE[i.status]} label={t(statusKey(i.status))} />
+          ) : connect.data?.mode === 'webrtc' && stats ? (
+            <ConnectionIndicator stats={stats} />
           ) : connect.data?.mode === 'simulated' ? (
             <span className="mr-2 hidden items-center gap-1.5 text-xs text-zinc-400 md:inline-flex" title={t('session.simulatedHint')}>
               <span className="size-2 rounded-full bg-starting" aria-hidden /> {t('session.simulated')}
             </span>
           ) : null}
           <div className="hidden items-center gap-0.5 sm:flex">
-            {disabledTool(t('session.clipboard'), ClipboardCopy)}
+            {live ? (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="text-zinc-300 hover:bg-zinc-800"
+                aria-label={t('session.pasteLocal')}
+                title={t('session.pasteLocal')}
+                onClick={async () => {
+                  const text = await navigator.clipboard?.readText().catch(() => '');
+                  if (text) viewerRef.current?.paste(text);
+                  viewerRef.current?.focus();
+                }}
+              >
+                <ClipboardCopy />
+              </Button>
+            ) : (
+              disabledTool(t('session.clipboard'), ClipboardCopy)
+            )}
             {disabledTool(t('session.upload'), Upload)}
             {disabledTool(t('session.downloads'), Download)}
-            {disabledTool(t('session.keys'), Keyboard)}
+            {live ? (
+              <Menu
+                trigger={
+                  <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.keys')} title={t('session.keys')}>
+                    <Keyboard />
+                  </Button>
+                }
+              >
+                {Object.entries(COMBOS).map(([label, names]) => (
+                  <MenuItem
+                    key={label}
+                    onSelect={() => {
+                      viewerRef.current?.sendCombo(names);
+                      viewerRef.current?.focus();
+                    }}
+                  >
+                    <span className="font-mono text-xs">{label}</span>
+                  </MenuItem>
+                ))}
+              </Menu>
+            ) : (
+              disabledTool(t('session.keys'), Keyboard)
+            )}
             {disabledTool(t('session.quality'), Gauge)}
-            {disabledTool(t('session.sound'), Volume2)}
+            {live ? (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="text-zinc-300 hover:bg-zinc-800"
+                aria-label={t('session.sound')}
+                title={t('session.sound')}
+                aria-pressed={!muted}
+                onClick={() => setMuted((m) => !m)}
+              >
+                {muted ? <VolumeX /> : <Volume2 />}
+              </Button>
+            ) : (
+              disabledTool(t('session.sound'), Volume2)
+            )}
           </div>
           <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.fullscreen')} title={t('session.fullscreen')} onClick={() => void toggleFullscreen()}>
             {fullscreen ? <Minimize /> : <Maximize />}
@@ -286,12 +361,51 @@ export function SessionPage() {
         onWheel={() => (hadInput.current = true)}
       >
         {i?.status === 'running' && connect.data?.mode === 'simulated' ? <SimulatedChrome instance={i} regionName={regionName} /> : null}
-        {/* The gateway issues real connect info; the WebRTC viewer (packages/viewer, page 5) renders it next. */}
-        {i?.status === 'running' && connect.data?.mode === 'webrtc' ? <Overlay message={t('session.viewerPending')} /> : null}
+        {i?.status === 'running' && connect.data?.mode === 'webrtc' && session && !takenOver ? (
+          <RemoteBrowserView
+            key={session.id}
+            ref={viewerRef}
+            className="absolute inset-0 bg-frame"
+            muted={muted}
+            // Each viewer token works once, so every (re)connect asks the api for a fresh one.
+            getConnectInfo={async () => {
+              const c = await api<ConnectInfo>('GET', `/sessions/${session.id}/connect`);
+              if (c.mode !== 'webrtc') throw new Error('live view unavailable');
+              return c;
+            }}
+            onState={(state, attempt) => setViewer({ state, attempt })}
+            onStats={setStats}
+            onInput={() => (hadInput.current = true)}
+          />
+        ) : null}
         {i?.status === 'running' && connect.isError ? <Overlay message={errorMessage(connect.error)} /> : null}
         {overlay}
       </div>
     </div>
+  );
+}
+
+/** ● 32 ms, colored by quality; details on hover (page 5, "Quality telemetry"). */
+function ConnectionIndicator({ stats }: { stats: ViewerStats }) {
+  const level = qualityLevel(stats);
+  const color = { good: 'bg-running', fair: 'bg-starting', poor: 'bg-error', unknown: 'bg-sleeping' }[level];
+  const details = [
+    stats.rttMs !== null ? `RTT ${stats.rttMs} ms` : null,
+    stats.fps !== null ? `${stats.fps} fps` : null,
+    stats.loss !== null ? `loss ${(stats.loss * 100).toFixed(1)}%` : null,
+    stats.bitrateKbps !== null ? `${stats.bitrateKbps} kbps` : null,
+    stats.codec,
+    stats.transport,
+    stats.width && stats.height ? `${stats.width}×${stats.height}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  return (
+    <span className="mr-2 hidden items-center gap-1.5 font-mono text-xs text-zinc-300 md:inline-flex" title={details} data-testid="connection-indicator">
+      <span className={cn('size-2 rounded-full', color)} aria-hidden />
+      {stats.rttMs !== null ? `${stats.rttMs} ms` : '—'}
+      {stats.fps !== null ? <span className="text-zinc-500">· {stats.fps} fps</span> : null}
+    </span>
   );
 }
 

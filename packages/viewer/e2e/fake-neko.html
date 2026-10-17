@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>fake neko</title>
+<canvas id="screen" width="1280" height="720"></canvas>
+<script>
+  // Plays neko's side of the v3 protocol for the viewer end-to-end test: answers signal/request
+  // with an offer carrying an animated canvas and a "data" channel, and records every input frame.
+  window.received = [];
+  window.events = [];
+  const canvas = document.getElementById('screen');
+  const g = canvas.getContext('2d');
+  let n = 0;
+  setInterval(() => {
+    g.fillStyle = `hsl(${(n += 4) % 360} 70% 45%)`;
+    g.fillRect(0, 0, 1280, 720);
+    g.fillStyle = '#fff';
+    g.font = '64px sans-serif';
+    g.fillText('fake neko ' + n, 80, 360);
+  }, 33);
+
+  const ws = new WebSocket(`ws://${location.host}/api/ws?role=page`);
+  const send = (event, payload) => ws.send(JSON.stringify({ event, payload }));
+  let pc;
+  ws.onmessage = async (e) => {
+    const msg = JSON.parse(e.data);
+    window.events.push(msg.event ?? msg.bridge);
+    if (msg.bridge === 'client_connected') return send('system/init', { session_id: 'owner' });
+    if (msg.event === 'signal/request') {
+      pc?.close();
+      pc = new RTCPeerConnection();
+      const stream = canvas.captureStream(30);
+      for (const t of stream.getTracks()) pc.addTrack(t, stream);
+      const dc = pc.createDataChannel('data');
+      dc.binaryType = 'arraybuffer';
+      dc.onmessage = (m) => {
+        const v = new DataView(m.data);
+        const op = v.getUint8(0);
+        const rec = { op };
+        if (op === 1) Object.assign(rec, { x: v.getUint16(3), y: v.getUint16(5) });
+        if (op >= 3) rec.code = v.getUint32(3);
+        if (op === 2) Object.assign(rec, { dx: v.getInt16(3), dy: v.getInt16(5) });
+        window.received.push(rec);
+      };
+      pc.onicecandidate = (c) => c.candidate && send('signal/candidate', { candidate: c.candidate.candidate, sdpMid: c.candidate.sdpMid, sdpMLineIndex: c.candidate.sdpMLineIndex });
+      await pc.setLocalDescription(await pc.createOffer());
+      send('signal/provide', { sdp: pc.localDescription.sdp, iceservers: [] });
+    } else if (msg.event === 'signal/answer') {
+      await pc.setRemoteDescription({ type: 'answer', sdp: msg.payload.sdp });
+    } else if (msg.event === 'signal/candidate') {
+      await pc.addIceCandidate(msg.payload).catch(() => {});
+    } else if (msg.event === 'clipboard/set') {
+      window.clipboard = msg.payload.text;
+    } else if (msg.event === 'screen/set') {
+      window.screenSet = msg.payload;
+    }
+  };
+</script>
