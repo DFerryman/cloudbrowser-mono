@@ -30,7 +30,7 @@
     "CREEM_PRODUCT_PRO_YEARLY": "",
     // Operator console (/admin, page 10): comma-separated IPs and CIDRs allowed to reach it. Empty
     // means nobody (except 127.0.0.1 under `wrangler dev`). Add a WAF rule on the same list.
-    "ADMIN_IP_ALLOWLIST": "154.9.249.41,64.83.51.161",
+    "ADMIN_IP_ALLOWLIST": "154.9.249.41",
     // Operator alerts: comma-separated emails (via Email Service). The chat webhook URL is the
     // secret ALERT_WEBHOOK_URL (Slack-compatible).
     "ALERT_EMAILS": ""
