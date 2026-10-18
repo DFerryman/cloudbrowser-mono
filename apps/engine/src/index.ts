@@ -14,6 +14,7 @@ import { meterUsage, reclaimTrials } from './metering.js';
 import { refreshPrices } from './prices.js';
 import { enforceStoppedIntent } from './enforce-stopped.js';
 import { checkInstanceIp, idleStops, periodicIpChecks, runPending } from './scheduler.js';
+import { errorMessages } from './errors.js';
 
 export type { Env } from './deps.js';
 export { EventHub } from './event-hub.js';
@@ -66,21 +67,28 @@ export default {
   },
 
   async scheduled(controller, env, ctx) {
-    const deps = makeDeps(env, (p) => ctx.waitUntil(p));
-    if (deps.mode === 'reaper') {
-      console.log('reaper', JSON.stringify(await reaperTick(deps)));
-      return;
+    try {
+      const deps = makeDeps(env, (p) => ctx.waitUntil(p));
+      if (deps.mode === 'reaper') {
+        console.log('reaper', JSON.stringify(await reaperTick(deps)));
+        return;
+      }
+      await idleStops(deps);
+      await meterUsage(deps);
+      await reclaimTrials(deps);
+      await runPending(deps);
+      const minute = new Date(controller.scheduledTime).getUTCMinutes();
+      if (minute % 5 === 0) {
+        await periodicIpChecks(deps);
+        await enforceStoppedIntent(deps);
+      }
+      // Cheap when prices are fresh: only stale regions (older than 12 hours) are read from the provider.
+      await refreshPrices(deps).catch((e) => console.error('price refresh failed', e));
+    } catch (error) {
+      console.error('engine scheduled task failed', JSON.stringify({
+        cron: controller.cron, scheduledTime: controller.scheduledTime, errors: errorMessages(error),
+      }));
+      throw error;
     }
-    await idleStops(deps);
-    await meterUsage(deps);
-    await reclaimTrials(deps);
-    await runPending(deps);
-    const minute = new Date(controller.scheduledTime).getUTCMinutes();
-    if (minute % 5 === 0) {
-      await periodicIpChecks(deps);
-      await enforceStoppedIntent(deps);
-    }
-    // Cheap when prices are fresh: only stale regions (older than 12 hours) are read from the provider.
-    await refreshPrices(deps).catch((e) => console.error('price refresh failed', e));
   },
 } satisfies ExportedHandler<Env, OperationMessage>;

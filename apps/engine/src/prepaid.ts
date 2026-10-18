@@ -1,7 +1,8 @@
 import { DATA_KEPT_DAYS } from '@cloudbrowser/contracts';
 import { billingRequired, prepaidAccess, prepaidBalance, pricingSettings, reservationQuote, reservationWrite, reservedTotalSql, schema, type Db } from '@cloudbrowser/db';
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { StepFailed, type EngineDeps, type StepEnv } from './context.js';
+import { errorMessages, retryD1 } from './errors.js';
 
 const { browserInstances, browserReservations, billingAccounts, operations, viewerSessions } = schema;
 const paid = (s: string | null) => s !== 'active' && s !== 'ended';
@@ -12,16 +13,25 @@ export async function reconcileReservations(deps: EngineDeps) {
   if (!(await billingRequired(db))) return;
   const now = deps.now();
   const all = await db.select().from(browserInstances);
+  const holds = new Map((await db.select().from(browserReservations)).map((hold) => [hold.instanceId, hold]));
   const pending = await db.select().from(operations).where(isNull(operations.finishedAt));
   const { minBalanceMicros } = await pricingSettings(db);
   for (const inst of all) {
+    const hold = holds.get(inst.id);
     const removed = inst.desiredState === 'deleted' || ['deleting', 'purged', 'failed'].includes(inst.status);
     if (removed) {
-      await db.update(browserReservations).set({ reservedMicros: 0, updatedAt: now }).where(eq(browserReservations.instanceId, inst.id));
+      // Historic purged/trial browsers often have no deposit. Do not write them every minute.
+      // Recheck lifecycle in SQL so a concurrent funded recovery cannot lose its new deposit.
+      if (hold && hold.reservedMicros > 0) await retryD1(async () => {
+        await db.update(browserReservations).set({ reservedMicros: 0, updatedAt: now }).where(and(
+          eq(browserReservations.instanceId, inst.id), gt(browserReservations.reservedMicros, 0),
+          sql`EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${inst.id}
+            AND (${browserInstances.desiredState} = 'deleted' OR ${browserInstances.status} IN ('deleting', 'purged', 'failed')))`,
+        ));
+      }, deps.sleep);
       continue;
     }
     if (!paid(inst.trialState)) continue;
-    const [hold] = await db.select().from(browserReservations).where(eq(browserReservations.instanceId, inst.id));
     if (hold?.retentionStartedAt) continue;
     const resize = pending.find((o) => o.instanceId === inst.id && o.kind === 'resize_volume');
     const target = Number((resize?.params as { sizeGb?: number } | null)?.sizeGb ?? inst.storageGb);
@@ -46,7 +56,7 @@ export async function reconcileReservations(deps: EngineDeps) {
       }
     } catch (e) {
       // The funding trigger arbitrates concurrent admissions; try the fresh balance next tick.
-      if (!String(e).includes('insufficient_prepaid_reserve')) throw e;
+      if (!errorMessages(e).some((message) => message.includes('insufficient_prepaid_reserve'))) throw e;
     }
   }
 }
