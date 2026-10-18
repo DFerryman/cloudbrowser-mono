@@ -469,6 +469,71 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
+  it('does not restart neko\'s encoder when its screen already fits, on connect and on reconnect', async () => {
+    vi.useFakeTimers();
+    const { b } = setup();
+    b.setViewport(1700, 1000);
+    await b.connect();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const ws = FakeWS.all.at(-1)!;
+      ws.push({ t: 'agent_online' });
+      ws.push({ t: 'neko', data: { event: 'system/init', payload: { screen_size: { width: 1600, height: 900, rate: 25 } } } });
+      ws.push({ t: 'neko', data: { event: 'system/admin', payload: { screen_sizes_list: [{ width: 1600, height: 900, rate: 25 }, { width: 1920, height: 1080, rate: 30 }] } } });
+      ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+      await vi.advanceTimersByTimeAsync(0);
+      FakePC.last.connect();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(ws.neko('screen/set')).toEqual([]);
+      if (attempt === 0) {
+        ws.close();
+        await vi.advanceTimersByTimeAsync(1000); // the viewer reconnects with a fresh token
+      }
+    }
+    b.disconnect();
+  });
+
+  it('changes the screen during the handshake so the first frame already has the right size', async () => {
+    vi.useFakeTimers();
+    const { b } = setup();
+    b.setViewport(1700, 1000);
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init', payload: { screen_size: { width: 1920, height: 1080, rate: 30 } } } });
+    expect(ws.neko('signal/request')).toHaveLength(1);
+    ws.push({ t: 'neko', data: { event: 'system/admin', payload: { screen_sizes_list: [{ width: 1600, height: 900, rate: 25 }, { width: 1920, height: 1080, rate: 30 }] } } });
+    // Sent before neko's offer: its encoder restart overlaps ICE and DTLS instead of following the first frame.
+    expect(ws.neko('screen/set')).toEqual([{ width: 1600, height: 900, rate: 25 }]);
+    expect(ws.sent.findIndex((f: any) => f.data.event === 'screen/set')).toBeGreaterThan(ws.sent.findIndex((f: any) => f.data.event === 'signal/request'));
+    ws.push({ t: 'neko', data: { event: 'screen/updated', payload: { width: 1600, height: 900, rate: 25 } } });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(ws.neko('screen/set')).toHaveLength(1);
+    // A later viewport change still applies, through the ordered input queue.
+    b.setViewport(2000, 1200);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(ws.neko('screen/set').at(-1)).toEqual({ width: 1920, height: 1080, rate: 30 });
+    b.disconnect();
+  });
+
+  it('treats Xorg\'s width rounding as the same screen mode', async () => {
+    vi.useFakeTimers();
+    const { b } = setup();
+    b.setViewport(1600, 860);
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    // 1366×768 was requested earlier; Xorg rounded the width down to 1360.
+    ws.push({ t: 'neko', data: { event: 'system/init', payload: { screen_size: { width: 1360, height: 768, rate: 60 } } } });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    expect(ws.neko('screen/set')).toEqual([]);
+    b.disconnect();
+  });
+
   it('keeps trickle candidates that arrive before the offer and applies them in order', async () => {
     vi.useFakeTimers();
     const { b } = setup();

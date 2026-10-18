@@ -96,6 +96,9 @@ async function open(role: 'agent' | 'viewer', headers: Record<string, string> = 
   return { response, socket: ctx.getWebSockets(role).at(-1)! };
 }
 
+/** Inside the last half of the one-second lease, where a frame triggers a background re-check. */
+const INPUT_RENEW_AT = 600;
+
 const frame = (socket: Socket, payload: unknown) => gateway.webSocketMessage(socket as unknown as WebSocket, JSON.stringify(payload));
 
 function expireAuthorizationLease() {
@@ -163,6 +166,60 @@ describe('gateway revocation', () => {
       .toEqual(['system/init', 'signal/provide']);
     expect(agent.socket.sent.filter((f: any) => f.t === 'viewer').map((f: any) => f.data.data.event))
       .toEqual(['signal/request', 'signal/answer', 'control/keydown', 'control/keyup']);
+  });
+
+  it('renews a lease about to lapse in the background, without holding up the relay', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const agent = await open('agent');
+    const viewer = await open('viewer');
+    vi.setSystemTime(start + INPUT_RENEW_AT);
+    const prepare = d1.prepare.bind(d1);
+    let release!: () => void;
+    const remote = new Promise<void>(resolve => { release = resolve; });
+    const reads = vi.spyOn(d1, 'prepare').mockImplementation(sql => {
+      const statement = prepare(sql);
+      const wrap = (target: D1PreparedStatement): D1PreparedStatement => new Proxy(target, {
+        get(t, key) {
+          if (key === 'bind') return (...values: unknown[]) => wrap(t.bind(...values));
+          if (key === 'first' || key === 'all' || key === 'raw' || key === 'run') return async (...args: unknown[]) => {
+            await remote;
+            return (t[key] as (...args: unknown[]) => Promise<unknown>).apply(t, args);
+          };
+          return Reflect.get(t, key);
+        },
+      });
+      return wrap(statement);
+    });
+    // The lease is still valid: the frame goes through at once while the re-check waits on D1.
+    await frame(viewer.socket, { t: 'neko', data: { event: 'signal/answer' } });
+    expect(agent.socket.sent.at(-1)).toMatchObject({ t: 'viewer', data: { t: 'neko', data: { event: 'signal/answer' } } });
+    expect(reads).toHaveBeenCalled();
+    release();
+    for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    // Past the original lease (start + 1000), the renewed one (until start + 1600) still covers the relay with no new read.
+    vi.setSystemTime(start + 1050);
+    const before = reads.mock.calls.length;
+    await frame(viewer.socket, { t: 'neko', data: { event: 'signal/candidate' } });
+    expect(agent.socket.sent.at(-1)).toMatchObject({ t: 'viewer', data: { t: 'neko', data: { event: 'signal/candidate' } } });
+    expect(reads.mock.calls.length).toBe(before);
+    expect(viewer.socket.closed).toBeNull();
+  });
+
+  it('closes the viewer when a background renewal finds the session ended', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const agent = await open('agent');
+    const viewer = await open('viewer');
+    d1.sqlite.exec(`UPDATE viewer_sessions SET ended_at = 1 WHERE id = 'viewer1'`);
+    vi.setSystemTime(start + INPUT_RENEW_AT);
+    await frame(viewer.socket, { t: 'neko', data: { event: 'control/move', payload: { x: 1, y: 1 } } });
+    for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(viewer.socket.closed?.code).toBe(4003);
+    expect(agent.socket.closed).toBeNull();
+    expect(agent.socket.sent.at(-1)).toMatchObject({ t: 'viewer_close', sessionId: 'viewer1' });
   });
 
   it('immediately closes both tunnels through trusted RPC and never exposes a public revoke URL', async () => {

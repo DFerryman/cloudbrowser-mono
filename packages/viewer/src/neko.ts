@@ -28,6 +28,7 @@ export const EV = {
   CONTROL_KEYUP: 'control/keyup',
   CONTROL_PASTE: 'control/paste',
   SCREEN_SET: 'screen/set',
+  SCREEN_UPDATED: 'screen/updated',
   CLIPBOARD_SET: 'clipboard/set',
   CLIPBOARD_UPDATED: 'clipboard/updated',
   CURSOR_IMAGE: 'cursor/image',
@@ -141,6 +142,19 @@ export interface ScreenConfiguration {
 }
 
 /** The largest supported size that fits the viewport, so pixels map 1:1. */
+/** A screen mode as neko reports it, or null for anything malformed. */
+export function screenOf(value: unknown): ScreenConfiguration | null {
+  if (value === null || typeof value !== 'object') return null;
+  const { width, height, rate } = value as Record<string, unknown>;
+  return typeof width === 'number' && Number.isInteger(width) && width > 0
+    && typeof height === 'number' && Number.isInteger(height) && height > 0
+    && typeof rate === 'number' && Number.isInteger(rate) && rate > 0 ? { width, height, rate } : null;
+}
+
+/** Whether neko would end up on the same mode: Xorg rounds widths down to a multiple of 8. */
+export const sameScreen = (a: ScreenConfiguration, b: ScreenConfiguration) =>
+  a.height === b.height && a.rate === b.rate && a.width - (a.width % 8) === b.width - (b.width % 8);
+
 export function fitScreen(width: number, height: number): { width: number; height: number };
 export function fitScreen(width: number, height: number, configurations: readonly ScreenConfiguration[]): ScreenConfiguration | null;
 export function fitScreen(width: number, height: number, configurations?: readonly ScreenConfiguration[]) {

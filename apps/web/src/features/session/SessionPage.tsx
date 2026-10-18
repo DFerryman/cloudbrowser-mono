@@ -32,6 +32,8 @@ import { regionInfo, STATUS_TONE, statusKey } from '../instances/status.js';
 const HEARTBEAT_MS = 15_000;
 const IDLE_WARNING_MS = 60_000;
 const SESSION_REQUEST_TIMEOUT_MS = 20_000;
+/** Viewer tokens expire 60 s after issue; a prefetched one is handed over only while well inside that. */
+const PREFETCHED_TOKEN_MAX_AGE_MS = 30_000;
 
 /** Bound session creation and token fetches too; a transport deadline starts after them. */
 async function sessionRequest<T>(method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
@@ -88,6 +90,8 @@ export function SessionPage() {
   const openIntent = useRef<{ instanceId: string; key: string } | null>(null);
   const openSequence = useRef(0);
   const connectRequestSequence = useRef(0);
+  /** The prefetched single-use token already given to the viewer; each token is handed out once. */
+  const handedOutToken = useRef<string | null>(null);
   const currentInstanceId = useRef(id);
   currentInstanceId.current = id;
   const currentSessionId = useRef(session?.id);
@@ -495,6 +499,14 @@ export function SessionPage() {
             // Each viewer token works once, so every (re)connect asks the api for a fresh one.
             getConnectInfo={async () => {
               const sequence = ++connectRequestSequence.current;
+              // The page fetched one token to learn the live-view mode. The first attempt uses it
+              // instead of waiting for a second token; retries always fetch a fresh one.
+              const prefetched = connect.data;
+              if (prefetched?.mode === 'webrtc' && handedOutToken.current !== prefetched.token
+                && Date.now() - connect.dataUpdatedAt < PREFETCHED_TOKEN_MAX_AGE_MS) {
+                handedOutToken.current = prefetched.token;
+                return prefetched;
+              }
               try {
                 const c = await sessionRequest<ConnectInfo>('GET', `/sessions/${session.id}/connect`);
                 if (c.mode !== 'webrtc') throw new Error('live view unavailable');

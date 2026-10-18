@@ -13,6 +13,12 @@ const MAX_QUEUED_FRAME_BYTES = 1024 * 1024;
 const MAX_QUEUED_FRAMES = 4096;
 /** All relay frames share a short authorization lease; stop/delete RPCs revoke it immediately. */
 const INPUT_AUTH_LEASE_MS = 1000;
+/**
+ * A lease in use is re-checked this long before it lapses, in the background, so the ordered
+ * relay (the WebRTC handshake, typing) does not stall on D1 every second. The checks and the
+ * lease length are unchanged; a frame that finds an expired lease still waits for a fresh check.
+ */
+const RENEW_BEFORE_MS = 500;
 type InputGrant = { instanceId: string; row: LiveInstance; until: number };
 
 // Operation commands use <operation id>:<step>. Legacy commands without a prefix and
@@ -35,6 +41,7 @@ export class InstanceGateway extends DurableObject<Env> {
   private queuedFrameBytes = 0;
   private inputGrants = new Map<string, InputGrant>();
   private sessionChecks = new Map<string, Promise<boolean>>();
+  private renewal: Promise<void> | null = null;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // Keepalives are answered without waking the object.
@@ -128,11 +135,14 @@ export class InstanceGateway extends DurableObject<Env> {
   private async refreshSession(sessionId: string, row: LiveInstance, instanceId: string): Promise<boolean> {
     const epoch = this.revocationEpoch;
     try {
-      const session = await this.env.DB.prepare(`SELECT id FROM viewer_sessions
-        WHERE id = ? AND instance_id = ? AND user_id = ? AND ended_at IS NULL`)
-        .bind(sessionId, instanceId, row.user_id).first();
+      // Both reads are independent; one round trip instead of two on the connect path.
+      const [session, access] = await Promise.all([
+        this.env.DB.prepare(`SELECT id FROM viewer_sessions
+          WHERE id = ? AND instance_id = ? AND user_id = ? AND ended_at IS NULL`)
+          .bind(sessionId, instanceId, row.user_id).first(),
+        prepaidAccess(createDb(this.env.DB), row.user_id, instanceId),
+      ]);
       if (!session) return false;
-      const access = await prepaidAccess(createDb(this.env.DB), row.user_id, instanceId);
       if (!access.allowed || epoch !== this.revocationEpoch) return false;
       const until = Math.min(Date.now() + INPUT_AUTH_LEASE_MS, access.deadlineAt?.getTime() ?? Infinity);
       if (until <= Date.now()) return false;
@@ -153,6 +163,16 @@ export class InstanceGateway extends DurableObject<Env> {
 
   private async pruneSockets(row: LiveInstance, instanceId: string, allowCached = false) {
     for (const role of ['agent', 'viewer'] as const) for (const ws of this.sockets(role)) await this.validSocket(ws, row, instanceId, allowCached);
+  }
+
+  /** Re-checks a lease that is about to lapse, off the relay path; failures close it as usual. */
+  private renewSoon(sessionId: string, instanceId: string) {
+    const grant = this.inputGrants.get(sessionId);
+    if (this.renewal || !grant || grant.instanceId !== instanceId || grant.until - Date.now() > RENEW_BEFORE_MS) return;
+    this.renewal = (async () => {
+      const row = await this.liveInstance(instanceId);
+      if (row) await this.pruneSockets(row, instanceId);
+    })().catch(() => {}).finally(() => { this.renewal = null; });
   }
 
   override async fetch(req: Request): Promise<Response> {
@@ -271,6 +291,7 @@ export class InstanceGateway extends DurableObject<Env> {
     if (!row || epoch !== this.revocationEpoch) return;
     await this.pruneSockets(row, instanceId, true);
     if (!(await this.validSocket(ws, row, instanceId, true)) || epoch !== this.revocationEpoch) return;
+    if (relayedSession) this.renewSoon(relayedSession, instanceId);
     const att = ws.deserializeAttachment() as Attachment;
     if (att.role === 'agent') await this.fromAgent(ws, att, raw);
     else this.fromViewer(att, raw);

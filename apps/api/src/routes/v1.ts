@@ -644,13 +644,18 @@ v1.openapi(
   async (c) => {
     const db = c.get('db');
     const user = c.get('user');
-    const row = await ownedInstance(c, c.req.valid('param').id);
+    const instanceId = c.req.valid('param').id;
+    const key = c.req.valid('header')['idempotency-key'];
+    const sessionId = key ? await sha256Hex(JSON.stringify(['viewer-session', user.id, instanceId, key])) : newId();
+    // Opening the live view is the first call on the session page: independent reads run together.
+    // The earlier-session lookup is scoped to this user and browser, so it reveals nothing if not owned.
+    const [row, [earlier]] = await Promise.all([
+      ownedInstance(c, instanceId),
+      key ? db.select().from(viewerSessions)
+        .where(and(eq(viewerSessions.id, sessionId), eq(viewerSessions.instanceId, instanceId), eq(viewerSessions.userId, user.id))) : Promise.resolve([]),
+    ]);
     if (row.desiredState === 'deleted' || ['deleting', 'failed'].includes(row.status)) throw problem(409, 'invalid_state');
     if (row.desiredState === 'stopped' && ['creating', 'starting', 'stopping'].includes(row.status)) throw problem(409, 'invalid_state', 'This browser is being put to sleep.');
-    const key = c.req.valid('header')['idempotency-key'];
-    const sessionId = key ? await sha256Hex(JSON.stringify(['viewer-session', user.id, row.id, key])) : newId();
-    const [earlier] = key ? await db.select().from(viewerSessions)
-      .where(and(eq(viewerSessions.id, sessionId), eq(viewerSessions.instanceId, row.id), eq(viewerSessions.userId, user.id))) : [];
     if (earlier?.endedAt || (earlier && row.status === 'sleeping')) {
       throw problem(409, 'invalid_state', 'This viewer session has ended. Open a new session to use this browser here.');
     }
@@ -676,21 +681,21 @@ v1.openapi(
         before: [db.update(browserInstances).set({ desiredState: 'running', updatedAt: new Date() }).where(eq(browserInstances.id, row.id))],
       });
       operationId = r.operationId;
+      await requireViewerCredit(db, user.id, row.id);
     } else {
-      const [op] = await db
-        .select({ id: operations.id })
-        .from(operations)
-        .where(and(eq(operations.instanceId, row.id), isNull(operations.finishedAt)));
+      const [[op]] = await Promise.all([
+        db.select({ id: operations.id }).from(operations).where(and(eq(operations.instanceId, row.id), isNull(operations.finishedAt))),
+        requireViewerCredit(db, user.id, row.id),
+      ]);
       operationId = op?.id ?? null;
     }
 
-    await requireViewerCredit(db, user.id, row.id);
     const now = new Date();
     const available = sql`EXISTS (SELECT 1 FROM browser_instances WHERE id = ${row.id} AND user_id = ${user.id}
       AND desired_state = 'running' AND status NOT IN ('deleting', 'purged', 'failed'))`;
     const newIntent = sql`NOT EXISTS (SELECT 1 FROM viewer_sessions WHERE id = ${sessionId})`;
     const openActive = and(available, sql`EXISTS (SELECT 1 FROM viewer_sessions WHERE id = ${sessionId} AND ended_at IS NULL)`);
-    await db.batch([
+    const [, , , [opened]] = await db.batch([
       // One controller at a time. A timed-out HTTP request may still reach this transaction
       // after its retry succeeded: the existing stable id makes that old request a no-op.
       db
@@ -703,9 +708,10 @@ v1.openapi(
       // Opening another viewer is input activity, not a new billable run or a fresh trial.
       db.insert(instanceHealth).values({ instanceId: row.id, lastInputAt: sql`CASE WHEN ${openActive} THEN ${now.getTime()} ELSE NULL END` })
         .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastInputAt: now }, setWhere: openActive }),
+      // Read back in the same transaction rather than another round trip.
+      db.select().from(viewerSessions)
+        .where(and(eq(viewerSessions.id, sessionId), eq(viewerSessions.instanceId, row.id), eq(viewerSessions.userId, user.id))),
     ]);
-    const [opened] = await db.select().from(viewerSessions)
-      .where(and(eq(viewerSessions.id, sessionId), eq(viewerSessions.instanceId, row.id), eq(viewerSessions.userId, user.id)));
     if (!opened || opened.endedAt) throw problem(409, 'invalid_state', 'This viewer session has ended. Open a new session to use this browser here.');
     return c.json({ session: { id: opened.id, instanceId: row.id, startedAt: opened.startedAt.toISOString() }, operationId }, 201);
   },
@@ -714,12 +720,14 @@ v1.openapi(
 async function ownedSession(c: Vars, id: string) {
   const db = c.get('db');
   const user = c.get('user');
-  const [s] = await db
-    .select()
+  // One round trip: the session and its browser are read together (connect and heartbeats are hot paths).
+  const [row] = await db
+    .select({ session: viewerSessions, inst: { userId: browserInstances.userId, status: browserInstances.status, desiredState: browserInstances.desiredState } })
     .from(viewerSessions)
+    .leftJoin(browserInstances, eq(browserInstances.id, viewerSessions.instanceId))
     .where(and(eq(viewerSessions.id, id), eq(viewerSessions.userId, user.id)));
-  if (!s) throw problem(404, 'not_found');
-  const [inst] = await db.select({ userId: browserInstances.userId, status: browserInstances.status, desiredState: browserInstances.desiredState }).from(browserInstances).where(eq(browserInstances.id, s.instanceId));
+  if (!row) throw problem(404, 'not_found');
+  const { session: s, inst } = row;
   if (!inst || inst.userId !== user.id) throw problem(404, 'not_found');
   if (inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) throw problem(409, 'invalid_state', 'This browser has been deleted.');
   return s;
@@ -738,15 +746,22 @@ v1.openapi(
     const db = c.get('db');
     const s = await ownedSession(c, c.req.valid('param').id);
     if (s.endedAt) throw problem(409, 'invalid_state', 'This browser is open in another tab or device.');
-    await requireViewerCredit(db, s.userId, s.instanceId);
-    const [p] = await db
-      .select()
-      .from(placements)
-      .where(and(eq(placements.instanceId, s.instanceId), eq(placements.status, 'current')));
+    // The credit check, the placement and the TURN credentials are independent: fetch them
+    // together rather than one after another, so the viewer can start its handshake sooner.
+    // Nothing is returned unless every check passes.
+    const turn = c.env.GATEWAY_URL && c.env.VIEWER_TOKEN_PRIVATE_KEY
+      ? turnIceServers(c.env, 3600).then((servers) => ({ servers }), (error: unknown) => ({ error }))
+      : null;
+    const [, [p]] = await Promise.all([
+      requireViewerCredit(db, s.userId, s.instanceId),
+      db.select().from(placements).where(and(eq(placements.instanceId, s.instanceId), eq(placements.status, 'current'))),
+    ]);
     if (p?.executor === 'fake' && c.env.LIVE_VIEW !== 'on') return c.json({ mode: 'simulated' as const }, 200);
-    if (!c.env.GATEWAY_URL || !c.env.VIEWER_TOKEN_PRIVATE_KEY) {
+    if (!turn || !c.env.GATEWAY_URL || !c.env.VIEWER_TOKEN_PRIVATE_KEY) {
       throw problem(503, 'viewer_unavailable', 'The live view is not configured.');
     }
+    const ice = await turn;
+    if ('error' in ice) throw ice.error;
     // A 60 s single-use token for the gateway, and short-lived TURN credentials (pages 2 and 5).
     const token = await signViewerToken(JSON.parse(c.env.VIEWER_TOKEN_PRIVATE_KEY) as JsonWebKey, {
       jti: newId(),
@@ -760,7 +775,7 @@ v1.openapi(
         mode: 'webrtc' as const,
         gatewayUrl: `${c.env.GATEWAY_URL.replace(/\/$/, '')}/v1/stream/${s.instanceId}`,
         token,
-        iceServers: await turnIceServers(c.env, 3600),
+        iceServers: ice.servers,
       },
       200,
     );

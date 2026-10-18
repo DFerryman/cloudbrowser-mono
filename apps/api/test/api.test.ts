@@ -1,6 +1,6 @@
 import { verifyViewerToken } from '@cloudbrowser/contracts';
 import { newArchiveKey } from '@cloudbrowser/db';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import engine from '@cloudbrowser/engine';
 import app from '../src/index.js';
 import { internalApi } from '../src/internal.js';
@@ -368,6 +368,27 @@ describe('gateway internal API and live view', () => {
     const api = internalApi(t.env as never);
     expect(await api.redeemViewerToken(claims!)).toBe(true);
     expect(await api.redeemViewerToken(claims!)).toBe(false);
+  });
+
+  it('returns TURN credentials fetched alongside the checks, and never redeems a token of an ended session', async () => {
+    Object.assign(t.env, { LIVE_VIEW: 'on', GATEWAY_URL: 'wss://connect.test', VIEWER_TOKEN_PRIVATE_KEY: JSON.stringify(keys.privateJwk), TURN_KEY_ID: 'k', TURN_KEY_API_TOKEN: 'secret' });
+    const turn = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({ iceServers: [
+      { urls: ['turn:turn.cloudflare.com:3478?transport=udp', 'turn:turn.cloudflare.com:53?transport=udp'], username: 'u', credential: 'c' },
+    ] }));
+    const id = await createRunning();
+    const open = await t.call('POST', `/api/v1/instances/${id}/sessions`);
+    const info = (await t.call('GET', `/api/v1/sessions/${open.body.session.id}/connect`)).body;
+    expect(info.iceServers).toEqual([{ urls: ['turn:turn.cloudflare.com:3478?transport=udp'], username: 'u', credential: 'c' }]);
+    expect(turn).toHaveBeenCalledTimes(1);
+
+    // A TURN outage is reported, not hidden behind a token without relay servers.
+    turn.mockImplementationOnce(async () => new Response('down', { status: 503 }));
+    expect((await t.call('GET', `/api/v1/sessions/${open.body.session.id}/connect`)).status).toBeGreaterThanOrEqual(500);
+
+    const claims = await verifyViewerToken(keys.publicJwk, info.token);
+    t.d1.sqlite.prepare('UPDATE viewer_sessions SET ended_at = ? WHERE id = ?').run(Date.now(), open.body.session.id);
+    expect(await internalApi(t.env as never).redeemViewerToken(claims!)).toBe(false);
+    turn.mockRestore();
   });
 });
 

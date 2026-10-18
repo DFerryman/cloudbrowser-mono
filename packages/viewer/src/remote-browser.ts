@@ -1,5 +1,5 @@
 import type { GatewayToViewer, IceServer } from '@cloudbrowser/contracts';
-import { decode, EV, fitScreen, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
+import { decode, EV, fitScreen, sameScreen, screenOf, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
 import { KEYSYM, keyIdentity, keysymFor, keysymForName, matchingKeyIdentity, unidentifiedKey, type KeyIdentityEvent } from './keyboard.js';
 import { readStats, type ViewerStats } from './stats.js';
 import { ScrollAccumulator } from './scroll.js';
@@ -84,6 +84,8 @@ export class RemoteBrowser {
   private readonly inputQueue: InputQueue;
   private pendingViewport: { width: number; height: number } | null = null;
   private screenConfigurations: ScreenConfiguration[] = [];
+  /** neko's current screen (system/init, screen/updated): it restarts its encoder on every change. */
+  private remoteScreen: ScreenConfiguration | null = null;
   private screenTimer: ReturnType<typeof setTimeout> | null = null;
   private lastScreenAt = 0;
   private appliedScreen = '';
@@ -128,6 +130,8 @@ export class RemoteBrowser {
     this.teardownPeer();
     this.inputQueue.resume();
     this.screenConfigurations = [];
+    this.remoteScreen = null;
+    this.appliedScreen = '';
     this.stopped = false;
     this.setState(this.attempt === 0 ? 'connecting' : 'reconnecting');
     let info: ConnectInfo;
@@ -521,20 +525,19 @@ export class RemoteBrowser {
   private async onNeko(msg: NekoMessage, ws: WebSocket) {
     switch (msg.event) {
       case EV.SYSTEM_INIT:
+        this.remoteScreen = screenOf((msg.payload as { screen_size?: unknown } | undefined)?.screen_size) ?? this.remoteScreen;
         this.requestSignal(ws);
         return;
       case EV.SYSTEM_ADMIN: {
         const list = (msg.payload as { screen_sizes_list?: unknown } | undefined)?.screen_sizes_list;
         if (!Array.isArray(list)) return;
-        this.screenConfigurations = list.filter((s): s is ScreenConfiguration => (
-          s !== null && typeof s === 'object'
-          && typeof s.width === 'number' && Number.isInteger(s.width) && s.width > 0
-          && typeof s.height === 'number' && Number.isInteger(s.height) && s.height > 0
-          && typeof s.rate === 'number' && Number.isInteger(s.rate) && s.rate > 0
-        )).slice(0, 256);
+        this.screenConfigurations = list.map(screenOf).filter((s): s is ScreenConfiguration => s !== null).slice(0, 256);
         this.applyScreen();
         return;
       }
+      case EV.SCREEN_UPDATED:
+        this.remoteScreen = screenOf(msg.payload) ?? this.remoteScreen;
+        return;
       case EV.SIGNAL_PROVIDE:
         await this.answer(msg.payload as unknown as SignalProvide, ws);
         return;
@@ -652,7 +655,11 @@ export class RemoteBrowser {
 
   private applyScreen() {
     const viewport = this.pendingViewport;
-    if (!viewport || this.state !== 'live') return;
+    const live = this.state === 'live';
+    // Before the stream is live, only with neko's advertised modes: the change then overlaps the
+    // WebRTC handshake, and the first frame already has the right size instead of being followed
+    // by an encoder restart.
+    if (!viewport || (!live && (!this.screenConfigurations.length || !this.signalRequested || this.ws?.readyState !== 1))) return;
     // Neko advertises the actual X11 modes, including their refresh rates. A familiar size
     // such as 1600×900 can support 25 Hz without supporting 30 Hz.
     const s = fitScreen(viewport.width, viewport.height, this.screenConfigurations)
@@ -660,8 +667,12 @@ export class RemoteBrowser {
     const key = `${s.width}x${s.height}@${s.rate}`;
     if (key === this.appliedScreen) return;
     this.appliedScreen = key;
+    // Neko rebuilds its video pipeline on every screen/set, even to the same size: skip a no-op.
+    if (this.remoteScreen && sameScreen(s, this.remoteScreen)) return;
     this.lastScreenAt = Date.now();
-    this.sendInput({ event: EV.SCREEN_SET, payload: { ...s } });
+    if (live) this.sendInput({ event: EV.SCREEN_SET, payload: { ...s } });
+    // No input can be queued before the stream is live; this precedes all of it on the socket.
+    else this.sendNeko({ event: EV.SCREEN_SET, payload: { ...s } });
   }
 
   private startStats() {
@@ -689,6 +700,7 @@ export class RemoteBrowser {
     const pc = this.pc;
     this.pc = null;
     pc?.close();
-    this.appliedScreen = '';
+    // A new offer on the same socket keeps the screen applied for it; a new socket starts afresh.
+    if (!preserveCandidates) this.appliedScreen = '';
   }
 }

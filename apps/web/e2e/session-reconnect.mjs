@@ -114,6 +114,9 @@ try {
 
   const deniedReconnect = await fixture();
   await deniedReconnect.page.waitForFunction(() => window.fixtureSockets.length === 1);
+  // The page's own token request is handed to the first viewer attempt; no second request is made.
+  assert.equal(deniedReconnect.state.connects, 1, 'the first viewer attempt must reuse the prefetched token');
+  assert.match(await deniedReconnect.page.evaluate(() => window.fixtureSockets[0].url), /token=token1$/);
   deniedReconnect.state.denyConnect = true;
   await deniedReconnect.page.evaluate(() => window.fixtureSockets[0].close());
   await deniedReconnect.page.getByText('The browser connection is currently denied.', { exact: true }).waitFor();
@@ -121,6 +124,10 @@ try {
   await finish(deniedReconnect, 'a transport reconnect exposes its actual authorization error without creating a new session');
 
   const oldConnect = await fixture({ holdConnect: true });
+  // The first attempt uses the prefetched token; a dropped socket makes the viewer ask for a new one.
+  await oldConnect.page.waitForFunction(() => window.fixtureSockets.length === 1);
+  await oldConnect.page.evaluate(() => window.fixtureSockets[0].close());
+  await oldConnect.page.clock.fastForward(1_000);
   await oldConnect.heldConnectReady;
   assert.ok(oldConnect.state.heldConnect);
   // The old session is replaced while its viewer token request is still pending.
@@ -128,7 +135,7 @@ try {
   await pendingHeartbeat;
   await oldConnect.page.clock.fastForward(15_000);
   await oldConnect.page.getByRole('button', { name: 'Use here', exact: true }).click();
-  await oldConnect.page.waitForFunction(() => window.fixtureSockets.length === 1);
+  await oldConnect.page.waitForFunction(() => window.fixtureSockets.length === 2);
   await oldConnect.state.heldConnect.fulfill(problem(403, 'This stale error must be ignored.'));
   await oldConnect.page.waitForTimeout(100);
   assert.equal(await oldConnect.page.getByText('This stale error must be ignored.', { exact: true }).count(), 0);

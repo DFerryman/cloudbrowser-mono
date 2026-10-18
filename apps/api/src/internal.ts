@@ -173,19 +173,17 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
  * checks that it was never used and that its viewer session is still the open one.
  */
 export async function redeemViewerToken(db: Db, claims: ViewerTokenClaims, now = new Date()): Promise<boolean> {
-  const [session] = await db
-    .select()
-    .from(viewerSessions)
-    .where(and(eq(viewerSessions.id, claims.sid), eq(viewerSessions.instanceId, claims.iid), eq(viewerSessions.userId, claims.uid)));
-  if (!session || session.endedAt) return false;
-  const [inst] = await db.select({ userId: browserInstances.userId, status: browserInstances.status, desiredState: browserInstances.desiredState }).from(browserInstances).where(eq(browserInstances.id, claims.iid));
-  if (!inst || inst.userId !== claims.uid || inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) return false;
-  try {
-    await db.insert(viewerTokens).values({ jti: claims.jti, sessionId: claims.sid, redeemedAt: now });
-    return true;
-  } catch {
-    return false; // already redeemed
-  }
+  // One atomic statement on the viewer's connect path: the session must be open and its browser
+  // owned and not deleted, and each token id is inserted at most once (a second use returns no row).
+  const eligible = sql`EXISTS (SELECT 1 FROM ${viewerSessions} WHERE ${viewerSessions.id} = ${claims.sid}
+      AND ${viewerSessions.instanceId} = ${claims.iid} AND ${viewerSessions.userId} = ${claims.uid} AND ${viewerSessions.endedAt} IS NULL)
+    AND EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${claims.iid} AND ${browserInstances.userId} = ${claims.uid}
+      AND ${browserInstances.desiredState} <> 'deleted' AND ${browserInstances.status} NOT IN ('deleting', 'purged'))`;
+  const redeemed = await db.insert(viewerTokens)
+    .select(sql`SELECT ${claims.jti}, ${claims.sid}, ${now.getTime()} WHERE ${eligible}`)
+    .onConflictDoNothing()
+    .returning({ jti: viewerTokens.jti });
+  return redeemed.length > 0;
 }
 
 /**
