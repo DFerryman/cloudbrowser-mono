@@ -13,6 +13,7 @@ export interface NekoMessage<P = Record<string, unknown>> {
 
 export const EV = {
   SYSTEM_INIT: 'system/init',
+  SYSTEM_ADMIN: 'system/admin',
   SYSTEM_DISCONNECT: 'system/disconnect',
   SIGNAL_REQUEST: 'signal/request',
   SIGNAL_PROVIDE: 'signal/provide',
@@ -125,8 +126,32 @@ export const SCREEN_SIZES = [
   [2560, 1440],
 ] as const;
 
-/** The largest size that fits the viewport, so pixels map 1:1. */
-export function fitScreen(width: number, height: number): { width: number; height: number } {
+export interface ScreenConfiguration {
+  width: number;
+  height: number;
+  rate: number;
+}
+
+/** The largest supported size that fits the viewport, so pixels map 1:1. */
+export function fitScreen(width: number, height: number): { width: number; height: number };
+export function fitScreen(width: number, height: number, configurations: readonly ScreenConfiguration[]): ScreenConfiguration | null;
+export function fitScreen(width: number, height: number, configurations?: readonly ScreenConfiguration[]) {
+  if (configurations) {
+    if (configurations.length === 0) return null;
+    // Keep the existing 720p–1440p policy when the server supports it. For smaller viewports,
+    // use the smallest supported desktop and let the video scale down.
+    const policy = configurations.filter((s) => s.width >= 1280 && s.height >= 720 && s.width <= 2560 && s.height <= 1440);
+    const available = policy.length > 0 ? policy : configurations;
+    const fits = available.filter((s) => s.width <= width && s.height <= height);
+    const sizes = fits.length > 0 ? fits : available;
+    const best = sizes.reduce((a, b) => {
+      const difference = b.width * b.height - a.width * a.height;
+      return (fits.length > 0 ? difference > 0 : difference < 0) ? b : a;
+    });
+    const rates = sizes.filter((s) => s.width === best.width && s.height === best.height).map((s) => s.rate);
+    const bounded = rates.filter((rate) => rate <= 30);
+    return { width: best.width, height: best.height, rate: bounded.length > 0 ? Math.max(...bounded) : Math.min(...rates) };
+  }
   let best: readonly [number, number] = SCREEN_SIZES[0];
   for (const s of SCREEN_SIZES) if (s[0] <= width && s[1] <= height) best = s;
   return { width: best[0], height: best[1] };

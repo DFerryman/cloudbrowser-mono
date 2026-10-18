@@ -1,5 +1,5 @@
 import type { GatewayToViewer, IceServer } from '@cloudbrowser/contracts';
-import { decode, encode, EV, fitScreen, x11Button, type NekoMessage, type SignalCandidate, type SignalProvide } from './neko.js';
+import { decode, encode, EV, fitScreen, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
 import { keysymFor, keysymForName } from './keyboard.js';
 import { readStats, type ViewerStats } from './stats.js';
 
@@ -57,7 +57,8 @@ export class RemoteBrowser {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private connectionTimer: ReturnType<typeof setTimeout> | null = null;
   private pressed = new Set<number>();
-  private pendingScreen: { width: number; height: number } | null = null;
+  private pendingViewport: { width: number; height: number } | null = null;
+  private screenConfigurations: ScreenConfiguration[] = [];
   private screenTimer: ReturnType<typeof setTimeout> | null = null;
   private lastScreenAt = 0;
   private appliedScreen = '';
@@ -74,6 +75,7 @@ export class RemoteBrowser {
     this.retryTimer = null;
     this.clearConnectionTimer();
     this.teardownPeer();
+    this.screenConfigurations = [];
     this.stopped = false;
     this.setState(this.attempt === 0 ? 'connecting' : 'reconnecting');
     let info: ConnectInfo;
@@ -170,7 +172,7 @@ export class RemoteBrowser {
 
   /** Reports the usable viewport in CSS pixels; the remote screen follows, debounced. */
   setViewport(width: number, height: number) {
-    this.pendingScreen = fitScreen(width, height);
+    this.pendingViewport = { width, height };
     if (this.screenTimer) clearTimeout(this.screenTimer);
     const wait = Math.max(SCREEN_DEBOUNCE_MS, this.lastScreenAt + SCREEN_MIN_INTERVAL_MS - Date.now());
     this.screenTimer = setTimeout(() => this.applyScreen(), wait);
@@ -276,6 +278,18 @@ export class RemoteBrowser {
       case EV.SYSTEM_INIT:
         this.requestSignal(ws);
         return;
+      case EV.SYSTEM_ADMIN: {
+        const list = (msg.payload as { screen_sizes_list?: unknown } | undefined)?.screen_sizes_list;
+        if (!Array.isArray(list)) return;
+        this.screenConfigurations = list.filter((s): s is ScreenConfiguration => (
+          s !== null && typeof s === 'object'
+          && typeof s.width === 'number' && Number.isInteger(s.width) && s.width > 0
+          && typeof s.height === 'number' && Number.isInteger(s.height) && s.height > 0
+          && typeof s.rate === 'number' && Number.isInteger(s.rate) && s.rate > 0
+        )).slice(0, 256);
+        this.applyScreen();
+        return;
+      }
       case EV.SIGNAL_PROVIDE:
         await this.answer(msg.payload as unknown as SignalProvide, ws);
         return;
@@ -351,7 +365,7 @@ export class RemoteBrowser {
         this.setState('live');
         this.sendNeko({ event: EV.CONTROL_REQUEST });
         this.startStats();
-        if (this.pendingScreen) this.applyScreen();
+        if (this.pendingViewport) this.applyScreen();
       } else if (pc.connectionState === 'failed') {
         // An ICE failure (e.g. a network change): start over with a fresh token.
         this.reconnect(ws);
@@ -388,13 +402,17 @@ export class RemoteBrowser {
   }
 
   private applyScreen() {
-    const s = this.pendingScreen;
-    if (!s || this.state !== 'live') return;
-    const key = `${s.width}x${s.height}`;
+    const viewport = this.pendingViewport;
+    if (!viewport || this.state !== 'live') return;
+    // Neko advertises the actual X11 modes, including their refresh rates. A familiar size
+    // such as 1600×900 can support 25 Hz without supporting 30 Hz.
+    const s = fitScreen(viewport.width, viewport.height, this.screenConfigurations)
+      ?? { ...fitScreen(viewport.width, viewport.height), rate: 60 }; // Neko v3's default for clients without capabilities.
+    const key = `${s.width}x${s.height}@${s.rate}`;
     if (key === this.appliedScreen) return;
     this.appliedScreen = key;
     this.lastScreenAt = Date.now();
-    this.sendNeko({ event: EV.SCREEN_SET, payload: { width: s.width, height: s.height, rate: 30 } });
+    this.sendNeko({ event: EV.SCREEN_SET, payload: { ...s } });
   }
 
   private startStats() {

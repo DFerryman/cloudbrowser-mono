@@ -349,6 +349,7 @@ alerts.
 | *Waiting for capacity* | /admin → Operations | No capacity for any of the three instance types in the zone; it keeps retrying (a waking browser moves to another zone after 30 minutes) |
 | Alert `quota` | Service Quotas | vCPU or Elastic IP limit (step 2) |
 | Running, but the live view stays black | browser devtools console; api config | TURN key missing on the api; gateway domain or viewer keys wrong |
+| Chrome fills only part of the desktop, with black space on the right | Browser supervisor configuration and `openbox` process | Preserve the upstream Openbox program when replacing the Chrome configuration; `--start-maximized` needs a window manager |
 | *Needs attention*: "Network paused while we check your dedicated IP" | /admin → the browser → Last IP check | Chrome saw a different IP than the Elastic IP; it stays blocked until checked |
 
 The browser container starts supervisor as root (`--user root` in the systemd Docker command),

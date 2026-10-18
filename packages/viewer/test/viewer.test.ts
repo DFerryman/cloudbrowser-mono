@@ -30,6 +30,28 @@ describe('neko data channel encoding', () => {
     expect(fitScreen(3000, 2000)).toEqual({ width: 2560, height: 1440 });
     expect(fitScreen(800, 600)).toEqual({ width: 1280, height: 720 });
   });
+
+  it('selects an advertised screen mode and its supported refresh rate', () => {
+    const configurations = [
+      { width: 1280, height: 720, rate: 30 },
+      { width: 1368, height: 768, rate: 30 },
+      { width: 1600, height: 900, rate: 25 },
+      { width: 1920, height: 1080, rate: 60 },
+      { width: 1920, height: 1080, rate: 30 },
+      { width: 2560, height: 1440, rate: 30 },
+      { width: 3840, height: 2160, rate: 25 },
+    ];
+    expect(fitScreen(1440, 860, configurations)).toEqual({ width: 1368, height: 768, rate: 30 });
+    expect(fitScreen(1700, 1000, configurations)).toEqual({ width: 1600, height: 900, rate: 25 });
+    expect(fitScreen(2000, 1200, configurations)).toEqual({ width: 1920, height: 1080, rate: 30 });
+    expect(fitScreen(4000, 2500, configurations)).toEqual({ width: 2560, height: 1440, rate: 30 });
+    expect(fitScreen(800, 600, configurations)).toEqual({ width: 1280, height: 720, rate: 30 });
+    expect(fitScreen(1600, 900, [])).toBeNull();
+  });
+
+  it('uses the supported rate when a screen has no mode at or below 30 Hz', () => {
+    expect(fitScreen(1600, 1000, [{ width: 1440, height: 900, rate: 60 }])).toEqual({ width: 1440, height: 900, rate: 60 });
+  });
 });
 
 describe('keyboard mapping', () => {
@@ -197,6 +219,57 @@ describe('RemoteBrowser', () => {
     ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'o', iceservers: [{ urls: ['stun:x'] }] } } });
     await tick();
     expect(FakePC.last.config.iceTransportPolicy).toBe('all');
+    b.disconnect();
+  });
+
+  it('uses Neko screen capabilities for both dimensions and rate, ignoring malformed entries', async () => {
+    vi.useFakeTimers();
+    const { b } = setup();
+    b.setViewport(1700, 1000);
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init' } });
+    ws.push({ t: 'neko', data: { event: 'system/admin', payload: { screen_sizes_list: [
+      null,
+      { width: 1600, height: 900, rate: 0 },
+      { width: '1600', height: 900, rate: 30 },
+      { width: 1280, height: 720, rate: 30 },
+      { width: 1368, height: 768, rate: 30 },
+      { width: 1600, height: 900, rate: 25 },
+      { width: 1920, height: 1080, rate: 30 },
+    ] } } });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    expect(ws.neko('screen/set')).toEqual([{ width: 1600, height: 900, rate: 25 }]);
+
+    b.setViewport(1440, 860);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(ws.neko('screen/set').at(-1)).toEqual({ width: 1368, height: 768, rate: 30 });
+    b.disconnect();
+  });
+
+  it('uses Neko\'s 60 Hz fallback and corrects it if capabilities arrive after the stream', async () => {
+    vi.useFakeTimers();
+    const { b } = setup();
+    b.setViewport(1700, 1000);
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init' } });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    expect(ws.neko('screen/set')).toEqual([{ width: 1600, height: 900, rate: 60 }]);
+
+    ws.push({ t: 'neko', data: { event: 'system/admin', payload: {
+      screen_sizes_list: [{ width: 1600, height: 900, rate: 25 }],
+    } } });
+    expect(ws.neko('screen/set')).toEqual([
+      { width: 1600, height: 900, rate: 60 },
+      { width: 1600, height: 900, rate: 25 },
+    ]);
     b.disconnect();
   });
 
