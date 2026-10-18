@@ -56,7 +56,7 @@ export interface Env {
   ARCHIVE_MASTER_KEY?: string;
 }
 
-export type SessionUser = { id: string; email: string; name: string };
+export type SessionUser = { id: string; email: string; name: string; twoFactorEnabled?: boolean };
 
 export type AppEnv = {
   Bindings: Env;

@@ -64,6 +64,13 @@
       "when": 1792440000000,
       "tag": "0008_prepaid_reserves",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1792520000000,
+      "tag": "0009_two_factor",
+      "breakpoints": true
     }
   ]
 }

@@ -14,7 +14,8 @@ export const Entitlements = z.object({
 export type Entitlements = z.infer<typeof Entitlements>;
 
 export const Me = z.object({
-  user: z.object({ id: z.string(), email: z.string(), name: z.string() }),
+  /** `twoFactorEnabled`: sign-in also asks for a code from an authenticator app. */
+  user: z.object({ id: z.string(), email: z.string(), name: z.string(), twoFactorEnabled: z.boolean().optional() }),
   entitlements: Entitlements,
   usage: z.object({ browsers: z.number().int(), running: z.number().int() }),
 });

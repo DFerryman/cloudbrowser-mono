@@ -234,6 +234,18 @@ describe('admin console', () => {
     expect((await callAdmin('GET', '/api/v1/admin/users?q=user@', undefined, IP)).body[0].suspended).toBe(1);
   });
 
+  it('shows who uses two-factor sign-in and resets it, audited, for a user who lost their authenticator', async () => {
+    t.d1.sqlite.prepare(`UPDATE user SET two_factor_enabled = 1 WHERE id = ?`).run(owner);
+    t.d1.sqlite.prepare(`INSERT INTO two_factor (id, secret, backup_codes, user_id, verified) VALUES ('tf1', 'enc', 'enc', ?, 1)`).run(owner);
+    expect((await callAdmin('GET', '/api/v1/admin/users?q=user@', undefined, IP)).body[0].twoFactorEnabled).toBe(true);
+    expect((await callAdmin('POST', `/api/v1/admin/users/${owner}/reset-two-factor`, { reason: 'x' }, IP)).status).toBe(400);
+    expect((await callAdmin('POST', `/api/v1/admin/users/${owner}/reset-two-factor`, { reason: 'verified by support ticket 42' }, IP)).status).toBe(200);
+    expect((await callAdmin('GET', '/api/v1/admin/users?q=user@', undefined, IP)).body[0].twoFactorEnabled).toBe(false);
+    expect(t.d1.sqlite.prepare('SELECT count(*) AS n FROM two_factor').get()).toEqual({ n: 0 });
+    const audit = (await callAdmin('GET', '/api/v1/admin/audit', undefined, IP)).body;
+    expect(audit.find((a: { action: string }) => a.action === 'user.reset_two_factor')).toMatchObject({ target: `user:${owner}` });
+  });
+
   it('sets the markup, shows cost against price per region, and credits a user', async () => {
     const pricing = (await callAdmin('GET', '/api/v1/admin/pricing', undefined, IP)).body;
     const tyo = pricing.regions.find((r: { regionId: string }) => r.regionId === 'tyo1');

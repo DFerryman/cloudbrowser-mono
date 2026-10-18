@@ -396,7 +396,7 @@ adminRoute.get('/users', async (c) => {
   const db = c.get('db');
   const q = (c.req.query('q') ?? '').trim().replace(/[%_]/g, '');
   const rows = await db
-    .select({ id: user.id, email: user.email, createdAt: user.createdAt })
+    .select({ id: user.id, email: user.email, createdAt: user.createdAt, twoFactorEnabled: user.twoFactorEnabled })
     .from(user)
     .where(q ? or(like(user.email, `%${q}%`), eq(user.id, q)) : undefined)
     .orderBy(desc(user.createdAt))
@@ -466,6 +466,24 @@ adminRoute.post('/users/:id/credit', async (c) => {
   await applyBalance(db, { userId: id, kind: 'adjustment', amountMicros, reference: `adjustment:${newId(now.getTime())}`, description: reason, actor: actor(c) }, now);
   await audit(db, c, 'user.credit', `user:${id}`, { amountMicros, reason });
   c.executionCtx.waitUntil(notifyHub(c.env, id));
+  return c.json({ ok: true });
+});
+
+/**
+ * Turns off a user's two-factor sign-in after they lost their authenticator and backup codes.
+ * Verify their identity out of band first; their next sign-in needs only the email code.
+ */
+adminRoute.post('/users/:id/reset-two-factor', async (c) => {
+  const db = c.get('db');
+  const id = c.req.param('id');
+  const { reason } = await body(c, z.object({ reason: z.string().trim().min(3).max(500) }));
+  const [u] = await db.select({ id: user.id }).from(user).where(eq(user.id, id));
+  if (!u) throw problem(404, 'not_found');
+  await db.batch([
+    db.delete(schema.twoFactor).where(eq(schema.twoFactor.userId, id)),
+    db.update(user).set({ twoFactorEnabled: false, updatedAt: new Date() }).where(eq(user.id, id)),
+  ]);
+  await audit(db, c, 'user.reset_two_factor', `user:${id}`, { reason });
   return c.json({ ok: true });
 });
 

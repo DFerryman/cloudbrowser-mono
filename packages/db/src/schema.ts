@@ -21,6 +21,8 @@ export const user = sqliteTable('user', {
   email: text('email').notNull().unique(),
   emailVerified: integer('email_verified', { mode: 'boolean' }).notNull().default(false),
   image: text('image'),
+  /** Better Auth two-factor plugin: set once an authenticator app code has been confirmed. */
+  twoFactorEnabled: integer('two_factor_enabled', { mode: 'boolean' }).notNull().default(false),
   createdAt: ts('created_at').notNull(),
   updatedAt: ts('updated_at').notNull(),
 });
@@ -96,6 +98,27 @@ export const passkey = sqliteTable(
     aaguid: text('aaguid'),
   },
   (t) => [index('passkey_user_idx').on(t.userId), index('passkey_credential_idx').on(t.credentialID)],
+);
+
+/**
+ * Better Auth two-factor plugin (TOTP authenticator apps). The secret and the backup codes are
+ * encrypted with BETTER_AUTH_SECRET; `verified` is false until the first code is confirmed.
+ * Failed codes count towards a temporary account lock. Owner: api.
+ */
+export const twoFactor = sqliteTable(
+  'two_factor',
+  {
+    id: text('id').primaryKey(),
+    secret: text('secret').notNull(),
+    backupCodes: text('backup_codes').notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    verified: integer('verified', { mode: 'boolean' }).notNull().default(true),
+    failedVerificationCount: integer('failed_verification_count').notNull().default(0),
+    lockedUntil: ts('locked_until'),
+  },
+  (t) => [uniqueIndex('two_factor_user_idx').on(t.userId)],
 );
 
 /** Pilot accounts are invite-only (page 12). Owner: operators (SQL), read by api. */

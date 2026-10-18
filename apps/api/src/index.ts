@@ -47,6 +47,12 @@ app.use('/api/*', async (c, next) => {
  */
 const limitSignIn: MiddlewareHandler<AppEnv> = async (c, next) => {
   const limiter = c.env.AUTH_LIMITER;
+  // Second-factor codes have their own budget per IP, besides the plugin's per-challenge attempt
+  // cap and its account lock after repeated wrong codes.
+  if (limiter && c.req.method === 'POST' && /\/two-factor\/[a-z-]+$/.test(c.req.path)) {
+    const { success } = await limiter.limit({ key: `2fa-ip:${c.req.header('cf-connecting-ip') ?? 'unknown'}` });
+    if (!success) return c.json({ code: 'TOO_MANY_REQUESTS', message: 'Too many attempts. Try again in a minute.' }, 429);
+  }
   if (limiter && c.req.method === 'POST' && /\/(email-otp\/send-verification-otp|sign-in\/email-otp)$/.test(c.req.path)) {
     const ip = c.req.header('cf-connecting-ip') ?? 'unknown';
     const email = String(((await c.req.raw.clone().json().catch(() => ({}))) as { email?: unknown }).email ?? '')
@@ -97,7 +103,7 @@ const sameOrigin: MiddlewareHandler<AppEnv> = async (c, next) => {
 const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
   const session = await c.get('auth').api.getSession({ headers: c.req.raw.headers });
   if (!session) throw problem(401, 'unauthenticated');
-  c.set('user', { id: session.user.id, email: session.user.email, name: session.user.name });
+  c.set('user', { id: session.user.id, email: session.user.email, name: session.user.name, twoFactorEnabled: !!session.user.twoFactorEnabled });
   c.set('sessionId', session.session.id);
   await next();
 };

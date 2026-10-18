@@ -154,6 +154,7 @@ export type UserRow = {
   availableMicros: number;
   exhaustedAt: string | null;
   frozenAt: string | null;
+  twoFactorEnabled: boolean;
   admin: boolean;
 };
 

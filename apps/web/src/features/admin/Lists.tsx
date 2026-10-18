@@ -246,6 +246,8 @@ export function UsersPage() {
   const [credit, setCredit] = useState<UserRow | null>(null);
   const [amount, setAmount] = useState('5');
   const [unfreeze, setUnfreeze] = useState<UserRow | null>(null);
+  const [resetTwoFactor, setResetTwoFactor] = useState<UserRow | null>(null);
+  const reset2fa = useAdminAction((v: { id: string; reason: string }) => post(`/users/${v.id}/reset-two-factor`, { reason: v.reason }));
   const grant = useAdminAction((v: { id: string; amountMicros: number; reason: string }) => post(`/users/${v.id}/credit`, { amountMicros: v.amountMicros, reason: v.reason }));
   const thaw = useAdminAction((v: { id: string; reason: string }) => post(`/users/${v.id}/unfreeze`, { reason: v.reason }));
   return (
@@ -268,9 +270,14 @@ export function UsersPage() {
         columns={['Email', 'Joined', 'Balance', 'Browsers', 'Kill switch']}
         cells={(u) => [
           <span>
-            {u.email} {u.admin ? <Pill>staff</Pill> : null}
+            {u.email} {u.admin ? <Pill>staff</Pill> : null} {u.twoFactorEnabled ? <Pill tone="ok">2FA</Pill> : null}
             <br />
             <Mono>{u.id}</Mono>
+            {u.twoFactorEnabled ? (
+              <Button size="sm" variant="ghost" className="ml-1" onClick={() => setResetTwoFactor(u)}>
+                Reset 2FA
+              </Button>
+            ) : null}
           </span>,
           when(u.createdAt),
           <span className="flex flex-wrap items-center gap-1.5">
@@ -337,6 +344,16 @@ export function UsersPage() {
         <Label htmlFor="credit-amount">Amount (USD)</Label>
         <Input id="credit-amount" type="number" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} className="mb-3 w-40" />
       </ReasonDialog>
+      <ReasonDialog
+        open={resetTwoFactor !== null}
+        title={resetTwoFactor ? `Reset two-factor sign-in for ${resetTwoFactor.email}` : ''}
+        description="For a user who lost their authenticator app and backup codes. Confirm who they are first (for example, from their sign-in email and recent payments). Their next sign-in needs only the email code, and they can set up a new authenticator."
+        confirm="Reset 2FA"
+        danger
+        busy={reset2fa.isPending}
+        onClose={() => setResetTwoFactor(null)}
+        onConfirm={(reason) => resetTwoFactor && reset2fa.mutate({ id: resetTwoFactor.id, reason }, { onSuccess: () => setResetTwoFactor(null), onError: (e) => toast((e as Error).message, 'error') })}
+      />
       <ReasonDialog
         open={unfreeze !== null}
         title={unfreeze ? `Unfreeze ${unfreeze.email}` : ''}

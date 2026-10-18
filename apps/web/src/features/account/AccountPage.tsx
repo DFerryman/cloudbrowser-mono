@@ -4,6 +4,7 @@ import { PageHeader, signOut } from '../../app/AppShell.js';
 import { api } from '../../lib/api.js';
 import { useI18n, type Locale } from '../../lib/i18n.js';
 import { Passkeys } from './Passkeys.js';
+import { TwoFactorSettings } from './TwoFactor.js';
 import { useMe } from '../instances/hooks.js';
 
 /** The account: who you are and how you sign in. Money is on Billing & usage. */
@@ -35,8 +36,15 @@ export function AccountPage() {
           </Link>
         </Section>
         <Section title={t('account.security')} description={t('account.securityBody')} className="lg:col-span-2">
-          <Passkeys />
-          <div className="flex flex-wrap gap-2">
+          <div className="divide-y divide-border">
+            <div className="pb-5">
+              <TwoFactorSettings />
+            </div>
+            <div className="py-5">
+              <Passkeys />
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2 border-t border-border pt-5">
             <Button
               onClick={async () => {
                 await api('POST', '/api/auth/revoke-sessions', { body: {} }).catch(() => {});

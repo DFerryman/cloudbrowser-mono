@@ -5,6 +5,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly problem: Problem,
+    /** Better Auth's error code (`/api/auth/*`), e.g. INVALID_CODE. */
+    readonly code?: string,
   ) {
     super(problem.detail ?? problem.title);
   }
@@ -36,7 +38,7 @@ export async function api<T>(method: string, path: string, opts: Options = {}): 
       data && typeof data.type === 'string'
         ? data
         : { type: 'internal', title: data?.message ?? res.statusText, status: res.status };
-    throw new ApiError(res.status, problem);
+    throw new ApiError(res.status, problem, typeof data?.code === 'string' ? data.code : undefined);
   }
   return data as T;
 }

@@ -6,6 +6,7 @@ import { emailOTP } from 'better-auth/plugins';
 import { eq } from 'drizzle-orm';
 import { sendSignInCode } from './email.js';
 import type { Env } from './env.js';
+import { twoFactorGuard, twoFactorPlugin } from './two-factor.js';
 
 async function isInvited(db: Db, email: string) {
   const [row] = await db.select().from(schema.invites).where(eq(schema.invites.email, email.trim().toLowerCase()));
@@ -21,7 +22,8 @@ export function relyingParty(env: Env) {
 /**
  * Better Auth with email one-time codes (page 1, "Auth"). The pilot is invite-only, so codes are
  * only sent to, and accounts only created for, addresses in the `invites` table. Signed-in users
- * can add passkeys, which also serve as the step-up for /admin (page 10). TOTP and OAuth come later.
+ * can add passkeys and turn on two-factor sign-in with an authenticator app (two-factor.ts).
+ * OAuth comes later.
  */
 export function createAuth(env: Env, db: Db, waitUntil: (p: Promise<unknown>) => void) {
   return betterAuth({
@@ -32,7 +34,7 @@ export function createAuth(env: Env, db: Db, waitUntil: (p: Promise<unknown>) =>
     trustedOrigins: [env.APP_URL],
     database: drizzleAdapter(db, {
       provider: 'sqlite',
-      schema: { user: schema.user, session: schema.session, account: schema.account, verification: schema.verification, passkey: schema.passkey },
+      schema: { user: schema.user, session: schema.session, account: schema.account, verification: schema.verification, passkey: schema.passkey, twoFactor: schema.twoFactor },
     }),
     session: {
       expiresIn: 60 * 60 * 24 * 30,
@@ -42,6 +44,7 @@ export function createAuth(env: Env, db: Db, waitUntil: (p: Promise<unknown>) =>
       useSecureCookies: env.APP_URL.startsWith('https://'),
       defaultCookieAttributes: { sameSite: 'lax', httpOnly: true },
     },
+    hooks: { before: twoFactorGuard },
     databaseHooks: {
       user: {
         create: {
@@ -53,6 +56,7 @@ export function createAuth(env: Env, db: Db, waitUntil: (p: Promise<unknown>) =>
       },
     },
     plugins: [
+      twoFactorPlugin(),
       passkey({ ...relyingParty(env), authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' } }),
       emailOTP({
         otpLength: 6,
