@@ -57,6 +57,14 @@ Cloudflare deployment.
   stop without a grace period; the reserve funds seven days of retention before permanent purge.
   Unused retained credit is released after deletion or funded resumption. Normal usage cannot
   debit more than funded credit. Billing defaults to prepaid; explicit false is a test/pilot override.
+- **Billing consistency**: an engine test drives two browsers through a month boundary, stops,
+  traffic, a capped last minute and retention, and checks that the balance equals the applied
+  transactions, usage debits equal charged usage, and every month, browser, day and item total
+  agrees between the user's pages and the operator console. Running time settled by a stop is
+  capped like metered running time after a missed run; access deadlines use the metering's
+  rounding. The console's margin table includes internal snapshot cost (so rows add up), payment
+  fees are estimated on the amount paid including tax, and the users list shows available and
+  held credit like the user's own page.
 - **Free trial** (page 6): each user may create one browser for free, once, in Sydney: 10 minutes
   of running time, a 2 GB data volume, no snapshots, 5-minute auto-sleep. It is metered at cost
   but charged nothing, sleeps when the 10 minutes are used, and is kept until its fixed seven-day
@@ -128,6 +136,22 @@ Cloudflare deployment.
   report newer than the operation; `verify_ip_in_chrome` and `prepare_shutdown` are commands with
   60 s timeouts (the VM is stopped anyway without an ack); real agents self-check every 5 minutes and
   the engine pauses the network if the last check failed or is older than 15 minutes.
+- **Two-step verification**: Better Auth's two-factor plugin, passwordless, with TOTP authenticator
+  apps. Account → Security shows a QR code (rendered locally) and the setup key; the first code
+  confirms it, then ten one-time backup codes are shown to copy or download. Every email-code
+  sign-in then withholds the session until a TOTP or backup code is verified (five attempts per
+  challenge, a 15-minute lock after ten wrong codes, an optional 30-day trusted device). Turning it
+  off needs a current authenticator or backup code, replacing backup codes needs an authenticator
+  code, and the setup secret is never readable again. Operators can reset it (audited).
+- **Connection path**: the session page hands its prefetched viewer token to the first connection
+  attempt instead of fetching a second one; session open and connect run their independent D1
+  reads and the TURN credential request in parallel; the gateway redeems a token in one statement,
+  reads the session and credit together and renews an expiring one-second input lease in the
+  background so signaling and typing do not stall on D1. The viewer tracks neko's screen size,
+  skips no-op `screen/set` requests (neko rebuilds its encoder on every one) and makes a needed
+  change during the WebRTC handshake, so the first frame already has the right size. Measured with
+  real Chromium against a TURN relay: pre-gathering ICE candidates does not help, because Chrome
+  only uses the candidate pool as the offerer and neko offers, so it is not used.
 - **Live view plumbing**: `GET /v1/sessions/:id/connect` returns the gateway URL, a viewer token and
   Cloudflare Realtime TURN credentials for real placements (or with `LIVE_VIEW=on`).
 - **Live view** (`packages/viewer`, session view): neko v3 signaling through the gateway, a
@@ -142,9 +166,11 @@ Cloudflare deployment.
   and hard trial/funding deadlines remain enforced. Same-session reconnects do not report take-over.
 - **Images** (`images/`): browser and agent containers are built and published to GHCR. The
   pre-built Packer golden VM image remains planned.
-- **Web** (`apps/web`, `packages/ui`): design tokens from page 1, app shell, sign-in, dashboard with
-  live status, create dialog (region, permanence note, advanced options, four progress steps,
-  auto-open when ready), session view (44 px toolbar, region/IP chip, every state overlay, idle
+- **Web** (`apps/web`, `packages/ui`): design tokens from page 1, app shell, sign-in (with the
+  second step), dashboard with live status, create dialog (plan choice when the free trial is
+  offered, regions with price and latency, permanence note, collapsed advanced options, a cost
+  summary with the full breakdown on request, actions and balance status in a footer that stays
+  visible; a bottom sheet on phones), four progress steps and auto-open when ready, session view (44 px toolbar, region/IP chip, every state overlay, idle
   warning, fullscreen with Keyboard Lock), browser settings (identity, verify IP, request new IP,
   backups with restore, behavior, activity, delete with type-to-confirm), account page, Simplified Chinese and English.
 
@@ -208,5 +234,5 @@ Considered and **not** used:
   recreated, or the agent updated, before the Storage tab allows growth); confirming every Creem
   payload against recorded test-mode fixtures.
 - Passkey sign-in (passkeys are registered and used for the admin step-up; sign-in with them is a
-  small UI addition), TOTP, OAuth; time-limited support share codes (page 4); dashboard
+  small UI addition), OAuth; time-limited support share codes (page 4); dashboard
   thumbnails; dependency-cruiser and an OpenAPI diff in CI.

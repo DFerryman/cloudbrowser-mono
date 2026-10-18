@@ -1,2 +1,6 @@
 # Copy to .dev.vars for `wrangler dev`. In production set it with `wrangler secret put BETTER_AUTH_SECRET`.
 BETTER_AUTH_SECRET=change-me-to-a-long-random-string
+# wrangler.jsonc holds the production origin; sign-in only accepts requests from APP_URL.
+APP_URL=http://localhost:8787
+# Prints each sign-in code to the wrangler log.
+ENVIRONMENT=development

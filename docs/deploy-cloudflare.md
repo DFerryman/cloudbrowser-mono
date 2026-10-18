@@ -178,6 +178,18 @@ complete price sheet before removing the create pause. Existing browsers retain 
 Deploy the gateway before the API: the API's `GATEWAY` service binding uses the gateway's new
 `Internal` entrypoint to revoke live connections immediately after deletion.
 
+### Two-step verification (migration `0009`)
+
+Migration `0009` adds `user.two_factor_enabled` and the `two_factor` table. It is additive, so it
+can be applied before the new Workers are deployed; deploy the api and the web build afterwards
+(`pnpm deploy` does both). No new variables or secrets are needed: the second-factor endpoints
+share `AUTH_LIMITER` (their own per-IP key), and the authenticator secrets and backup codes are
+encrypted with `BETTER_AUTH_SECRET`. **Rotating `BETTER_AUTH_SECRET` therefore invalidates every
+enabled authenticator and backup code** (as well as all sessions): if it ever has to change, reset
+two-step verification for the affected users in the operator console (Users → Reset 2FA) so they
+can sign in with their email code and set it up again. Use the same reset, after confirming the
+person's identity, for anyone who lost both their phone and their backup codes.
+
 ### Ordered input and priority stop/delete
 
 Every input kind uses the same FIFO from the viewer through the gateway and VM relay to Neko.
@@ -192,7 +204,9 @@ before provider calls and lifecycle writes. AWS calls already in flight still re
 confirmation, so accepting intent does not claim instantaneous physical termination. Stop revokes
 viewers while retaining the agent channel for cleanup. Normal input has at most a one-second
 authorization lease; trusted stop/delete RPCs revoke it immediately, and alarms enforce trial or
-credit expiry even without another input event.
+credit expiry even without another input event. A lease in use is re-checked shortly before it
+lapses, off the relay path, so signaling and typing do not wait on D1; the checks and the lease
+length are the same.
 
 ### Permanent user deletion and isolation
 
@@ -269,13 +283,13 @@ CloudFormation stack, the access keys and the images are in [docs/aws.md](aws.md
 
 ```bash
 pnpm db:migrate:remote
-pnpm deploy   # builds web, then deploys engine + reaper, reconciler, api, in that order
+pnpm deploy   # builds everything, then deploys gateway, engine + reaper, reconciler and api, in that order
 ```
 
-The engine deploys first because the api and the reaper bind to its `EventHub` Durable Object and
-the api binds to the engine as a service; the gateway deploys last because it binds to the api's
-`Internal` entrypoint. The engine reaches the gateway only through the `cloudbrowser-agent-commands`
-queue, so there is no deploy-order cycle.
+The api deploys last: it binds to the gateway's `Internal` entrypoint (to revoke live connections),
+to the engine as a service and to its `EventHub` Durable Object. The gateway and the api call each
+other only through stable RPC methods, and the engine reaches the gateway only through the
+`cloudbrowser-agent-commands` queue, so the order above is safe for every change in this repo.
 
 ## 5. Domain
 

@@ -16,8 +16,8 @@ and [`docs/deploy-cloudflare.md`](docs/deploy-cloudflare.md) to deploy.
 ```
 apps/
   web/          Vite + React SPA: sign-in, dashboard, create dialog, session view, settings (zh-CN + en)
-  api/          Worker: Hono REST + SSE under /api, Better Auth (email codes via Email Service),
-                rate limits, IP echo; serves apps/web/dist
+  api/          Worker: Hono REST + SSE under /api, Better Auth (email codes via Email Service,
+                optional TOTP two-step verification), rate limits, IP echo; serves apps/web/dist
   engine/       Worker: queue consumer running operations (journal, leases, ledger, retries),
                 EventHub Durable Object for SSE; reaper mode = only deleter
   reconciler/   Worker: ledger vs provider, orphans, circuit breaker, quota and spend snapshots
@@ -45,7 +45,7 @@ Requirements: Node 22.13+ and pnpm 10.
 
 ```bash
 pnpm install
-cp apps/api/.dev.vars.example apps/api/.dev.vars          # set BETTER_AUTH_SECRET
+cp apps/api/.dev.vars.example apps/api/.dev.vars          # set BETTER_AUTH_SECRET; APP_URL is localhost
 pnpm db:migrate:local
 pnpm --filter @cloudbrowser/api exec wrangler d1 execute cloudbrowser --local \
   --persist-to ../../.wrangler/state --command "INSERT INTO invites (email) VALUES ('you@example.com')"
