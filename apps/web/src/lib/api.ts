@@ -10,7 +10,7 @@ export class ApiError extends Error {
   }
 }
 
-type Options = { body?: unknown; idempotent?: boolean; signal?: AbortSignal };
+type Options = { body?: unknown; idempotent?: boolean; idempotencyKey?: string; signal?: AbortSignal };
 
 /**
  * All data comes from /api/v1 on the same origin; the session cookie is HttpOnly. Lifecycle
@@ -19,7 +19,8 @@ type Options = { body?: unknown; idempotent?: boolean; signal?: AbortSignal };
 export async function api<T>(method: string, path: string, opts: Options = {}): Promise<T> {
   const headers: Record<string, string> = { accept: 'application/json' };
   if (opts.body !== undefined) headers['content-type'] = 'application/json';
-  if (opts.idempotent) headers['idempotency-key'] = crypto.randomUUID();
+  if (opts.idempotencyKey !== undefined) headers['idempotency-key'] = opts.idempotencyKey;
+  else if (opts.idempotent) headers['idempotency-key'] = crypto.randomUUID();
   const res = await fetch(path.startsWith('/api/') ? path : `/api/v1${path}`, {
     method,
     headers,

@@ -1,9 +1,8 @@
-import { browserEstimate, customerRates, retentionReserve, TRIAL, BYTES_PER_GB, type Rates } from '@cloudbrowser/contracts';
+import { browserEstimate, customerRates, retentionReserve, TRIAL, BYTES_PER_GB, DEFAULT_PRICING_SETTINGS, ProviderPriceSheet, type Rates } from '@cloudbrowser/contracts';
 import { and, eq, notInArray, sql, type SQL } from 'drizzle-orm';
 import type { Db } from './index.js';
-import { billingRequired } from './caps.js';
 import { priceSheets, pricingSettings } from './pricing.js';
-import { billingAccounts, browserInstances, browserReservations, instanceHealth, placements } from './schema.js';
+import { billingAccounts, browserInstances, browserReservations, controlFlags, instanceHealth, placements, pricingSettings as pricingSettingsTable, providerPrices, regions } from './schema.js';
 
 export const reservedTotalSql = (userId: string) => sql`coalesce((SELECT sum(reserved_micros) FROM browser_reservations WHERE user_id = ${userId}), 0)`;
 
@@ -43,42 +42,70 @@ export function reservationWrite(db: Db, userId: string, instanceId: string, quo
 }
 
 export type PrepaidAccessReason = 'balance' | 'trial' | 'frozen' | 'suspended' | 'deleted' | null;
-export async function prepaidAccess(db: Db, userId: string, instanceId: string, now = new Date()): Promise<{ allowed: boolean; reason: PrepaidAccessReason; deadlineAt: Date | null }> {
-  const [row] = await db.select({ inst: browserInstances, health: instanceHealth }).from(browserInstances)
-    .leftJoin(instanceHealth, eq(instanceHealth.instanceId, browserInstances.id))
-    .where(and(eq(browserInstances.id, instanceId), eq(browserInstances.userId, userId)));
-  const denied = (reason: PrepaidAccessReason, deadlineAt: Date | null = null) => ({ allowed: false, reason, deadlineAt });
+export interface PrepaidAccess {
+  allowed: boolean;
+  reason: PrepaidAccessReason;
+  /** Gateway authorization lease: paid access must be rechecked at least every minute. */
+  deadlineAt: Date | null;
+  /** Actual projected depletion within this lease; null when it only needs renewal. */
+  balanceDeadlineAt: Date | null;
+}
+export async function prepaidAccess(db: Db, userId: string, instanceId: string, now = new Date()): Promise<PrepaidAccess> {
+  // Authorization is on the signaling/input path. A single D1 batch supplies one current
+  // transactional snapshot, rather than serial cross-region requests outlasting the grant.
+  // No cached balance, frozen status or ownership may authorize a later renewal.
+  const [instanceRows, accounts, holdRows, flags, prices, settingsRows, all, placementRows] = await db.batch([
+    db.select({ inst: browserInstances, health: instanceHealth }).from(browserInstances)
+      .leftJoin(instanceHealth, eq(instanceHealth.instanceId, browserInstances.id))
+      .where(and(eq(browserInstances.id, instanceId), eq(browserInstances.userId, userId))),
+    db.select().from(billingAccounts).where(eq(billingAccounts.userId, userId)),
+    db.select().from(browserReservations).where(eq(browserReservations.userId, userId)),
+    db.select().from(controlFlags).where(eq(controlFlags.key, 'billing_required')),
+    db.select({ price: providerPrices }).from(providerPrices).innerJoin(regions,
+      and(eq(regions.id, providerPrices.regionId), eq(regions.executor, providerPrices.executor), eq(regions.providerRegion, providerPrices.providerRegion))),
+    db.select().from(pricingSettingsTable).where(eq(pricingSettingsTable.id, 1)),
+    db.select({ inst: browserInstances, health: instanceHealth }).from(browserInstances)
+      .leftJoin(instanceHealth, eq(instanceHealth.instanceId, browserInstances.id))
+      .where(and(eq(browserInstances.userId, userId), notInArray(browserInstances.status, ['deleting', 'purged', 'failed']))),
+    db.select({ machine: placements }).from(placements).innerJoin(browserInstances, eq(browserInstances.id, placements.instanceId))
+      .where(and(eq(browserInstances.userId, userId), eq(placements.status, 'current'))),
+  ]);
+  const [row] = instanceRows;
+  const [account] = accounts;
+  const holds = new Map(holdRows.map((h) => [h.instanceId, h]));
+  const reservedMicros = holdRows.reduce((sum, h) => sum + h.reservedMicros, 0);
+  const availableMicros = Math.max(0, (account?.balanceMicros ?? 0) - reservedMicros);
+  const denied = (reason: PrepaidAccessReason, deadlineAt: Date | null = null) => ({ allowed: false, reason, deadlineAt, balanceDeadlineAt: null });
   if (!row || row.inst.desiredState === 'deleted' || ['deleting', 'purged', 'failed'].includes(row.inst.status)) return denied('deleted');
-  const a = await prepaidBalance(db, userId);
-  if (a.frozenAt) return denied('frozen');
+  if (account?.frozenAt) return denied('frozen');
   if (row.inst.suspendedAt) return denied('suspended');
   if (row.inst.trialState === 'active' || row.inst.trialState === 'ended') {
     const remainingMs = Math.max(0, TRIAL.runningSeconds * 1000 - Math.max(row.inst.trialUsedMs, row.inst.trialUsedS * 1000));
     const origin = row.health?.meteredAt?.getTime() ?? row.inst.lastActiveAt?.getTime() ?? 0;
     const deadlineAt = row.inst.status === 'running' && origin ? new Date(origin + remainingMs) : null;
-    return row.inst.trialState === 'ended' || remainingMs <= 0 || (deadlineAt && now >= deadlineAt) ? denied('trial', deadlineAt) : { allowed: true, reason: null, deadlineAt };
+    return row.inst.trialState === 'ended' || remainingMs <= 0 || (deadlineAt && now >= deadlineAt) ? denied('trial', deadlineAt) : { allowed: true, reason: null, deadlineAt, balanceDeadlineAt: null };
   }
-  if (!(await billingRequired(db))) return { allowed: true, reason: null, deadlineAt: null };
-  const [hold] = await db.select().from(browserReservations).where(eq(browserReservations.instanceId, instanceId));
-  if (!hold || hold.retentionStartedAt || hold.reservedMicros < hold.requiredMicros || a.availableMicros <= 0) return denied('balance');
+  if (flags[0]?.value === 'false') return { allowed: true, reason: null, deadlineAt: null, balanceDeadlineAt: null };
+  const hold = holds.get(instanceId);
+  if (!hold || hold.retentionStartedAt || hold.reservedMicros < hold.requiredMicros || availableMicros <= 0) return denied('balance');
   // The gateway closes before another funded minute can be spent. Rechecks can extend this lease
   // only when fresh credit still covers it; input and reconnecting never change trial deadlines.
-  const sheets = await priceSheets(db);
-  const settings = await pricingSettings(db);
-  const all = await db.select({ inst: browserInstances, health: instanceHealth }).from(browserInstances)
-    .leftJoin(instanceHealth, eq(instanceHealth.instanceId, browserInstances.id))
-    .where(and(eq(browserInstances.userId, userId), notInArray(browserInstances.status, ['deleting', 'purged', 'failed'])));
-  const machines = new Map((await db.select().from(placements).where(eq(placements.status, 'current'))).map((p) => [p.instanceId, p]));
-  const holds = new Map((await db.select().from(browserReservations).where(eq(browserReservations.userId, userId))).map((h) => [h.instanceId, h]));
+  const sheets = new Map<string, ProviderPriceSheet>();
+  for (const { price } of prices) {
+    const parsed = ProviderPriceSheet.safeParse(price.sheet);
+    if (parsed.success && price.fetchedAt) sheets.set(price.regionId, parsed.data);
+  }
+  const settings = settingsRows[0] ?? DEFAULT_PRICING_SETTINGS;
+  const machines = new Map(placementRows.map(({ machine }) => [machine.instanceId, machine]));
   let hour = 0;
   let pending = 0;
   for (const { inst, health } of all) {
     if (inst.trialState === 'active' || inst.trialState === 'ended' || holds.get(inst.id)?.retentionStartedAt) continue;
     const sheet = sheets.get(inst.regionId);
     if (!sheet) return denied('balance');
-    const rates = customerRates(sheet.sheet, settings.markupPercent);
+    const rates = customerRates(sheet, settings.markupPercent);
     const machine = machines.get(inst.id);
-    const vmPrice = machine?.instanceType ? sheet.sheet.instanceTypes[machine.instanceType] : sheet.sheet.vmHour;
+    const vmPrice = machine?.instanceType ? sheet.instanceTypes[machine.instanceType] : sheet.vmHour;
     if (vmPrice === undefined) return denied('balance');
     rates.compute = Math.round(vmPrice * 1_000_000 * settings.markupPercent / 100);
     const fixed = holds.get(inst.id)?.fixedHourMicros ?? 0;
@@ -93,10 +120,11 @@ export async function prepaidAccess(db: Db, userId: string, instanceId: string, 
     const billed = health?.netTxBilledBytes ?? tx;
     pending += (tx >= billed ? tx - billed : tx) / BYTES_PER_GB * rates.transfer;
   }
-  const remaining = Math.max(0, a.availableMicros - Math.ceil(pending));
+  const remaining = Math.max(0, availableMicros - Math.ceil(pending));
   const fundedMs = hour > 0 ? Math.floor(remaining / hour * 3_600_000) : 60_000;
   if (fundedMs < 1000) return denied('balance');
-  return { allowed: true, reason: null, deadlineAt: new Date(now.getTime() + Math.min(60_000, fundedMs)) };
+  const deadlineAt = new Date(now.getTime() + Math.min(60_000, fundedMs));
+  return { allowed: true, reason: null, deadlineAt, balanceDeadlineAt: hour > 0 && fundedMs <= 60_000 ? deadlineAt : null };
 }
 
 /** Capture actual running time before changing status; safe inside a fenced stop/delete batch. */

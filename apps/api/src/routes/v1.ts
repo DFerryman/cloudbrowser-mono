@@ -25,10 +25,10 @@ import {
   type RegionId,
 } from '@cloudbrowser/contracts';
 import { turnIceServers } from '../turn.js';
-import { billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, settleRunningStatements } from '@cloudbrowser/db';
+import { billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, sha256Hex, settleRunningStatements } from '@cloudbrowser/db';
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import type { AppEnv } from '../env.js';
-import { admitCreate, admitInstanceSpend, admitIpChange, admitSpend, admitStart, billingAccount, claimTrial, entitlementsFor, isTrial, regionAcceptingNew, trialSecondsLeft, usage } from '../limits.js';
+import { admitCreate, admitInstanceSpend, admitIpChange, admitSpend, admitStart, claimTrial, entitlementsFor, isTrial, regionAcceptingNew, trialSecondsLeft, usage } from '../limits.js';
 import { currentBurn, instancePrice, regionPrice, requirePrice, storageLimits } from '../pricing.js';
 import { instanceUsage, monthOf } from '../usage.js';
 import { billingRoute } from './billing.js';
@@ -637,8 +637,8 @@ v1.openapi(
     method: 'post',
     path: '/instances/{id}/sessions',
     tags: ['sessions'],
-    description: 'Open a viewer session. Wakes the browser if it is sleeping. Other open sessions are taken over.',
-    request: { params: IdParam },
+    description: 'Open a viewer session. Wakes the browser if it is sleeping. Other open sessions are taken over. An optional Idempotency-Key safely retries the same open intent without taking over its own session.',
+    request: { params: IdParam, headers: z.object({ 'idempotency-key': z.string().trim().min(1).max(200).optional() }) },
     responses: { 201: jsonResponse(OpenSessionResult, 'Session opened'), ...errors, 403: problemResponse('Plan limit') },
   }),
   async (c) => {
@@ -647,6 +647,21 @@ v1.openapi(
     const row = await ownedInstance(c, c.req.valid('param').id);
     if (row.desiredState === 'deleted' || ['deleting', 'failed'].includes(row.status)) throw problem(409, 'invalid_state');
     if (row.desiredState === 'stopped' && ['creating', 'starting', 'stopping'].includes(row.status)) throw problem(409, 'invalid_state', 'This browser is being put to sleep.');
+    const key = c.req.valid('header')['idempotency-key'];
+    const sessionId = key ? await sha256Hex(JSON.stringify(['viewer-session', user.id, row.id, key])) : newId();
+    const [earlier] = key ? await db.select().from(viewerSessions)
+      .where(and(eq(viewerSessions.id, sessionId), eq(viewerSessions.instanceId, row.id), eq(viewerSessions.userId, user.id))) : [];
+    if (earlier?.endedAt || (earlier && row.status === 'sleeping')) {
+      throw problem(409, 'invalid_state', 'This viewer session has ended. Open a new session to use this browser here.');
+    }
+    // Replaying a successful open must not wake a browser, invalidate another controller, or
+    // reset the trial. Credit and ownership are always checked again before returning it.
+    if (earlier) {
+      await requireViewerCredit(db, user.id, row.id);
+      const [op] = await db.select({ id: operations.id }).from(operations)
+        .where(and(eq(operations.instanceId, row.id), isNull(operations.finishedAt)));
+      return c.json({ session: { id: earlier.id, instanceId: row.id, startedAt: earlier.startedAt.toISOString() }, operationId: op?.id ?? null }, 201);
+    }
 
     let operationId: string | null = null;
     if (row.status === 'sleeping') {
@@ -655,7 +670,7 @@ v1.openapi(
       const r = await enqueueOperation(c, {
         instanceId: row.id,
         kind: wake.kind,
-        key: null,
+        key: key ? `session-open:${sessionId}` : null,
         route: 'open',
         params: { reason: 'open', ...wake.params },
         before: [db.update(browserInstances).set({ desiredState: 'running', updatedAt: new Date() }).where(eq(browserInstances.id, row.id))],
@@ -671,26 +686,28 @@ v1.openapi(
 
     await requireViewerCredit(db, user.id, row.id);
     const now = new Date();
-    const sessionId = newId(now.getTime());
+    const available = sql`EXISTS (SELECT 1 FROM browser_instances WHERE id = ${row.id} AND user_id = ${user.id}
+      AND desired_state = 'running' AND status NOT IN ('deleting', 'purged', 'failed'))`;
+    const newIntent = sql`NOT EXISTS (SELECT 1 FROM viewer_sessions WHERE id = ${sessionId})`;
+    const openActive = and(available, sql`EXISTS (SELECT 1 FROM viewer_sessions WHERE id = ${sessionId} AND ended_at IS NULL)`);
     await db.batch([
-      // One controller at a time: the newest session takes over.
+      // One controller at a time. A timed-out HTTP request may still reach this transaction
+      // after its retry succeeded: the existing stable id makes that old request a no-op.
       db
         .update(viewerSessions)
         .set({ endedAt: now })
-        .where(and(eq(viewerSessions.instanceId, row.id), isNull(viewerSessions.endedAt))),
-      db.insert(viewerSessions).values({
-        id: sessionId,
-        instanceId: row.id,
-        userId: user.id,
-        startedAt: now,
-        lastSeenAt: now,
-        country: c.req.header('cf-ipcountry') ?? null,
-        userAgent: c.req.header('user-agent')?.slice(0, 300) ?? null,
-      }),
+        .where(and(eq(viewerSessions.instanceId, row.id), isNull(viewerSessions.endedAt), newIntent, available)),
+      db.insert(viewerSessions).select(sql`SELECT ${sessionId}, ${row.id}, ${user.id}, ${now.getTime()}, ${now.getTime()}, NULL,
+        ${c.req.header('cf-ipcountry') ?? null}, ${c.req.header('user-agent')?.slice(0, 300) ?? null}
+        WHERE ${available}`).onConflictDoNothing(),
       // Opening another viewer is input activity, not a new billable run or a fresh trial.
-      db.insert(instanceHealth).values({ instanceId: row.id, lastInputAt: now }).onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastInputAt: now } }),
+      db.insert(instanceHealth).values({ instanceId: row.id, lastInputAt: sql`CASE WHEN ${openActive} THEN ${now.getTime()} ELSE NULL END` })
+        .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastInputAt: now }, setWhere: openActive }),
     ]);
-    return c.json({ session: { id: sessionId, instanceId: row.id, startedAt: now.toISOString() }, operationId }, 201);
+    const [opened] = await db.select().from(viewerSessions)
+      .where(and(eq(viewerSessions.id, sessionId), eq(viewerSessions.instanceId, row.id), eq(viewerSessions.userId, user.id)));
+    if (!opened || opened.endedAt) throw problem(409, 'invalid_state', 'This viewer session has ended. Open a new session to use this browser here.');
+    return c.json({ session: { id: opened.id, instanceId: row.id, startedAt: opened.startedAt.toISOString() }, operationId }, 201);
   },
 );
 
@@ -753,7 +770,7 @@ v1.openapi(
 const HeartbeatBody = z.object({ input: z.boolean() });
 const HeartbeatResult = z.object({
   sleepAt: z.string().nullable(),
-  /** `balance`: the prepaid balance is used up; the browser sleeps at `sleepAt` regardless of input. */
+  /** `balance`: available prepaid credit is projected to run out at `sleepAt` regardless of input. */
   reason: z.enum(['idle', 'balance', 'trial']).optional(),
 });
 
@@ -788,15 +805,15 @@ v1.openapi(
     if (!inst || inst.status !== 'running') return c.json({ sleepAt: null }, 200);
     const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, h?.lastInputAt?.getTime() ?? 0);
     const idleAt = last + inst.idleTimeoutS * 1000;
-    // Prepaid access ends at the funded lease deadline, without an unpaid grace period.
+    // A paid authorization lease is renewed every minute. Its renewal time is not a sleep
+    // deadline: only a genuine depletion projection should produce a balance warning.
     const access = await prepaidAccess(db, inst.userId, inst.id, now);
-    const { exhaustedAt } = (await billingRequired(db)) ? await billingAccount(db, inst.userId) : { exhaustedAt: null };
     // A free trial browser sleeps when its minutes are used, whatever the input.
     if (inst.trialState === 'active') {
       const trialAt = access.deadlineAt?.getTime() ?? now.getTime() + trialSecondsLeft(inst) * 1000;
       if (trialAt < idleAt) return c.json({ sleepAt: new Date(trialAt).toISOString(), reason: 'trial' as const }, 200);
     }
-    const balanceAt = !isTrial(inst) ? access.deadlineAt?.getTime() ?? (exhaustedAt ? exhaustedAt.getTime() : Infinity) : Infinity;
+    const balanceAt = !isTrial(inst) ? access.balanceDeadlineAt?.getTime() ?? Infinity : Infinity;
     return balanceAt < idleAt
       ? c.json({ sleepAt: new Date(balanceAt).toISOString(), reason: 'balance' as const }, 200)
       : c.json({ sleepAt: new Date(idleAt).toISOString(), reason: 'idle' as const }, 200);

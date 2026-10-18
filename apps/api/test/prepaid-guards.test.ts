@@ -41,6 +41,78 @@ beforeEach(async () => {
 afterEach(() => vi.useRealTimers());
 
 describe('prepaid runtime boundaries', () => {
+  it('checks a fresh authorization snapshot in one D1 round trip, including immediate revocation', async () => {
+    await credit(10_000_000);
+    const id = await create(false); await meter();
+    let requests = 0;
+    let batching = false;
+    const wrap = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, {
+      get(target, key) {
+        const value = Reflect.get(target, key, target);
+        if (typeof value !== 'function') return value;
+        return (...args: unknown[]) => {
+          if (key === 'bind') return wrap(Reflect.apply(value, target, args));
+          if (!batching && ['all', 'first', 'raw', 'run'].includes(String(key))) requests++;
+          return Reflect.apply(value, target, args);
+        };
+      },
+    });
+    const counted = createDb({ ...t.d1,
+      prepare: (query: string) => wrap(t.d1.prepare(query)),
+      async batch(statements: D1PreparedStatement[]) {
+        requests++; batching = true;
+        try { return await t.d1.batch(statements); } finally { batching = false; }
+      },
+    } as D1Database);
+
+    expect(await prepaidAccess(counted, userId, id)).toMatchObject({ allowed: true });
+    expect(requests).toBe(1);
+    t.d1.sqlite.prepare('UPDATE billing_accounts SET frozen_at = ? WHERE user_id = ?').run(Date.now(), userId);
+    expect(await prepaidAccess(counted, userId, id)).toMatchObject({ allowed: false, reason: 'frozen' });
+    expect(requests).toBe(2);
+    t.d1.sqlite.prepare("UPDATE browser_instances SET desired_state = 'deleted' WHERE id = ?").run(id);
+    expect(await prepaidAccess(counted, userId, id)).toMatchObject({ allowed: false, reason: 'deleted' });
+    expect(requests).toBe(3);
+  });
+
+  it('renews funded access without reporting the authorization lease as balance exhaustion', async () => {
+    await credit(10_000_000);
+    const id = await create(false); await meter();
+    const session = await t.call('POST', `/api/v1/instances/${id}/sessions`);
+    expect(session.status).toBe(201);
+    for (const ms of [0, 45_000, 90_000]) {
+      advance(ms);
+      const access = await prepaidAccess(db(), userId, id);
+      expect(access).toMatchObject({ allowed: true, reason: null, balanceDeadlineAt: null });
+      expect(access.deadlineAt?.getTime()).toBe(Date.now() + 60_000);
+      const heartbeat = await t.call('POST', `/api/v1/sessions/${session.body.session.id}/heartbeat`, { input: true });
+      expect(heartbeat.status).toBe(200);
+      expect(heartbeat.body.reason).toBe('idle');
+      expect(Date.parse(heartbeat.body.sleepAt)).toBeGreaterThan(Date.now() + 60_000);
+    }
+  });
+
+  it('still reports actual near-term depletion and clears the warning after new credit', async () => {
+    await credit(10_000_000);
+    const id = await create(false); await meter();
+    const session = await t.call('POST', `/api/v1/instances/${id}/sessions`);
+    expect(session.status).toBe(201);
+    await credit(1_000 - (await prepaidBalance(db(), userId)).availableMicros);
+
+    const access = await prepaidAccess(db(), userId, id);
+    expect(access.allowed).toBe(true);
+    expect(access.balanceDeadlineAt?.getTime()).toBeGreaterThan(Date.now());
+    expect(access.balanceDeadlineAt?.getTime()).toBeLessThan(Date.now() + 60_000);
+    const heartbeat = await t.call('POST', `/api/v1/sessions/${session.body.session.id}/heartbeat`, { input: true });
+    expect(heartbeat).toMatchObject({ status: 200, body: { reason: 'balance', sleepAt: access.balanceDeadlineAt!.toISOString() } });
+
+    advance(access.balanceDeadlineAt!.getTime() - START);
+    expect(await prepaidAccess(db(), userId, id)).toMatchObject({ allowed: false, reason: 'balance' });
+    await credit(10_000_000);
+    expect(await t.call('POST', `/api/v1/sessions/${session.body.session.id}/heartbeat`, { input: true }))
+      .toMatchObject({ status: 200, body: { reason: 'idle' } });
+  });
+
   it('defaults a missing billing flag to prepaid rather than silently enabling free paid browsers', async () => {
     t.d1.sqlite.exec("DELETE FROM control_flags WHERE key = 'billing_required'");
     const price = (await t.call('GET', '/api/v1/pricing')).body.find((p: { regionId: string }) => p.regionId === 'tyo1');

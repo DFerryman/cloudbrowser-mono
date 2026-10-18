@@ -11,7 +11,7 @@ type LiveInstance = { user_id: string; status: string; desired_state: string; ge
 const MAX_FRAME_BYTES = 256 * 1024;
 const MAX_QUEUED_FRAME_BYTES = 1024 * 1024;
 const MAX_QUEUED_FRAMES = 4096;
-/** Input bursts share a short authorization lease; stop/delete RPCs revoke it immediately. */
+/** All relay frames share a short authorization lease; stop/delete RPCs revoke it immediately. */
 const INPUT_AUTH_LEASE_MS = 1000;
 type InputGrant = { instanceId: string; row: LiveInstance; until: number };
 
@@ -34,6 +34,7 @@ export class InstanceGateway extends DurableObject<Env> {
   private queuedFrames = 0;
   private queuedFrameBytes = 0;
   private inputGrants = new Map<string, InputGrant>();
+  private sessionChecks = new Map<string, Promise<boolean>>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // Keepalives are answered without waking the object.
@@ -76,7 +77,7 @@ export class InstanceGateway extends DurableObject<Env> {
     for (const agent of this.sockets('agent')) agent.close(code, reason);
   }
 
-  /** D1 is authoritative; upgrades and alarms always read current state. */
+  /** D1 is authoritative; upgrades and expired authorization leases read current state. */
   private async liveInstance(instanceId: string): Promise<LiveInstance | null> {
     try {
       const row = await this.env.DB.prepare(`SELECT b.user_id, b.status, b.desired_state, a.generation
@@ -109,12 +110,24 @@ export class InstanceGateway extends DurableObject<Env> {
   }
 
   private async validSession(sessionId: string, row: LiveInstance, instanceId: string, allowCached = false): Promise<boolean> {
+    if (row.desired_state !== 'running' || row.status !== 'running') return false;
+    const cached = this.inputGrants.get(sessionId);
+    if (allowCached && cached && cached.instanceId === instanceId && cached.row.user_id === row.user_id
+      && cached.row.generation === row.generation && cached.until > Date.now()) return true;
+    // An alarm, upgrade and the FIFO relay can await the same check. Never launch duplicate
+    // cross-region billing reads for a single authorization decision.
+    const key = `${this.revocationEpoch}:${instanceId}:${row.user_id}:${row.generation}:${sessionId}`;
+    const checking = this.sessionChecks.get(key);
+    if (checking) return checking;
+    const check = this.refreshSession(sessionId, row, instanceId);
+    this.sessionChecks.set(key, check);
+    try { return await check; }
+    finally { if (this.sessionChecks.get(key) === check) this.sessionChecks.delete(key); }
+  }
+
+  private async refreshSession(sessionId: string, row: LiveInstance, instanceId: string): Promise<boolean> {
     const epoch = this.revocationEpoch;
     try {
-      if (row.desired_state !== 'running' || row.status !== 'running') return false;
-      const cached = this.inputGrants.get(sessionId);
-      if (allowCached && cached && cached.instanceId === instanceId && cached.row.user_id === row.user_id
-        && cached.row.generation === row.generation && cached.until > Date.now()) return true;
       const session = await this.env.DB.prepare(`SELECT id FROM viewer_sessions
         WHERE id = ? AND instance_id = ? AND user_id = ? AND ended_at IS NULL`)
         .bind(sessionId, instanceId, row.user_id).first();
@@ -123,10 +136,15 @@ export class InstanceGateway extends DurableObject<Env> {
       if (!access.allowed || epoch !== this.revocationEpoch) return false;
       const until = Math.min(Date.now() + INPUT_AUTH_LEASE_MS, access.deadlineAt?.getTime() ?? Infinity);
       if (until <= Date.now()) return false;
-      this.inputGrants.set(sessionId, { instanceId, row, until });
+      const grant = { instanceId, row, until };
+      this.inputGrants.set(sessionId, grant);
       // A trial or depleted balance is revoked even if the viewer sends no more input frames.
       await this.ctx.storage.setAlarm(until);
-      return epoch === this.revocationEpoch;
+      if (epoch !== this.revocationEpoch || until <= Date.now()) {
+        if (this.inputGrants.get(sessionId) === grant) this.inputGrants.delete(sessionId);
+        return false;
+      }
+      return true;
     } catch {
       this.closeAll('authorization unavailable');
       return false;
@@ -167,7 +185,7 @@ export class InstanceGateway extends DurableObject<Env> {
 
     const row = await this.liveInstance(instanceId);
     if (!row || epoch !== this.revocationEpoch) return new Response('browser unavailable', { status: 403 });
-    await this.pruneSockets(row, instanceId);
+    await this.pruneSockets(row, instanceId, true);
     if (epoch !== this.revocationEpoch) return new Response('browser unavailable', { status: 403 });
 
     const { 0: client, 1: server } = new WebSocketPair();
@@ -194,8 +212,9 @@ export class InstanceGateway extends DurableObject<Env> {
       if (!row.generation || !(await this.validSession(sessionId, row, instanceId)) || epoch !== this.revocationEpoch) return new Response('session revoked', { status: 403 });
       // One controller at a time: the newest viewer takes over (page 5).
       for (const old of this.sockets('viewer')) {
-        this.send(old, { t: 'taken_over' });
-        old.close(4001, 'taken over');
+        const prior = old.deserializeAttachment() as Attachment | null;
+        if (prior?.role === 'viewer' && prior.sessionId === sessionId) old.close(4000, 'reconnected');
+        else { this.send(old, { t: 'taken_over' }); old.close(4001, 'taken over'); }
       }
       this.ctx.acceptWebSocket(server, ['viewer', `session:${sessionId}`]);
       server.serializeAttachment(attachment);
@@ -241,26 +260,38 @@ export class InstanceGateway extends DurableObject<Env> {
       return;
     }
     const attachment = ws.deserializeAttachment() as Attachment | null;
-    const cached = attachment?.role === 'viewer' ? this.inputGrants.get(attachment.sessionId) : null;
-    const data = raw && typeof raw === 'object' && 't' in raw && raw.t === 'neko' && 'data' in raw ? raw.data : null;
-    const inputEvent = data && typeof data === 'object' && 'event' in data && typeof data.event === 'string'
-      && (data.event.startsWith('control/') || data.event.startsWith('clipboard/'));
-    const row = inputEvent && cached && cached.instanceId === instanceId && cached.until > Date.now()
+    const relayedSession = attachment?.role === 'viewer' ? attachment.sessionId
+      : raw && typeof raw === 'object' && 't' in raw && ['viewer', 'viewer_error'].includes(String(raw.t))
+        && 'sessionId' in raw && typeof raw.sessionId === 'string' ? raw.sessionId : null;
+    const cached = relayedSession ? this.inputGrants.get(relayedSession) : null;
+    // SDP and system/init are on the same authorized channel as input. Reading the instance,
+    // session and billing multiple times per signal can stall the entire ordered handshake.
+    const row = cached && cached.instanceId === instanceId && cached.until > Date.now()
       ? cached.row : await this.liveInstance(instanceId);
     if (!row || epoch !== this.revocationEpoch) return;
-    await this.pruneSockets(row, instanceId, !!inputEvent);
-    if (!(await this.validSocket(ws, row, instanceId, !!inputEvent)) || epoch !== this.revocationEpoch) return;
+    await this.pruneSockets(row, instanceId, true);
+    if (!(await this.validSocket(ws, row, instanceId, true)) || epoch !== this.revocationEpoch) return;
     const att = ws.deserializeAttachment() as Attachment;
     if (att.role === 'agent') await this.fromAgent(ws, att, raw);
     else this.fromViewer(att, raw);
   }
 
   override async alarm() {
-    this.inputGrants.clear();
     const instanceId = await this.instanceId();
-    if (!instanceId || !this.sockets('viewer').length) return;
+    const viewers = this.sockets('viewer');
+    if (!instanceId || !viewers.length) return;
+    // A frame may have renewed an expiring lease before this alarm was delivered. Preserve the
+    // renewed grant; it already scheduled its own bounded deadline. Expired grants are rechecked.
+    const grants = viewers.map(viewer => {
+      const att = viewer.deserializeAttachment() as Attachment | null;
+      return att?.role === 'viewer' ? this.inputGrants.get(att.sessionId) : null;
+    });
+    if (grants.every(grant => grant && grant.instanceId === instanceId && grant.until > Date.now())) {
+      await this.ctx.storage.setAlarm(Math.min(...grants.map(grant => grant!.until)));
+      return;
+    }
     const row = await this.liveInstance(instanceId);
-    if (row) await this.pruneSockets(row, instanceId);
+    if (row) await this.pruneSockets(row, instanceId, true);
   }
 
   private async fromAgent(ws: WebSocket, att: Extract<Attachment, { role: 'agent' }>, raw: unknown) {
@@ -346,7 +377,7 @@ export class InstanceGateway extends DurableObject<Env> {
     if (!instanceId) return;
     const row = await this.liveInstance(instanceId);
     if (!row) return;
-    await this.pruneSockets(row, instanceId);
+    await this.pruneSockets(row, instanceId, true);
     const agent = this.sockets('agent')[0];
     if (!agent || epoch !== this.revocationEpoch) return;
     const { results } = await this.env.DB.prepare(

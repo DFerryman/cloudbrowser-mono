@@ -222,17 +222,21 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
           )}
           {trial ? null : <p className="text-xs text-muted">{t('create.chargesStart')}</p>}
           {b && !trial ? (
-            <p className="border-t border-border pt-3 text-sm">
-              {t('create.balance', { amount: money(b.availableMicros ?? 0, locale) })}{' '}
+            <div className="space-y-1 border-t border-border pt-3 text-sm">
+              <p>{t('billing.totalBalance', { amount: money(b.balanceMicros, locale) })}</p>
+              <p className="text-muted">{t('billing.availableAndReserved', {
+                available: money(b.availableMicros, locale),
+                reserved: money(b.reservedMicros, locale),
+              })}</p>
               {needsCredit ? (
-                <>
+                <p>
                   <span className="text-error">{t(b.frozen ? 'billing.frozen' : 'create.needCredit', { amount: money(minimumSpendBalance(b) + reserve, locale) })}</span>{' '}
                   <Link to="/billing" className="font-medium text-accent hover:underline">
                     {t('create.addCredit')}
                   </Link>
-                </>
+                </p>
               ) : null}
-            </p>
+            </div>
           ) : null}
         </aside>
 

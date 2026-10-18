@@ -30,6 +30,11 @@ export function BillingSuccessPage() {
         {done && billing.data ? (
           <>
             <p className="text-base font-medium text-fg">{t('billing.success.done', { amount: money(billing.data.balanceMicros, locale) })}</p>
+            <p>{t('billing.availableAndReserved', {
+              available: money(billing.data.availableMicros, locale),
+              reserved: money(billing.data.reservedMicros, locale),
+            })}</p>
+            <p className="text-sm text-muted">{t('billing.reserveHint')}</p>
             <Link to="/billing">
               <Button variant="primary">{t('billing.success.go')}</Button>
             </Link>

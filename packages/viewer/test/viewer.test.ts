@@ -554,7 +554,7 @@ describe('RemoteBrowser', () => {
     ws.push({ t: 'neko', data: { event: 'system/init' } });
     ws.push({ t: 'neko', data: { event: 'signal/candidate', payload: { candidate: 'before-offline' } } });
     ws.push({ t: 'agent_offline' });
-    expect(vi.getTimerCount()).toBe(0);
+    expect(vi.getTimerCount()).toBe(1); // an offline agent also has a bounded reconnect deadline
     ws.push({ t: 'agent_online' });
     expect(ws.neko('signal/request')).toHaveLength(1);
     ws.push({ t: 'neko', data: { event: 'system/init' } });
@@ -565,7 +565,120 @@ describe('RemoteBrowser', () => {
 
     expect(FakePC.last.candidates).toEqual([]);
     expect(ws.neko('signal/answer')).toHaveLength(1);
+    FakePC.last.connect();
+    b.button(true, 0, 100, 100);
+    b.button(false, 0, 100, 100);
+    expect(ws.neko('control/buttondown')).toEqual([{ code: 1 }]);
+    expect(ws.neko('control/buttonup')).toEqual([{ code: 1 }]);
     b.disconnect();
+  });
+
+  it('retries when a WebSocket upgrade never delivers the first gateway frame', async () => {
+    vi.useFakeTimers();
+    const { b, getConnectInfo, states } = setup([], { connectionTimeoutMs: 1000 });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.readyState = 0;
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(ws.readyState).toBe(3);
+    expect(states.at(-1)).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    b.disconnect();
+  });
+
+  it('does not wait forever when a running browser has no connected agent', async () => {
+    vi.useFakeTimers();
+    const { b, getConnectInfo, states } = setup([], { connectionTimeoutMs: 1000 });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_offline' });
+    expect(states.at(-1)).toBe('agent-offline');
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(ws.readyState).toBe(3);
+    expect(states.at(-1)).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    b.disconnect();
+  });
+
+  it('ignores an older token response that arrives after a repeated connection attempt', async () => {
+    const { b, getConnectInfo } = setup();
+    let finishOld!: (info: { gatewayUrl: string; token: string; iceServers: [] }) => void;
+    getConnectInfo.mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }));
+    const oldAttempt = b.connect();
+    await b.connect();
+    expect(FakeWS.all).toHaveLength(1);
+    const current = FakeWS.all[0]!;
+    finishOld({ gatewayUrl: 'wss://gw/v1/stream/i1', token: 'stale', iceServers: [] });
+    await oldAttempt;
+
+    expect(FakeWS.all).toHaveLength(1);
+    expect(current.readyState).toBe(1);
+    b.disconnect();
+  });
+
+  it('does not let a stale failed connection schedule a retry over the current socket', async () => {
+    vi.useFakeTimers();
+    const { b, getConnectInfo, states } = setup();
+    let rejectOld!: (error: Error) => void;
+    getConnectInfo.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectOld = reject; }));
+    const oldAttempt = b.connect();
+    await b.connect();
+    const current = FakeWS.all[0]!;
+    rejectOld(new Error('outdated request failed'));
+    await oldAttempt;
+
+    expect(states.at(-1)).toBe('connecting');
+    expect(vi.getTimerCount()).toBe(1); // current socket's deadline, no stale retry
+    expect(current.readyState).toBe(1);
+    b.disconnect();
+  });
+
+  it('does not revive a disconnected page from an outstanding token response', async () => {
+    const { b, getConnectInfo, states } = setup();
+    let finish!: (info: { gatewayUrl: string; token: string; iceServers: [] }) => void;
+    getConnectInfo.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const attempt = b.connect();
+    b.disconnect();
+    finish({ gatewayUrl: 'wss://gw/v1/stream/i1', token: 'late', iceServers: [] });
+    await attempt;
+
+    expect(FakeWS.all).toHaveLength(0);
+    expect(states.at(-1)).toBe('closed');
+  });
+
+  it('bounds a stalled token request and ignores its response after the fresh attempt starts', async () => {
+    vi.useFakeTimers();
+    const { b, getConnectInfo, states } = setup([], { connectionTimeoutMs: 1000 });
+    let finishOld!: (info: { gatewayUrl: string; token: string; iceServers: [] }) => void;
+    getConnectInfo.mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }));
+    const stalled = b.connect();
+    await vi.advanceTimersByTimeAsync(1000);
+    await stalled;
+    expect(states.at(-1)).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    expect(FakeWS.all).toHaveLength(1);
+
+    finishOld({ gatewayUrl: 'wss://gw/v1/stream/i1', token: 'expired', iceServers: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(FakeWS.all).toHaveLength(1);
+    b.disconnect();
+  });
+
+  it('cancels a pending token deadline immediately when the page disconnects', async () => {
+    vi.useFakeTimers();
+    const { b, getConnectInfo } = setup();
+    getConnectInfo.mockImplementationOnce(() => new Promise(() => {}));
+    const pending = b.connect();
+    b.disconnect();
+    await pending;
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(FakeWS.all).toHaveLength(0);
   });
 
   it('retries with a fresh token when an online agent never provides an offer', async () => {

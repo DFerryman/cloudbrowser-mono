@@ -86,7 +86,7 @@ beforeEach(() => {
   gateway = new InstanceGateway(ctx as unknown as DurableObjectState, env);
 });
 
-afterEach(() => { d1.sqlite.close(); vi.unstubAllGlobals(); });
+afterEach(() => { d1.sqlite.close(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 async function open(role: 'agent' | 'viewer', headers: Record<string, string> = {}) {
   const response = await gateway.fetch(new Request('https://gateway/socket', {
@@ -97,6 +97,13 @@ async function open(role: 'agent' | 'viewer', headers: Record<string, string> = 
 }
 
 const frame = (socket: Socket, payload: unknown) => gateway.webSocketMessage(socket as unknown as WebSocket, JSON.stringify(payload));
+
+function expireAuthorizationLease() {
+  // A lost RPC is caught at the existing one-second authorization boundary. This applies to
+  // signaling as well as input; explicit stop/delete RPCs above still revoke synchronously.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(Date.now() + 1001);
+}
 
 describe('gateway revocation', () => {
   it('keeps normal viewer signaling, agent heartbeat and command delivery working', async () => {
@@ -114,6 +121,48 @@ describe('gateway revocation', () => {
     expect(env.API.agentMessage).toHaveBeenCalledWith('browser1', 1, { t: 'event', kind: 'heartbeat', data: {} });
     expect(agent.socket.sent.at(-1)).toMatchObject({ t: 'command', id: 'cmd1' });
     expect(d1.sqlite.prepare(`SELECT status FROM agent_commands WHERE id = 'cmd1'`).get()).toEqual({ status: 'delivered' });
+  });
+
+  it('forwards a complete ordered handshake and input burst without repeated remote authorization reads', async () => {
+    const agent = await open('agent');
+    const viewer = await open('viewer');
+    const prepare = d1.prepare.bind(d1);
+    const reads = vi.spyOn(d1, 'prepare');
+    // An established authorization lease must work even while D1 has cross-region latency.
+    // A single attempted extra read is blocked until all frames have had a chance to queue.
+    let release!: () => void;
+    const remote = new Promise<void>(resolve => { release = resolve; });
+    reads.mockImplementation(sql => {
+      const wrap = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, {
+        get(target, key) {
+          if (key === 'bind') return (...values: unknown[]) => wrap(target.bind(...values));
+          if (key === 'first' || key === 'all' || key === 'raw' || key === 'run') return async (...args: unknown[]) => {
+            await remote;
+            return (target[key] as (...args: unknown[]) => Promise<unknown>).apply(target, args);
+          };
+          return Reflect.get(target, key);
+        },
+      });
+      return wrap(prepare(sql));
+    });
+    const burst = [
+      frame(agent.socket, { t: 'viewer', sessionId: 'viewer1', data: { event: 'system/init' } }),
+      frame(viewer.socket, { t: 'neko', data: { event: 'signal/request' } }),
+      frame(agent.socket, { t: 'viewer', sessionId: 'viewer1', data: { event: 'signal/provide' } }),
+      frame(viewer.socket, { t: 'neko', data: { event: 'signal/answer' } }),
+      frame(viewer.socket, { t: 'neko', data: { event: 'control/keydown', payload: { keysym: 97 } } }),
+      frame(viewer.socket, { t: 'neko', data: { event: 'control/keyup', payload: { keysym: 97 } } }),
+    ];
+    // Bounded turns instead of a timing assertion: a DB read would keep this burst blocked.
+    for (let turn = 0; turn < 30; turn++) await Promise.resolve();
+    const readCount = reads.mock.calls.length;
+    release();
+    await Promise.all(burst);
+    expect({ blockedQueries: readCount, totalQueries: reads.mock.calls.length }).toEqual({ blockedQueries: 0, totalQueries: 0 });
+    expect(viewer.socket.sent.filter((f: any) => f.t === 'neko').map((f: any) => f.data.event))
+      .toEqual(['system/init', 'signal/provide']);
+    expect(agent.socket.sent.filter((f: any) => f.t === 'viewer').map((f: any) => f.data.data.event))
+      .toEqual(['signal/request', 'signal/answer', 'control/keydown', 'control/keyup']);
   });
 
   it('immediately closes both tunnels through trusted RPC and never exposes a public revoke URL', async () => {
@@ -235,6 +284,7 @@ describe('gateway revocation', () => {
     const viewer = await open('viewer');
     expect(viewer.response.status).toBe(101);
     d1.sqlite.exec(`UPDATE billing_accounts SET balance_micros=1000000`);
+    expireAuthorizationLease();
     await gateway.alarm();
     expect(viewer.socket.closed?.code).toBe(4003);
     expect(agent.socket.closed).toBeNull();
@@ -276,6 +326,115 @@ describe('gateway revocation', () => {
     expect(replacement.socket.sent).toContainEqual({t:'viewer_open',sessionId:'viewer1',relayId});
   });
 
+  it('replaces the same session without a false takeover or closing the new relay', async () => {
+    const agent = await open('agent');
+    const previous = await open('viewer');
+    const current = await open('viewer');
+    const relayId = (current.socket.attachment as { relayId: string }).relayId;
+    expect(previous.socket.sent).not.toContainEqual({ t: 'taken_over' });
+    expect(previous.socket.closed).toEqual({ code: 4000, reason: 'reconnected' });
+    const before = agent.socket.sent.length;
+    await gateway.webSocketClose(previous.socket as unknown as WebSocket);
+    expect(agent.socket.sent).toHaveLength(before);
+    await frame(agent.socket, { t: 'viewer', sessionId: 'viewer1', relayId, data: { event: 'system/init' } });
+    expect(current.socket.closed).toBeNull();
+    expect(current.socket.sent.at(-1)).toEqual({ t: 'neko', data: { event: 'system/init' } });
+  });
+
+  it('still immediately takes over a genuinely different session', async () => {
+    await open('agent');
+    const previous = await open('viewer');
+    d1.sqlite.exec(`INSERT INTO viewer_sessions (id,instance_id,user_id,started_at,last_seen_at)
+      VALUES ('viewer2','browser1','owner1',0,0)`);
+    const current = await open('viewer', { 'x-cb-session': 'viewer2' });
+    expect(current.response.status).toBe(101);
+    expect(previous.socket.sent.at(-1)).toEqual({ t: 'taken_over' });
+    expect(previous.socket.closed).toEqual({ code: 4001, reason: 'taken over' });
+    expect(current.socket.closed).toBeNull();
+  });
+
+  it('does not let a short remaining trial run past its exact deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
+    d1.sqlite.prepare(`UPDATE browser_instances SET trial_state='active',trial_used_s=599,trial_used_ms=599750,last_active_at=?`).run(Date.now());
+    const agent = await open('agent');
+    const viewer = await open('viewer');
+    const deadline = Date.now() + 250;
+    expect(viewer.response.status).toBe(101);
+    expect(await ctx.storage.get('alarm')).toBe(deadline);
+    vi.setSystemTime(deadline);
+    const before = viewer.socket.sent.length;
+    await frame(agent.socket, { t: 'viewer', sessionId: 'viewer1', data: { event: 'signal/provide' } });
+    expect(viewer.socket.closed?.code).toBe(4003);
+    expect(viewer.socket.sent).toHaveLength(before);
+    expect(agent.socket.closed).toBeNull();
+  });
+
+  it('rejects an authorization that expires while its alarm write is pending', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
+    d1.sqlite.prepare(`UPDATE browser_instances SET trial_state='active',trial_used_s=599,trial_used_ms=599750,last_active_at=?`).run(Date.now());
+    vi.spyOn(ctx.storage, 'setAlarm').mockImplementation(async at => { vi.setSystemTime(at); });
+    expect((await open('viewer')).response.status).toBe(403);
+    expect(ctx.getWebSockets('viewer')).toHaveLength(0);
+  });
+
+  it('caps a paid authorization by its remaining funded time after a slow DB response', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
+    d1.sqlite.exec(`
+      UPDATE control_flags SET value='true' WHERE key='billing_required';
+      INSERT INTO provider_prices (region_id,executor,provider_region,sheet,fetched_at)
+        VALUES ('tyo1','fake','ap-northeast-1','{"source":"simulated","instanceType":"fake.large","vmHour":0.1,"instanceTypes":{"fake.large":0.1},"volumeGbMonth":0.08,"snapshotGbMonth":0.05,"ipHour":0.005,"transferOutGb":0.09,"rootVolumeGb":16,"effectiveDate":null}',0);
+      INSERT INTO billing_accounts (user_id,balance_micros,updated_at) VALUES ('owner1',2000000,0);
+      INSERT INTO browser_reservations (instance_id,user_id,required_micros,reserved_micros,fixed_hour_micros,rates,updated_at)
+        VALUES ('browser1','owner1',1000000,1000000,1000,'{"compute":120000,"ip":6000,"storage":96000,"snapshot":60000,"transfer":108000}',0);
+      UPDATE billing_accounts SET balance_micros=1000050 WHERE user_id='owner1';
+    `);
+    d1.sqlite.prepare(`UPDATE browser_instances SET last_active_at=?`).run(Date.now());
+    const agent = await open('agent');
+    const batch = d1.batch.bind(d1);
+    vi.spyOn(d1, 'batch').mockImplementationOnce(async statements => {
+      const result = await batch(statements);
+      vi.setSystemTime(Date.now() + 700);
+      return result;
+    });
+    const viewer = await open('viewer');
+    expect(viewer.response.status).toBe(101);
+    const deadline = await ctx.storage.get('alarm') as number;
+    expect(deadline - Date.now()).toBeGreaterThan(0);
+    expect(deadline - Date.now()).toBeLessThan(1000);
+    vi.setSystemTime(deadline);
+    await gateway.alarm();
+    expect(viewer.socket.closed?.code).toBe(4003);
+    expect(agent.socket.closed).toBeNull();
+  });
+
+  it('shares one fresh session authorization between an expired alarm and queued signaling', async () => {
+    const agent = await open('agent');
+    const viewer = await open('viewer');
+    expireAuthorizationLease();
+    const batch = d1.batch.bind(d1);
+    let entered!: () => void;
+    let release!: () => void;
+    const reading = new Promise<void>(resolve => { entered = resolve; });
+    const remote = new Promise<void>(resolve => { release = resolve; });
+    const reads = vi.spyOn(d1, 'batch').mockImplementationOnce(async statements => {
+      entered();
+      await remote;
+      return batch(statements);
+    });
+    const alarm = gateway.alarm();
+    await reading;
+    const signal = frame(viewer.socket, { t: 'neko', data: { event: 'signal/request' } });
+    for (let turn = 0; turn < 30; turn++) await Promise.resolve();
+    release();
+    await Promise.all([alarm, signal]);
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(agent.socket.sent.at(-1)).toMatchObject({ t: 'viewer', data: { t: 'neko', data: { event: 'signal/request' } } });
+    expect(viewer.socket.closed).toBeNull();
+  });
+
   it('requeues an active command when its claimed socket send failed', async () => {
     const agent=await open('agent');
     d1.sqlite.exec(`INSERT INTO agent_commands (id,instance_id,kind,payload,status,created_at)
@@ -295,6 +454,7 @@ describe('gateway revocation', () => {
     if (change === 'intent') d1.sqlite.exec(`UPDATE browser_instances SET desired_state = 'deleted' WHERE id = 'browser1'`);
     else if (change === 'missing') { d1.sqlite.exec('PRAGMA foreign_keys = OFF'); d1.sqlite.exec(`DELETE FROM browser_instances WHERE id = 'browser1'`); }
     else d1.sqlite.prepare(`UPDATE browser_instances SET status = ? WHERE id = 'browser1'`).run(change);
+    expireAuthorizationLease();
     const before = agent.socket.sent.filter((f: any) => f.t === 'viewer').length;
     await frame(viewer.socket, { t: 'ime', text: 'private text' });
     expect(agent.socket.sent.filter((f: any) => f.t === 'viewer')).toHaveLength(before);
@@ -308,6 +468,7 @@ describe('gateway revocation', () => {
     const agent = await open('agent');
     const viewer = await open('viewer');
     d1.sqlite.exec(`UPDATE viewer_sessions SET ended_at = 10 WHERE id = 'viewer1'`);
+    expireAuthorizationLease();
     const before = viewer.socket.sent.length;
     await frame(agent.socket, { t: 'viewer', sessionId: 'viewer1', data: { event: 'sensitive' } });
     expect(viewer.socket.sent).toHaveLength(before);
@@ -324,6 +485,7 @@ describe('gateway revocation', () => {
     const agent = await open('agent');
     const viewer = await open('viewer');
     d1.sqlite.exec(`UPDATE agent_credentials SET generation = 2 WHERE instance_id = 'browser1'`);
+    expireAuthorizationLease();
     const before = viewer.socket.sent.length;
     await frame(agent.socket, { t: 'viewer', sessionId: 'viewer1', data: 'secret' });
     expect(agent.socket.closed?.code).toBe(4003);
@@ -347,6 +509,7 @@ describe('gateway revocation', () => {
   it('fails closed on a database error rather than continuing an existing relay', async () => {
     const agent = await open('agent');
     const viewer = await open('viewer');
+    expireAuthorizationLease();
     vi.spyOn(d1, 'prepare').mockImplementation(() => { throw new Error('database unavailable'); });
     await frame(agent.socket, { t: 'viewer', sessionId: 'viewer1', data: 'secret' });
     expect(agent.socket.closed).not.toBeNull();

@@ -5,10 +5,10 @@ import { useState } from 'react';
 import { Link } from 'react-router';
 import { PageHeader } from '../../app/AppShell.js';
 import { useI18n } from '../../lib/i18n.js';
-import { cents, money } from '../../lib/money.js';
+import { money } from '../../lib/money.js';
 import { regionKey } from '../instances/status.js';
-import { currentMonth, monthLabel, recentMonths, useAccountUsage, useBilling, useCheckout, usePortal, usePricing, useTransactions } from './hooks.js';
-import { PriceBreakdown } from './PriceBreakdown.js';
+import { DailyCharges } from './DailyCharges.js';
+import { currentMonth, monthLabel, recentMonths, useAccountUsage, useBilling, useCheckout, usePortal, useTransactions } from './hooks.js';
 
 const ITEM_COLOR: Record<UsageItem, string> = {
   compute: 'bg-accent',
@@ -20,7 +20,7 @@ const ITEM_COLOR: Record<UsageItem, string> = {
 
 /**
  * Account-level billing (page 6): balance and top-ups, this month's spending across every browser,
- * credit history, how billing works and the prices per region. One browser's own usage is on its
+ * credit history and how billing works. One browser's own usage is on its
  * Usage tab.
  */
 export function BillingPage() {
@@ -46,7 +46,6 @@ export function BillingPage() {
             <Transactions />
             <HowItWorks />
           </div>
-          <PriceList />
         </div>
       ) : null}
     </>
@@ -78,10 +77,18 @@ function BalanceCard({ state }: { state: BillingState }) {
   return (
     <Card className="flex flex-col p-5">
       <h2 className="text-base font-semibold">{t('billing.balance')}</h2>
-      <p className={cn('mt-2 text-3xl font-semibold tabular-nums', state.availableMicros <= 0 && 'text-error')}>{m(state.availableMicros ?? 0)}</p>
+      <p className={cn('mt-2 text-3xl font-semibold tabular-nums', state.balanceMicros < 0 && 'text-error')}>{m(state.balanceMicros)}</p>
       <p className="mt-1 text-sm text-muted">{t('billing.balanceHint')}</p>
-      <p className="mt-3 text-sm">{t('billing.totalBalance', { amount: m(state.balanceMicros) })}</p>
-      <p className="text-sm">{t('billing.reservedBalance', { amount: m(state.reservedMicros ?? 0) })}</p>
+      <dl className="mt-3 space-y-1 text-sm">
+        <div className="flex items-center justify-between gap-3">
+          <dt className="text-muted">{t('billing.availableBalance')}</dt>
+          <dd className={cn('tabular-nums', state.availableMicros <= 0 && 'text-error')}>{m(state.availableMicros)}</dd>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <dt className="text-muted">{t('billing.reservedBalance')}</dt>
+          <dd className="tabular-nums">{m(state.reservedMicros)}</dd>
+        </div>
+      </dl>
       <p className="mt-1 text-xs text-muted">{t('billing.reserveHint')}</p>
       <div className="mt-3 space-y-1 text-sm">
         <p>{state.burnHourMicros > 0 ? t('billing.burn', { amount: m(state.burnHourMicros) }) : t('billing.burnNone')}</p>
@@ -107,13 +114,12 @@ function BalanceCard({ state }: { state: BillingState }) {
       ) : null}
 
       <div className="mt-5 border-t border-border pt-4">
-        <h3 className="text-sm font-medium">{t('billing.topUp')}</h3>
         {!state.enabled ? (
           <p className="mt-1 text-sm text-muted">{t('billing.unavailable')}</p>
         ) : state.topUps.length === 0 ? (
           <p className="mt-1 text-sm text-muted">{t('billing.noTopUps')}</p>
         ) : (
-          <div className="mt-2 grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-2">
             {state.topUps.map((p) => (
               <Button
                 key={p.productId}
@@ -122,7 +128,7 @@ function BalanceCard({ state }: { state: BillingState }) {
                 disabled={checkout.isPending || state.frozen}
                 onClick={() => checkout.mutate(p.productId, { onError: (e) => toast(errorMessage(e), 'error') })}
               >
-                {t('billing.topUpButton', { amount: m(cents(p.amountCents)) })}
+                {t('billing.topUp')}
               </Button>
             ))}
           </div>
@@ -176,7 +182,6 @@ function MonthCard({ totals, month, className }: { totals: UsageTotals; month: s
   const { t, locale } = useI18n();
   const usage = useAccountUsage(month);
   const days = usage.data?.byDay ?? [];
-  const max = Math.max(1, ...days.map((d) => d.totalMicros));
   return (
     <Card className={cn('p-5', className)}>
       <h2 className="text-base font-semibold">{t('billing.thisMonth')}</h2>
@@ -185,23 +190,7 @@ function MonthCard({ totals, month, className }: { totals: UsageTotals; month: s
       <div className="mt-4">
         <ItemBreakdown totals={totals} />
       </div>
-      {days.length ? (
-        <div className="mt-5">
-          <h3 className="mb-2 text-sm font-medium">{t('billing.byDay')}</h3>
-          <div className="flex h-20 items-end gap-1" role="list">
-            {days.map((d) => (
-              <div
-                key={d.day}
-                role="listitem"
-                title={`${d.day}: ${money(d.totalMicros, locale)}`}
-                aria-label={`${d.day}: ${money(d.totalMicros, locale)}`}
-                className="min-w-1 flex-1 rounded-t bg-accent/70"
-                style={{ height: `${Math.max(4, (d.totalMicros / max) * 100)}%` }}
-              />
-            ))}
-          </div>
-        </div>
-      ) : null}
+      <DailyCharges days={days} />
     </Card>
   );
 }
@@ -338,32 +327,6 @@ function HowItWorks() {
         <li>{t('billing.how.2')}</li>
         <li>{t('billing.how.3')}</li>
       </ol>
-    </Section>
-  );
-}
-
-/** Customer prices per region, side by side. */
-function PriceList() {
-  const { t } = useI18n();
-  const pricing = usePricing();
-  const regions = (pricing.data ?? []).filter((p) => p.rates);
-  return (
-    <Section title={t('billing.prices')} description={t('billing.pricesHint')}>
-      {pricing.isPending ? (
-        <Skeleton className="h-24" />
-      ) : (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {regions.map((p) => (
-            <div key={p.regionId} className="rounded-[var(--radius-control)] border border-border p-3">
-              <h3 className="font-medium">{t(regionKey(p.regionId))}</h3>
-              {p.machine ? <p className="text-xs text-muted">{t('price.machineShort', { vcpu: p.machine.vcpu, memory: p.machine.memoryGb })}</p> : null}
-              <div className="mt-2">
-                <PriceBreakdown pricing={p} />
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
     </Section>
   );
 }

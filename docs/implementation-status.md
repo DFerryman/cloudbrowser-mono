@@ -27,8 +27,8 @@ Cloudflare deployment.
   5-minute IP checks with fail-closed status, change-IP rollback, and a separate **reaper**
   deployment (permanent user-delete cleanup, system retention purge after 7 days, failed-create cleanup, rejected/superseded IPs after 30 days,
   orphans after 24 h).
-- **Backups and recovery** (page 4, page 10): a daily provider snapshot of each volume (cron, kept
-  7 days, the newest always kept); an encrypted profile archive at each sleep (the agent closes
+- **Internal recovery** (page 4, page 10): user snapshots and the daily snapshot cron are removed.
+  An encrypted profile archive is retained at each sleep (the agent closes
   Chrome, packs the profile without caches, zstd, chunked AES-256-GCM with a per-browser key, and
   PUTs it to a presigned R2 URL; the last 10 plus one a day for 14 days are kept). Snapshots restore
   while asleep (new volume from the snapshot, swapped in, IP unchanged); archives restore while
@@ -75,9 +75,11 @@ Cloudflare deployment.
   system can grow online without restarting Chrome or the VM. User snapshot controls, public
   backup/restore routes and automatic daily snapshots are removed; existing snapshot resources
   and temporary internal recovery snapshots are still cleaned up safely and are not user charges.
-- **Usage pages**: the Billing & usage page shows the balance, top-ups, transactions, this month's
-  spend by item, by browser and by day, and the current price list. Each browser's Usage tab
-  shows its own spend and what it costs per hour now.
+- **Usage pages**: the main balance is all unspent credit, including the frozen seven-day
+  resource deposit; available and frozen amounts are listed separately. Freezing is not a debit.
+  Billing & usage shows top-ups, transactions and this month's spend by item, by browser and in
+  a date-labelled UTC daily charge table. It has no regional price catalogue. The top-up button
+  opens Creem to choose the payment amount. Each browser's Usage tab shows its own charges.
 - **Operator console** (page 10): `/admin` (code-split, English-only) on `/api/v1/admin/*`, behind
   the `admins` table, an IP allowlist (plus a recommended WAF rule) and a passkey step-up that lasts
   30 minutes per session. Overview (browsers by status, unfinished and failed operations, findings,
@@ -107,7 +109,9 @@ Cloudflare deployment.
   email codes sent with Cloudflare Email Service (invite-only), Workers Rate Limiting on sign-in and
   writes, the IP echo endpoint, Idempotency-Key on lifecycle calls, admission checks (plan, region,
   global caps, quota headroom, spend guard, creation freeze), viewer sessions with take-over and
-  idle heartbeats, IP verify, IP change requests, backups list and restore, SSE with `Last-Event-ID` resume.
+  idle heartbeats, IP verify, IP change requests and SSE with `Last-Event-ID` resume. Viewer open
+  requests accept a stable Idempotency-Key so a timed-out retry cannot take over its own session.
+  Paid access renewal deadlines are separate from actual credit-depletion warnings.
 - **Session gateway** (`apps/gateway`): a Worker on `connect.example.com` plus one `InstanceGateway`
   Durable Object per browser (WebSocket hibernation). Agents authenticate with a single-use
   bootstrap token (swapped for a long-lived credential) or that credential, checked through the
@@ -127,14 +131,17 @@ Cloudflare deployment.
 - **Live view plumbing**: `GET /v1/sessions/:id/connect` returns the gateway URL, a viewer token and
   Cloudflare Realtime TURN credentials for real placements (or with `LIVE_VIEW=on`).
 - **Live view** (`packages/viewer`, session view): neko v3 signaling through the gateway, a
-  receive-only RTCPeerConnection (relay-only when TURN servers are present), input on the data
-  channel (pointer coalesced per frame, wheel, buttons, keys with X11 keysyms, Cmd→Ctrl on macOS,
-  release-all on blur), IME text through the agent, paste (local clipboard → remote, then Ctrl+V)
+  receive-only RTCPeerConnection (relay-only when TURN servers are present), ordered WebSocket
+  input (pointer, wheel, buttons, keys with X11 keysyms, Cmd→Ctrl on macOS, release-all on blur),
+  paired-key IME text and paste (local clipboard → remote, then Ctrl+V)
   and remote clipboard → local, remote cursor drawn locally, remote screen size following the
   viewport (debounced, at most every 5 s), stats every 2 s with the toolbar indicator, reconnect with
-  backoff and a fresh single-use token, take-over. Verified end to end in Chromium against a fake neko.
-- **Images** (`images/`): browser image (neko v3 + Chrome, policies, fonts, flags) and Packer golden
-  VM image (agent unit, nftables rules). Written, not built yet.
+  backoff and a fresh single-use token, take-over. HTTP/token and transport waits are bounded;
+  stale asynchronous responses cannot overwrite a replacement session. Authorization uses one
+  current D1 batch and an existing one-second grant for relay bursts; stop/delete RPC revocation
+  and hard trial/funding deadlines remain enforced. Same-session reconnects do not report take-over.
+- **Images** (`images/`): browser and agent containers are built and published to GHCR. The
+  pre-built Packer golden VM image remains planned.
 - **Web** (`apps/web`, `packages/ui`): design tokens from page 1, app shell, sign-in, dashboard with
   live status, create dialog (region, permanence note, advanced options, four progress steps,
   auto-open when ready), session view (44 px toolbar, region/IP chip, every state overlay, idle

@@ -28,7 +28,7 @@ export interface RemoteBrowserOptions {
   /** Map Cmd → Ctrl and Option → Alt (macOS default, page 5). */
   macToPc?: boolean;
   statsIntervalMs?: number;
-  /** Maximum time for signaling and WebRTC to connect before retrying. Defaults to 20 s. */
+  /** Maximum time per token fetch or transport/WebRTC handshake before retrying. Defaults to 20 s. */
   connectionTimeoutMs?: number;
   WebSocketImpl?: typeof WebSocket;
   RTCPeerConnectionImpl?: typeof RTCPeerConnection;
@@ -59,6 +59,8 @@ export class RemoteBrowser {
   private dc: RTCDataChannel | null = null;
   private state: ViewerState = 'closed';
   private attempt = 0;
+  private connectSequence = 0;
+  private cancelConnectInfo: (() => void) | null = null;
   private stopped = true;
   private signalRequested = false;
   private remoteDescriptionReady = false;
@@ -113,28 +115,51 @@ export class RemoteBrowser {
   }
 
   async connect(): Promise<void> {
+    const sequence = ++this.connectSequence;
+    this.cancelConnectInfo?.();
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     this.clearConnectionTimer();
+    this.releaseTransportKeys();
+    this.inputQueue.clear();
+    const old = this.ws;
+    this.ws = null;
+    old?.close();
     this.teardownPeer();
     this.inputQueue.resume();
     this.screenConfigurations = [];
     this.stopped = false;
     this.setState(this.attempt === 0 ? 'connecting' : 'reconnecting');
     let info: ConnectInfo;
+    let infoTimer: ReturnType<typeof setTimeout> | undefined;
+    let cancelInfo: (() => void) | undefined;
     try {
-      info = await this.opts.getConnectInfo();
+      const pendingInfo = this.opts.getConnectInfo();
+      const deadline = new Promise<never>((_resolve, reject) => {
+        infoTimer = setTimeout(() => reject(new Error('connection information timed out')), this.opts.connectionTimeoutMs ?? CONNECTION_TIMEOUT_MS);
+        cancelInfo = () => reject(new Error('connection attempt replaced'));
+        this.cancelConnectInfo = cancelInfo;
+      });
+      info = await Promise.race([pendingInfo, deadline]);
     } catch {
-      this.scheduleReconnect();
+      if (sequence === this.connectSequence) this.scheduleReconnect();
       return;
+    } finally {
+      clearTimeout(infoTimer);
+      if (this.cancelConnectInfo === cancelInfo) this.cancelConnectInfo = null;
     }
-    if (this.stopped) return;
+    // A repeated Retry click or a slow, older token response must not create a second
+    // socket which would take over the newer connection from this same page.
+    if (this.stopped || sequence !== this.connectSequence) return;
     this.iceServers = info.iceServers;
     this.signalRequested = false;
     const WS = this.opts.WebSocketImpl ?? WebSocket;
     const sep = info.gatewayUrl.includes('?') ? '&' : '?';
     const ws = new WS(`${info.gatewayUrl}${sep}token=${encodeURIComponent(info.token)}`);
     this.ws = ws;
+    // A blocked WebSocket upgrade may never deliver agent_online or even an error event.
+    // Bound the whole transport handshake rather than waiting for the first server frame.
+    this.startConnectionTimer(ws);
     ws.onmessage = (e) => {
       if (this.ws === ws && !this.stopped) this.onGatewayFrame(e.data, ws);
     };
@@ -150,6 +175,8 @@ export class RemoteBrowser {
   }
 
   disconnect() {
+    this.connectSequence++;
+    this.cancelConnectInfo?.();
     this.stopped = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
@@ -456,7 +483,12 @@ export class RemoteBrowser {
       case 'agent_online':
         // The tunnel is online before the agent's local neko relay is necessarily ready.
         // Neko's system/init is the acknowledgment that it can receive signal/request.
-        if (this.state !== 'live') this.startConnectionTimer(ws);
+        if (this.state !== 'live') {
+          // An offline notification with no user input pauses the queue without failing it.
+          // A returning agent must make a fresh, empty queue usable on this same socket.
+          this.inputQueue.resume();
+          this.startConnectionTimer(ws);
+        }
         return;
       case 'agent_offline':
         this.inputReady = false;
@@ -465,6 +497,7 @@ export class RemoteBrowser {
         this.teardownPeer();
         this.signalRequested = false;
         this.setState('agent-offline');
+        if (!this.stopped) this.startConnectionTimer(ws);
         return;
       case 'input_error':
         this.inputReady = false;

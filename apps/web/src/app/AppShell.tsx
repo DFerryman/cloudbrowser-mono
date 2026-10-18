@@ -89,9 +89,15 @@ export function AppShell() {
           {me.data ? (
             <div className="hidden space-y-0.5 px-2.5 text-xs text-muted lg:block">
               {billing.data ? (
-                <p className={(billing.data.availableMicros ?? 0) <= billing.data.lowBalanceMicros ? 'font-medium text-error' : ''}>
-                  {t('nav.balance', { amount: money(billing.data.availableMicros ?? 0, locale) })}
-                </p>
+                <>
+                  <p>{t('nav.balance', { amount: money(billing.data.balanceMicros, locale) })}</p>
+                  <p className={billing.data.availableMicros <= billing.data.lowBalanceMicros ? 'text-error' : ''}>
+                    {t('billing.availableAndReserved', {
+                      available: money(billing.data.availableMicros, locale),
+                      reserved: money(billing.data.reservedMicros, locale),
+                    })}
+                  </p>
+                </>
               ) : null}
               <p>{t('nav.usage', { used: me.data.usage.browsers, max: me.data.entitlements.maxBrowsers })}</p>
             </div>

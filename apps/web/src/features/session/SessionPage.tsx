@@ -31,6 +31,24 @@ import { regionInfo, STATUS_TONE, statusKey } from '../instances/status.js';
 
 const HEARTBEAT_MS = 15_000;
 const IDLE_WARNING_MS = 60_000;
+const SESSION_REQUEST_TIMEOUT_MS = 20_000;
+
+/** Bound session creation and token fetches too; a transport deadline starts after them. */
+async function sessionRequest<T>(method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SESSION_REQUEST_TIMEOUT_MS);
+  try {
+    return await api<T>(method, path, { body, idempotencyKey, signal: controller.signal });
+  } catch (e) {
+    if (controller.signal.aborted) throw new ApiError(408, {
+      type: 'internal', title: 'Connection timed out', status: 408,
+      detail: 'The browser connection request timed out. Please retry.',
+    });
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 type HeartbeatResult = { sleepAt: string | null; reason?: 'idle' | 'balance' | 'trial' };
 
@@ -42,6 +60,7 @@ type HeartbeatResult = { sleepAt: string | null; reason?: 'idle' | 'balance' | '
 export function SessionPage() {
   const { id = '' } = useParams();
   const { t, errorMessage } = useI18n();
+  const connectionErrorMessage = (error: unknown) => error instanceof ApiError && error.status === 408 ? t('error.connection_timeout') : errorMessage(error);
   const navigate = useNavigate();
   const instance = useInstance(id);
   const lifecycle = useLifecycle();
@@ -51,6 +70,7 @@ export function SessionPage() {
 
   const [session, setSession] = useState<ViewerSession | null>(null);
   const [openError, setOpenError] = useState<unknown>(null);
+  const [connectionError, setConnectionError] = useState<unknown>(null);
   const [takenOver, setTakenOver] = useState(false);
   const [sleepAt, setSleepAt] = useState<number | null>(null);
   /** `balance`: the prepaid balance ran out; input does not keep the browser awake. */
@@ -64,18 +84,48 @@ export function SessionPage() {
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [inputInterrupted, setInputInterrupted] = useState(false);
   const [visibleHeight, setVisibleHeight] = useState<number | null>(null);
+  const openRequest = useRef<{ instanceId: string; promise: Promise<void> } | null>(null);
+  const openIntent = useRef<{ instanceId: string; key: string } | null>(null);
+  const openSequence = useRef(0);
+  const connectRequestSequence = useRef(0);
+  const currentInstanceId = useRef(id);
+  currentInstanceId.current = id;
+  const currentSessionId = useRef(session?.id);
+  currentSessionId.current = session?.id;
 
-  const open = useCallback(async () => {
+  const open = useCallback((newIntent = false) => {
+    // StrictMode effects and repeated Retry / Use here clicks must share a request.
+    // Creating two sessions would make this page revoke its own first session.
+    if (openRequest.current?.instanceId === id) return openRequest.current.promise;
+    if (newIntent || openIntent.current?.instanceId !== id) openIntent.current = { instanceId: id, key: crypto.randomUUID() };
+    const intent = openIntent.current;
+    const sequence = ++openSequence.current;
     setOpenError(null);
-    try {
-      const r = await api<{ session: ViewerSession; operationId: string | null }>('POST', `/instances/${id}/sessions`);
-      setSession(r.session);
-      setTakenOver(false);
-      setViewer({ state: 'connecting', attempt: 0 });
-      void queryClient.invalidateQueries({ queryKey: keys.instance(id) });
-    } catch (e) {
-      setOpenError(e);
-    }
+    setConnectionError(null);
+    const request = { instanceId: id, promise: Promise.resolve() };
+    request.promise = (async () => {
+      try {
+        const r = await sessionRequest<{ session: ViewerSession; operationId: string | null }>('POST', `/instances/${id}/sessions`, undefined, intent.key);
+        if (sequence !== openSequence.current || currentInstanceId.current !== id) return;
+        if (openIntent.current === intent) openIntent.current = null;
+        setSession(r.session);
+        setTakenOver(false);
+        setInputInterrupted(false);
+        setSleepAt(null);
+        setSleepReason('idle');
+        setViewer({ state: 'connecting', attempt: 0 });
+        void queryClient.invalidateQueries({ queryKey: keys.instance(id) });
+      } catch (e) {
+        // A timeout or unknown server/network result may already have opened the session.
+        // Retry that same intent; a definite rejection lets the next explicit retry be new.
+        if (e instanceof ApiError && e.status < 500 && e.status !== 408 && openIntent.current === intent) openIntent.current = null;
+        if (sequence === openSequence.current && currentInstanceId.current === id) setOpenError(e);
+      } finally {
+        if (openRequest.current === request) openRequest.current = null;
+      }
+    })();
+    openRequest.current = request;
+    return request.promise;
   }, [id]);
 
   useEffect(() => {
@@ -98,19 +148,33 @@ export function SessionPage() {
   // Heartbeats carry whether the user interacted, which drives the idle timeout.
   useEffect(() => {
     if (!session || takenOver) return;
+    let active = true;
+    let inFlight = false;
     const beat = async () => {
+      if (!active || inFlight) return;
+      inFlight = true;
+      const input = hadInput.current;
+      hadInput.current = false;
       try {
-        const r = await api<HeartbeatResult>('POST', `/sessions/${session.id}/heartbeat`, { body: { input: hadInput.current } });
-        hadInput.current = false;
+        const r = await api<HeartbeatResult>('POST', `/sessions/${session.id}/heartbeat`, { body: { input } });
+        if (!active) return;
         setSleepAt(r.sleepAt ? Date.parse(r.sleepAt) : null);
         setSleepReason(r.reason ?? 'idle');
       } catch (e) {
+        if (!active) return;
+        hadInput.current ||= input;
         if (e instanceof ApiError && e.status === 409) setTakenOver(true);
+        else if (e instanceof ApiError && [401, 402, 403, 404].includes(e.status)) setOpenError(e);
+      } finally {
+        inFlight = false;
       }
     };
     void beat();
     const h = setInterval(beat, HEARTBEAT_MS);
-    return () => clearInterval(h);
+    return () => {
+      active = false;
+      clearInterval(h);
+    };
   }, [session, takenOver, status]);
 
   // Out of credit, or the free trial ending: say so once, while there is still time to finish up (page 6).
@@ -130,7 +194,7 @@ export function SessionPage() {
   const connect = useQuery({
     queryKey: ['connect', session?.id],
     enabled: !!session && !takenOver && status === 'running',
-    queryFn: () => api<ConnectInfo>('GET', `/sessions/${session!.id}/connect`),
+    queryFn: () => sessionRequest<ConnectInfo>('GET', `/sessions/${session!.id}/connect`),
     staleTime: Infinity,
     retry: false,
   });
@@ -189,14 +253,14 @@ export function SessionPage() {
   if (instance.isError) {
     overlay = <Overlay message={errorMessage(instance.error)} action={<Button onClick={() => navigate('/browsers')}>{t('session.back')}</Button>} />;
   } else if (takenOver || viewer.state === 'taken-over') {
-    overlay = <Overlay message={t('overlay.elsewhere')} action={<Button variant="primary" onClick={() => void open()}>{t('overlay.useHere')}</Button>} />;
+    overlay = <Overlay message={t('overlay.elsewhere')} action={<Button variant="primary" onClick={() => void open(true)}>{t('overlay.useHere')}</Button>} />;
   } else if (inputInterrupted) {
     overlay = <Overlay message={t('overlay.inputInterrupted')} action={<Button onClick={() => {
       setInputInterrupted(false);
       viewerRef.current?.reconnect();
     }}>{t('overlay.retryNow')}</Button>} />;
-  } else if (openError && status !== 'running') {
-    overlay = <Overlay message={errorMessage(openError)} action={<Button onClick={() => void open()}>{t('common.retry')}</Button>} />;
+  } else if (openError || connectionError) {
+    overlay = <Overlay message={connectionErrorMessage(openError ?? connectionError)} action={<Button onClick={() => void open()}>{t('common.retry')}</Button>} />;
   } else if (i) {
     switch (i.status) {
       case 'creating':
@@ -256,7 +320,9 @@ export function SessionPage() {
               action={<Button onClick={() => viewerRef.current?.reconnect()}>{t('overlay.retryNow')}</Button>}
             />
           );
-        } else if (connect.data?.mode === 'webrtc' && (viewer.state === 'connecting' || viewer.state === 'agent-offline')) {
+        } else if (connect.data?.mode === 'webrtc' && viewer.state === 'agent-offline') {
+          overlay = <Overlay message={t('overlay.agentOffline')} busy action={<Button onClick={() => viewerRef.current?.reconnect()}>{t('overlay.retryNow')}</Button>} />;
+        } else if (connect.data?.mode === 'webrtc' && viewer.state === 'connecting') {
           overlay = <Overlay message={t('overlay.connecting')} busy />;
         } else if (sleepReason !== 'idle' && idleLeft < IDLE_WARNING_MS) {
           const seconds = Math.max(0, Math.ceil(idleLeft / 1000));
@@ -428,9 +494,16 @@ export function SessionPage() {
             muted={muted}
             // Each viewer token works once, so every (re)connect asks the api for a fresh one.
             getConnectInfo={async () => {
-              const c = await api<ConnectInfo>('GET', `/sessions/${session.id}/connect`);
-              if (c.mode !== 'webrtc') throw new Error('live view unavailable');
-              return c;
+              const sequence = ++connectRequestSequence.current;
+              try {
+                const c = await sessionRequest<ConnectInfo>('GET', `/sessions/${session.id}/connect`);
+                if (c.mode !== 'webrtc') throw new Error('live view unavailable');
+                if (currentSessionId.current === session.id && sequence === connectRequestSequence.current) setConnectionError(null);
+                return c;
+              } catch (e) {
+                if (currentSessionId.current === session.id && sequence === connectRequestSequence.current) setConnectionError(e);
+                throw e;
+              }
             }}
             onState={(state, attempt) => setViewer({ state, attempt })}
             onStats={setStats}
@@ -438,7 +511,7 @@ export function SessionPage() {
             onKeyboardChange={setKeyboardOpen}
           />
         ) : null}
-        {i?.status === 'running' && connect.isError ? <Overlay message={errorMessage(connect.error)} /> : null}
+        {i?.status === 'running' && connect.isError ? <Overlay message={connectionErrorMessage(connect.error)} action={<Button onClick={() => void connect.refetch()}>{t('common.retry')}</Button>} /> : null}
         {overlay}
       </div>
     </div>
