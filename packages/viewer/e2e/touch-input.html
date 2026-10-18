@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Remote browser input regression fixture</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body, #root { width: 100%; height: 100%; margin: 0; }
+      body { font: 16px sans-serif; }
+      header { height: 64px; display: flex; align-items: center; gap: 16px; padding: 8px; }
+      button { min-height: 44px; padding: 8px 16px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./touch-input.tsx"></script>
+  </body>
+</html>

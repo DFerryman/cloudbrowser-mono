@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import {
   ArrowLeft,
   ClipboardCopy,
+  Command,
   Download,
   Gauge,
   Keyboard,
@@ -60,6 +61,8 @@ export function SessionPage() {
   const [viewer, setViewer] = useState<{ state: ViewerState; attempt: number }>({ state: 'connecting', attempt: 0 });
   const [stats, setStats] = useState<ViewerStats | null>(null);
   const [muted, setMuted] = useState(true);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const [visibleHeight, setVisibleHeight] = useState<number | null>(null);
 
   const open = useCallback(async () => {
     setOpenError(null);
@@ -134,6 +137,22 @@ export function SessionPage() {
     document.addEventListener('fullscreenchange', onChange);
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
+
+  useEffect(() => {
+    if (!keyboardOpen) {
+      setVisibleHeight(null);
+      return;
+    }
+    const viewport = window.visualViewport;
+    const resize = () => setVisibleHeight(viewport?.height ?? window.innerHeight);
+    resize();
+    viewport?.addEventListener('resize', resize);
+    window.addEventListener('resize', resize);
+    return () => {
+      viewport?.removeEventListener('resize', resize);
+      window.removeEventListener('resize', resize);
+    };
+  }, [keyboardOpen]);
 
   const toggleFullscreen = async () => {
     if (document.fullscreenElement) {
@@ -258,7 +277,7 @@ export function SessionPage() {
   );
 
   return (
-    <div ref={frameRef} className="flex h-dvh flex-col bg-frame text-zinc-100">
+    <div ref={frameRef} className="flex h-dvh flex-col bg-frame text-zinc-100" style={visibleHeight === null ? undefined : { height: visibleHeight }}>
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-zinc-800 px-2">
         <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.back')} onClick={() => navigate('/browsers')}>
           <ArrowLeft />
@@ -286,6 +305,19 @@ export function SessionPage() {
               <span className="size-2 rounded-full bg-starting" aria-hidden /> {t('session.simulated')}
             </span>
           ) : null}
+          <Button
+            size="icon"
+            variant="ghost"
+            className="text-zinc-300 hover:bg-zinc-800"
+            disabled={!live}
+            aria-label={t(keyboardOpen ? 'session.hideKeyboard' : 'session.showKeyboard')}
+            title={t(keyboardOpen ? 'session.hideKeyboard' : 'session.showKeyboard')}
+            aria-pressed={keyboardOpen}
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={() => viewerRef.current?.toggleKeyboard()}
+          >
+            <Keyboard />
+          </Button>
           <div className="hidden items-center gap-0.5 sm:flex">
             {live ? (
               <Button
@@ -311,7 +343,7 @@ export function SessionPage() {
               <Menu
                 trigger={
                   <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.keys')} title={t('session.keys')}>
-                    <Keyboard />
+                    <Command />
                   </Button>
                 }
               >
@@ -392,6 +424,7 @@ export function SessionPage() {
             onState={(state, attempt) => setViewer({ state, attempt })}
             onStats={setStats}
             onInput={() => (hadInput.current = true)}
+            onKeyboardChange={setKeyboardOpen}
           />
         ) : null}
         {i?.status === 'running' && connect.isError ? <Overlay message={errorMessage(connect.error)} /> : null}

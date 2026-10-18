@@ -85,6 +85,8 @@ export const en = {
   'session.upload': 'Upload',
   'session.downloads': 'Downloads',
   'session.keys': 'Send keys',
+  'session.showKeyboard': 'Show keyboard',
+  'session.hideKeyboard': 'Hide keyboard',
   'session.quality': 'Quality',
   'session.sound': 'Sound',
   'session.fullscreen': 'Fullscreen',

@@ -1,6 +1,6 @@
 import type { GatewayToViewer, IceServer } from '@cloudbrowser/contracts';
 import { decode, encode, EV, fitScreen, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
-import { keysymFor, keysymForName } from './keyboard.js';
+import { KEYSYM, keysymFor, keysymForName } from './keyboard.js';
 import { readStats, type ViewerStats } from './stats.js';
 
 export type ViewerState = 'connecting' | 'live' | 'reconnecting' | 'agent-offline' | 'taken-over' | 'closed';
@@ -36,6 +36,10 @@ const SCREEN_DEBOUNCE_MS = 750;
 const SCREEN_MIN_INTERVAL_MS = 5000;
 const CONNECTION_TIMEOUT_MS = 20_000;
 const MAX_PENDING_ICE_CANDIDATES = 256;
+/** US keyboard base keys for characters that require Shift on the remote X11 keyboard. */
+const SOFTWARE_SHIFTED = new Map([...`~!@#$%^&*()_+{}|:"<>?`].map((character, i) => (
+  [character, [...'`1234567890-=[]\\;\',./'][i]!.charCodeAt(0)] as const
+)));
 
 /**
  * Live-view client for one browser (page 5, `packages/viewer`): signaling over the gateway
@@ -57,6 +61,7 @@ export class RemoteBrowser {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private connectionTimer: ReturnType<typeof setTimeout> | null = null;
   private pressed = new Set<number>();
+  private softwarePressed = new Set<number>();
   private pendingViewport: { width: number; height: number } | null = null;
   private screenConfigurations: ScreenConfiguration[] = [];
   private screenTimer: ReturnType<typeof setTimeout> | null = null;
@@ -151,6 +156,7 @@ export class RemoteBrowser {
   releaseAllKeys() {
     for (const sym of this.pressed) this.sendData(encode.key(false, sym));
     this.pressed.clear();
+    for (const sym of [...this.softwarePressed].reverse()) this.sendSoftwareKey(false, sym);
   }
 
   /** Presses and releases a combination such as ['Control', 't'] (toolbar Keys menu). */
@@ -163,6 +169,54 @@ export class RemoteBrowser {
   /** Composed IME text (CJK, emoji); the agent inserts it with CDP Input.insertText (page 5). */
   typeText(text: string) {
     if (text) this.sendGateway({ t: 'ime', text });
+  }
+
+  /** Software input uses one ordered WebSocket, including edits and browser-chrome shortcuts. */
+  softwareKey(down: boolean, e: Pick<KeyboardEvent, 'key' | 'code'>): boolean {
+    const sym = keysymFor(e, { macToPc: this.opts.macToPc ?? false });
+    if (sym === null) return false;
+    this.sendSoftwareKey(down, sym);
+    return true;
+  }
+
+  sendSoftwareCombo(names: string[]) {
+    const syms = names.map(keysymForName).filter((s): s is number => s !== null);
+    const release = syms.filter((s) => !this.softwarePressed.has(s));
+    for (const sym of syms) this.sendSoftwareKey(true, sym);
+    for (const sym of release.reverse()) this.sendSoftwareKey(false, sym);
+  }
+
+  /** Types into the focused X11 window, including Chrome's address bar and menus. */
+  typeSoftwareText(text: string) {
+    let paste = '';
+    const flush = () => {
+      if (paste) this.sendNeko({ event: EV.CONTROL_PASTE, payload: { text: paste } });
+      paste = '';
+    };
+    for (const character of text.replace(/\r\n?/g, '\n')) {
+      const cp = character.codePointAt(0)!;
+      if (cp >= 0x80) {
+        paste += character;
+        continue;
+      }
+      flush();
+      let sym: number;
+      let shift = false;
+      if (character === '\n') sym = 0xff0d;
+      else if (character === '\t') sym = KEYSYM.Tab;
+      else if (cp >= 0x20 && cp <= 0x7e) {
+        const shifted = SOFTWARE_SHIFTED.get(character);
+        shift = shifted !== undefined || (cp >= 0x41 && cp <= 0x5a);
+        sym = shifted ?? (shift ? cp + 0x20 : cp);
+      } else continue;
+      const addShift = shift && !this.softwarePressed.has(KEYSYM.Shift_L) && !this.softwarePressed.has(0xffe2);
+      if (addShift) this.sendSoftwareKey(true, KEYSYM.Shift_L);
+      const wasHeld = this.softwarePressed.has(sym);
+      this.sendSoftwareKey(true, sym);
+      if (!wasHeld) this.sendSoftwareKey(false, sym);
+      if (addShift) this.sendSoftwareKey(false, KEYSYM.Shift_L);
+    }
+    flush();
   }
 
   /** Puts text on the remote clipboard, e.g. before sending Ctrl+V for a local paste. */
@@ -227,6 +281,12 @@ export class RemoteBrowser {
 
   private sendNeko(msg: NekoMessage) {
     this.sendGateway({ t: 'neko', data: msg });
+  }
+
+  private sendSoftwareKey(down: boolean, keysym: number) {
+    if (down) this.softwarePressed.add(keysym);
+    else this.softwarePressed.delete(keysym);
+    this.sendNeko({ event: down ? EV.CONTROL_KEYDOWN : EV.CONTROL_KEYUP, payload: { keysym } });
   }
 
   private sendData(buf: ArrayBuffer) {

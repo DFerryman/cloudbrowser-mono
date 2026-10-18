@@ -87,6 +87,8 @@ export const zhCN: Messages = {
   'session.upload': '上传',
   'session.downloads': '下载',
   'session.keys': '发送按键',
+  'session.showKeyboard': '显示键盘',
+  'session.hideKeyboard': '收起键盘',
   'session.quality': '画质',
   'session.sound': '声音',
   'session.fullscreen': '全屏',

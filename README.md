@@ -102,6 +102,16 @@ node packages/viewer/e2e/run.mjs <instance id> <wrangler log> shot.png
 The runner signs in to the real web app, opens the session view and checks that the fake neko's
 WebRTC video plays and that mouse, click, key and scroll input arrives over the data channel.
 
+On touch screens, tap to click and swipe with one or two fingers to scroll. Use the toolbar's
+keyboard button to show or hide the software keyboard; touching the picture keeps that choice.
+Keyboard animations resize the local view without repeatedly changing the remote desktop.
+The standalone touch/input regression mounts the real viewer with a fake transport, without
+sign-in or a running VM:
+
+```bash
+node packages/viewer/e2e/touch-input.mjs   # requires Playwright and Chromium; accepts PLAYWRIGHT_PATH
+```
+
 Cron handlers (idle sleep, IP checks, reaper, reconciler) can be triggered locally with
 `wrangler dev --test-scheduled` and `curl "http://localhost:<port>/__scheduled?cron=*+*+*+*+*"`.
 

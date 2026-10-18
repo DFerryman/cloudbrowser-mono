@@ -222,6 +222,73 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
+  it('types an address using ordered Neko keys with explicit Shift for capitals and US punctuation', async () => {
+    const { b } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    const down = (keysym: number) => ({ t: 'neko', data: { event: 'control/keydown', payload: { keysym } } });
+    const up = (keysym: number) => ({ t: 'neko', data: { event: 'control/keyup', payload: { keysym } } });
+    const key = (character: string) => [down(character.charCodeAt(0)), up(character.charCodeAt(0))];
+    const shifted = (character: string) => [down(0xffe1), ...key(character), up(0xffe1)];
+    b.typeSoftwareText('https://A.co/?q=B_2');
+    expect(ws.sent).toEqual([
+      ...key('h'), ...key('t'), ...key('t'), ...key('p'), ...key('s'), ...shifted(';'),
+      ...key('/'), ...key('/'), ...shifted('a'), ...key('.'), ...key('c'), ...key('o'),
+      ...key('/'), ...shifted('/'), ...key('q'), ...key('='), ...shifted('b'), ...shifted('-'), ...key('2'),
+    ]);
+    b.disconnect();
+  });
+
+  it('pastes consecutive Unicode text and orders following Backspace and Enter on the same WebSocket', async () => {
+    const { b } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    b.typeSoftwareText('你好🙂');
+    expect(b.softwareKey(true, { key: 'Backspace', code: 'Backspace' })).toBe(true);
+    b.softwareKey(false, { key: 'Backspace', code: 'Backspace' });
+    b.sendSoftwareCombo(['Enter']);
+    expect(ws.sent).toEqual([
+      { t: 'neko', data: { event: 'control/paste', payload: { text: '你好🙂' } } },
+      { t: 'neko', data: { event: 'control/keydown', payload: { keysym: 0xff08 } } },
+      { t: 'neko', data: { event: 'control/keyup', payload: { keysym: 0xff08 } } },
+      { t: 'neko', data: { event: 'control/keydown', payload: { keysym: 0xff0d } } },
+      { t: 'neko', data: { event: 'control/keyup', payload: { keysym: 0xff0d } } },
+    ]);
+    b.disconnect();
+  });
+
+  it('maps all US shifted punctuation and newline/tab without using the page-only IME path', async () => {
+    const { b } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    b.typeSoftwareText('~!@#$%^&*()_+{}|:"<>?\r\n\t');
+    const keys = ws.sent.map((frame: any) => [frame.data.event, frame.data.payload.keysym]);
+    const expected = [...'`1234567890-=[]\\;\',./'].flatMap((base) => [
+      ['control/keydown', 0xffe1], ['control/keydown', base.charCodeAt(0)],
+      ['control/keyup', base.charCodeAt(0)], ['control/keyup', 0xffe1],
+    ]);
+    expected.push(['control/keydown', 0xff0d], ['control/keyup', 0xff0d], ['control/keydown', 0xff09], ['control/keyup', 0xff09]);
+    expect(keys).toEqual(expected);
+    b.disconnect();
+  });
+
+  it('releases software-held keys separately and preserves an existing Shift during text insertion', async () => {
+    const { b } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    b.softwareKey(true, { key: 'Shift', code: 'ShiftLeft' });
+    b.typeSoftwareText('A');
+    expect(ws.neko('control/keyup')).toEqual([{ keysym: 0x61 }]);
+    b.softwareKey(true, { key: 'ArrowLeft', code: 'ArrowLeft' });
+    b.releaseAllKeys();
+    expect(ws.neko('control/keyup')).toEqual([{ keysym: 0x61 }, { keysym: 0xff51 }, { keysym: 0xffe1 }]);
+    const count = ws.sent.length;
+    b.releaseAllKeys();
+    expect(ws.sent).toHaveLength(count);
+    expect(b.softwareKey(true, { key: 'Process', code: '' })).toBe(false);
+    b.disconnect();
+  });
+
   it('uses Neko screen capabilities for both dimensions and rate, ignoring malformed entries', async () => {
     vi.useFakeTimers();
     const { b } = setup();
