@@ -1,7 +1,6 @@
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import {
   Accepted,
-  Backup,
   ConnectInfo,
   CreateInstanceBody,
   DEFAULT_IDLE_TIMEOUT_S,
@@ -26,22 +25,21 @@ import {
   type RegionId,
 } from '@cloudbrowser/contracts';
 import { turnIceServers } from '../turn.js';
-import { billingRequired, eventRow, newId, schema, userCaps } from '@cloudbrowser/db';
-import { and, asc, desc, eq, isNull, ne } from 'drizzle-orm';
+import { billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, settleRunningStatements } from '@cloudbrowser/db';
+import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import type { AppEnv } from '../env.js';
-import { admitCreate, admitIpChange, admitSpend, admitStart, billingAccount, claimTrial, entitlementsFor, isTrial, regionAcceptingNew, trialSecondsLeft, usage } from '../limits.js';
-import { currentBurn, regionPrice, requirePrice, storageLimits } from '../pricing.js';
+import { admitCreate, admitInstanceSpend, admitIpChange, admitSpend, admitStart, billingAccount, claimTrial, entitlementsFor, isTrial, regionAcceptingNew, trialSecondsLeft, usage } from '../limits.js';
+import { currentBurn, instancePrice, regionPrice, requirePrice, storageLimits } from '../pricing.js';
 import { instanceUsage, monthOf } from '../usage.js';
 import { billingRoute } from './billing.js';
 import { enqueueOperation, notifyUser, replayed, requireIdempotencyKey } from '../ops.js';
 import { problem } from '../problem.js';
 import { toInstances, toOperation } from '../views.js';
 import { eventsRoute } from './events.js';
+import { resizeQuota } from '../storage.js';
 
-const { browserInstances, regions, operations, viewerSessions, instanceHealth, placements, events, auditLog, backups, agentCredentials, archiveKeys, agentCommands } = schema;
+const { browserInstances, regions, operations, viewerSessions, instanceHealth, placements, events, auditLog, agentCredentials, archiveKeys, agentCommands } = schema;
 
-/** AWS allows one change to a volume every 6 hours. */
-const RESIZE_COOLDOWN_MS = 6 * 3_600_000;
 /** The first agent that grows the file system and reports disk usage. */
 const RESIZE_AGENT_VERSION = '0.2.0';
 const newerOrEqual = (v: string | null, min: string) => {
@@ -89,6 +87,19 @@ async function ownedInstance(c: Vars, id: string) {
     .where(and(eq(browserInstances.id, id), eq(browserInstances.userId, user.id), ne(browserInstances.status, 'purged')));
   if (!row) throw problem(404, 'not_found');
   return row;
+}
+
+/** A partial creation remains resumable even if a VM was created before it was put to sleep. */
+async function wakeOperation(db: AppEnv['Variables']['db'], row: typeof browserInstances.$inferSelect) {
+  const [p] = await db.select({ id: placements.id }).from(placements).where(and(eq(placements.instanceId, row.id), eq(placements.status, 'current')));
+  const [created] = await db.select({ id: operations.id, status: operations.status, params: operations.params }).from(operations)
+    .where(and(eq(operations.instanceId, row.id), eq(operations.kind, 'create'))).orderBy(desc(operations.createdAt)).limit(1);
+  if (p && (!created || created.status === 'succeeded')) return { kind: 'start' as const, params: {} as Record<string, unknown> };
+  const resume = created?.params?.resumeCreateFrom ?? created?.id;
+  if (typeof resume !== 'string') throw problem(409, 'invalid_state', 'This browser has no saved creation to resume.');
+  const [source] = await db.select({ params: operations.params }).from(operations).where(and(eq(operations.id, resume), eq(operations.instanceId, row.id)));
+  const maxVmHour = source?.params?.maxVmHour;
+  return { kind: 'create' as const, params: { resumeCreateFrom: resume, storageGb: row.storageGb, ...(typeof maxVmHour === 'number' ? { maxVmHour } : {}) } };
 }
 
 async function oneInstance(db: AppEnv['Variables']['db'], id: string) {
@@ -176,7 +187,7 @@ v1.openapi(
     if (trial && body.regionId !== TRIAL.regionId) throw problem(400, 'validation_failed', `The free trial runs in ${REGION_INFO[TRIAL.regionId].city} only.`);
     await admitCreate(db, user.id, body.regionId, now, { trial });
     // The user must have been shown this region's current prices (create dialog).
-    await requirePrice(db, body.regionId, body.priceVersion);
+    const confirmedPrice = await requirePrice(db, body.regionId, body.priceVersion);
     const storageGb = trial ? TRIAL.storageGb : (await storageLimits(db, user.id)).defaultGb;
     if (body.storageGb !== storageGb) throw problem(409, 'price_changed', 'The storage included with a new browser changed. Review the new price and try again.');
     if (trial && !(await claimTrial(db, user.id, now))) throw problem(409, 'invalid_state', 'You have already used your free trial.');
@@ -185,6 +196,7 @@ v1.openapi(
     const locale: BrowserLocale = body.locale ?? 'en-US';
     const screen = body.screen ?? 'auto';
     const instanceId = newId(now.getTime());
+    const funding = !trial && (await billingRequired(db)) ? await reservationQuote(db, body.regionId, { storageGb, backupsEnabled: false }) : null;
     const result = await (async () => {
       try {
         return await enqueueOperation(c, {
@@ -192,7 +204,7 @@ v1.openapi(
           kind: 'create',
           key,
           route,
-          params: { storageGb },
+          params: { storageGb, maxVmHour: confirmedPrice.sheet.vmHour },
           before: [
             db.insert(browserInstances).values({
               id: instanceId,
@@ -202,6 +214,7 @@ v1.openapi(
               status: 'creating',
               desiredState: 'running',
               storageGb,
+              backupsEnabled: false,
               idleTimeoutS: trial ? TRIAL.idleTimeoutS : DEFAULT_IDLE_TIMEOUT_S,
               ...(trial ? { trialState: 'active' } : {}),
               locale,
@@ -212,6 +225,7 @@ v1.openapi(
             }),
           ],
           after: [
+            ...(funding ? [reservationWrite(db, user.id, instanceId, funding, now)] : []),
             db.insert(auditLog).values({
               actor: `user:${user.id}`,
               action: 'instance.create',
@@ -250,7 +264,7 @@ v1.openapi(
     method: 'patch',
     path: '/instances/{id}',
     tags: ['instances'],
-    description: 'Rename, idle timeout, screen size, language or snapshot backups. The region can never be changed.',
+    description: 'Rename, idle timeout, screen size or language. The region can never be changed.',
     request: { params: IdParam, body: { content: { 'application/json': { schema: UpdateInstanceBody } }, required: true } },
     responses: { 200: jsonResponse(Instance, 'Updated browser'), ...errors, 403: problemResponse('Plan limit') },
   }),
@@ -259,12 +273,6 @@ v1.openapi(
     const user = c.get('user');
     const row = await ownedInstance(c, c.req.valid('param').id);
     const { priceVersion, ...body } = c.req.valid('json');
-    if (body.backupsEnabled === true && isTrial(row)) throw problem(409, 'invalid_state', 'Snapshots are not part of the free trial. Add credit to keep this browser first.');
-    if (body.backupsEnabled === true && !row.backupsEnabled) {
-      // Snapshots are billed per GB-month: the user must have seen the price, and be able to pay it.
-      await requirePrice(db, row.regionId, priceVersion);
-      await admitSpend(db, user.id, 'turn on snapshots');
-    }
     if (body.idleTimeoutS !== undefined) {
       const max = (await entitlementsFor(db, user.id)).idleTimeoutMaxS;
       if (!(IDLE_TIMEOUT_OPTIONS_S as readonly number[]).includes(body.idleTimeoutS)) {
@@ -281,7 +289,7 @@ v1.openapi(
     await db.batch([
       db
         .update(browserInstances)
-        .set({ ...body, fingerprint, updatedAt: now })
+        .set({ ...body, backupsEnabled: false, fingerprint, updatedAt: now })
         .where(eq(browserInstances.id, row.id)),
       db.insert(events).values(eventRow(user.id, 'instance.updated', { instanceId: row.id }, now)),
     ]);
@@ -306,21 +314,23 @@ v1.openapi(
     const earlier = await replayed(db, c.get('user').id, key, route);
     if (earlier) return c.json(earlier, 202);
     const row = await ownedInstance(c, c.req.valid('param').id);
-    if (row.status === 'deleting') throw problem(409, 'invalid_state', 'This browser is already deleted.');
     const now = new Date();
     const result = await enqueueOperation(c, {
       instanceId: row.id,
       kind: 'delete',
+      priority: 'delete',
       key,
       route,
       params: { reason: 'user', purgeNow: true },
       // One transaction: accepting a permanent deletion also invalidates every route back to the
       // profile. Provider deletion is asynchronous and may be retried; access never waits for it.
       before: [
-        db.update(browserInstances).set({ status: 'deleting', desiredState: 'deleted', deletedAt: now, purgeAfter: now, updatedAt: now }).where(eq(browserInstances.id, row.id)),
+        ...settleRunningStatements(db, row.id, now),
+        db.update(browserInstances).set({ status: 'deleting', desiredState: 'deleted', deletedAt: sql`coalesce(${browserInstances.deletedAt}, ${now.getTime()})`, purgeAfter: sql`min(coalesce(${browserInstances.purgeAfter}, ${now.getTime()}), ${now.getTime()})`, updatedAt: now }).where(eq(browserInstances.id, row.id)),
         db.update(viewerSessions).set({ endedAt: now }).where(and(eq(viewerSessions.instanceId, row.id), isNull(viewerSessions.endedAt))),
         db.update(agentCredentials).set({ credentialHash: null, bootstrapHash: null, bootstrapExpiresAt: null, rotatedAt: now }).where(eq(agentCredentials.instanceId, row.id)),
         db.update(archiveKeys).set({ wrappedKey: null, destroyedAt: now }).where(eq(archiveKeys.instanceId, row.id)),
+        db.update(schema.browserReservations).set({ reservedMicros: 0, updatedAt: now }).where(eq(schema.browserReservations.instanceId, row.id)),
         db.update(agentCommands).set({ status: 'failed', reply: { error: 'Browser permanently deleted.' }, completedAt: now }).where(and(eq(agentCommands.instanceId, row.id), isNull(agentCommands.completedAt))),
       ],
       after: [db.insert(auditLog).values({ actor: `user:${c.get('user').id}`, action: 'instance.delete_requested', target: `instance:${row.id}`, detail: { permanent: true }, createdAt: now })],
@@ -344,7 +354,7 @@ const lifecycle = [
   {
     action: 'stop',
     kind: 'stop',
-    allowed: ['running', 'needs_attention', 'waiting_capacity', 'provider_issue'],
+    allowed: ['creating', 'starting', 'stopping', 'running', 'sleeping', 'failed', 'needs_attention', 'waiting_capacity', 'provider_issue', 'deleting'],
     desired: 'stopped',
     description: 'Put a browser to sleep now. Data and IP are kept.',
   },
@@ -381,19 +391,32 @@ for (const l of lifecycle) {
       }
       if (l.action === 'start') await admitStart(db, user.id, row.id, row.regionId);
       if (l.action === 'undelete') {
+        await admitInstanceSpend(db, user.id, row, 'restore a deleted browser');
         if (!row.purgeAfter || row.purgeAfter <= new Date()) throw problem(409, 'invalid_state', 'The 7-day recovery window has passed.');
         const u = await usage(db, user.id);
         const ent = await entitlementsFor(db, user.id);
         if (u.browsers >= ent.maxBrowsers) throw problem(403, 'plan_limit', `Your plan allows ${ent.maxBrowsers} browsers.`);
       }
+      let kind: 'start' | 'stop' | 'undelete' | 'create' = l.kind;
+      const params: Record<string, unknown> = { reason: 'user' };
+      if (l.action === 'start') {
+        const wake = await wakeOperation(db, row); kind = wake.kind; Object.assign(params, wake.params);
+      }
+      const now = new Date();
       const result = await enqueueOperation(c, {
         instanceId: row.id,
-        kind: l.kind,
+        kind,
+        ...(l.action === 'stop' ? { priority: 'stop' as const } : {}),
         key,
         route,
-        params: { reason: 'user' },
-        before: [db.update(browserInstances).set({ desiredState: l.desired, updatedAt: new Date() }).where(eq(browserInstances.id, row.id))],
+        params,
+        before: [
+          ...(l.action === 'stop' ? settleRunningStatements(db, row.id, now) : []),
+          db.update(browserInstances).set({ desiredState: l.desired, ...(l.action === 'stop' ? { status: sql`case when ${browserInstances.status} = 'sleeping' then 'sleeping' else 'stopping' end` } : {}), updatedAt: now }).where(eq(browserInstances.id, row.id)),
+          ...(l.action === 'stop' ? [db.update(viewerSessions).set({ endedAt: now }).where(and(eq(viewerSessions.instanceId, row.id), isNull(viewerSessions.endedAt)))] : []),
+        ],
       });
+      if (l.action === 'stop') await c.env.GATEWAY?.revokeViewers?.(row.id).catch((e: unknown) => console.error('close sleeping browser viewers failed', row.id, e));
       return c.json(result, 202);
     },
   );
@@ -448,7 +471,7 @@ v1.openapi(
     }
     if (isTrial(row)) throw problem(409, 'invalid_state', 'A new IP is not part of the free trial. Add credit to keep this browser first.');
     await requirePrice(db, row.regionId, c.req.valid('json').priceVersion);
-    await admitSpend(db, user.id, 'request a new IP');
+    await admitInstanceSpend(db, user.id, row, 'request a new IP');
     await admitIpChange(db, user.id, new Date());
     const result = await enqueueOperation(c, {
       instanceId: row.id,
@@ -469,93 +492,16 @@ v1.openapi(
   },
 );
 
-// --- backups (page 4) ---------------------------------------------------------------------------
-
-const BackupParams = z.object({ id: z.string().min(1).max(64), backupId: z.string().min(1).max(128) });
-
-function toBackup(b: typeof backups.$inferSelect): Backup {
-  return {
-    id: b.id,
-    kind: b.kind as Backup['kind'],
-    reason: b.reason as Backup['reason'],
-    status: b.status as Backup['status'],
-    sizeBytes: b.sizeBytes ?? null,
-    createdAt: b.createdAt.toISOString(),
-    restorableWhen: b.kind === 'snapshot' ? 'sleeping' : 'running',
-  };
-}
-
-v1.openapi(
-  createRoute({
-    method: 'get',
-    path: '/instances/{id}/backups',
-    tags: ['backups'],
-    description: 'Daily volume snapshots and the encrypted profile archives taken at each sleep, newest first.',
-    request: { params: IdParam },
-    responses: { 200: jsonResponse(z.array(Backup), 'Backups'), ...errors },
-  }),
-  async (c) => {
-    const row = await ownedInstance(c, c.req.valid('param').id);
-    const rows = await c
-      .get('db')
-      .select()
-      .from(backups)
-      .where(and(eq(backups.instanceId, row.id), isNull(backups.deletedAt)))
-      .orderBy(desc(backups.createdAt));
-    return c.json(rows.map(toBackup), 200);
-  },
-);
-
-v1.openapi(
-  createRoute({
-    method: 'post',
-    path: '/instances/{id}/backups/{backupId}/restore',
-    tags: ['backups'],
-    description: 'Restore a snapshot while the browser sleeps, or an archive while it runs. The current data is replaced.',
-    request: { params: BackupParams, headers: IdempotencyHeader },
-    responses: { ...accepted, ...errors },
-  }),
-  async (c) => {
-    const db = c.get('db');
-    const user = c.get('user');
-    const { id, backupId } = c.req.valid('param');
-    const key = requireIdempotencyKey(c);
-    const route = `POST /v1/instances/${id}/backups/${backupId}/restore`;
-    const earlier = await replayed(db, user.id, key, route);
-    if (earlier) return c.json(earlier, 202);
-    const row = await ownedInstance(c, id);
-    const [b] = await db
-      .select()
-      .from(backups)
-      .where(and(eq(backups.id, backupId), eq(backups.instanceId, row.id), isNull(backups.deletedAt)));
-    if (!b || b.status !== 'complete') throw problem(404, 'not_found', 'Backup not found.');
-    const when = toBackup(b).restorableWhen;
-    if (row.status !== when) {
-      throw problem(
-        409,
-        'invalid_state',
-        when === 'sleeping' ? 'Put the browser to sleep before restoring a snapshot.' : 'Start the browser before restoring an archive.',
-      );
-    }
-    const result = await enqueueOperation(c, {
-      instanceId: row.id,
-      kind: 'restore',
-      key,
-      route,
-      params: { backupId: b.id },
-      after: [
-        db.insert(auditLog).values({
-          actor: `user:${user.id}`,
-          action: 'backup.restore_requested',
-          target: `instance:${row.id}`,
-          detail: { backupId: b.id, kind: b.kind },
-          createdAt: new Date(),
-        }),
-      ],
-    });
-    return c.json(result, 202);
-  },
-);
+// Old client routes remain tombstoned; public snapshot/backup features have been removed.
+// Ownership is checked first so this response cannot reveal another user's browser.
+v1.get('/instances/:id/backups', async (c) => {
+  await ownedInstance(c, c.req.param('id'));
+  throw problem(410, 'not_found', 'Browser backups are no longer available.');
+});
+v1.post('/instances/:id/backups/:backupId/restore', async (c) => {
+  await ownedInstance(c, c.req.param('id'));
+  throw problem(410, 'not_found', 'Browser backups are no longer available.');
+});
 
 // --- storage and usage (pages 4 and 6) ----------------------------------------------------------
 
@@ -566,20 +512,10 @@ async function storageOf(c: Vars, row: typeof browserInstances.$inferSelect): Pr
     .select({ executor: placements.executor })
     .from(placements)
     .where(and(eq(placements.instanceId, row.id), eq(placements.status, 'current')));
-  const [lastResize] = await db
-    .select({ finishedAt: operations.finishedAt })
-    .from(operations)
-    .where(and(eq(operations.instanceId, row.id), eq(operations.kind, 'resize_volume'), eq(operations.status, 'succeeded')))
-    .orderBy(desc(operations.finishedAt))
-    .limit(1);
+  const nextResizeAt = await resizeQuota(db, row.id);
   const [busy] = await db.select({ id: operations.id }).from(operations).where(and(eq(operations.instanceId, row.id), isNull(operations.finishedAt)));
-  const snaps = await db
-    .select({ id: backups.id })
-    .from(backups)
-    .where(and(eq(backups.instanceId, row.id), eq(backups.kind, 'snapshot'), eq(backups.status, 'complete')));
   const { maxGb } = await storageLimits(db, row.userId);
   const price = await regionPrice(db, row.regionId);
-  const nextAt = lastResize?.finishedAt ? lastResize.finishedAt.getTime() + RESIZE_COOLDOWN_MS : 0;
   const blockedReason: InstanceStorage['blockedReason'] = isTrial(row)
     ? 'trial'
     : !['running', 'sleeping'].includes(row.status)
@@ -588,7 +524,7 @@ async function storageOf(c: Vars, row: typeof browserInstances.$inferSelect): Pr
       ? 'busy'
       : row.storageGb >= maxGb
         ? 'max'
-        : nextAt > Date.now()
+        : nextResizeAt
           ? 'cooldown'
           : p && p.executor !== 'fake' && !newerOrEqual(h?.agentVersion ?? null, RESIZE_AGENT_VERSION)
             ? 'agent'
@@ -602,8 +538,7 @@ async function storageOf(c: Vars, row: typeof browserInstances.$inferSelect): Pr
     reportedAt: h?.diskReportedAt?.toISOString() ?? null,
     resizable: blockedReason === null,
     blockedReason,
-    nextResizeAt: nextAt > Date.now() ? new Date(nextAt).toISOString() : null,
-    snapshots: { count: snaps.length, retentionDays: (await userCaps(db, row.userId)).get('snapshot_retention_days') ?? 7 },
+    nextResizeAt: nextResizeAt?.toISOString() ?? null,
   };
 }
 
@@ -624,7 +559,7 @@ v1.openapi(
     method: 'post',
     path: '/instances/{id}/storage',
     tags: ['instances'],
-    description: 'Grows the data volume (it can never shrink). Billed per GB-month from the moment it grows; one change every 6 hours.',
+    description: 'Grows the data volume (it can never shrink). Billed per GB-month from the moment it grows; at most four attempts per rolling 24 hours, after the previous AWS modification completes.',
     request: { params: IdParam, headers: IdempotencyHeader, body: { content: { 'application/json': { schema: ResizeStorageBody } }, required: true } },
     responses: { ...accepted, ...errors, 402: problemResponse('Not enough credit'), 503: problemResponse('Prices unavailable') },
   }),
@@ -641,12 +576,12 @@ v1.openapi(
     const storage = await storageOf(c, row);
     if (sizeGb <= row.storageGb) throw problem(400, 'validation_failed', `Storage can only grow: choose more than ${row.storageGb} GB.`);
     if (sizeGb > storage.maxGb) throw problem(403, 'plan_limit', `Storage can grow up to ${storage.maxGb} GB.`, { limit: 'storage_max_gb' });
-    if (storage.blockedReason === 'cooldown') throw problem(409, 'invalid_state', 'Storage can grow once every 6 hours. Try again later.');
+    if (storage.blockedReason === 'cooldown') throw problem(409, 'invalid_state', 'Storage allows four resize attempts per rolling 24 hours. Try again when the current quota resets.');
     if (storage.blockedReason === 'state') throw problem(409, 'invalid_state', 'Storage can grow while the browser is running or sleeping.');
     if (storage.blockedReason === 'trial') throw problem(409, 'invalid_state', 'Add credit to keep this trial browser before adding storage.');
     if (storage.blockedReason === 'agent') throw problem(409, 'invalid_state', 'This browser was created before storage could grow. Create a new browser to get more space.');
     await requirePrice(db, row.regionId, priceVersion);
-    await admitSpend(db, user.id, 'add storage');
+    await admitInstanceSpend(db, user.id, row, 'add storage', { storageGb: sizeGb });
     const result = await enqueueOperation(c, {
       instanceId: row.id,
       kind: 'resize_volume',
@@ -679,12 +614,21 @@ v1.openapi(
   async (c) => {
     const db = c.get('db');
     const row = await ownedInstance(c, c.req.valid('param').id);
-    const now = currentBurn(await regionPrice(db, row.regionId), row);
+    const now = currentBurn(await instancePrice(db, row.id, row.regionId), row);
     return c.json(await instanceUsage(db, row.id, monthOf(c.req.valid('query').month), now), 200);
   },
 );
 
 // --- sessions ----------------------------------------------------------------------------------
+
+async function requireViewerCredit(db: import('@cloudbrowser/db').Db, userId: string, instanceId: string) {
+  const access = await prepaidAccess(db, userId, instanceId);
+  if (access.allowed) return access;
+  await db.update(viewerSessions).set({ endedAt: new Date() }).where(and(eq(viewerSessions.instanceId, instanceId), isNull(viewerSessions.endedAt)));
+  if (access.reason === 'frozen') throw problem(403, 'account_frozen', 'This account is frozen.');
+  if (access.reason === 'deleted') throw problem(409, 'invalid_state', 'This browser is unavailable.');
+  throw problem(402, 'insufficient_balance', access.reason === 'trial' ? 'The free ten-minute trial has ended. Add credit to continue.' : 'Available prepaid credit is insufficient. Usage is stopped; data and IP are kept for seven days.');
+}
 
 const OpenSessionResult = z.object({ session: ViewerSession, operationId: z.string().nullable() });
 
@@ -702,16 +646,18 @@ v1.openapi(
     const user = c.get('user');
     const row = await ownedInstance(c, c.req.valid('param').id);
     if (row.desiredState === 'deleted' || ['deleting', 'failed'].includes(row.status)) throw problem(409, 'invalid_state');
+    if (row.desiredState === 'stopped' && ['creating', 'starting', 'stopping'].includes(row.status)) throw problem(409, 'invalid_state', 'This browser is being put to sleep.');
 
     let operationId: string | null = null;
     if (row.status === 'sleeping') {
       await admitStart(db, user.id, row.id, row.regionId);
+      const wake = await wakeOperation(db, row);
       const r = await enqueueOperation(c, {
         instanceId: row.id,
-        kind: 'start',
+        kind: wake.kind,
         key: null,
         route: 'open',
-        params: { reason: 'open' },
+        params: { reason: 'open', ...wake.params },
         before: [db.update(browserInstances).set({ desiredState: 'running', updatedAt: new Date() }).where(eq(browserInstances.id, row.id))],
       });
       operationId = r.operationId;
@@ -723,6 +669,7 @@ v1.openapi(
       operationId = op?.id ?? null;
     }
 
+    await requireViewerCredit(db, user.id, row.id);
     const now = new Date();
     const sessionId = newId(now.getTime());
     await db.batch([
@@ -740,7 +687,8 @@ v1.openapi(
         country: c.req.header('cf-ipcountry') ?? null,
         userAgent: c.req.header('user-agent')?.slice(0, 300) ?? null,
       }),
-      db.update(browserInstances).set({ lastActiveAt: now }).where(eq(browserInstances.id, row.id)),
+      // Opening another viewer is input activity, not a new billable run or a fresh trial.
+      db.insert(instanceHealth).values({ instanceId: row.id, lastInputAt: now }).onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastInputAt: now } }),
     ]);
     return c.json({ session: { id: sessionId, instanceId: row.id, startedAt: now.toISOString() }, operationId }, 201);
   },
@@ -773,6 +721,7 @@ v1.openapi(
     const db = c.get('db');
     const s = await ownedSession(c, c.req.valid('param').id);
     if (s.endedAt) throw problem(409, 'invalid_state', 'This browser is open in another tab or device.');
+    await requireViewerCredit(db, s.userId, s.instanceId);
     const [p] = await db
       .select()
       .from(placements)
@@ -821,6 +770,7 @@ v1.openapi(
     const db = c.get('db');
     const s = await ownedSession(c, c.req.valid('param').id);
     if (s.endedAt) throw problem(409, 'invalid_state', 'This browser is open in another tab or device.');
+    await requireViewerCredit(db, s.userId, s.instanceId);
     const now = new Date();
     const { input } = c.req.valid('json');
     await db.batch([
@@ -838,14 +788,15 @@ v1.openapi(
     if (!inst || inst.status !== 'running') return c.json({ sleepAt: null }, 200);
     const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, h?.lastInputAt?.getTime() ?? 0);
     const idleAt = last + inst.idleTimeoutS * 1000;
-    // Balance used up: the engine puts the browser to sleep 10 minutes after it ran out (page 6).
+    // Prepaid access ends at the funded lease deadline, without an unpaid grace period.
+    const access = await prepaidAccess(db, inst.userId, inst.id, now);
     const { exhaustedAt } = (await billingRequired(db)) ? await billingAccount(db, inst.userId) : { exhaustedAt: null };
     // A free trial browser sleeps when its minutes are used, whatever the input.
     if (inst.trialState === 'active') {
-      const trialAt = now.getTime() + trialSecondsLeft(inst) * 1000;
+      const trialAt = access.deadlineAt?.getTime() ?? now.getTime() + trialSecondsLeft(inst) * 1000;
       if (trialAt < idleAt) return c.json({ sleepAt: new Date(trialAt).toISOString(), reason: 'trial' as const }, 200);
     }
-    const balanceAt = exhaustedAt && !isTrial(inst) ? exhaustedAt.getTime() + BALANCE_GRACE_MS : Infinity;
+    const balanceAt = !isTrial(inst) ? access.deadlineAt?.getTime() ?? (exhaustedAt ? exhaustedAt.getTime() : Infinity) : Infinity;
     return balanceAt < idleAt
       ? c.json({ sleepAt: new Date(balanceAt).toISOString(), reason: 'balance' as const }, 200)
       : c.json({ sleepAt: new Date(idleAt).toISOString(), reason: 'idle' as const }, 200);

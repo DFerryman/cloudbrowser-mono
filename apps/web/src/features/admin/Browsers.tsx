@@ -53,7 +53,7 @@ type Action = 'retry' | 'recover' | 'stop' | 'suspend' | 'unsuspend';
 const ACTIONS: Record<Action, { label: string; help: string; danger?: boolean }> = {
   retry: { label: 'Retry last failed operation', help: 'Runs the latest failed start, stop, recover, restore, delete or undelete again with the same parameters.' },
   recover: { label: 'Recover', help: 'New VM in another zone of the same region, with the same IP and data (page 10).' },
-  stop: { label: 'Put to sleep', help: 'Graceful stop with an archive, like an idle timeout.' },
+  stop: { label: 'Put to sleep', help: 'Gracefully stops the browser while keeping its saved data and IP.' },
   suspend: { label: 'Suspend', help: 'Kill switch: the browser sleeps within a minute and cannot start. Data and IP are kept.', danger: true },
   unsuspend: { label: 'Release suspension', help: 'The owner can start the browser again.' },
 };
@@ -176,20 +176,6 @@ export function BrowserDetailPage() {
           rowKey={(r) => String(r.address)}
           columns={['Address', 'Assigned', 'Released']}
           cells={(r) => [<Mono>{String(r.address)}</Mono>, when(r.assignedAt), when(r.releasedAt)]}
-        />
-      </Section>
-      <Section title="Backups">
-        <Table
-          rows={d.data.backups}
-          rowKey={(r) => String(r.id)}
-          columns={['When', 'Kind', 'Reason', 'Status', 'Size']}
-          cells={(r) => [
-            when(r.createdAt),
-            String(r.kind),
-            String(r.reason),
-            <Pill tone={statusTone(String(r.status))}>{String(r.status)}</Pill>,
-            r.sizeBytes ? `${(Number(r.sizeBytes) / 1024 ** 2).toFixed(1)} MB` : '—',
-          ]}
         />
       </Section>
       <Section title="Audit">

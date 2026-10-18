@@ -1,4 +1,4 @@
-import { USAGE_UNITS, UsageItem } from '@cloudbrowser/contracts';
+import { HOURS_PER_MONTH, USAGE_UNITS, UsageItem } from '@cloudbrowser/contracts';
 import { Card, Section, Select, Skeleton } from '@cloudbrowser/ui';
 import { useState } from 'react';
 import { Link } from 'react-router';
@@ -15,6 +15,8 @@ export function UsagePage() {
   const [month, setMonth] = useState(currentMonth());
   const usage = useInstanceUsage(i.id, month);
   const u = usage.data;
+  const items = UsageItem.options.filter((item) => item !== 'snapshot' || u?.byDay.some((day) => day.byItem.snapshot !== 0));
+  const trial = !!i.trial && i.trial.state !== 'converted';
   const m = (v: number) => money(v, locale);
 
   return (
@@ -34,6 +36,7 @@ export function UsagePage() {
         <Card className="p-5 lg:col-span-2">
           {u ? (
             <div className="space-y-1 text-sm">
+              {trial ? <p className="font-medium text-running">{t('usage.trialFree')}</p> : <>
               <p className="font-medium">
                 {u.now.hourMicros === 0
                   ? t('usage.nowNothing')
@@ -42,8 +45,10 @@ export function UsagePage() {
                     : t('usage.nowAsleep', { amount: m(u.now.hourMicros) })}
               </p>
               <p className="text-muted">{t('usage.runningRate', { amount: m(u.now.runningHourMicros) })}</p>
-              <p className="text-muted">{t('usage.keptRate', { amount: m(u.now.alwaysOnMonthMicros) })}</p>
+              <p className="text-muted">{t('usage.keptRate', { amount: m(u.now.alwaysOnMonthMicros), hourly: m(Math.round(u.now.alwaysOnMonthMicros / HOURS_PER_MONTH)) })}</p>
+              <p className="text-muted">{t('usage.actualStorage', { gb: i.storageGb })}</p>
               <p className="pt-2 text-xs text-muted">{t('usage.note')}</p>
+              </>}
             </div>
           ) : (
             <Skeleton className="h-20" />
@@ -85,7 +90,7 @@ export function UsagePage() {
               <thead className="sticky top-0 bg-bg text-left text-xs text-muted">
                 <tr className="border-b border-border">
                   <th className="py-2 pr-3 font-medium">{t('usage.col.day')}</th>
-                  {UsageItem.options.map((item) => (
+                  {items.map((item) => (
                     <th key={item} className="hidden py-2 pr-3 text-right font-medium sm:table-cell">
                       {t(`billing.item.${item}`)}
                     </th>
@@ -97,7 +102,7 @@ export function UsagePage() {
                 {[...u.byDay].reverse().map((d) => (
                   <tr key={d.day}>
                     <td className="py-2 pr-3 whitespace-nowrap">{new Date(`${d.day}T00:00:00Z`).toLocaleDateString(locale, { timeZone: 'UTC' })}</td>
-                    {UsageItem.options.map((item) => (
+                    {items.map((item) => (
                       <td key={item} className="hidden py-2 pr-3 text-right tabular-nums text-muted sm:table-cell">
                         {m(d.byItem[item])}
                       </td>

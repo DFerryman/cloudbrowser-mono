@@ -7,7 +7,7 @@ import { MICROS_PER_USD } from '@cloudbrowser/contracts';
 export function money(micros: number, locale: string) {
   const usd = micros / MICROS_PER_USD;
   const abs = Math.abs(usd);
-  const max = abs === 0 || abs >= 1 ? 2 : abs >= 0.1 ? 3 : 4;
+  const max = abs === 0 || abs >= 1 ? 2 : 4;
   return new Intl.NumberFormat(locale, { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: max }).format(usd);
 }
 

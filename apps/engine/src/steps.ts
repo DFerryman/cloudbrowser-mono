@@ -1,10 +1,11 @@
 import { ProviderPriceSheet, TRIAL, resourceMonthlyCostCents } from '@cloudbrowser/contracts';
-import { eventRow, newArchiveKey, newId, raiseAlert, schema, sha256Hex, userCaps, type Db } from '@cloudbrowser/db';
+import { eventRow, newArchiveKey, newId, raiseAlert, schema, settleRunningStatements, sha256Hex, userCaps, type Db } from '@cloudbrowser/db';
 import { ExecutorError, type ExecutorKind, type ResourceKind } from '@cloudbrowser/executors';
-import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import {
   placementRef,
   readContext,
+  OperationSuperseded,
   RestartFrom,
   StepFailed,
   type PlacementRow,
@@ -13,6 +14,7 @@ import {
 } from './context.js';
 import { bootstrapToken, type CommandReply } from './agent.js';
 import { archiveObjectKey } from './archives.js';
+import { fencedInsert, operationFence } from './fencing.js';
 
 const { browserInstances, instanceHealth, ipAddresses, placements, resources, auditLog, events, agentCredentials, agentCommands, viewerSessions, backups, archiveKeys, providerPrices, regions } = schema;
 
@@ -43,6 +45,18 @@ async function estimateCents(env: Pick<StepEnv, 'deps' | 'executor'>, providerRe
   const sheet = await sheetFor(env.deps.db, env.executor.kind, providerRegion);
   return sheet ? resourceMonthlyCostCents(sheet, kind, sizeGb) : 0;
 }
+/** A capacity fallback can only select a machine at or below the public price confirmed. */
+async function vmPricing(env: StepEnv, providerRegion: string) {
+  const sheet = await sheetFor(env.deps.db, env.executor.kind, providerRegion);
+  if (!sheet) {
+    if (env.executor.kind === 'fake') return {}; // Local simulator fixtures do not need live AWS prices.
+    throw new StepFailed('Machine prices are unavailable. No new VM was launched.');
+  }
+  const quoted = env.op.params?.maxVmHour;
+  const maxVmHour = typeof quoted === 'number' && Number.isFinite(quoted) && quoted >= 0 ? Math.min(quoted, sheet.vmHour) : sheet.vmHour;
+  return { maxVmHour, instanceTypePrices: sheet.instanceTypes ?? { [sheet.instanceType]: sheet.vmHour } };
+}
+
 const MAX_IP_ROUNDS = 3;
 const OLD_IP_KEEP_DAYS = 30;
 
@@ -69,7 +83,11 @@ async function ledgerPending(env: StepEnv, kind: ResourceKind, token: string, ge
       monthlyCostEstimate,
       firstSeenAt: deps.now(),
     })
-    .onConflictDoNothing();
+    .onConflictDoUpdate({
+      target: resources.requestToken,
+      set: { createdByOp: op.id, firstSeenAt: deps.now(), tags: env.tags(kind, generation) },
+      setWhere: and(isNull(resources.providerId), eq(resources.state, 'pending'), operationFence(env)),
+    });
 }
 
 async function ledgerActive(
@@ -81,7 +99,7 @@ async function ledgerActive(
 ) {
   await env.deps.db
     .update(resources)
-    .set({ providerId, zone, address, state: 'active', lastSeenAt: env.deps.now() })
+    .set({ providerId, zone, address, state: sql`case when ${resources.state} in ('rejected', 'superseded') or (${resources.state} = 'deleted' and ${resources.providerId} is not null) then ${resources.state} else 'active' end`, lastSeenAt: env.deps.now() })
     .where(eq(resources.requestToken, token));
 }
 
@@ -127,7 +145,7 @@ async function screenIp(env: StepEnv): Promise<StepOutcome> {
   const [row] = await db.select().from(ipAddresses).where(eq(ipAddresses.address, address));
   if (!row || row.instanceId !== env.instance.id) {
     // Leave the allocation to the reaper and try another one.
-    await db.update(resources).set({ state: 'rejected' }).where(eq(resources.requestToken, token));
+    await db.update(resources).set({ state: 'rejected' }).where(and(eq(resources.requestToken, token), operationFence(env)));
     throw new RestartFrom('allocate_ip', `address ${address} was used before`);
   }
   return { result: { address } };
@@ -142,7 +160,11 @@ const COMMAND_TIMEOUT_MS = 60_000;
 const COMMAND_POLL_MS = 2_000;
 
 async function awaitAgent(env: StepEnv): Promise<StepOutcome> {
-  return awaitAgentFor(env, await loadPlacement(env));
+  const p = await loadPlacement(env);
+  // A create interrupted by Sleep resumes under a fresh operation, retaining its dedicated
+  // resources and stable create tokens. An already-created VM may still be stopped.
+  if (env.op.kind === 'create' && env.op.params?.resumeCreateFrom) await env.executor.ensureRunning(env.ctx('resume_running'), placementRef(p));
+  return awaitAgentFor(env, p);
 }
 
 async function awaitAgentFor(env: StepEnv, p: PlacementRow): Promise<StepOutcome> {
@@ -172,7 +194,9 @@ async function command(
 }
 
 async function verifyBinding(env: StepEnv): Promise<StepOutcome> {
-  return verifyBindingFor(env, await loadPlacement(env));
+  const p = await currentPlacement(env);
+  if (!p && env.op.kind === 'stop') return { result: { skipped: 'creation was stopped before placement' } };
+  return verifyBindingFor(env, p ?? await loadPlacement(env));
 }
 
 async function verifyBindingFor(env: StepEnv, p: PlacementRow): Promise<StepOutcome> {
@@ -235,6 +259,8 @@ async function ensureRunning(env: StepEnv): Promise<StepOutcome> {
  * stores are journaled.
  */
 async function prepareShutdown(env: StepEnv): Promise<StepOutcome> {
+  const settlement = settleRunningStatements(env.deps.db, env.instance.id, env.deps.now(), operationFence(env));
+  await env.deps.db.batch([settlement[0]!, ...settlement.slice(1)]);
   // Permanent deletion has already revoked the agent and archive key. Never create a fresh
   // profile copy or wait for an agent that is intentionally unable to authenticate.
   if (env.op.kind === 'delete' && env.op.params?.purgeNow === true) {
@@ -244,10 +270,11 @@ async function prepareShutdown(env: StepEnv): Promise<StepOutcome> {
     await env.deps.db.update(browserInstances).set({
       status: 'deleting', desiredState: 'deleted', deletedAt: env.instance.deletedAt ?? at,
       purgeAfter: env.instance.purgeAfter && env.instance.purgeAfter <= at ? env.instance.purgeAfter : at, updatedAt: at,
-    }).where(eq(browserInstances.id, env.instance.id));
+    }).where(and(eq(browserInstances.id, env.instance.id), operationFence(env)));
     await revokeDeletedInstance(env);
     return { result: { skipped: true, reason: 'permanent deletion' } };
   }
+  if (env.op.kind === 'stop' && env.op.params?.preemptedOperationId) return { result: { skipped: 'interrupted operation; provider stop is authoritative' } };
   const p = await currentPlacement(env);
   if (!p) return { result: { skipped: true } };
   const archive = await prepareArchive(env, p, 'sleep');
@@ -264,10 +291,38 @@ async function prepareShutdown(env: StepEnv): Promise<StepOutcome> {
 }
 
 async function ensureStopped(env: StepEnv): Promise<StepOutcome> {
-  const p = await currentPlacement(env);
-  if (!p) return { result: { skipped: true } };
-  await env.executor.ensureStopped(env.ctx('ensure_stopped'), placementRef(p));
-  return {};
+  const places = await env.deps.db.select().from(placements).where(eq(placements.instanceId, env.instance.id));
+  const ledger = await env.deps.db.select().from(resources).where(and(eq(resources.instanceId, env.instance.id), ne(resources.state, 'deleted')));
+  const groups = new Map<string, { executor: ExecutorKind; region: string }>();
+  for (const r of ledger) groups.set(`${r.executor}:${r.region}`, { executor: r.executor as ExecutorKind, region: r.region });
+  for (const p of places) groups.set(`${p.executor}:${p.providerRegion}`, { executor: p.executor as ExecutorKind, region: p.providerRegion });
+  groups.set(`${env.region.executor}:${env.region.providerRegion}`, { executor: env.region.executor as ExecutorKind, region: env.region.providerRegion });
+  let stopped = 0;
+  for (const group of groups.values()) {
+    const executor = env.deps.executor(group.executor);
+    // A provider call may have created a VM before its response reached placements/ledger.
+    const inventory = await executor.listManaged(env.ctx('stop_inventory'), group.region);
+    const current = places.find((p) => p.status === 'current' && p.executor === group.executor && p.providerRegion === group.region);
+    const disk = current && inventory.find((r) => r.kind === 'volume' && r.providerId === current.volumeId && r.tags['cb:instance'] === env.instance.id && r.tags['cb:env'] === env.deps.envName);
+    if (disk && typeof disk.sizeGb === 'number' && Number.isSafeInteger(disk.sizeGb) && disk.sizeGb > 0) {
+      await env.deps.db.update(browserInstances).set({ storageGb: sql`max(${browserInstances.storageGb}, ${disk.sizeGb})` })
+        .where(and(eq(browserInstances.id, env.instance.id), operationFence(env)));
+    }
+    const ids = new Set([
+      ...places.filter((p) => p.executor === group.executor && p.providerRegion === group.region && p.vmId).map((p) => p.vmId!),
+      ...inventory.filter((r) => r.kind === 'vm' && r.tags['cb:instance'] === env.instance.id && r.tags['cb:env'] === env.deps.envName).map((r) => r.providerId),
+    ]);
+    for (const vmId of ids) {
+      const p = places.find((x) => x.vmId === vmId);
+      const ref = p ? placementRef(p) : { providerRegion: group.region, vmId, zone: '', volumeId: '', nicId: '', ipAllocationId: '', ipAddress: '' };
+      await executor.ensureStopped(env.ctx('ensure_stopped', vmId), ref);
+      stopped++;
+    }
+  }
+  const drainUntil = Number(env.op.params?.drainUntil ?? 0);
+  if (drainUntil > env.deps.now().getTime()) return { wait: Math.min(5_000, drainUntil - env.deps.now().getTime()), reason: 'confirming an earlier provider request has stopped' };
+  // Re-running this step after drainUntil stops a VM that appeared after the first pass too.
+  return { result: { stopped } };
 }
 
 async function currentPlacement(env: StepEnv): Promise<PlacementRow | null> {
@@ -292,10 +347,19 @@ async function finishWithStatus(
     db
       .update(browserInstances)
       .set({ status, statusReason: null, updatedAt: at, ...extra })
-      .where(eq(browserInstances.id, env.instance.id)),
+      .where(and(eq(browserInstances.id, env.instance.id), operationFence(env))),
     db.insert(events).values(eventRow(env.instance.userId, 'instance.updated', { instanceId: env.instance.id }, at)),
   ] as const;
-  await db.batch(stmts);
+  if (status === 'running') {
+    const startsRunning = sql`exists(select 1 from browser_instances where id = ${env.instance.id} and status <> 'running')`;
+    await db.batch([
+      db.insert(instanceHealth).values({
+        instanceId: env.instance.id,
+        meteredAt: sql`case when ${operationFence(env)} and ${startsRunning} then ${at.getTime()} else null end`,
+      }).onConflictDoUpdate({ target: instanceHealth.instanceId, set: { meteredAt: at }, setWhere: and(operationFence(env), startsRunning) }),
+      ...stmts,
+    ]);
+  } else await db.batch(stmts);
   return {};
 }
 
@@ -326,7 +390,7 @@ async function createVolume(env: StepEnv): Promise<StepOutcome> {
   await ledgerPending(env, 'volume', ctx.token, 1, zone, sizeGb);
   const vol = await env.executor.ensureVolume(ctx, env.region.providerRegion, zone, sizeGb);
   await ledgerActive(env, ctx.token, vol.volumeId, vol.zone);
-  await env.deps.db.update(browserInstances).set({ storageGb: vol.sizeGb }).where(eq(browserInstances.id, env.instance.id));
+  await env.deps.db.update(browserInstances).set({ storageGb: vol.sizeGb }).where(and(eq(browserInstances.id, env.instance.id), operationFence(env)));
   return { result: { volumeId: vol.volumeId, sizeGb: vol.sizeGb } };
 }
 
@@ -340,15 +404,24 @@ async function issueBootstrap(env: StepEnv): Promise<StepOutcome> {
 }
 
 /** A new bootstrap for `generation`; replacing the credential stops an older generation's agent from connecting. */
+function createTokenOperation(env: StepEnv) {
+  return env.op.kind === 'create' && typeof env.op.params?.resumeCreateFrom === 'string' ? env.op.params.resumeCreateFrom : env.op.id;
+}
+
 async function issueBootstrapFor(env: StepEnv, generation: number): Promise<StepOutcome> {
-  const token = await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, env.op.id, generation);
+  const token = await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, createTokenOperation(env), generation);
+  if (env.op.kind === 'create' && env.op.params?.resumeCreateFrom) {
+    const [existing] = await env.deps.db.select().from(agentCredentials).where(eq(agentCredentials.instanceId, env.instance.id));
+    if (existing?.generation === generation && existing.credentialHash) return { result: { resumed: true } };
+  }
   const at = env.deps.now();
   const expiresAt = new Date(at.getTime() + 15 * 60_000);
   const values = { generation, bootstrapHash: await sha256Hex(token), bootstrapExpiresAt: expiresAt, credentialHash: null, activatedAt: null };
-  await env.deps.db
-    .insert(agentCredentials)
-    .values({ instanceId: env.instance.id, createdAt: at, ...values })
-    .onConflictDoUpdate({ target: agentCredentials.instanceId, set: values });
+  await fencedInsert(env.deps.db, 'agent_credentials', {
+    instance_id: env.instance.id, created_at: at, generation, bootstrap_hash: values.bootstrapHash,
+    bootstrap_expires_at: expiresAt, credential_hash: null, activated_at: null,
+  }, operationFence(env), sql`on conflict(instance_id) do update set generation = excluded.generation, bootstrap_hash = excluded.bootstrap_hash,
+    bootstrap_expires_at = excluded.bootstrap_expires_at, credential_hash = null, activated_at = null where ${operationFence(env)}`);
   return { result: { expiresAt: expiresAt.toISOString() } };
 }
 
@@ -359,34 +432,32 @@ async function createVm(env: StepEnv): Promise<StepOutcome> {
   const ctx = env.ctx('create_vm');
   await ledgerPending(env, 'vm', ctx.token, 1, zone);
   const vm = await env.executor.ensureVm(ctx, env.region.providerRegion, {
+    ...await vmPricing(env, env.region.providerRegion),
     zone,
     nicId,
     volumeId,
     instanceId: env.instance.id,
-    bootstrapToken: await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, env.op.id, 1),
+    bootstrapToken: await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, createTokenOperation(env), 1),
     gatewayUrl: env.deps.gatewayUrl,
   });
   await ledgerActive(env, ctx.token, vm.vmId, vm.zone);
-  await env.deps.db
-    .insert(placements)
-    .values({
+  await fencedInsert(env.deps.db, 'placements', {
       id: newId(),
-      instanceId: env.instance.id,
+      instance_id: env.instance.id,
       generation: 1,
       executor: env.executor.kind,
-      providerRegion: env.region.providerRegion,
+      provider_region: env.region.providerRegion,
       zone: vm.zone,
-      vmId: vm.vmId,
-      instanceType: vm.instanceType ?? null,
-      rootVolumeGb: vm.rootVolumeGb ?? 16,
-      volumeId,
-      networkId: nicId,
-      ipAllocationId: ip.allocationId,
-      ipAddress: ip.address,
+      vm_id: vm.vmId,
+      instance_type: vm.instanceType ?? null,
+      root_volume_gb: vm.rootVolumeGb ?? 16,
+      volume_id: volumeId,
+      network_id: nicId,
+      ip_allocation_id: ip.allocationId,
+      ip_address: ip.address,
       status: 'current',
-      createdAt: env.deps.now(),
-    })
-    .onConflictDoNothing();
+      created_at: env.deps.now(),
+  }, operationFence(env));
   return { result: { vmId: vm.vmId } };
 }
 
@@ -405,7 +476,7 @@ async function associateNewIp(env: StepEnv): Promise<StepOutcome> {
     db
       .update(placements)
       .set({ ipAllocationId: next.allocationId, ipAddress: next.address })
-      .where(eq(placements.id, p.id)),
+      .where(and(eq(placements.id, p.id), operationFence(env))),
     // The old IP stays allocated and unattached for 30 days, then the reaper releases it.
     db
       .update(resources)
@@ -414,7 +485,7 @@ async function associateNewIp(env: StepEnv): Promise<StepOutcome> {
         and(
           eq(resources.instanceId, env.instance.id),
           eq(resources.kind, 'ip'),
-          eq(resources.providerId, String(previous.oldAllocationId)),
+          eq(resources.providerId, String(previous.oldAllocationId)), operationFence(env),
         ),
       ),
   ]);
@@ -457,15 +528,15 @@ export async function compensateChangeIp(env: StepEnv) {
     db
       .update(placements)
       .set({ ipAllocationId: swapped.oldAllocationId, ipAddress: swapped.oldAddress })
-      .where(eq(placements.id, p.id)),
+      .where(and(eq(placements.id, p.id), operationFence(env))),
     db
       .update(resources)
       .set({ state: 'active', releaseAfter: null })
-      .where(and(eq(resources.instanceId, env.instance.id), eq(resources.providerId, swapped.oldAllocationId))),
+      .where(and(eq(resources.instanceId, env.instance.id), eq(resources.providerId, swapped.oldAllocationId), operationFence(env))),
     db
       .update(resources)
       .set({ state: 'rejected' })
-      .where(and(eq(resources.instanceId, env.instance.id), eq(resources.providerId, next?.allocationId ?? ''))),
+      .where(and(eq(resources.instanceId, env.instance.id), eq(resources.providerId, next?.allocationId ?? ''), operationFence(env))),
   ]);
 }
 
@@ -504,9 +575,15 @@ export async function discoverInstanceResources(env: DeleteEnv, instanceId: stri
         if (known.state === 'deleted') await db.update(resources).set({ state: 'active', deletedAt: null, lastSeenAt: now() }).where(eq(resources.id, known.id));
         continue;
       }
+      const pending = rows.find((x) => !x.providerId && x.executor === group.executor && x.region === group.region && x.kind === r.kind && r.tags['cb:token'] === x.requestToken);
+      if (pending) {
+        await db.update(resources).set({ providerId: r.providerId, state: 'active', lastSeenAt: now() }).where(eq(resources.id, pending.id));
+        pending.providerId = r.providerId; pending.state = 'active';
+        continue;
+      }
       await db.insert(resources).values({
         id: newId(), instanceId, executor: group.executor, kind: r.kind, providerId: r.providerId,
-        region: r.region, zone: r.zone, state: 'active', tags: r.tags,
+        region: r.region, zone: r.zone, state: 'active', tags: r.tags, createdByOp: r.tags['cb:op'] ?? null,
         requestToken: `discovered:${group.executor}:${group.region}:${r.providerId}`,
         firstSeenAt: now(), lastSeenAt: now(),
       }).onConflictDoNothing();
@@ -541,7 +618,9 @@ export async function deleteLedgerResources(
         (x.tags['cb:token'] === r.requestToken || x.tags['cb:op'] === r.createdByOp),
       );
       for (const x of possible) await executor.ensureDeleted(ctx, r.region, x.kind, x.providerId);
-      if (!possible.length && now().getTime() - r.firstSeenAt.getTime() < UNKNOWN_RESOURCE_SETTLE_MS) {
+      const [creator] = r.createdByOp ? await db.select({ status: schema.operations.status, finishedAt: schema.operations.finishedAt }).from(schema.operations).where(eq(schema.operations.id, r.createdByOp)) : [];
+      const possibleSubmissionAt = Math.max(r.firstSeenAt.getTime(), creator?.status === 'canceled' ? creator.finishedAt?.getTime() ?? 0 : 0);
+      if (!possible.length && now().getTime() - possibleSubmissionAt < UNKNOWN_RESOURCE_SETTLE_MS) {
         waitingForUnknown = true;
         continue;
       }
@@ -564,6 +643,7 @@ async function revokeDeletedInstance(env: Pick<StepEnv, 'deps' | 'instance'>) {
   await db.batch([
     db.update(agentCredentials).set({ credentialHash: null, bootstrapHash: null, bootstrapExpiresAt: null, rotatedAt: at }).where(eq(agentCredentials.instanceId, env.instance.id)),
     db.update(archiveKeys).set({ wrappedKey: null, destroyedAt: at }).where(eq(archiveKeys.instanceId, env.instance.id)),
+    db.update(schema.browserReservations).set({ reservedMicros: 0, updatedAt: at }).where(eq(schema.browserReservations.instanceId, env.instance.id)),
     db.update(viewerSessions).set({ endedAt: at }).where(and(eq(viewerSessions.instanceId, env.instance.id), isNull(viewerSessions.endedAt))),
     db.update(agentCommands).set({ status: 'failed', reply: { error: 'Browser permanently deleted.' }, completedAt: at }).where(and(eq(agentCommands.instanceId, env.instance.id), isNull(agentCommands.completedAt))),
   ]);
@@ -607,7 +687,8 @@ export async function ensureArchiveKey(env: Pick<StepEnv, 'deps'>, instanceId: s
   if (row?.wrappedKey) return true;
   if (row?.destroyedAt) return false;
   const { wrapped } = await newArchiveKey(archiveMasterKey);
-  await db.insert(archiveKeys).values({ instanceId, wrappedKey: wrapped, createdAt: now() }).onConflictDoNothing();
+  await fencedInsert(db, 'archive_keys', { instance_id: instanceId, wrapped_key: wrapped, created_at: now() },
+    sql`exists(select 1 from browser_instances where id = ${instanceId} and desired_state <> 'deleted' and status not in ('deleting', 'purged'))`);
   return true;
 }
 
@@ -647,7 +728,7 @@ async function settleArchive(env: StepEnv, backupId: string, reply: CommandReply
 
 /** A provider snapshot of the current volume, in the ledger and in `backups`. */
 export async function snapshotVolume(
-  env: { deps: StepEnv['deps']; executor: StepEnv['executor']; instance: { id: string }; op?: { id: string } | null; tags: StepEnv['tags'] },
+  env: { deps: StepEnv['deps']; executor: StepEnv['executor']; instance: { id: string }; op?: { id: string } | null; tags: StepEnv['tags']; assertActive?: StepEnv['assertActive'] },
   p: PlacementRow,
   reason: string,
   token: string,
@@ -671,7 +752,11 @@ export async function snapshotVolume(
       firstSeenAt: now(),
     })
     .onConflictDoNothing();
-  const ctx = { operationId: env.op?.id ?? 'scheduler', step: 'snapshot', token, tags: env.tags('snapshot', p.generation), deadline: Date.now() + 120_000 };
+  const assertActive = env.assertActive ?? (async () => {
+    const [inst] = await db.select({ desiredState: browserInstances.desiredState, status: browserInstances.status }).from(browserInstances).where(eq(browserInstances.id, env.instance.id));
+    if (!inst || inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) throw new OperationSuperseded();
+  });
+  const ctx = { operationId: env.op?.id ?? 'scheduler', step: 'snapshot', token, tags: env.tags('snapshot', p.generation), deadline: Date.now() + 120_000, assertActive };
   const snap = await env.executor.snapshot(ctx, p.providerRegion, p.volumeId ?? '');
   const at = now();
   const monthlyCostEstimate = await estimateCents(env, p.providerRegion, 'snapshot', snap.sizeGb);
@@ -728,11 +813,11 @@ async function swapVolume(env: StepEnv): Promise<StepOutcome> {
   const { db, now } = env.deps;
   await env.executor.swapVolume(env.ctx('swap_volume'), placementRef(p), restored.volumeId);
   await db.batch([
-    db.update(placements).set({ volumeId: restored.volumeId }).where(eq(placements.id, p.id)),
+    db.update(placements).set({ volumeId: restored.volumeId }).where(and(eq(placements.id, p.id), operationFence(env))),
     db
       .update(resources)
       .set({ state: 'superseded', releaseAfter: new Date(now().getTime() + SUPERSEDED_KEEP_MS) })
-      .where(and(eq(resources.instanceId, env.instance.id), eq(resources.providerId, p.volumeId ?? ''))),
+      .where(and(eq(resources.instanceId, env.instance.id), eq(resources.providerId, p.volumeId ?? ''), operationFence(env))),
   ]);
   return { result: { previousVolumeId: p.volumeId } };
 }
@@ -771,7 +856,7 @@ async function loadBuilding(env: StepEnv): Promise<PlacementRow> {
 /** Stop the old VM if it still runs (best effort), then snapshot its volume. */
 async function recoverSnapshot(env: StepEnv): Promise<StepOutcome> {
   const p = await loadPlacement(env);
-  await env.executor.ensureStopped(env.ctx('snapshot_volume', 'stop'), placementRef(p)).catch(() => undefined);
+  await env.executor.ensureStopped(env.ctx('snapshot_volume', 'stop'), placementRef(p)).catch((e) => { if (e instanceof OperationSuperseded) throw e; });
   const snap = await snapshotVolume(env, p, 'recover', env.ctx('snapshot_volume').token);
   const zones = env.executor.zones(p.providerRegion);
   const target = zones.find((z) => z !== p.zone) ?? p.zone ?? zones[0]!;
@@ -819,6 +904,7 @@ async function recoverVm(env: StepEnv): Promise<StepOutcome> {
   const ctx = env.ctx('create_vm');
   await ledgerPending(env, 'vm', ctx.token, plan.generation, plan.zone);
   const vm = await env.executor.ensureVm(ctx, p.providerRegion, {
+    ...await vmPricing(env, p.providerRegion),
     zone: plan.zone,
     nicId,
     volumeId,
@@ -827,26 +913,23 @@ async function recoverVm(env: StepEnv): Promise<StepOutcome> {
     gatewayUrl: env.deps.gatewayUrl,
   });
   await ledgerActive(env, ctx.token, vm.vmId, vm.zone);
-  await env.deps.db
-    .insert(placements)
-    .values({
+  await fencedInsert(env.deps.db, 'placements', {
       id: newId(),
-      instanceId: env.instance.id,
+      instance_id: env.instance.id,
       generation: plan.generation,
       executor: env.executor.kind,
-      providerRegion: p.providerRegion,
+      provider_region: p.providerRegion,
       zone: vm.zone,
-      vmId: vm.vmId,
-      instanceType: vm.instanceType ?? null,
-      rootVolumeGb: vm.rootVolumeGb ?? 16,
-      volumeId,
-      networkId: nicId,
-      ipAllocationId: p.ipAllocationId,
-      ipAddress: p.ipAddress,
+      vm_id: vm.vmId,
+      instance_type: vm.instanceType ?? null,
+      root_volume_gb: vm.rootVolumeGb ?? 16,
+      volume_id: volumeId,
+      network_id: nicId,
+      ip_allocation_id: p.ipAllocationId,
+      ip_address: p.ipAddress,
       status: 'building',
-      createdAt: env.deps.now(),
-    })
-    .onConflictDoNothing();
+      created_at: env.deps.now(),
+  }, operationFence(env));
   return { result: { vmId: vm.vmId } };
 }
 
@@ -858,12 +941,12 @@ async function finishRecover(env: StepEnv): Promise<StepOutcome> {
   const keep = new Date(now().getTime() + SUPERSEDED_KEEP_MS);
   const oldIds = [old.vmId, old.networkId, old.volumeId].filter((x): x is string => !!x);
   await db.batch([
-    db.update(placements).set({ status: 'superseded' }).where(eq(placements.id, old.id)),
-    db.update(placements).set({ status: 'current' }).where(eq(placements.id, next.id)),
+    db.update(placements).set({ status: 'superseded' }).where(and(eq(placements.id, old.id), operationFence(env))),
+    db.update(placements).set({ status: 'current' }).where(and(eq(placements.id, next.id), operationFence(env))),
     db
       .update(resources)
       .set({ state: 'superseded', releaseAfter: keep })
-      .where(and(eq(resources.instanceId, env.instance.id), inArray(resources.providerId, oldIds))),
+      .where(and(eq(resources.instanceId, env.instance.id), inArray(resources.providerId, oldIds), operationFence(env))),
     db.insert(auditLog).values({
       actor: 'engine',
       action: 'instance.recovered',
@@ -876,6 +959,25 @@ async function finishRecover(env: StepEnv): Promise<StepOutcome> {
   return finishWithStatus(env, 'running', { lastActiveAt: now() });
 }
 
+/** Canceled recovery/IP work must not leave unused paid assets allocated indefinitely. */
+async function finishStop(env: StepEnv): Promise<StepOutcome> {
+  const oldId = env.op.params?.preemptedOperationId;
+  const [interrupted] = typeof oldId === 'string' ? await env.deps.db.select({ kind: schema.operations.kind }).from(schema.operations).where(eq(schema.operations.id, oldId)) : [];
+  if (interrupted && ['recover', 'change_ip'].includes(interrupted.kind)) {
+    await discoverInstanceResources(env, env.instance.id);
+    const p = await currentPlacement(env);
+    const keep = new Set([p?.vmId, p?.networkId, p?.volumeId, p?.ipAllocationId].filter((x): x is string => !!x));
+    const leftovers = await env.deps.db.select().from(resources).where(and(eq(resources.instanceId, env.instance.id), eq(resources.createdByOp, String(oldId)), eq(resources.state, 'active')));
+    for (const r of leftovers) {
+      if (!r.providerId || keep.has(r.providerId) || r.kind === 'snapshot' || r.tags['cb:kind'] === 'root_volume') continue;
+      await env.deps.db.update(resources).set({ state: r.kind === 'ip' ? 'rejected' : 'superseded', releaseAfter: env.deps.now() })
+        .where(and(eq(resources.id, r.id), operationFence(env)));
+    }
+  }
+  return finishWithStatus(env, 'sleeping', env.instance.trialState === 'active' || env.instance.trialState === 'ended'
+    ? { trialReclaimAt: env.instance.trialReclaimAt ?? new Date(env.op.createdAt.getTime() + TRIAL.keptDays * 86_400_000) } : {});
+}
+
 // --- resize_volume (page 4: more storage) --------------------------------------------------------
 
 /** How long to wait between checks of a volume modification. */
@@ -885,9 +987,19 @@ const RESIZE_POLL_MS = 5_000;
 async function resizeVolume(env: StepEnv): Promise<StepOutcome> {
   const p = await loadPlacement(env);
   const target = Number((env.op.params as { sizeGb?: unknown } | null)?.sizeGb);
-  if (!Number.isInteger(target) || target <= env.instance.storageGb) throw new StepFailed('The new size must be larger than the current one.');
+  if (!Number.isInteger(target) || target < env.instance.storageGb) throw new StepFailed('The new size must be at least the current one.');
   const r = await env.executor.resizeVolume(env.ctx('resize_volume'), p.providerRegion, p.volumeId ?? '', target);
   if (r.state === 'pending') return { wait: RESIZE_POLL_MS, reason: 'growing the volume' };
+  // AWS cannot undo an accepted volume growth. A late response may arrive after Sleep canceled
+  // this job: record physical capacity and cost without restoring the old lifecycle status.
+  await env.deps.db.batch([
+    env.deps.db.update(browserInstances).set({ storageGb: sql`max(${browserInstances.storageGb}, ${r.sizeGb})` }).where(and(
+      eq(browserInstances.id, env.instance.id), ne(browserInstances.status, 'purged'),
+      sql`exists(select 1 from placements where instance_id = ${env.instance.id} and volume_id = ${p.volumeId ?? ''} and status = 'current')`,
+    )),
+    env.deps.db.update(resources).set({ monthlyCostEstimate: await estimateCents(env, p.providerRegion, 'volume', r.sizeGb) })
+      .where(and(eq(resources.instanceId, env.instance.id), eq(resources.providerId, p.volumeId ?? ''), ne(resources.state, 'deleted'))),
+  ]);
   return { result: { sizeGb: r.sizeGb } };
 }
 
@@ -897,7 +1009,8 @@ async function resizeVolume(env: StepEnv): Promise<StepOutcome> {
  */
 async function growFilesystem(env: StepEnv): Promise<StepOutcome> {
   if (env.instance.status !== 'running') return { result: { grown: false, when: 'next start' } };
-  const { reply, timedOut } = await command(env, 'grow_filesystem', 'grow_filesystem', {});
+  // The agent allows resize2fs two minutes; include delivery time before declaring a timeout.
+  const { reply, timedOut } = await command(env, 'grow_filesystem', 'grow_filesystem', {}, 150_000);
   if (reply.status === 'pending' && !timedOut) return { wait: COMMAND_POLL_MS, reason: 'growing the file system' };
   if (reply.status !== 'succeeded') await raiseAlert(env.deps.db, {
     source: 'engine', severity: 'warning', title: `Browser file system growth needs attention: ${env.instance.id}`,
@@ -915,7 +1028,7 @@ async function finishResize(env: StepEnv): Promise<StepOutcome> {
     db
       .update(resources)
       .set({ monthlyCostEstimate: await estimateCents(env, p.providerRegion, 'volume', sizeGb) })
-      .where(and(eq(resources.instanceId, env.instance.id), eq(resources.providerId, p.volumeId ?? ''))),
+      .where(and(eq(resources.instanceId, env.instance.id), eq(resources.providerId, p.volumeId ?? ''), operationFence(env))),
     db.insert(auditLog).values({
       actor: env.op.userId ? `user:${env.op.userId}` : 'engine',
       action: 'storage.resized',
@@ -955,15 +1068,7 @@ export const HANDLERS: Record<string, Record<string, Handler>> = {
     prepare_shutdown: prepareShutdown,
     ensure_stopped: ensureStopped,
     verify_binding: verifyBinding,
-    // An unconverted trial browser is kept 7 days after each sleep, then reclaimed (page 6).
-    finish: (env) =>
-      finishWithStatus(
-        env,
-        'sleeping',
-        env.instance.trialState === 'active' || env.instance.trialState === 'ended'
-          ? { trialReclaimAt: new Date(env.deps.now().getTime() + TRIAL.keptDays * 86_400_000) }
-          : {},
-      ),
+    finish: finishStop,
   },
   change_ip: {
     allocate_ip: allocateIp,

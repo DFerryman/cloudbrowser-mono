@@ -60,13 +60,17 @@ Service sends (the message is printed in the log) and, with `ENVIRONMENT=develop
 code is also logged. Queues, the Durable Object and the rate limiters all run locally. For frontend work with hot reload,
 also run `pnpm --filter @cloudbrowser/web dev` (Vite on :5173 proxies `/api` to :8787).
 
-Backups: the daily snapshot runs when the engine's 1-minute cron fires at minute 7 of an hour. Profile archives need real R2 credentials (see
+Snapshots: user snapshot controls and automatic daily snapshots have been removed. Internal
+recovery and cleanup still handle existing provider snapshots. Profile archives need real R2 credentials (see
 `docs/deploy-cloudflare.md`); without them they are skipped locally.
 
 Billing: browsers draw per minute from a prepaid balance, at the AWS list price for their region
 (read from the AWS Price List API) times the markup set in the operator console. Locally the
-simulator's price sheet is used. Without Creem settings, or while the `billing_required` flag is
-off, usage is metered and shown but nothing is charged. To try Creem test mode locally, put
+simulator's price sheet is used. Paid browsers also reserve seven days of fixed IP/disk costs;
+the reserve remains unspent balance, and only available credit can fund use. At exhaustion,
+access stops immediately and the reserve funds seven days of retention before permanent deletion.
+The one ten-minute trial is exempt. Missing Creem settings disable top-ups, not prepaid checks.
+An explicit `billing_required=false` is only a local test/pilot override. To try Creem test mode locally, put
 `CREEM_API_BASE=https://test-api.creem.io`, `CREEM_API_KEY`, `CREEM_WEBHOOK_SECRET` and
 `CREEM_TOPUP_PRODUCTS` (one-time product ids, comma-separated) in `apps/api/.dev.vars`, and expose
 the webhook with `cloudflared tunnel --url http://localhost:8787` (webhook URL:
@@ -103,12 +107,13 @@ node packages/viewer/e2e/run.mjs <instance id> <wrangler log> shot.png
 ```
 
 The runner signs in to the real web app, opens the session view and checks that the fake neko's
-WebRTC video plays and that mouse, click, key and scroll input arrives over the data channel.
+WebRTC video plays. User input uses one ordered WebSocket queue across mouse, touch, keyboard,
+IME and clipboard events, with backpressure and visible failure instead of silent input loss.
 
 On touch screens, tap to click and swipe with one or two fingers to scroll. Use the toolbar's
 keyboard button to show or hide the software keyboard; touching the picture keeps that choice.
 Keyboard animations resize the local view without repeatedly changing the remote desktop.
-The standalone touch/input regression mounts the real viewer with a fake transport, without
+The standalone touch/input regression mounts the real viewer and interprets its Neko wire events, without
 sign-in or a running VM:
 
 ```bash

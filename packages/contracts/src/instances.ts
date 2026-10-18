@@ -77,8 +77,6 @@ export const Instance = z.object({
   currentOperation: OperationSummary.nullable(),
   /** Size of the data volume in GB (the system disk is extra, see pricing). */
   storageGb: z.number().int(),
-  /** Daily provider snapshots of the data volume, billed per GB-month. Off by default. */
-  backupsEnabled: z.boolean(),
   /** Set for the free trial browser: free until converted by adding credit (see TRIAL). */
   trial: z
     .object({
@@ -114,8 +112,6 @@ export const UpdateInstanceBody = z
     idleTimeoutS: z.number().int().min(60).max(3600).optional(),
     screen: ScreenSize.optional(),
     locale: BrowserLocale.optional(),
-    /** Turning snapshots on starts a monthly charge; turning them off deletes the snapshots. */
-    backupsEnabled: z.boolean().optional(),
     priceVersion: PriceVersion.optional(),
   })
   .strict();
@@ -142,9 +138,8 @@ export const InstanceStorage = z.object({
   totalBytes: z.number().int().nullable(),
   reportedAt: z.string().nullable(),
   resizable: z.boolean(),
-  /** Why it cannot grow now: `state` (not running or sleeping), `cooldown` (6 hours between changes), `agent` (browser created before storage could grow), `max`. */
+  /** Why it cannot grow now: `state` (not running or sleeping), `cooldown` (four attempts per rolling 24 hours), `agent` (browser created before storage could grow), `max`. */
   blockedReason: z.enum(['state', 'cooldown', 'agent', 'max', 'busy', 'trial']).nullable(),
   nextResizeAt: z.string().nullable(),
-  snapshots: z.object({ count: z.number().int(), retentionDays: z.number().int() }),
 });
 export type InstanceStorage = z.infer<typeof InstanceStorage>;

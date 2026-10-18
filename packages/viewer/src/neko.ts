@@ -20,6 +20,10 @@ export const EV = {
   SIGNAL_ANSWER: 'signal/answer',
   SIGNAL_CANDIDATE: 'signal/candidate',
   CONTROL_REQUEST: 'control/request',
+  CONTROL_MOVE: 'control/move',
+  CONTROL_SCROLL: 'control/scroll',
+  CONTROL_BUTTONDOWN: 'control/buttondown',
+  CONTROL_BUTTONUP: 'control/buttonup',
   CONTROL_KEYDOWN: 'control/keydown',
   CONTROL_KEYUP: 'control/keyup',
   CONTROL_PASTE: 'control/paste',
@@ -74,6 +78,7 @@ export const encode = {
       v.setUint16(3, clamp16(x));
       v.setUint16(5, clamp16(y));
     }),
+  /** Signed X11 click counts: positive X/Y inject left/up, negative X/Y right/down. */
   scroll: (dx: number, dy: number, controlKey = false) =>
     frame(OP.SCROLL, 5, (v) => {
       v.setInt16(3, clampS16(dx));

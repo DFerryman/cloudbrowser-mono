@@ -167,11 +167,11 @@ export class AwsExecutor implements Executor {
   }
 
   private call(ctx: OpContext, region: string, action: string, params: Params, mutating = true) {
-    return this.ec2.call(region, action, params, ctx.deadline, mutating);
+    return this.ec2.call(region, action, params, ctx.deadline, mutating, ctx.assertActive);
   }
 
   private read(ctx: OpContext, region: string, action: string, params: Params) {
-    return this.ec2.call(region, action, params, ctx.deadline, false);
+    return this.ec2.call(region, action, params, ctx.deadline, false, ctx.assertActive);
   }
 
   /** All pages of a Describe call. */
@@ -396,8 +396,25 @@ export class AwsExecutor implements Executor {
     });
     let vmId = text(items(inst ?? undefined, 'instancesSet')[0], 'instanceId');
     if (!vmId) {
+      const configuredTypes = cfg.instanceTypes?.length ? cfg.instanceTypes : DEFAULT_INSTANCE_TYPES;
+      let types = configuredTypes.map((type, index) => ({ type, index }));
+      // Older callers may omit a quote. Production creation supplies both fields; a partial or
+      // malformed quote never permits launch, and an existing VM is resolved before this gate.
+      if (spec.maxVmHour !== undefined || spec.instanceTypePrices !== undefined) {
+        if (typeof spec.maxVmHour !== 'number' || !Number.isFinite(spec.maxVmHour) || spec.maxVmHour < 0) {
+          throw new ExecutorError('invalid', 'A valid confirmed VM hourly price is required before launching a machine.');
+        }
+        const cap = spec.maxVmHour;
+        for (const type of configuredTypes) {
+          const price = spec.instanceTypePrices?.[type];
+          if (typeof price !== 'number' || !Number.isFinite(price) || price < 0) {
+            throw new ExecutorError('invalid', `A current provider price is required for launch candidate ${type}.`);
+          }
+        }
+        types = types.filter(({ type }) => spec.instanceTypePrices![type]! <= cap);
+        if (!types.length) throw new ExecutorError('capacity', 'No launch candidate fits the confirmed VM hourly price.');
+      }
       const ami = cfg.ami ?? (await this.latestUbuntu(ctx, region));
-      const types = cfg.instanceTypes?.length ? cfg.instanceTypes : DEFAULT_INSTANCE_TYPES;
       const userData = bootstrapScript({
         instanceId: spec.instanceId,
         gatewayUrl: spec.gatewayUrl,
@@ -406,14 +423,15 @@ export class AwsExecutor implements Executor {
         agentImage: this.opts.agentImage,
         browserImage: this.opts.browserImage,
       });
-      for (const [i, type] of types.entries()) {
+      for (const [attempt, { type, index }] of types.entries()) {
         try {
           const res = await this.call(ctx, region, 'RunInstances', {
             ImageId: ami,
             InstanceType: type,
             MinCount: 1,
             MaxCount: 1,
-            ClientToken: await clientToken(ctx.token, `:${i}`),
+            // Keep each type's original token even when more expensive candidates were filtered.
+            ClientToken: await clientToken(ctx.token, `:${index}`),
             'NetworkInterface.1.DeviceIndex': 0,
             'NetworkInterface.1.NetworkInterfaceId': spec.nicId,
             'BlockDeviceMapping.1.DeviceName': '/dev/sda1',
@@ -435,7 +453,7 @@ export class AwsExecutor implements Executor {
           break;
         } catch (e) {
           // No capacity for this type (or not offered in this zone): try the next allowed type.
-          if (e instanceof ExecutorError && e.errorClass === 'capacity' && i < types.length - 1) continue;
+          if (e instanceof ExecutorError && e.errorClass === 'capacity' && attempt < types.length - 1) continue;
           throw e;
         }
       }
@@ -460,6 +478,7 @@ export class AwsExecutor implements Executor {
     this.authorize('ensureRunning');
     const region = p.providerRegion;
     let inst = await this.instance(ctx, region, p.vmId);
+    if (inst) this.requireOwner(ctx, inst, p.vmId);
     let state = this.stateOf(inst);
     if (state === 'terminating' || state === 'terminated' || state === 'missing') throw new ExecutorError('invalid', `VM ${p.vmId} no longer exists`);
     if (state === 'stopping') {
@@ -478,7 +497,9 @@ export class AwsExecutor implements Executor {
   async ensureStopped(ctx: OpContext, p: Placement): Promise<RunState> {
     this.authorize('ensureStopped');
     const region = p.providerRegion;
-    const state = this.stateOf(await this.instance(ctx, region, p.vmId));
+    const inst = await this.instance(ctx, region, p.vmId);
+    if (inst) this.requireOwner(ctx, inst, p.vmId);
+    const state = this.stateOf(inst);
     if (state === 'missing' || state === 'terminated') return 'missing';
     if (state === 'stopped') return 'stopped';
     if (state === 'running' || state === 'pending') await this.call(ctx, region, 'StopInstances', { 'InstanceId.1': p.vmId });
@@ -530,6 +551,10 @@ export class AwsExecutor implements Executor {
 
   async resizeVolume(ctx: OpContext, region: string, volumeId: string, sizeGb: number): Promise<ResizeState> {
     this.authorize('resizeVolume');
+    const vol = await this.volume(ctx, region, volumeId);
+    if (!vol) throw new ExecutorError('invalid', `volume ${volumeId} does not exist`);
+    this.requireOwner(ctx, vol, volumeId);
+    const size = Number(text(vol, 'size') ?? 0);
     let mods: XmlNode[] = [];
     try {
       mods = await this.readAll(ctx, region, 'DescribeVolumesModifications', 'volumeModificationSet', { 'VolumeId.1': volumeId });
@@ -538,16 +563,15 @@ export class AwsExecutor implements Executor {
     }
     const latest = mods.sort((a, b) => (text(b, 'startTime') ?? '').localeCompare(text(a, 'startTime') ?? ''))[0];
     const target = Number(text(latest, 'targetSize') ?? 0);
-    if (latest && target >= sizeGb) {
+    if (latest) {
       const state = text(latest, 'modificationState');
       if (state === 'failed') throw new ExecutorError('invalid', `resizing ${volumeId} failed: ${text(latest, 'statusMessage') ?? 'no reason given'}`);
-      // The new size is usable (and billed) from `optimizing` on.
-      return { state: state === 'modifying' ? 'pending' : 'ready', sizeGb: target };
+      if (!['modifying', 'optimizing', 'completed'].includes(state ?? '')) throw new ExecutorError('retryable', `Unrecognized volume modification state for ${volumeId}.`);
+      // The accepted size is usable (and billed) from optimizing on, but another size change
+      // must wait for completed. Retrying the same target never submits ModifyVolume twice.
+      if (target >= sizeGb) return { state: state === 'modifying' ? 'pending' : 'ready', sizeGb: Math.max(size, target) };
+      if (state !== 'completed') return { state: 'pending', sizeGb };
     }
-    const vol = await this.volume(ctx, region, volumeId);
-    if (!vol) throw new ExecutorError('invalid', `volume ${volumeId} does not exist`);
-    this.requireOwner(ctx, vol, volumeId);
-    const size = Number(text(vol, 'size') ?? 0);
     if (size >= sizeGb) return { state: 'ready', sizeGb: size };
     await this.call(ctx, region, 'ModifyVolume', { VolumeId: volumeId, Size: sizeGb });
     return { state: 'pending', sizeGb };
@@ -701,7 +725,10 @@ export class AwsExecutor implements Executor {
     const f = filters({ 'tag:cb:managed': 'true', 'tag:cb:env': ctx.tags['cb:env'] });
     const out: ObservedResource[] = [];
     const add = (kind: ResourceKind, id: string | undefined, node: XmlNode, state: string, zone: string | null) => {
-      if (id) out.push({ providerId: id, kind, region, zone, state, tags: tagsOf(node) });
+      if (id) {
+        const sizeGb = kind === 'volume' ? Number(text(node, 'size')) : NaN;
+        out.push({ providerId: id, kind, region, zone, state, tags: tagsOf(node), ...(Number.isInteger(sizeGb) && sizeGb > 0 ? { sizeGb } : {}) });
+      }
     };
     for (const r of await this.readAll(ctx, region, 'DescribeInstances', 'reservationSet', f)) {
       for (const i of items(r, 'instancesSet')) {

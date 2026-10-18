@@ -25,6 +25,10 @@ const NAMED: Record<string, number> = {
   NumLock: 0xff7f,
   CapsLock: 0xffe5,
   Delete: 0xffff,
+  Shift: 0xffe1,
+  Control: 0xffe3,
+  Alt: 0xffe9,
+  Meta: 0xffeb,
   ' ': 0x0020,
 };
 
@@ -49,6 +53,7 @@ export interface KeyMapOptions {
 
 export function keysymFor(e: Pick<KeyboardEvent, 'key' | 'code'>, opts: KeyMapOptions): number | null {
   if (opts.macToPc && (e.code === 'MetaLeft' || e.code === 'MetaRight')) return e.code === 'MetaLeft' ? 0xffe3 : 0xffe4;
+  if (opts.macToPc && !e.code && e.key === 'Meta') return 0xffe3;
   if (e.code in BY_CODE) return BY_CODE[e.code]!;
   if (e.key in NAMED) return NAMED[e.key]!;
   const f = /^F(\d{1,2})$/.exec(e.key);
@@ -62,6 +67,40 @@ export function keysymFor(e: Pick<KeyboardEvent, 'key' | 'code'>, opts: KeyMapOp
     return cp <= 0xff ? cp : 0x01000000 + cp;
   }
   return null; // Dead, Process (IME), Unidentified…
+}
+
+export interface KeyIdentityEvent {
+  key: string;
+  code: string;
+  keyCode?: number;
+}
+
+const usableCode = (code: string) => code && code !== 'Unidentified';
+const usableKeyCode = (code?: number) => code !== undefined && code !== 0 && code !== 229;
+const keyName = (key: string) => [...key].length === 1 ? key.toLowerCase() : key;
+
+/** Keyboard layouts and iOS can change key/keyCode between a press and its release. */
+export function keyIdentity(event: KeyIdentityEvent): string {
+  if (usableCode(event.code)) return `code:${event.code}`;
+  if (usableKeyCode(event.keyCode)) return `keyCode:${event.keyCode}`;
+  return `key:${keyName(event.key)}`;
+}
+
+export function matchingKeyIdentity<T extends KeyIdentityEvent>(held: ReadonlyMap<string, T>, event: KeyIdentityEvent): string | null {
+  const exact = keyIdentity(event);
+  if (held.has(exact)) return exact;
+  // A usable physical code identifies a different key; do not match another key by its label.
+  if (usableCode(event.code)) return null;
+  if (usableKeyCode(event.keyCode)) {
+    for (const [id, down] of held) if (down.keyCode === event.keyCode) return id;
+  }
+  for (const [id, down] of held) if (keyName(down.key) === keyName(event.key)) return id;
+  return null;
+}
+
+export function unidentifiedKey(event: KeyIdentityEvent): boolean {
+  return !usableCode(event.code) && !usableKeyCode(event.keyCode)
+    && ['Unidentified', 'Process', 'Dead', ''].includes(event.key);
 }
 
 export function isMac(platform = typeof navigator !== 'undefined' ? navigator.platform : ''): boolean {

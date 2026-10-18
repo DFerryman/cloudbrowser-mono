@@ -5,9 +5,10 @@ import { UsageItem } from './pricing.js';
 /**
  * Prepaid, usage-based billing (page 6). Users top up a balance through Creem (one-time payments of
  * the top-up products configured in Creem); browsers draw from it per minute at the prices in
- * `pricing.ts`. When the balance runs out, running browsers sleep 10 minutes later; a sleeping
- * browser's IP and storage keep being charged (the balance can go below zero) for up to 30 days,
- * then the browsers are deleted. Topping up clears the debt and lets them wake again.
+ * `pricing.ts`. When the balance runs out, access stops immediately. Seven days of fixed IP/disk/snapshot charges are reserved before a
+ * paid browser can be used. Only available credit pays active usage; the deposit pays fixed
+ * charges during the seven-day stopped retention window, then the browser is permanently deleted.
+ * Normal usage never creates debt; payment reversals may leave a negative balance.
  *
  * `pilot`: the invite-only pilot (control flag `billing_required` off). Usage is metered and shown
  * at the real prices, but nothing is taken from a balance.
@@ -15,10 +16,10 @@ import { UsageItem } from './pricing.js';
 export const BillingMode = z.enum(['pilot', 'prepaid']);
 export type BillingMode = z.infer<typeof BillingMode>;
 
-/** Running browsers sleep this long after the balance runs out (the session view warns). */
-export const BALANCE_GRACE_MS = 10 * 60_000;
+/** No unpaid-use grace period. */
+export const BALANCE_GRACE_MS = 0;
 /** After the balance ran out, browsers are kept this long, then deleted. */
-export const DATA_KEPT_DAYS = 30;
+export const DATA_KEPT_DAYS = 7;
 
 /**
  * The free trial (page 6): each user may create one browser for free, once. It runs in one region
@@ -59,8 +60,12 @@ export const BillingState = z.object({
   mode: BillingMode,
   /** False when Creem is not configured on this deployment: no top-ups. */
   enabled: z.boolean(),
+  /** Total unspent prepaid credit, including the fixed-resource deposit. */
   balanceMicros: z.number().int(),
-  /** When the balance reached zero; running browsers sleep 10 minutes later. */
+  reservedMicros: z.number().int().nonnegative(),
+  availableMicros: z.number().int().nonnegative(),
+  retentionDays: z.number().int().positive(),
+  /** When spendable credit became insufficient and the seven-day retention window began. */
   exhaustedAt: z.string().nullable(),
   /** After the balance ran out, browsers are kept until this date, then deleted. */
   dataKeptUntil: z.string().nullable(),

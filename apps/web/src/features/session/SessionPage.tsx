@@ -62,6 +62,7 @@ export function SessionPage() {
   const [stats, setStats] = useState<ViewerStats | null>(null);
   const [muted, setMuted] = useState(true);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const [inputInterrupted, setInputInterrupted] = useState(false);
   const [visibleHeight, setVisibleHeight] = useState<number | null>(null);
 
   const open = useCallback(async () => {
@@ -189,6 +190,11 @@ export function SessionPage() {
     overlay = <Overlay message={errorMessage(instance.error)} action={<Button onClick={() => navigate('/browsers')}>{t('session.back')}</Button>} />;
   } else if (takenOver || viewer.state === 'taken-over') {
     overlay = <Overlay message={t('overlay.elsewhere')} action={<Button variant="primary" onClick={() => void open()}>{t('overlay.useHere')}</Button>} />;
+  } else if (inputInterrupted) {
+    overlay = <Overlay message={t('overlay.inputInterrupted')} action={<Button onClick={() => {
+      setInputInterrupted(false);
+      viewerRef.current?.reconnect();
+    }}>{t('overlay.retryNow')}</Button>} />;
   } else if (openError && status !== 'running') {
     overlay = <Overlay message={errorMessage(openError)} action={<Button onClick={() => void open()}>{t('common.retry')}</Button>} />;
   } else if (i) {
@@ -280,7 +286,7 @@ export function SessionPage() {
   );
 
   return (
-    <div ref={frameRef} className="flex h-dvh flex-col bg-frame text-zinc-100" style={visibleHeight === null ? undefined : { height: visibleHeight }}>
+    <div ref={frameRef} className="fixed inset-0 flex h-dvh flex-col overflow-hidden overscroll-none bg-frame text-zinc-100" style={visibleHeight === null ? undefined : { height: visibleHeight }}>
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-zinc-800 px-2">
         <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.back')} onClick={() => navigate('/browsers')}>
           <ArrowLeft />
@@ -317,6 +323,7 @@ export function SessionPage() {
             title={t(keyboardOpen ? 'session.hideKeyboard' : 'session.showKeyboard')}
             aria-pressed={keyboardOpen}
             onPointerDown={(e) => e.preventDefault()}
+            onMouseDown={(e) => e.preventDefault()}
             onClick={() => viewerRef.current?.toggleKeyboard()}
           >
             <Keyboard />
@@ -416,6 +423,7 @@ export function SessionPage() {
           <RemoteBrowserView
             key={session.id}
             ref={viewerRef}
+            onInputError={() => setInputInterrupted(true)}
             className="absolute inset-0 bg-frame"
             muted={muted}
             // Each viewer token works once, so every (re)connect asks the api for a fresh one.

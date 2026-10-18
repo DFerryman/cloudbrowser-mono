@@ -23,8 +23,8 @@ import (
 	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/protocol"
 )
 
-// Version is reported in `ready`. 0.2.0 reports disk usage and bytes sent, and grows the data file system.
-const Version = "0.2.0"
+// Version is reported in `ready`. 0.2.1 also reports failed viewer input relays.
+const Version = "0.2.1"
 
 // Browser is Chrome as the agent controls it through CDP.
 type Browser interface {
@@ -46,6 +46,7 @@ type Neko interface {
 type NekoSession interface {
 	Send(msg json.RawMessage) error
 	Close()
+	Done() <-chan struct{}
 }
 
 // Firewall switches the VM firewall between normal and fail-closed modes (page 3).
@@ -85,6 +86,7 @@ type Agent struct {
 	mu          sync.Mutex
 	conn        *websocket.Conn
 	sessions    map[string]NekoSession
+	relayIDs    map[string]string
 	lastInputAt time.Time
 }
 
@@ -95,7 +97,7 @@ func New(cfg Config, b Browser, n Neko, f Firewall, log *slog.Logger) *Agent {
 	if cfg.IPCheckEvery == 0 {
 		cfg.IPCheckEvery = 5 * time.Minute
 	}
-	return &Agent{cfg: cfg, browser: b, neko: n, firewall: f, log: log, sessions: map[string]NekoSession{}}
+	return &Agent{cfg: cfg, browser: b, neko: n, firewall: f, log: log, sessions: map[string]NekoSession{}, relayIDs: map[string]string{}}
 }
 
 func (a *Agent) credentialPath() string { return filepath.Join(a.cfg.StateDir, "credential") }
@@ -282,11 +284,11 @@ func (a *Agent) handle(ctx context.Context, in protocol.Incoming) {
 	case "command":
 		go a.command(ctx, in)
 	case "viewer_open":
-		a.openViewer(ctx, in.SessionID)
+		a.openViewer(ctx, in.SessionID, in.RelayID)
 	case "viewer_close":
-		a.closeViewer(in.SessionID)
+		a.closeViewer(in.SessionID, in.RelayID)
 	case "viewer":
-		a.fromViewer(ctx, in.SessionID, in.Data)
+		a.fromViewer(ctx, in.SessionID, in.Data, in.RelayID)
 	}
 }
 
@@ -412,27 +414,60 @@ func (a *Agent) restoreProfile(ctx context.Context, payload map[string]any) erro
 	return restoreErr
 }
 
-func (a *Agent) openViewer(ctx context.Context, sessionID string) {
+func (a *Agent) openViewer(ctx context.Context, sessionID string, relayIDs ...string) {
 	if a.neko == nil || sessionID == "" {
 		return
 	}
 	a.closeViewer(sessionID)
+	relayID := ""
+	if len(relayIDs) > 0 {
+		relayID = relayIDs[0]
+	}
 	s, err := a.neko.Open(ctx, sessionID, func(msg json.RawMessage) {
-		_ = a.write(ctx, protocol.ToViewer{T: "viewer", SessionID: sessionID, Data: msg})
+		_ = a.write(ctx, protocol.ToViewer{T: "viewer", SessionID: sessionID, RelayID: relayID, Data: msg})
 	})
 	if err != nil {
 		a.log.Error("open neko", "err", err)
+		a.viewerError(ctx, sessionID, relayID, "relay_unavailable")
 		return
 	}
 	a.mu.Lock()
 	a.sessions[sessionID] = s
+	a.relayIDs[sessionID] = relayID
 	a.mu.Unlock()
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.Done():
+			a.mu.Lock()
+			if a.sessions[sessionID] != s {
+				a.mu.Unlock()
+				return // Intentional close or a replacement owns the session now.
+			}
+			delete(a.sessions, sessionID)
+			delete(a.relayIDs, sessionID)
+			a.mu.Unlock()
+			s.Close()
+			_ = a.write(ctx, protocol.ViewerError{T: "viewer_error", SessionID: sessionID, RelayID: relayID, Reason: "relay_failed"})
+		}
+	}()
 }
 
-func (a *Agent) closeViewer(sessionID string) {
+func (a *Agent) viewerError(ctx context.Context, sessionID, relayID, reason string) {
+	a.closeViewer(sessionID, relayID)
+	_ = a.write(ctx, protocol.ViewerError{T: "viewer_error", SessionID: sessionID, RelayID: relayID, Reason: reason})
+}
+
+func (a *Agent) closeViewer(sessionID string, relayIDs ...string) {
 	a.mu.Lock()
+	if len(relayIDs) > 0 && a.relayIDs[sessionID] != relayIDs[0] {
+		a.mu.Unlock()
+		return
+	}
 	s := a.sessions[sessionID]
 	delete(a.sessions, sessionID)
+	delete(a.relayIDs, sessionID)
 	a.mu.Unlock()
 	if s != nil {
 		s.Close()
@@ -443,29 +478,47 @@ func (a *Agent) closeSessions() {
 	a.mu.Lock()
 	all := a.sessions
 	a.sessions = map[string]NekoSession{}
+	a.relayIDs = map[string]string{}
 	a.mu.Unlock()
 	for _, s := range all {
 		s.Close()
 	}
 }
 
-func (a *Agent) fromViewer(ctx context.Context, sessionID string, data json.RawMessage) {
+func (a *Agent) fromViewer(ctx context.Context, sessionID string, data json.RawMessage, relayIDs ...string) {
 	var f protocol.ViewerFrame
 	if err := json.Unmarshal(data, &f); err != nil {
 		return
 	}
 	a.mu.Lock()
-	a.lastInputAt = time.Now()
 	s := a.sessions[sessionID]
+	relayID := a.relayIDs[sessionID]
+	if len(relayIDs) > 0 {
+		if s != nil && relayIDs[0] != relayID {
+			a.mu.Unlock()
+			return
+		}
+		relayID = relayIDs[0]
+	}
+	a.lastInputAt = time.Now()
 	a.mu.Unlock()
 	switch f.T {
 	case "ime":
+		if s == nil {
+			a.viewerError(ctx, sessionID, relayID, "relay_unavailable")
+			return
+		}
 		if err := a.browser.InsertText(ctx, f.Text); err != nil {
 			a.log.Warn("insert text", "err", err)
+			a.viewerError(ctx, sessionID, relayID, "input_failed")
 		}
 	case "neko":
-		if s != nil {
-			_ = s.Send(f.Data)
+		if s == nil {
+			a.viewerError(ctx, sessionID, relayID, "relay_unavailable")
+			return
+		}
+		if err := s.Send(f.Data); err != nil {
+			a.viewerError(ctx, sessionID, relayID, "input_failed")
 		}
 	}
 }

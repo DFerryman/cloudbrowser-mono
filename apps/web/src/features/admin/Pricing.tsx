@@ -8,7 +8,6 @@ const ITEMS = [
   ['compute', 'Running (per hour)'],
   ['ip', 'Dedicated IP (per hour)'],
   ['storage', 'Storage (per GB-month)'],
-  ['snapshot', 'Snapshots (per GB-month)'],
   ['transfer', 'Data out (per GB)'],
 ] as const;
 
@@ -67,9 +66,9 @@ export function PricingPage() {
           <Tile label="AWS projected (all resources)" value={mo.projectedAwsCents !== null ? `$${(mo.projectedAwsCents / 100).toFixed(2)}` : '—'} />
         </div>
         <p className="mt-2 text-xs text-muted">
-          Costs use AWS public unit prices and platform usage, not an AWS bill. Free-tier allowances, credits, discounts and actual snapshot sizes are not reconciled.
+          Costs use AWS public unit prices and platform usage, not an AWS bill. Free-tier allowances, credits and discounts are not reconciled.
           AWS projected (from the reconciler) also includes resources not charged to anyone: browsers being created,
-          resources awaiting cleanup, old IPs kept 30 days after a change, and recover snapshots. Outstanding balances: {usd(d.balances.totalMicros)} (of which{' '}
+          resources awaiting cleanup, old IPs kept 30 days after a change, and internal recovery resources. Outstanding balances: {usd(d.balances.totalMicros)} (of which{' '}
           {usd(d.balances.negativeMicros)} below zero).
         </p>
         <Table

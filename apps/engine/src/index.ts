@@ -12,13 +12,14 @@ import { reaperTick } from './reaper.js';
 import { runOperation } from './runner.js';
 import { meterUsage, reclaimTrials } from './metering.js';
 import { refreshPrices } from './prices.js';
-import { checkInstanceIp, dailySnapshots, idleStops, periodicIpChecks, runPending } from './scheduler.js';
+import { enforceStoppedIntent } from './enforce-stopped.js';
+import { checkInstanceIp, idleStops, periodicIpChecks, runPending } from './scheduler.js';
 
 export type { Env } from './deps.js';
 export { EventHub } from './event-hub.js';
 export { runOperation } from './runner.js';
 export { reaperTick } from './reaper.js';
-export { runPending, idleStops, checkInstanceIp, dailySnapshots } from './scheduler.js';
+export { runPending, idleStops, checkInstanceIp } from './scheduler.js';
 export { meterUsage, reclaimTrials } from './metering.js';
 export { refreshPrices } from './prices.js';
 export type { EngineDeps } from './context.js';
@@ -75,8 +76,10 @@ export default {
     await reclaimTrials(deps);
     await runPending(deps);
     const minute = new Date(controller.scheduledTime).getUTCMinutes();
-    if (minute % 5 === 0) await periodicIpChecks(deps);
-    if (minute === 7) await dailySnapshots(deps);
+    if (minute % 5 === 0) {
+      await periodicIpChecks(deps);
+      await enforceStoppedIntent(deps);
+    }
     // Cheap when prices are fresh: only stale regions (older than 12 hours) are read from the provider.
     await refreshPrices(deps).catch((e) => console.error('price refresh failed', e));
   },

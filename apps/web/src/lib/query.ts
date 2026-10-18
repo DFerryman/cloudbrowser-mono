@@ -22,7 +22,6 @@ export const keys = {
   instances: ['instances'] as const,
   instance: (id: string) => ['instance', id] as const,
   sessions: (id: string) => ['instance', id, 'sessions'] as const,
-  backups: (id: string) => ['instance', id, 'backups'] as const,
   storage: (id: string) => ['instance', id, 'storage'] as const,
   instanceUsage: (id: string, month: string) => ['instance', id, 'usage', month] as const,
   operation: (id: string) => ['operation', id] as const,

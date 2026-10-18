@@ -26,7 +26,7 @@ export interface Env {
   /** Public WebSocket URL of the session gateway, e.g. wss://connect.example.com. */
   GATEWAY_URL?: string;
   /** Trusted gateway RPC: deletion closes existing agent and viewer connections immediately. */
-  GATEWAY?: { revokeInstance(instanceId: string): Promise<void> };
+  GATEWAY?: { revokeInstance(instanceId: string): Promise<void>; revokeViewers?(instanceId: string): Promise<void> };
   /** Ed25519 private key (JWK JSON) that signs 60 s viewer tokens. Secret. */
   VIEWER_TOKEN_PRIVATE_KEY?: string;
   /** Cloudflare Realtime TURN key: viewers and neko get short-lived credentials from it. */

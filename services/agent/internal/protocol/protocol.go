@@ -33,7 +33,16 @@ type TurnRequest struct {
 type ToViewer struct {
 	T         string          `json:"t"` // "viewer"
 	SessionID string          `json:"sessionId"`
+	RelayID   string          `json:"relayId,omitempty"`
 	Data      json.RawMessage `json:"data"`
+}
+
+// ViewerError reports an input delivery failure without logging or returning input content.
+type ViewerError struct {
+	T         string `json:"t"` // "viewer_error"
+	SessionID string `json:"sessionId"`
+	RelayID   string `json:"relayId,omitempty"`
+	Reason    string `json:"reason"` // relay_unavailable | relay_failed | input_failed
 }
 
 // Incoming is any frame the gateway sends; fields are set according to T.
@@ -45,6 +54,7 @@ type Incoming struct {
 	Payload    map[string]any  `json:"payload,omitempty"`
 	IceServers []IceServer     `json:"iceServers,omitempty"`
 	SessionID  string          `json:"sessionId,omitempty"`
+	RelayID    string          `json:"relayId,omitempty"`
 	Data       json.RawMessage `json:"data,omitempty"`
 }
 

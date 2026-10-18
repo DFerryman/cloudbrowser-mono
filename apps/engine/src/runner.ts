@@ -1,9 +1,10 @@
 import { OPERATION_STEPS, type OperationKind } from '@cloudbrowser/contracts';
 import { eventRow, operationRow, raiseAlert, schema } from '@cloudbrowser/db';
 import { ExecutorError, type ErrorClass, type ResourceKind } from '@cloudbrowser/executors';
-import { and, eq, inArray, isNull, lt, lte, or } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
 import {
   RestartFrom,
+  OperationSuperseded,
   StepFailed,
   type EngineDeps,
   type OperationRow,
@@ -12,10 +13,13 @@ import {
   type StepWait,
 } from './context.js';
 import { compensateChangeIp, HANDLERS } from './steps.js';
+import { operationFence } from './fencing.js';
+import { assertOperationFunded } from './prepaid.js';
 
 const { operations, operationSteps, browserInstances, regions, placements, events, auditLog } = schema;
 
-const LEASE_MS = 60_000;
+// Provider calls can last two minutes. A shorter lease lets a second worker overlap them.
+const LEASE_MS = 3 * 60_000;
 const MAX_RETRYABLE_ATTEMPTS = 8;
 const CAPACITY_RETRY_MS = 60_000;
 
@@ -35,7 +39,8 @@ export type RunResult =
   | { state: 'succeeded' }
   | { state: 'failed'; reason: string }
   | { state: 'deferred'; notBefore: Date }
-  | { state: 'busy' };
+  | { state: 'busy' }
+  | { state: 'canceled' };
 
 function backoffMs(attempt: number): number {
   const base = Math.min(2_000 * 2 ** Math.max(0, attempt - 1), 5 * 60_000);
@@ -55,6 +60,11 @@ function classify(e: unknown): ErrorClass | 'step_failed' {
  * that already succeeded are skipped.
  */
 export async function runOperation(deps: EngineDeps, operationId: string): Promise<RunResult> {
+  try { return await runOwnedOperation(deps, operationId); }
+  catch (e) { if (e instanceof OperationSuperseded) return { state: 'canceled' }; throw e; }
+}
+
+async function runOwnedOperation(deps: EngineDeps, operationId: string): Promise<RunResult> {
   const { db } = deps;
   const now = deps.now();
 
@@ -95,6 +105,7 @@ export async function runOperation(deps: EngineDeps, operationId: string): Promi
     return fail(deps, op, env, 'deadline', deadlineReason(op.kind as OperationKind));
   }
 
+  await env.assertActive();
   const transitional = TRANSITIONAL_STATUS[op.kind as OperationKind];
   if (transitional && env.instance.status !== transitional && op.attempt === 0) {
     await setInstanceStatus(deps, env, transitional, null);
@@ -105,9 +116,17 @@ export async function runOperation(deps: EngineDeps, operationId: string): Promi
   if (!handlers || steps.length === 0) return fail(deps, op, env, 'invalid', `Operation ${op.kind} is not supported yet.`);
 
   const journal = await db.select().from(operationSteps).where(eq(operationSteps.operationId, op.id));
+  if (op.kind === 'create' && typeof op.params?.resumeCreateFrom === 'string') {
+    const [source] = await db.select({ instanceId: operations.instanceId, kind: operations.kind }).from(operations).where(eq(operations.id, op.params.resumeCreateFrom));
+    if (!source || source.instanceId !== op.instanceId || source.kind !== 'create') return fail(deps, op, env, 'invalid', 'The saved creation does not belong to this browser.');
+    const saved = await db.select().from(operationSteps).where(and(eq(operationSteps.operationId, op.params.resumeCreateFrom), eq(operationSteps.status, 'succeeded')));
+    // Refresh bootstrap validity and agent verification; the resumed VM must authenticate after this wake.
+    for (const row of saved) if (['allocate_ip', 'screen_ip', 'create_nic', 'create_volume', 'create_vm'].includes(row.step) && !journal.some((j) => j.step === row.step)) journal.push(row);
+  }
   const done = new Map(journal.map((j) => [j.step, j]));
 
   for (let i = 0; i < steps.length; i++) {
+    await env.assertActive();
     const step = steps[i]!;
     const entry = done.get(step);
     if (entry?.status === 'succeeded') {
@@ -117,7 +136,7 @@ export async function runOperation(deps: EngineDeps, operationId: string): Promi
 
     const token = env.ctx(step).token;
     const at = deps.now();
-    await db.batch([
+    try { await db.batch([
       db
         .insert(operationSteps)
         .values({ operationId: op.id, step, status: 'started', requestToken: token, attempts: 1, updatedAt: at })
@@ -127,30 +146,35 @@ export async function runOperation(deps: EngineDeps, operationId: string): Promi
         }),
       db
         .update(operations)
-        .set({ step, updatedAt: at, leaseExpiresAt: new Date(at.getTime() + LEASE_MS) })
+        .set({ step, updatedAt: at, leaseExpiresAt: new Date(at.getTime() + LEASE_MS), kind: sql`case when ${operationFence(env)} then ${op.kind} else null end` })
         .where(eq(operations.id, op.id)),
       db.insert(events).values(eventRow(env.instance.userId, 'operation.updated', { operationId: op.id, instanceId: op.instanceId }, at)),
-    ]);
+    ]); } catch (e) { await env.assertActive(); throw e; }
     deps.notify(env.instance.userId);
     op.step = step;
 
     let outcome: StepOutcome;
     try {
+      await env.assertActive();
+      await assertOperationFunded(env);
       outcome = await handlers[step]!(env);
+      await env.assertActive();
     } catch (e) {
+      if (e instanceof OperationSuperseded) throw e;
+      await env.assertActive();
       if (e instanceof RestartFrom) {
         const from = steps.indexOf(e.step);
         const reset = steps.slice(from, i + 1);
         await db
           .delete(operationSteps)
-          .where(and(eq(operationSteps.operationId, op.id), inArray(operationSteps.step, reset)));
+          .where(and(eq(operationSteps.operationId, op.id), inArray(operationSteps.step, reset), operationFence(env)));
         for (const s of reset) {
           delete env.results[s];
           done.delete(s);
         }
         env.round += 1;
         op.params = { ...(op.params ?? {}), round: env.round };
-        await db.update(operations).set({ params: op.params }).where(eq(operations.id, op.id));
+        await db.update(operations).set({ params: op.params }).where(and(eq(operations.id, op.id), operationFence(env)));
         i = from - 1;
         continue;
       }
@@ -164,15 +188,16 @@ export async function runOperation(deps: EngineDeps, operationId: string): Promi
     await db
       .update(operationSteps)
       .set({ status: 'succeeded', result: stepResult, updatedAt: deps.now() })
-      .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.step, step)));
+      .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.step, step), operationFence(env)));
   }
 
+  await env.assertActive();
   const at = deps.now();
+  const finished = await db.update(operations)
+    .set({ status: 'succeeded', finishedAt: at, updatedAt: at, leaseOwner: null, leaseExpiresAt: null, error: null, errorClass: null })
+    .where(and(eq(operations.id, op.id), operationFence(env))).returning({ id: operations.id });
+  if (!finished.length) throw new OperationSuperseded();
   await db.batch([
-    db
-      .update(operations)
-      .set({ status: 'succeeded', finishedAt: at, updatedAt: at, leaseOwner: null, leaseExpiresAt: null, error: null, errorClass: null })
-      .where(eq(operations.id, op.id)),
     db.insert(events).values(eventRow(env.instance.userId, 'operation.updated', { operationId: op.id, instanceId: op.instanceId }, at)),
     db.insert(auditLog).values({
       actor: deps.mode === 'reaper' ? 'reaper' : 'engine',
@@ -214,12 +239,26 @@ async function buildEnv(deps: EngineDeps, op: OperationRow): Promise<StepEnv | n
     placement: placement ?? null,
     results: {},
     round,
+    async assertActive() {
+      const owned = await db.update(operations).set({ leaseExpiresAt: new Date(deps.now().getTime() + LEASE_MS), updatedAt: deps.now() })
+        .where(and(eq(operations.id, op.id), operationFence(env))).returning({ id: operations.id });
+      if (!owned.length) throw new OperationSuperseded();
+      const [current] = await db.select({ desiredState: browserInstances.desiredState, status: browserInstances.status }).from(browserInstances).where(eq(browserInstances.id, instance.id));
+      if (!current || (current.status === 'purged' && op.kind !== 'purge') ||
+          (current.desiredState === 'deleted' && !['delete', 'purge', 'undelete'].includes(op.kind)) ||
+          (current.desiredState === 'stopped' && ['create', 'start', 'recover'].includes(op.kind))) {
+        await db.update(operations).set({ status: 'canceled', finishedAt: deps.now(), updatedAt: deps.now(), leaseOwner: null, leaseExpiresAt: null, errorClass: 'superseded', error: 'A newer browser intent superseded this operation.' })
+          .where(and(eq(operations.id, op.id), operationFence(env)));
+        throw new OperationSuperseded();
+      }
+    },
     ctx(step, extra) {
       const generation = env.placement?.generation ?? 1;
       return {
         operationId: op.id,
         step,
-        token: `${op.id}:${step}:${generation}${extra ? `:${extra}` : ''}`,
+        token: `${op.kind === 'create' && typeof op.params?.resumeCreateFrom === 'string' ? op.params.resumeCreateFrom : op.id}:${step}:${generation}${extra ? `:${extra}` : ''}`,
+        assertActive: async () => { await env.assertActive(); await assertOperationFunded(env); },
         tags: env.tags('vm', generation),
         // Wall-clock deadline for the provider call: at most 2 minutes, never past the operation's.
         deadline: Date.now() + Math.max(0, Math.min(120_000, op.deadlineAt.getTime() - deps.now().getTime())),
@@ -236,6 +275,13 @@ async function buildEnv(deps: EngineDeps, op: OperationRow): Promise<StepEnv | n
       };
     },
   };
+  // Agents also perform asynchronous IO. Their durable command writes are independently fenced.
+  const bridge = env.agent;
+  env.agent = new Proxy(bridge, { get(target, key) {
+    const value = Reflect.get(target, key);
+    if (typeof value !== 'function') return value;
+    return async (...args: unknown[]) => { await env.assertActive(); if (key === 'send') await assertOperationFunded(env); const result = await value.apply(target, args); await env.assertActive(); return result; };
+  } });
   return env;
 }
 
@@ -246,7 +292,7 @@ async function setInstanceStatus(deps: EngineDeps, env: StepEnv, status: string,
     db
       .update(browserInstances)
       .set({ status, statusReason: reason, updatedAt: at })
-      .where(eq(browserInstances.id, env.instance.id)),
+      .where(and(eq(browserInstances.id, env.instance.id), operationFence(env))),
     db.insert(events).values(eventRow(env.instance.userId, 'instance.updated', { instanceId: env.instance.id }, at)),
   ]);
   deps.notify(env.instance.userId);
@@ -259,19 +305,22 @@ async function defer(deps: EngineDeps, op: OperationRow, waitMs: number, attempt
   await deps.db
     .update(operations)
     .set({ status: 'waiting', notBefore, attempt, leaseOwner: null, leaseExpiresAt: null, updatedAt: at })
-    .where(eq(operations.id, op.id));
+    .where(and(eq(operations.id, op.id), operationFence({ deps, op }))).returning({ id: operations.id });
+  const [current] = await deps.db.select({ finishedAt: operations.finishedAt }).from(operations).where(eq(operations.id, op.id));
+  if (!current || current.finishedAt) return { state: 'canceled' };
   return { state: 'deferred', notBefore };
 }
 
 async function handleError(deps: EngineDeps, op: OperationRow, env: StepEnv, step: string, e: unknown): Promise<RunResult> {
+  await env.assertActive();
   const cls = classify(e);
   const message = e instanceof Error ? e.message : String(e);
   const { db } = deps;
   await db
     .update(operationSteps)
     .set({ status: 'failed', result: { error: message, errorClass: cls }, updatedAt: deps.now() })
-    .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.step, step)));
-  await db.update(operations).set({ error: message, errorClass: cls }).where(eq(operations.id, op.id));
+    .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.step, step), operationFence(env)));
+  await db.update(operations).set({ error: message, errorClass: cls }).where(and(eq(operations.id, op.id), operationFence(env)));
 
   switch (cls) {
     case 'retryable':
@@ -328,23 +377,23 @@ async function handleError(deps: EngineDeps, op: OperationRow, env: StepEnv, ste
 
 async function handOverToRecover(deps: EngineDeps, op: OperationRow, env: StepEnv): Promise<RunResult> {
   const { db } = deps;
+  await env.assertActive();
   const at = deps.now();
   const recover = operationRow({ instanceId: op.instanceId, userId: op.userId, kind: 'recover', params: { reason: 'capacity', after: op.id }, now: at });
-  await db.batch([
-    db
-      .update(operations)
-      .set({ status: 'failed', finishedAt: at, updatedAt: at, leaseOwner: null, leaseExpiresAt: null, errorClass: 'capacity', error: 'Handed over to recover.' })
-      .where(eq(operations.id, op.id)),
-    db.insert(operations).values(recover),
-    db.insert(auditLog).values({
-      actor: 'engine',
-      action: 'operation.start.recover',
-      target: `instance:${op.instanceId}`,
-      detail: { operationId: op.id, recoverId: recover.id },
-      createdAt: at,
-    }),
-    db.insert(events).values(eventRow(env.instance.userId, 'operation.updated', { operationId: recover.id, instanceId: op.instanceId }, at)),
-  ]);
+  try {
+    await db.batch([
+      // NOT NULL is a transactional assertion: if another intent won, do not insert its recovery.
+      db.insert(auditLog).values({
+        actor: sql`case when ${operationFence(env)} and exists(select 1 from browser_instances where id = ${op.instanceId} and desired_state = 'running') then 'engine' else null end`,
+        action: 'operation.start.recover', target: `instance:${op.instanceId}`, detail: { operationId: op.id, recoverId: recover.id }, createdAt: at,
+      }),
+      db.update(operations)
+        .set({ status: 'failed', finishedAt: at, updatedAt: at, leaseOwner: null, leaseExpiresAt: null, errorClass: 'capacity', error: 'Handed over to recover.' })
+        .where(and(eq(operations.id, op.id), operationFence(env))),
+      db.insert(operations).values(recover),
+      db.insert(events).values(eventRow(env.instance.userId, 'operation.updated', { operationId: recover.id, instanceId: op.instanceId }, at)),
+    ]);
+  } catch (e) { await env.assertActive(); throw e; }
   deps.notify(env.instance.userId);
   return { state: 'failed', reason: 'Handed over to recover.' };
 }
@@ -366,6 +415,7 @@ async function fail(
   reason: string,
 ): Promise<RunResult> {
   const { db } = deps;
+  if (env) await env.assertActive();
   if (env && op.kind === 'purge') await raiseAlert(db, {
     source: 'reaper', severity: 'critical', title: `Browser cleanup incomplete: ${op.instanceId}`,
     detail: { instanceId: op.instanceId, operationId: op.id, errorClass, reason }, dedupeKey: `cleanup:${op.instanceId}`,
@@ -374,6 +424,7 @@ async function fail(
     try {
       await compensateChangeIp(env);
     } catch (e) {
+      if (e instanceof OperationSuperseded) throw e;
       reason = `${reason} Restoring the previous IP also failed.`;
       void e;
     }
@@ -391,7 +442,7 @@ async function fail(
     db
       .update(operations)
       .set({ status: 'failed', finishedAt: at, updatedAt: at, leaseOwner: null, leaseExpiresAt: null, error: reason, errorClass })
-      .where(eq(operations.id, op.id)),
+      .where(and(eq(operations.id, op.id), operationFence({ deps, op }))),
     db.insert(auditLog).values({
       actor: deps.mode === 'reaper' ? 'reaper' : 'engine',
       action: `operation.${op.kind}.failed`,
@@ -402,18 +453,19 @@ async function fail(
   ] as const;
   if (env) {
     const extra = [
+      ...(op.kind === 'create' ? [db.update(schema.browserReservations).set({ reservedMicros: 0, updatedAt: at }).where(and(eq(schema.browserReservations.instanceId, op.instanceId), operationFence(env)))] : []),
       db.insert(events).values(eventRow(env.instance.userId, 'operation.updated', { operationId: op.id, instanceId: op.instanceId }, at)),
       ...(instanceStatus
         ? [
             db
               .update(browserInstances)
               .set({ status: instanceStatus, statusReason: reason, updatedAt: at })
-              .where(eq(browserInstances.id, op.instanceId)),
+              .where(and(eq(browserInstances.id, op.instanceId), operationFence(env))),
             db.insert(events).values(eventRow(env.instance.userId, 'instance.updated', { instanceId: op.instanceId }, at)),
           ]
         : []),
     ];
-    await db.batch([...stmts, ...extra]);
+    await db.batch([extra[0]!, ...extra.slice(1), ...stmts]);
     deps.notify(env.instance.userId);
   } else {
     await db.batch(stmts);

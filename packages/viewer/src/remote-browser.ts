@@ -1,7 +1,9 @@
 import type { GatewayToViewer, IceServer } from '@cloudbrowser/contracts';
-import { decode, encode, EV, fitScreen, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
-import { KEYSYM, keysymFor, keysymForName } from './keyboard.js';
+import { decode, EV, fitScreen, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
+import { KEYSYM, keyIdentity, keysymFor, keysymForName, matchingKeyIdentity, unidentifiedKey, type KeyIdentityEvent } from './keyboard.js';
 import { readStats, type ViewerStats } from './stats.js';
+import { ScrollAccumulator } from './scroll.js';
+import { InputQueue, type InputFailure } from './input-queue.js';
 
 export type ViewerState = 'connecting' | 'live' | 'reconnecting' | 'agent-offline' | 'taken-over' | 'closed';
 
@@ -21,6 +23,8 @@ export interface RemoteBrowserOptions {
   onCursor?: (css: string) => void;
   /** Text the remote Chrome put on its clipboard. */
   onClipboard?: (text: string) => void;
+  /** Delivery was interrupted; discard old input and require an explicit reconnect. */
+  onInputError?: (reason: InputFailure) => void;
   /** Map Cmd → Ctrl and Option → Alt (macOS default, page 5). */
   macToPc?: boolean;
   statsIntervalMs?: number;
@@ -36,15 +40,18 @@ const SCREEN_DEBOUNCE_MS = 750;
 const SCREEN_MIN_INTERVAL_MS = 5000;
 const CONNECTION_TIMEOUT_MS = 20_000;
 const MAX_PENDING_ICE_CANDIDATES = 256;
-/** US keyboard base keys for characters that require Shift on the remote X11 keyboard. */
-const SOFTWARE_SHIFTED = new Map([...`~!@#$%^&*()_+{}|:"<>?`].map((character, i) => (
-  [character, [...'`1234567890-=[]\\;\',./'][i]!.charCodeAt(0)] as const
-)));
+/** Characters that require Shift on the remote US X11 keyboard. */
+const SOFTWARE_SHIFTED = new Set([...`~!@#$%^&*()_+{}|:"<>?`]);
+const SHIFTED_KEYSYMS = new Map([...'`1234567890-=[]\\;\',./'].map((character, index) =>
+  [character.charCodeAt(0), [...SOFTWARE_SHIFTED][index]!.charCodeAt(0)]));
+const modifierKeysym = (sym: number) => sym >= 0xffe1 && sym <= 0xffee;
+const shiftedKeysym = (sym: number) => sym >= 0x61 && sym <= 0x7a ? sym - 0x20 : SHIFTED_KEYSYMS.get(sym) ?? sym;
 
 /**
  * Live-view client for one browser (page 5, `packages/viewer`): signaling over the gateway
  * WebSocket (neko v3 messages wrapped in `viewer.v1` frames), a receive-only RTCPeerConnection,
- * and input on the WebRTC data channel. Framework-agnostic; it never calls the REST API itself.
+ * and all input on one ordered WebSocket FIFO. The data channel only receives cursor updates.
+ * Framework-agnostic; it never calls the REST API itself.
  */
 export class RemoteBrowser {
   private ws: WebSocket | null = null;
@@ -62,6 +69,17 @@ export class RemoteBrowser {
   private connectionTimer: ReturnType<typeof setTimeout> | null = null;
   private pressed = new Set<number>();
   private softwarePressed = new Set<number>();
+  private readonly scrollAccumulator = new ScrollAccumulator();
+  private scrollTimer: ReturnType<typeof setTimeout> | null = null;
+  private scrollControl = false;
+  private pointerPosition: { x: number; y: number } | null = null;
+  private pressedEvents = new Map<string, KeyIdentityEvent & { sym: number }>();
+  private softwareEvents = new Map<string, KeyIdentityEvent & { sym: number }>();
+  private readonly pressedButtons = new Set<number>();
+  private readonly transportKeys = new Set<number>();
+  private readonly transportButtons = new Set<number>();
+  private inputReady = false;
+  private readonly inputQueue: InputQueue;
   private pendingViewport: { width: number; height: number } | null = null;
   private screenConfigurations: ScreenConfiguration[] = [];
   private screenTimer: ReturnType<typeof setTimeout> | null = null;
@@ -69,7 +87,26 @@ export class RemoteBrowser {
   private appliedScreen = '';
   private cursorUrl: string | null = null;
 
-  constructor(private readonly opts: RemoteBrowserOptions) {}
+  constructor(private readonly opts: RemoteBrowserOptions) {
+    this.inputQueue = new InputQueue({
+      transport: () => this.ws,
+      ready: () => this.inputReady && !this.stopped,
+      failed: (reason) => {
+        this.inputReady = false;
+        this.stopped = true;
+        this.releaseTransportKeys();
+        this.opts.onInputError?.(reason);
+      },
+      sent: (data) => {
+        const frame = JSON.parse(data) as { data: NekoMessage<{ keysym?: number; code?: number }> };
+        const { event, payload } = frame.data;
+        if (event === EV.CONTROL_KEYDOWN && payload?.keysym !== undefined) this.transportKeys.add(payload.keysym);
+        if (event === EV.CONTROL_KEYUP && payload?.keysym !== undefined) this.transportKeys.delete(payload.keysym);
+        if (event === EV.CONTROL_BUTTONDOWN && payload?.code !== undefined) this.transportButtons.add(payload.code);
+        if (event === EV.CONTROL_BUTTONUP && payload?.code !== undefined) this.transportButtons.delete(payload.code);
+      },
+    });
+  }
 
   get currentState() {
     return this.state;
@@ -80,6 +117,7 @@ export class RemoteBrowser {
     this.retryTimer = null;
     this.clearConnectionTimer();
     this.teardownPeer();
+    this.inputQueue.resume();
     this.screenConfigurations = [];
     this.stopped = false;
     this.setState(this.attempt === 0 ? 'connecting' : 'reconnecting');
@@ -102,6 +140,8 @@ export class RemoteBrowser {
     };
     ws.onclose = () => {
       if (this.ws !== ws) return;
+      this.inputReady = false;
+      this.inputQueue.interrupt('disconnected');
       this.ws = null;
       this.clearConnectionTimer();
       this.teardownPeer();
@@ -115,7 +155,8 @@ export class RemoteBrowser {
     this.retryTimer = null;
     this.clearConnectionTimer();
     if (this.screenTimer) clearTimeout(this.screenTimer);
-    this.releaseAllKeys();
+    this.releaseTransportKeys();
+    this.inputQueue.clear();
     this.teardownPeer();
     const ws = this.ws;
     this.ws = null;
@@ -127,70 +168,102 @@ export class RemoteBrowser {
 
   /** Pointer position in remote screen pixels. */
   move(x: number, y: number) {
-    this.sendData(encode.move(x, y));
+    const position = { x: Math.round(x), y: Math.round(y) };
+    if (position.x !== this.pointerPosition?.x || position.y !== this.pointerPosition?.y) this.finishScroll();
+    this.pointerPosition = position;
+    this.sendInput({ event: EV.CONTROL_MOVE, payload: position });
   }
 
   button(down: boolean, domButton: number, x?: number, y?: number) {
     const b = x11Button(domButton);
     if (b === null) return;
     if (x !== undefined && y !== undefined) this.move(x, y);
-    this.sendData(encode.button(down, b));
+    if (down) this.pressedButtons.add(b);
+    else this.pressedButtons.delete(b);
+    this.sendInput({ event: down ? EV.CONTROL_BUTTONDOWN : EV.CONTROL_BUTTONUP, payload: { code: b } });
   }
 
-  /** Wheel deltas in pixels; the caller accumulates them per animation frame. */
+  /** CSS pixel deltas, converted to Neko's signed X11 wheel-click counts. */
   scroll(dx: number, dy: number, controlKey = false) {
-    if (dx || dy) this.sendData(encode.scroll(dx, dy, controlKey));
+    if (this.scrollAccumulator.needsFinish(dx, dy, controlKey)) this.finishScroll();
+    this.scrollControl = controlKey;
+    const ticks = this.scrollAccumulator.consume(dx, dy, controlKey);
+    if (ticks.x || ticks.y) this.sendInput({ event: EV.CONTROL_SCROLL, payload: { delta_x: ticks.x, delta_y: ticks.y, control_key: controlKey } });
+    if (this.scrollTimer) clearTimeout(this.scrollTimer);
+    this.scrollTimer = setTimeout(() => this.finishScroll(), 100);
+  }
+
+  finishScroll(): void {
+    if (this.scrollTimer) clearTimeout(this.scrollTimer);
+    this.scrollTimer = null;
+    const ticks = this.scrollAccumulator.finish();
+    if (ticks.x || ticks.y) this.sendInput({ event: EV.CONTROL_SCROLL, payload: { delta_x: ticks.x, delta_y: ticks.y, control_key: this.scrollControl } });
   }
 
   /** Returns true if the key was sent (the caller then prevents the browser default). */
-  key(down: boolean, e: Pick<KeyboardEvent, 'key' | 'code'>): boolean {
-    const sym = keysymFor(e, { macToPc: this.opts.macToPc ?? false });
+  key(down: boolean, e: KeyIdentityEvent): boolean {
+    const sym = this.trackKey(down, e, this.pressedEvents);
     if (sym === null) return false;
+    if (sym === 'repeat') return true;
+    if (sym === 'release-all') {
+      this.releaseAllKeys();
+      return true;
+    }
     if (down) this.pressed.add(sym);
     else this.pressed.delete(sym);
-    this.sendData(encode.key(down, sym));
-    return true;
+    return this.sendInput({ event: down ? EV.CONTROL_KEYDOWN : EV.CONTROL_KEYUP, payload: { keysym: sym } });
   }
 
   /** Releases every key the remote side thinks is held, e.g. when the page loses focus. */
   releaseAllKeys() {
-    for (const sym of this.pressed) this.sendData(encode.key(false, sym));
+    for (const sym of [...this.pressed].reverse()) this.sendInput({ event: EV.CONTROL_KEYUP, payload: { keysym: sym } });
     this.pressed.clear();
-    for (const sym of [...this.softwarePressed].reverse()) this.sendSoftwareKey(false, sym);
+    this.pressedEvents.clear();
+    this.releaseSoftwareKeys();
   }
 
   /** Presses and releases a combination such as ['Control', 't'] (toolbar Keys menu). */
   sendCombo(names: string[]) {
-    const syms = names.map(keysymForName).filter((s): s is number => s !== null);
-    for (const s of syms) this.sendData(encode.key(true, s));
-    for (const s of [...syms].reverse()) this.sendData(encode.key(false, s));
+    this.sendChord(names);
   }
 
-  /** Composed IME text (CJK, emoji); the agent inserts it with CDP Input.insertText (page 5). */
+  /** IME commits share the input FIFO and work in browser chrome as well as web pages. */
   typeText(text: string) {
-    if (text) this.sendGateway({ t: 'ime', text });
+    this.typeSoftwareText(text);
   }
 
   /** Software input uses one ordered WebSocket, including edits and browser-chrome shortcuts. */
-  softwareKey(down: boolean, e: Pick<KeyboardEvent, 'key' | 'code'>): boolean {
-    const sym = keysymFor(e, { macToPc: this.opts.macToPc ?? false });
+  softwareKey(down: boolean, e: KeyIdentityEvent): boolean {
+    const sym = this.trackKey(down, e, this.softwareEvents);
     if (sym === null) return false;
+    if (sym === 'repeat') return true;
+    if (sym === 'release-all') {
+      this.releaseSoftwareKeys();
+      return true;
+    }
     this.sendSoftwareKey(down, sym);
     return true;
   }
 
   sendSoftwareCombo(names: string[]) {
-    const syms = names.map(keysymForName).filter((s): s is number => s !== null);
-    const release = syms.filter((s) => !this.softwarePressed.has(s));
-    for (const sym of syms) this.sendSoftwareKey(true, sym);
-    for (const sym of release.reverse()) this.sendSoftwareKey(false, sym);
+    this.releaseSoftwareKeys();
+    this.sendChord(names);
   }
 
   /** Types into the focused X11 window, including Chrome's address bar and menus. */
   typeSoftwareText(text: string) {
+    // Native input is a committed text operation, never a continuation of a held key.
+    // Missing mobile keyups must not change its casing or keep the last character repeating.
+    this.releaseSoftwareKeys();
+    const held = [...this.pressed];
+    for (const keysym of [...held].reverse()) this.sendInput({ event: EV.CONTROL_KEYUP, payload: { keysym } });
     let paste = '';
+    let pasted = false;
     const flush = () => {
-      if (paste) this.sendNeko({ event: EV.CONTROL_PASTE, payload: { text: paste } });
+      if (paste) {
+        this.sendInput({ event: EV.CONTROL_PASTE, payload: { text: paste } });
+        pasted = true;
+      }
       paste = '';
     };
     for (const character of text.replace(/\r\n?/g, '\n')) {
@@ -205,23 +278,37 @@ export class RemoteBrowser {
       if (character === '\n') sym = 0xff0d;
       else if (character === '\t') sym = KEYSYM.Tab;
       else if (cp >= 0x20 && cp <= 0x7e) {
-        const shifted = SOFTWARE_SHIFTED.get(character);
-        shift = shifted !== undefined || (cp >= 0x41 && cp <= 0x5a);
-        sym = shifted ?? (shift ? cp + 0x20 : cp);
+        shift = SOFTWARE_SHIFTED.has(character) || (cp >= 0x41 && cp <= 0x5a);
+        // Neko resolves a keysym using the current X11 modifiers. Once Shift is down,
+        // send the resulting symbol (A/!), otherwise it allocates a new dynamic keycode.
+        sym = cp;
       } else continue;
-      const addShift = shift && !this.softwarePressed.has(KEYSYM.Shift_L) && !this.softwarePressed.has(0xffe2);
+      const addShift = shift;
       if (addShift) this.sendSoftwareKey(true, KEYSYM.Shift_L);
-      const wasHeld = this.softwarePressed.has(sym);
       this.sendSoftwareKey(true, sym);
-      if (!wasHeld) this.sendSoftwareKey(false, sym);
+      this.sendSoftwareKey(false, sym);
       if (addShift) this.sendSoftwareKey(false, KEYSYM.Shift_L);
     }
     flush();
+    for (const keysym of held) this.sendInput({ event: EV.CONTROL_KEYDOWN, payload: { keysym } });
+    if (pasted) for (const code of this.pressedButtons) this.sendInput({ event: EV.CONTROL_BUTTONDOWN, payload: { code } });
   }
 
   /** Puts text on the remote clipboard, e.g. before sending Ctrl+V for a local paste. */
   setClipboard(text: string) {
-    this.sendNeko({ event: EV.CLIPBOARD_SET, payload: { text } });
+    this.sendInput({ event: EV.CLIPBOARD_SET, payload: { text } });
+  }
+
+  /** Neko waits for the clipboard write and then pastes inside this single ordered command. */
+  paste(text: string) {
+    if (!text) return;
+    const keys = new Set([...this.pressed, ...this.softwarePressed]);
+    const buttons = [...this.pressedButtons];
+    this.sendInput({ event: EV.CONTROL_PASTE, payload: { text } });
+    // Neko's KeyPress resets all X11 holds around Ctrl+V. Restore the holds that
+    // preceded this operation before later keyups or shortcuts pass through the FIFO.
+    for (const keysym of keys) this.sendInput({ event: EV.CONTROL_KEYDOWN, payload: { keysym } });
+    for (const code of buttons) this.sendInput({ event: EV.CONTROL_BUTTONDOWN, payload: { code } });
   }
 
   /** Reports the usable viewport in CSS pixels; the remote screen follows, debounced. */
@@ -268,6 +355,10 @@ export class RemoteBrowser {
 
   private reconnect(ws: WebSocket) {
     if (this.ws !== ws || this.stopped) return;
+    // Negotiation errors and deadlines also replace the socket. Pending preconnect
+    // input must pause visibly instead of following the retry into another session.
+    this.inputReady = false;
+    this.inputQueue.interrupt('disconnected');
     this.ws = null;
     this.clearConnectionTimer();
     this.teardownPeer();
@@ -286,11 +377,64 @@ export class RemoteBrowser {
   private sendSoftwareKey(down: boolean, keysym: number) {
     if (down) this.softwarePressed.add(keysym);
     else this.softwarePressed.delete(keysym);
-    this.sendNeko({ event: down ? EV.CONTROL_KEYDOWN : EV.CONTROL_KEYUP, payload: { keysym } });
+    this.sendInput({ event: down ? EV.CONTROL_KEYDOWN : EV.CONTROL_KEYUP, payload: { keysym } });
   }
 
-  private sendData(buf: ArrayBuffer) {
-    if (this.dc && this.dc.readyState === 'open') this.dc.send(buf);
+  private sendChord(names: string[]) {
+    const held = new Set([...this.pressed, ...this.softwarePressed]);
+    const shift = names.includes('Shift') || held.has(KEYSYM.Shift_L) || held.has(0xffe2);
+    const syms = names.map(keysymForName).filter((sym): sym is number => sym !== null)
+      .map((sym) => shift ? shiftedKeysym(sym) : sym);
+    // Held modifiers remain down. A held character still needs a fresh stroke to trigger
+    // a toolbar shortcut, then returns to its original held state after the chord.
+    const suspended = [...held].filter((sym) => !modifierKeysym(sym));
+    for (const keysym of [...suspended].reverse()) this.sendInput({ event: EV.CONTROL_KEYUP, payload: { keysym } });
+    const added = syms.filter((sym) => !modifierKeysym(sym) || !held.has(sym));
+    for (const keysym of added) this.sendInput({ event: EV.CONTROL_KEYDOWN, payload: { keysym } });
+    for (const keysym of [...added].reverse()) this.sendInput({ event: EV.CONTROL_KEYUP, payload: { keysym } });
+    for (const keysym of suspended) this.sendInput({ event: EV.CONTROL_KEYDOWN, payload: { keysym } });
+  }
+
+  private releaseSoftwareKeys() {
+    for (const sym of [...this.softwarePressed].reverse()) this.sendSoftwareKey(false, sym);
+    this.softwareEvents.clear();
+  }
+
+  private trackKey(down: boolean, event: KeyIdentityEvent, held: Map<string, KeyIdentityEvent & { sym: number }>): number | 'repeat' | 'release-all' | null {
+    const id = matchingKeyIdentity(held, event);
+    if (down) {
+      if (id !== null) return 'repeat';
+      const sym = keysymFor(event, { macToPc: this.opts.macToPc ?? false });
+      if (sym === null) return null;
+      // Read native properties explicitly: DOM KeyboardEvent properties are not enumerable.
+      held.set(keyIdentity(event), { key: event.key, code: event.code, keyCode: event.keyCode, sym });
+      return sym;
+    }
+    if (id === null) return unidentifiedKey(event) && held.size > 0 ? 'release-all' : null;
+    const sym = held.get(id)!.sym;
+    held.delete(id);
+    return sym;
+  }
+
+  private sendInput(msg: NekoMessage): boolean {
+    if (msg.event !== EV.CONTROL_SCROLL && msg.event !== EV.CONTROL_MOVE) this.finishScroll();
+    return this.inputQueue.enqueue({ t: 'neko', data: msg });
+  }
+
+  private releaseTransportKeys(): void {
+    // On interruption, queued actions are canceled, never replayed. Best-effort releases are
+    // appended after any frames already handed to this WebSocket, before it is closed.
+    try {
+      for (const sym of [...this.transportKeys].reverse()) this.sendNeko({ event: EV.CONTROL_KEYUP, payload: { keysym: sym } });
+      for (const code of this.transportButtons) this.sendNeko({ event: EV.CONTROL_BUTTONUP, payload: { code } });
+    } catch { /* Delivery failure is already visible; closed transports cannot acknowledge releases. */ }
+    this.transportKeys.clear();
+    this.transportButtons.clear();
+    this.pressed.clear();
+    this.softwarePressed.clear();
+    this.pressedEvents.clear();
+    this.softwareEvents.clear();
+    this.pressedButtons.clear();
   }
 
   private requestSignal(ws: WebSocket) {
@@ -315,13 +459,21 @@ export class RemoteBrowser {
         if (this.state !== 'live') this.startConnectionTimer(ws);
         return;
       case 'agent_offline':
+        this.inputReady = false;
+        this.inputQueue.interrupt('disconnected');
         this.clearConnectionTimer();
         this.teardownPeer();
         this.signalRequested = false;
         this.setState('agent-offline');
         return;
+      case 'input_error':
+        this.inputReady = false;
+        this.inputQueue.interrupt('relay', true);
+        return;
       case 'taken_over':
         this.stopped = true;
+        this.releaseTransportKeys();
+        this.inputQueue.clear();
         if (this.retryTimer) clearTimeout(this.retryTimer);
         this.retryTimer = null;
         this.clearConnectionTimer();
@@ -422,11 +574,15 @@ export class RemoteBrowser {
       if (pc.connectionState === 'connected') {
         this.clearConnectionTimer();
         this.attempt = 0;
-        this.setState('live');
         this.sendNeko({ event: EV.CONTROL_REQUEST });
+        this.inputReady = true;
+        this.inputQueue.flush();
+        this.setState('live');
         this.startStats();
         if (this.pendingViewport) this.applyScreen();
-      } else if (pc.connectionState === 'failed') {
+      } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        this.inputReady = false;
+        this.inputQueue.interrupt('disconnected');
         // An ICE failure (e.g. a network change): start over with a fresh token.
         this.reconnect(ws);
       }
@@ -472,7 +628,7 @@ export class RemoteBrowser {
     if (key === this.appliedScreen) return;
     this.appliedScreen = key;
     this.lastScreenAt = Date.now();
-    this.sendNeko({ event: EV.SCREEN_SET, payload: { ...s } });
+    this.sendInput({ event: EV.SCREEN_SET, payload: { ...s } });
   }
 
   private startStats() {
@@ -487,6 +643,11 @@ export class RemoteBrowser {
   }
 
   private teardownPeer(preserveCandidates = false) {
+    this.inputReady = false;
+    if (this.scrollTimer) clearTimeout(this.scrollTimer);
+    this.scrollTimer = null;
+    this.scrollAccumulator.reset();
+    this.pointerPosition = null;
     this.remoteDescriptionReady = false;
     if (!preserveCandidates) this.pendingCandidates = [];
     if (this.statsTimer) clearInterval(this.statsTimer);

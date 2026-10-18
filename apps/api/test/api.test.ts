@@ -159,39 +159,34 @@ describe('browsers', () => {
     expect((await t.call('GET', `/api/v1/instances/${id}`)).body.status).toBe('deleting');
   });
 
-  it('lists backups and restores a snapshot only while the browser sleeps', async () => {
-    const created = await t.call('POST', '/api/v1/instances', { name: 'Work', regionId: 'tyo1', storageGb: 10, priceVersion: await quote('tyo1') }, { 'idempotency-key': 'b1' });
+  it('removes public snapshots, rejects old clients and never runs legacy daily snapshots', async () => {
+    const created = await t.call('POST', '/api/v1/instances', { name: 'Work', regionId: 'tyo1', storageGb: 10, priceVersion: await quote('tyo1'), backupsEnabled: true }, { 'idempotency-key': 'b1' });
+    expect(created.status).toBe(202);
     await t.settle();
     const id = created.body.instanceId;
-    expect((await t.call('GET', `/api/v1/instances/${id}/backups`)).body).toEqual([]);
-    expect((await t.call('GET', `/api/v1/instances/${id}`)).body.backupsEnabled).toBe(false);
+    const path = `/api/v1/instances/${id}`;
+    expect(t.d1.sqlite.prepare('SELECT backups_enabled AS enabled FROM browser_instances WHERE id = ?').get(id)).toEqual({ enabled: 0 });
+    expect((await t.call('GET', path)).body).not.toHaveProperty('backupsEnabled');
+    expect((await t.call('GET', `${path}/storage`)).body).not.toHaveProperty('snapshots');
+    for (const enabled of [true, false]) {
+      expect(await t.call('PATCH', path, { backupsEnabled: enabled, priceVersion: await quote() })).toMatchObject({ status: 400, body: { type: 'validation_failed' } });
+    }
+    expect((await t.call('GET', `${path}/backups`)).status).toBe(410);
+    expect((await t.call('POST', `${path}/backups/old-snapshot/restore`, undefined, { 'idempotency-key': 'removed-restore' })).status).toBe(410);
+    expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM operations WHERE kind = 'restore'").get()).toEqual({ n: 0 });
 
-    // Snapshots are billed: turning them on needs the price the user was shown.
-    const prices = (await t.call('GET', '/api/v1/pricing')).body as { regionId: string; version: string }[];
-    const version = prices.find((p) => p.regionId === 'tyo1')!.version;
-    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { backupsEnabled: true, priceVersion: 'stale' })).body.type).toBe('price_changed');
-    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { backupsEnabled: true, priceVersion: version })).body.backupsEnabled).toBe(true);
+    // Old database rows cannot opt the machine back into snapshots, including pilot mode.
+    t.d1.sqlite.prepare('UPDATE browser_instances SET backups_enabled = 1 WHERE id = ?').run(id);
+    await engine.scheduled!({ scheduledTime: Date.UTC(2026, 9, 18, 3, 7), cron: '* * * * *', noRetry() {} } as never, t.engineEnv as never, t.ctx);
+    expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM backups WHERE kind = 'snapshot'").get()).toEqual({ n: 0 });
+    expect((await t.call('PATCH', path, { name: 'Renamed' })).status).toBe(200);
+    expect(t.d1.sqlite.prepare('SELECT backups_enabled AS enabled FROM browser_instances WHERE id = ?').get(id)).toEqual({ enabled: 0 });
 
-    // The engine's daily snapshot runs at minute 7 of its 1-minute cron.
-    await engine.scheduled!({ scheduledTime: Date.UTC(2026, 9, 1, 3, 7), cron: '* * * * *', noRetry() {} } as never, t.engineEnv as never, t.ctx);
-    const list = (await t.call('GET', `/api/v1/instances/${id}/backups`)).body;
-    expect(list).toHaveLength(1);
-    expect(list[0]).toMatchObject({ kind: 'snapshot', reason: 'daily', status: 'complete', restorableWhen: 'sleeping' });
-
-    const path = `/api/v1/instances/${id}/backups/${list[0].id}/restore`;
-    expect((await t.call('POST', path, undefined, { 'idempotency-key': 'r0' })).body.type).toBe('invalid_state');
-    expect((await t.call('POST', `/api/v1/instances/${id}/backups/nope/restore`, undefined, { 'idempotency-key': 'r1' })).status).toBe(404);
-
-    await t.call('POST', `/api/v1/instances/${id}/stop`, undefined, { 'idempotency-key': 's1' });
-    await t.settle();
-    const restored = await t.call('POST', path, undefined, { 'idempotency-key': 'r2' });
-    expect(restored.status).toBe(202);
-    await t.settle();
-    expect((await t.call('GET', `/api/v1/operations/${restored.body.operationId}`)).body.status).toBe('succeeded');
-    expect((await t.call('GET', `/api/v1/instances/${id}`)).body.status).toBe('sleeping');
+    const doc = (await t.call('GET', '/api/v1/openapi.json')).body;
+    expect(Object.keys(doc.paths).some((p) => p.includes('/backups'))).toBe(false);
   });
 
-  it('requires a current quote for creating, adding storage, snapshots and a new IP', async () => {
+  it('requires a current quote for creating, adding storage and a new IP', async () => {
     const create = { name: 'Quoted', regionId: 'tyo1', storageGb: 10 };
     expect((await t.call('POST', '/api/v1/instances', create, { 'idempotency-key': 'no-quote' })).status).toBe(400);
     const created = await t.call('POST', '/api/v1/instances', { ...create, priceVersion: await quote() }, { 'idempotency-key': 'quoted' });
@@ -201,10 +196,10 @@ describe('browsers', () => {
     expect((await t.call('POST', `${path}/storage`, { sizeGb: 11 }, { 'idempotency-key': 'resize-no-quote' })).status).toBe(400);
     expect((await t.call('POST', `${path}/ip-change-requests`, { confirm: true }, { 'idempotency-key': 'ip-no-quote' })).status).toBe(400);
     expect((await t.call('POST', `${path}/ip-change-requests`, { confirm: true, priceVersion: 'stale' }, { 'idempotency-key': 'ip-stale' })).body.type).toBe('price_changed');
-    t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()})`);
+    t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()}) ON CONFLICT(key) DO UPDATE SET value = 'true'`);
     expect((await t.call('POST', `${path}/ip-change-requests`, { confirm: true, priceVersion: await quote() }, { 'idempotency-key': 'ip-unpaid' })).body.type).toBe('insufficient_balance');
     expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM operations WHERE kind IN ('change_ip', 'resize_volume')").get()).toEqual({ n: 0 });
-    expect((await t.call('GET', path)).body.backupsEnabled).toBe(false);
+    expect((await t.call('GET', path)).body).not.toHaveProperty('backupsEnabled');
   });
 
   it('requires confirmation again when the default storage size changes after the quote', async () => {
@@ -231,7 +226,7 @@ describe('browsers', () => {
   it('blocks frozen accounts from claiming a free trial, including after billing is disabled', async () => {
     const userId = (await t.call('GET', '/api/v1/me')).body.user.id;
     t.d1.sqlite.prepare('INSERT INTO billing_accounts (user_id, frozen_at, updated_at) VALUES (?, ?, ?)').run(userId, Date.now(), Date.now());
-    t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()})`);
+    t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()}) ON CONFLICT(key) DO UPDATE SET value = 'true'`);
     t.d1.sqlite.exec("UPDATE regions SET enabled = 1, executor = 'fake' WHERE id = 'syd1'");
     t.d1.sqlite.exec("UPDATE provider_prices SET executor = 'fake' WHERE region_id = 'syd1'");
     const create = { name: 'Trial', regionId: 'syd1', storageGb: 2, trial: true, priceVersion: await quote('syd1') };
@@ -244,7 +239,7 @@ describe('browsers', () => {
   });
 
   it('blocks frozen accounts from waking an active trial through either start endpoint', async () => {
-    t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()})`);
+    t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()}) ON CONFLICT(key) DO UPDATE SET value = 'true'`);
     t.d1.sqlite.exec("UPDATE regions SET enabled = 1, executor = 'fake' WHERE id = 'syd1'");
     t.d1.sqlite.exec("UPDATE provider_prices SET executor = 'fake' WHERE region_id = 'syd1'");
     const created = await t.call('POST', '/api/v1/instances', { name: 'Trial', regionId: 'syd1', storageGb: 2, trial: true, priceVersion: await quote('syd1') }, { 'idempotency-key': 'trial' });
@@ -273,7 +268,7 @@ describe('browsers', () => {
       ['/ip-change-requests', { confirm: true, priceVersion: await quote() }],
       ['/sessions', undefined],
     ] as const) expect((await t.call('POST', `${path}${suffix}`, body, { 'idempotency-key': `other${suffix}` })).status).toBe(404);
-    expect((await t.call('PATCH', path, { backupsEnabled: true, priceVersion: await quote() })).status).toBe(404);
+    expect((await t.call('PATCH', path, { name: 'Other user' })).status).toBe(404);
     expect((await t.call('GET', `/api/v1/operations/${created.body.operationId}`)).status).toBe(404);
     expect((await t.call('GET', `/api/v1/sessions/${session.body.session.id}/connect`)).status).toBe(404);
   });

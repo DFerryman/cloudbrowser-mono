@@ -1,6 +1,6 @@
 // Stands in for neko's WebSocket (ws://127.0.0.1:8099/api/ws) in the viewer end-to-end test. The
 // Go agent's neko relay connects here; messages are passed to and from the fake neko page, which
-// does the WebRTC part in a real Chromium.
+// does the WebRTC media part in a real Chromium and records the ordered Neko control/* JSON.
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';

@@ -6,7 +6,7 @@ Everything in the control plane runs on Cloudflare. Five Workers share one D1 da
 |---|---|---|---|---|
 | `cloudbrowser` (api + web) | `apps/api/wrangler.jsonc` | Yes: your app domain | HTTP, Queue (billing), cron every 5 min | Static assets, D1, Email Service, Queues (producer + billing consumer), Durable Object binding, Rate Limiting |
 | `cloudbrowser-engine` | `apps/engine/wrangler.jsonc` | No | Queue, cron every minute, service binding | D1, Queues (consumer + producer), Durable Object `EventHub`, R2 (presigned archive URLs) |
-| `cloudbrowser-reaper` | `apps/engine/wrangler.reaper.jsonc` | No | cron every 15 min | D1, Durable Object binding, R2 (deletes archives) |
+| `cloudbrowser-reaper` | `apps/engine/wrangler.reaper.jsonc` | No | cron every minute | D1, Durable Object binding, R2 (deletes archives) |
 | `cloudbrowser-reconciler` | `apps/reconciler/wrangler.jsonc` | No | cron every 5 min | D1 |
 | `cloudbrowser-gateway` | `apps/gateway/wrangler.jsonc` | Yes: `connect.` domain | HTTP (WebSocket), Queue | Durable Object `InstanceGateway`, Queues (consumer), service binding to the api's `Internal` entrypoint, D1 |
 
@@ -108,8 +108,8 @@ markup, default 120%), the minimum balance to start browsers and the low-balance
 operator console → *Pricing & margin*, which also shows each region's cost and price and can
 refresh prices now.
 
-**Billing** is a prepaid balance. The pilot runs without payments: usage is metered and shown at
-the real prices, but nothing is charged. Top-ups turn on when every value below is set; until then
+**Billing** is a prepaid balance. Only the one ten-minute trial may run without funded credit.
+Missing payment-provider settings do not grant free paid-browser use. Top-ups turn on when every value below is set; until then
 `/v1/billing/checkout` answers 503.
 
 1. **Creem dashboard (test mode first):** create one **one-time** product in **USD** per top-up
@@ -130,9 +130,9 @@ pnpm exec wrangler secret put CREEM_API_KEY
 pnpm exec wrangler secret put CREEM_WEBHOOK_SECRET
 ```
 
-5. **Charge for usage** once you sell: browsers then draw from the balance, nothing starts below
-   the minimum balance, and each new user gets the one free trial browser (10 minutes in Sydney).
-   Leave it off during the invite-only pilot.
+5. **Require prepaid usage**: after reserving seven days of IP/disk retention, the remaining
+   available balance must fund new paid usage. The one free trial browser is ten minutes in Sydney.
+   An absent flag defaults to prepaid enforcement; an explicit false is a development/pilot override.
 
 ```sql
 INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', unixepoch() * 1000)
@@ -141,10 +141,15 @@ INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', '
 
 What happens automatically: webhooks are verified, stored by event id and processed from the
 `cloudbrowser-billing` queue; a completed checkout is re-fetched from Creem and credited once per
-order. The engine meters usage every minute and takes it from the balance; when it runs out,
-running browsers sleep 10 minutes later. The api's 5-minute cron retries lost events, refreshes
-the top-up products hourly, emails a low-balance warning, emails users on day 1, 14 and 28 after
-the balance ran out and deletes their browsers on day 30 (restorable 7 more days); a nightly run
+order. The engine records usage every minute using elapsed time and the AWS unit prices times
+the markup. Compute and IPv4 use hours with fractional seconds; provisioned storage uses
+GB-month fractions of the actual UTC billing month, split across day/month boundaries. The
+730-hour convention is only a display projection, not the storage debit divisor.
+Available credit excludes the refundable seven-day IP/disk reserve. At exhaustion, viewer
+access is revoked and the VM is stopped without a ten-minute grace period. The reserve then
+funds seven days of fixed-resource retention, after which data and the IP are permanently deleted.
+An early manual deletion or funded resumption releases unused retention credit. The api's
+five-minute cron retries lost events, refreshes products and sends balance notices; a nightly run
 credits any paid order a lost webhook missed. Credit can also be added by hand in the console
 (*Users* → Credit), which is recorded as an adjustment.
 
@@ -153,11 +158,18 @@ monthly projection are estimates based on those prices and platform measurements
 capacity; they do not reconcile AWS credits, discounts, free tiers or actual incremental snapshot
 storage. Cost Explorer/CUR billing ingestion is not included in this release. Pilot usage is
 shown as an estimate; only actual balance debits count as customer revenue in the margin report.
+User snapshot controls, public backup/restore routes and automatic daily snapshots are removed;
+legacy snapshots and internal recovery snapshots remain eligible for cleanup. Snapshot estimates
+are not customer debits. Transfer counters are sampled:
+any unbacked burst beyond available credit is a platform cost, not a negative usage balance.
+Unknown provider startup time or minimum-lifetime rounding is not added as an unquoted surcharge.
 
 ### Existing deployment rollout
 
-Keep `billing_required=false` until payment-provider test checkouts and refunds have been verified.
-Before migration `0007`, capture a D1 Time Travel bookmark. The migration preserves legacy
+Capture a D1 Time Travel bookmark before each migration. Keep new creates paused until the new
+schema and affected Workers are live, then enforce `billing_required=true` for production.
+Migration `0008` adds the per-browser refundable retention reserves and funding constraints.
+Migration `0007` preserves legacy
 subscription, checkout and active-usage tables and archives changed caps in `legacy_billing_caps`.
 If rolling Workers back, restore those caps as well; do not assume a Worker rollback undoes SQL.
 Pause new creates while updating the AWS allowed types, `AWS_REGIONS`, D1 and all Workers. Publish
@@ -165,6 +177,22 @@ the updated agent image before allowing new browsers, refresh prices, and confir
 complete price sheet before removing the create pause. Existing browsers retain their VM/data/IP.
 Deploy the gateway before the API: the API's `GATEWAY` service binding uses the gateway's new
 `Internal` entrypoint to revoke live connections immediately after deletion.
+
+### Ordered input and priority stop/delete
+
+Every input kind uses the same FIFO from the viewer through the gateway and VM relay to Neko.
+The gateway serializes callbacks across D1/RPC awaits; native DOM input is not coalesced across
+click/key/text boundaries. Queues are bounded and honor transport backpressure. Interruption,
+overflow or relay failure visibly disables input, releases held controls where reachable, and
+does not replay stale clicks or text into a new connection. Agent 0.2.1 reports failed local relays.
+
+Stop and delete are accepted even while another operation is unfinished. Delete has highest
+priority; repeated requests merge, and a late stop cannot undo deletion. Canceled work is fenced
+before provider calls and lifecycle writes. AWS calls already in flight still require drain and
+confirmation, so accepting intent does not claim instantaneous physical termination. Stop revokes
+viewers while retaining the agent channel for cleanup. Normal input has at most a one-second
+authorization lease; trusted stop/delete RPCs revoke it immediately, and alarms enforce trial or
+credit expiry even without another input event.
 
 ### Permanent user deletion and isolation
 

@@ -54,6 +54,7 @@ type fakeNekoSession struct{ n *fakeNeko }
 
 func (s fakeNekoSession) Send(m json.RawMessage) error { s.n.sent <- m; return nil }
 func (s fakeNekoSession) Close()                       {}
+func (s fakeNekoSession) Done() <-chan struct{}        { return nil }
 func (n *fakeNeko) Open(_ context.Context, _ string, toViewer func(json.RawMessage)) (NekoSession, error) {
 	go toViewer(json.RawMessage(`{"event":"system/init"}`))
 	return fakeNekoSession{n}, nil
@@ -290,7 +291,7 @@ type fakeHost struct {
 }
 
 func (h *fakeHost) DiskUsage(string) (uint64, uint64, error) { return 3 << 30, 10 << 30, nil }
-func (h *fakeHost) NetTxBytes() (uint64, error)            { return 123456, nil }
+func (h *fakeHost) NetTxBytes() (uint64, error)              { return 123456, nil }
 func (h *fakeHost) GrowFilesystem(_ context.Context, path string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

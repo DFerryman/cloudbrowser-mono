@@ -14,7 +14,7 @@ import {
   type RegionPricing,
 } from '@cloudbrowser/contracts';
 import { priceSheets, pricingSettings, schema, userCaps, type Db } from '@cloudbrowser/db';
-import { asc } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { problem } from './problem.js';
 
 /** Data volume of a new browser and the most it can grow to, unless a cap says otherwise. */
@@ -35,6 +35,17 @@ export async function regionPrice(db: Db, regionId: string): Promise<RegionPrice
   const { markupPercent } = await pricingSettings(db);
   const rates = customerRates(stored.sheet, markupPercent);
   return { sheet: stored.sheet, rates, version: priceVersion(rates, stored.sheet.rootVolumeGb), fetchedAt: stored.fetchedAt };
+}
+
+/** Existing browsers show their observed machine and root disk, not the new-browser default. */
+export async function instancePrice(db: Db, instanceId: string, regionId: string): Promise<RegionPrice | null> {
+  const p = await regionPrice(db, regionId);
+  if (!p) return null;
+  const [placement] = await db.select().from(schema.placements).where(and(eq(schema.placements.instanceId, instanceId), eq(schema.placements.status, 'current')));
+  const actual = placement?.instanceType ? p.sheet.instanceTypes[placement.instanceType] : p.sheet.vmHour;
+  if (actual === undefined) return null;
+  const sheet = { ...p.sheet, vmHour: actual, rootVolumeGb: placement?.rootVolumeGb ?? p.sheet.rootVolumeGb };
+  return { ...p, sheet, rates: { ...customerRates(sheet, (await pricingSettings(db)).markupPercent), snapshot: 0 } };
 }
 
 /** Like regionPrice, but refuses the action when there is no price or the user saw an older one. */
@@ -78,8 +89,8 @@ export async function allRegionPricing(db: Db, userId: string): Promise<RegionPr
 }
 
 /** What one browser costs per hour right now (running or not) and per month while it is kept. */
-export function currentBurn(p: RegionPrice | null, inst: { status: string; storageGb: number; backupsEnabled: boolean }) {
-  if (!p || ['creating', 'failed', 'deleting', 'purged'].includes(inst.status)) return { hourMicros: 0, runningHourMicros: p?.rates.compute ?? 0, alwaysOnMonthMicros: 0 };
-  const e = browserEstimate(p.rates, { storageGb: inst.storageGb, rootVolumeGb: p.sheet.rootVolumeGb, backups: inst.backupsEnabled });
+export function currentBurn(p: RegionPrice | null, inst: { status: string; storageGb: number; backupsEnabled: boolean; trialState?: string | null }) {
+  if (!p || ['active', 'ended'].includes(inst.trialState ?? '') || ['creating', 'failed', 'deleting', 'purged'].includes(inst.status)) return { hourMicros: 0, runningHourMicros: p?.rates.compute ?? 0, alwaysOnMonthMicros: 0 };
+  const e = browserEstimate(p.rates, { storageGb: inst.storageGb, rootVolumeGb: p.sheet.rootVolumeGb, backups: false });
   return { hourMicros: e.alwaysOnHour + (inst.status === 'running' ? e.runningHour : 0), runningHourMicros: e.runningHour, alwaysOnMonthMicros: e.alwaysOnMonth };
 }

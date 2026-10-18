@@ -47,6 +47,12 @@ export interface OpContext {
   tags: ResourceTags;
   /** Epoch ms after which the call should give up. */
   deadline: number;
+  /**
+   * Confirms the calling operation still owns its lease and the browser's current intent.
+   * Called again at provider request boundaries, including after waits. A rejection must pass
+   * through unchanged so cancellation is never retried as a provider failure.
+   */
+  assertActive?: () => Promise<void>;
 }
 
 export type ResourceKind = 'vm' | 'volume' | 'network_interface' | 'ip' | 'snapshot';
@@ -92,6 +98,10 @@ export interface VmSpec {
   /** Single-use agent bootstrap token; the only secret in user data. */
   bootstrapToken: string;
   gatewayUrl: string;
+  /** Maximum VM price in USD/hour confirmed for this operation; applies only to a new launch. */
+  maxVmHour?: number;
+  /** Current provider prices for all configured launch candidates, never an estimated fallback. */
+  instanceTypePrices?: Record<string, number>;
 }
 
 /** Where a volume size change stands: `ready` once the new size can be used (AWS: optimizing or completed). */
@@ -149,6 +159,8 @@ export interface ObservedResource {
   zone: string | null;
   state: string;
   tags: Record<string, string>;
+  /** Actual provisioned size from the provider inventory, when this is a volume. */
+  sizeGb?: number;
 }
 
 export interface QuotaSnapshot {

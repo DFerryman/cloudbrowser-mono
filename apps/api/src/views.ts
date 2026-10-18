@@ -68,11 +68,10 @@ export async function toInstances(db: Db, rows: InstanceRow[]): Promise<Instance
         ? { id: op.id, kind: op.kind as Operation['kind'], status: op.status as Operation['status'], step: op.step }
         : null,
       storageGb: r.storageGb,
-      backupsEnabled: r.backupsEnabled,
       trial: r.trialState
         ? {
             state: r.trialState as NonNullable<Instance['trial']>['state'],
-            secondsLeft: r.trialState === 'active' ? Math.max(0, TRIAL.runningSeconds - r.trialUsedS) : 0,
+            secondsLeft: r.trialState === 'active' ? Math.ceil(Math.max(0, TRIAL.runningSeconds * 1000 - Math.max(r.trialUsedMs, r.trialUsedS * 1000)) / 1000) : 0,
             reclaimAt: r.trialState === 'converted' ? null : iso(r.trialReclaimAt),
           }
         : null,

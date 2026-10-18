@@ -20,3 +20,5 @@ export { newArchiveKey, wrapArchiveKey, unwrapArchiveKey } from './archive-keys.
 export { userCaps, billingRequired, usageMonth, usageDay } from './caps.js';
 export { pricingSettings, priceSheets, type StoredSheet } from './pricing.js';
 export { raiseAlert, type AlertSeverity } from './alerts.js';
+
+export { convertTrialStatements, prepaidBalance, prepaidAccess, reservationQuote, reservationWrite, reservedTotalSql, settleRunningStatements, type ReservationQuote, type PrepaidAccessReason } from './prepaid.js';

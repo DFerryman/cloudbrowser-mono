@@ -4,8 +4,10 @@
 <canvas id="screen" width="1280" height="720"></canvas>
 <script>
   // Plays neko's side of the v3 protocol for the viewer end-to-end test: answers signal/request
-  // with an offer carrying an animated canvas and a "data" channel, and records every input frame.
+  // with an offer carrying an animated canvas. Input is ordered Neko control/* WebSocket JSON;
+  // the deliberately unreliable data channel is receive-only from the viewer's perspective.
   window.received = [];
+  window.dataChannelInput = [];
   window.events = [];
   const canvas = document.getElementById('screen');
   const g = canvas.getContext('2d');
@@ -24,13 +26,14 @@
   ws.onmessage = async (e) => {
     const msg = JSON.parse(e.data);
     window.events.push(msg.event ?? msg.bridge);
+    if (msg.event?.startsWith('control/')) window.received.push({ event: msg.event, payload: msg.payload, transport: 'websocket' });
     if (msg.bridge === 'client_connected') return send('system/init', { session_id: 'owner' });
     if (msg.event === 'signal/request') {
       pc?.close();
       pc = new RTCPeerConnection();
       const stream = canvas.captureStream(30);
       for (const t of stream.getTracks()) pc.addTrack(t, stream);
-      const dc = pc.createDataChannel('data');
+      const dc = pc.createDataChannel('data', { ordered: false, maxRetransmits: 0 });
       dc.binaryType = 'arraybuffer';
       dc.onmessage = (m) => {
         const v = new DataView(m.data);
@@ -39,7 +42,7 @@
         if (op === 1) Object.assign(rec, { x: v.getUint16(3), y: v.getUint16(5) });
         if (op >= 3) rec.code = v.getUint32(3);
         if (op === 2) Object.assign(rec, { dx: v.getInt16(3), dy: v.getInt16(5) });
-        window.received.push(rec);
+        window.dataChannelInput.push(rec);
       };
       pc.onicecandidate = (c) => c.candidate && send('signal/candidate', { candidate: c.candidate.candidate, sdpMid: c.candidate.sdpMid, sdpMLineIndex: c.candidate.sdpMLineIndex });
       await pc.setLocalDescription(await pc.createOffer());
@@ -49,6 +52,8 @@
     } else if (msg.event === 'signal/candidate') {
       await pc.addIceCandidate(msg.payload).catch(() => {});
     } else if (msg.event === 'clipboard/set') {
+      window.clipboard = msg.payload.text;
+    } else if (msg.event === 'control/paste') {
       window.clipboard = msg.payload.text;
     } else if (msg.event === 'screen/set') {
       window.screenSet = msg.payload;

@@ -25,24 +25,26 @@ const instance = {
   id: 'browser-fixture', name: 'Quoted browser', regionId: 'syd1', status: 'sleeping', statusReason: null,
   desiredState: 'stopped', idleTimeoutS: 600, locale: 'en-US', screen: 'auto', ipAddress: '192.0.2.1',
   dedicatedSince: null, lastIpCheck: null, lastActiveAt: null, createdAt: new Date().toISOString(),
-  deletedAt: null, purgeAfter: null, currentOperation: null, storageGb: 10, backupsEnabled: false, trial: null,
+  deletedAt: null, purgeAfter: null, currentOperation: null, storageGb: 10, trial: null,
 };
 const results = [];
 
-async function fixture({ trial = false, failed = false, noPrice = false, width = 1365, sizeGb = 10, totalBytes, status = 'sleeping', purgeAfter = null } = {}) {
+async function fixture({ trial = false, failed = false, noPrice = false, width = 1365, sizeGb = 10, totalBytes, status = 'sleeping', purgeAfter = null,
+  balanceMicros = trial ? 0 : 10_000_000, reservedMicros = 0, availableMicros = Math.max(0, balanceMicros - reservedMicros), mode = 'prepaid', trialEligible = false, trialSeconds = 600, busy = false, legacySnapshots = false, rootVolumeGb = 16 } = {}) {
   const context = await browser.newContext({ viewport: { width, height: 1024 }, locale: 'en-US', hasTouch: width === 820 });
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  const i = { ...instance, storageGb: sizeGb, status, purgeAfter, ...(failed ? { status: 'failed' } : {}), ...(trial ? { storageGb: 2, trial: { state: 'active', secondsLeft: 600, reclaimAt: null } } : {}) };
+  const i = { ...instance, storageGb: sizeGb, status, purgeAfter, ...(legacySnapshots ? { backupsEnabled: true } : {}), ...(busy ? { currentOperation: { id: 'busy-op', kind: 'start', status: 'running' } } : {}), ...(failed ? { status: 'failed' } : {}), ...(trial ? { storageGb: 2, trial: { state: trialSeconds > 0 ? 'active' : 'ended', secondsLeft: trialSeconds, reclaimAt: null } } : {}) };
   const fsTotalBytes = totalBytes === undefined ? i.storageGb * 1024 ** 3 * 0.93 : totalBytes;
-  const state = { version: 'quote-1', storageGb: 10, requests: [], priceReads: 0, reject: false };
+  const state = { version: 'quote-1', storageGb: 10, requests: [], reads: [], priceReads: 0, reject: false };
   await context.route('**/*', async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     assert.equal(url.origin, origin, 'Every request must stay on the intercepted fixture origin');
     if (url.pathname.startsWith('/api/')) {
+      if (request.method() === 'GET') state.reads.push(url.pathname);
       let body;
       let status = 200;
       if (request.method() !== 'GET') {
@@ -68,18 +70,21 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
           rates: noPrice ? null : { compute: newer ? 200_000 : 100_000, ip: newer ? 12_000 : 6_000, storage: newer ? 200_000 : 100_000, snapshot: newer ? 100_000 : 50_000, transfer: 100_000 },
           rootVolumeGb: 16, machine: { vcpu: 2, memoryGb: 4 }, defaultStorageGb: state.storageGb, maxStorageGb: 100, version: noPrice ? null : state.version }];
       } else if (url.pathname === '/api/v1/billing') body = {
-        mode: 'prepaid', enabled: false, balanceMicros: trial ? 0 : 10_000_000, exhaustedAt: null, dataKeptUntil: null, frozen: false,
+        mode, enabled: false, balanceMicros, reservedMicros, availableMicros, retentionDays: 7, exhaustedAt: null, dataKeptUntil: null, frozen: false,
         minBalanceMicros: 1_000_000, lowBalanceMicros: 2_000_000, burnHourMicros: 10_000, topUps: [], month: { ...zero, month },
-        trial: { eligible: false, regionId: 'syd1', minutes: 10, storageGb: 2, keptDays: 7 },
+        trial: { eligible: trialEligible, regionId: 'syd1', minutes: 10, storageGb: 2, keptDays: 7 },
       };
       else if (url.pathname === '/api/v1/instances') body = [i];
       else if (url.pathname === `/api/v1/instances/${i.id}`) body = i;
-      else if (url.pathname.endsWith('/storage')) body = { sizeGb: i.storageGb, rootVolumeGb: 16, maxGb: 100, usedBytes: fsTotalBytes === null ? null : 1_000_000_000, totalBytes: fsTotalBytes,
-        reportedAt: null, resizable: !trial, blockedReason: trial ? 'trial' : null, nextResizeAt: null, snapshots: { count: 0, retentionDays: 7 } };
-      else if (url.pathname.endsWith('/usage') && url.pathname.includes('/instances/')) body = { month, totalMicros: 0, items: [], byDay: [], now: { hourMicros: 10_000, runningHourMicros: 100_000, alwaysOnMonthMicros: 7_300_000 } };
+      else if (url.pathname.endsWith('/storage')) body = { sizeGb: i.storageGb, rootVolumeGb, maxGb: 100, usedBytes: fsTotalBytes === null ? null : 1_000_000_000, totalBytes: fsTotalBytes,
+        reportedAt: null, resizable: !trial, blockedReason: trial ? 'trial' : null, nextResizeAt: null };
+      else if (url.pathname.endsWith('/usage') && url.pathname.includes('/instances/')) {
+        const fixed = 6_000 * 730 + 100_000 * (i.storageGb + rootVolumeGb);
+        body = { month, totalMicros: 0, items: [], byDay: [], now: { hourMicros: trial ? 0 : Math.round(fixed / 730) + (i.status === 'running' ? 100_000 : 0), runningHourMicros: 100_000, alwaysOnMonthMicros: fixed } };
+      }
       else if (url.pathname === '/api/v1/usage') body = { ...zero, month, byBrowser: [], byDay: [] };
       else if (url.pathname === '/api/v1/events') return route.fulfill({ contentType: 'text/event-stream', body: ': local fixture\n\n' });
-      else if (url.pathname.endsWith('/backups') || url.pathname.endsWith('/sessions') || url.pathname.endsWith('/transactions')) body = [];
+      else if (url.pathname.endsWith('/sessions') || url.pathname.endsWith('/transactions')) body = [];
       else throw new Error(`Unhandled fixture route: ${request.method()} ${url.pathname}`);
       return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
     }
@@ -91,6 +96,8 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
 }
 async function finish(f, name) {
   assert.deepEqual(f.errors, []);
+  assert.equal([...f.state.reads, ...f.state.requests.map((request) => request.path)].some((path) => path.includes('/backups')), false, 'Removed backup APIs must never be requested');
+  assert.equal(f.state.requests.some((request) => request.body && Object.hasOwn(request.body, 'backupsEnabled')), false, 'No action may enable snapshots');
   assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'Page must not overflow horizontally');
   results.push(name);
   await f.context.close();
@@ -112,6 +119,7 @@ try {
   await rejected(create, '/api/v1/instances');
   assert.equal(await create.page.getByLabel('Name', { exact: true }).inputValue(), 'Keep my entered name');
   await create.page.getByText('$0.20/h', { exact: true }).first().waitFor();
+  await create.page.getByText('$0.2191/h', { exact: true }).waitFor();
   await create.page.getByRole('button', { name: 'Create browser', exact: true }).click();
   await create.page.waitForURL('**/browsers');
   assert.equal(create.state.requests[1].body.priceVersion, 'quote-2');
@@ -130,15 +138,15 @@ try {
   assert.equal(capacity.state.requests[1].body.storageGb, 100);
   await finish(capacity, 'changed default storage refreshes the shown capacity and requires a second confirmation');
 
-  for (const action of ['storage', 'snapshot', 'ip']) {
+  for (const action of ['storage', 'ip']) {
     const f = await fixture({ width: action === 'storage' ? 820 : 1365 });
     await f.page.goto(`${origin}/browsers/${instance.id}/${action === 'ip' ? 'settings' : 'storage'}`);
-    const open = action === 'storage' ? 'Add storage' : action === 'snapshot' ? 'Turn on snapshots' : 'Request a new IP';
+    const open = action === 'storage' ? 'Add storage' : 'Request a new IP';
     await f.page.getByRole('button', { name: open, exact: true }).click();
     f.state.reject = true;
     const dialog = f.page.getByRole('dialog');
     await dialog.getByRole('button', { name: action === 'ip' ? 'Request new IP' : open, exact: true }).click();
-    const path = action === 'storage' ? `/api/v1/instances/${instance.id}/storage` : action === 'snapshot' ? `/api/v1/instances/${instance.id}` : `/api/v1/instances/${instance.id}/ip-change-requests`;
+    const path = action === 'storage' ? `/api/v1/instances/${instance.id}/storage` : `/api/v1/instances/${instance.id}/ip-change-requests`;
     await rejected(f, path);
     await dialog.waitFor({ state: 'hidden' });
     await f.page.getByRole('button', { name: open, exact: true }).click();
@@ -150,12 +158,12 @@ try {
 
   const trial = await fixture({ trial: true, width: 820 });
   await trial.page.goto(`${origin}/browsers/${instance.id}/storage`);
-  assert.equal(await trial.page.getByRole('button', { name: 'Turn on snapshots', exact: true }).isDisabled(), true);
-  await trial.page.getByText('Snapshots are not included in the free trial. Add credit to keep this browser first.', { exact: true }).waitFor();
+  await trial.page.getByRole('heading', { name: 'Storage', exact: true }).waitFor();
+  assert.equal(await trial.page.getByText(/snapshot|backup|profile archive/i).count(), 0);
   await trial.page.getByRole('link', { name: 'Usage', exact: true }).click();
   await trial.page.waitForURL('**/usage');
   assert.equal(trial.state.requests.length, 0);
-  await finish(trial, 'tablet browser management tabs work and trial snapshots are disabled with an explanation');
+  await finish(trial, 'tablet browser management tabs work without snapshot or backup features');
 
   const retry = await fixture({ failed: true, trial: true });
   await retry.page.goto(`${origin}/browsers`);
@@ -179,7 +187,7 @@ try {
 
   const deletion = await fixture();
   await deletion.page.goto(`${origin}/browsers/${instance.id}/settings`);
-  await deletion.page.getByText('Permanently delete this browser, its saved data, signed-in sessions and backups, and release its resources. Access closes immediately. This cannot be undone.', { exact: true }).waitFor();
+  await deletion.page.getByText('Permanently delete this browser, its saved data and signed-in sessions, and release its resources. Access closes immediately. This cannot be undone.', { exact: true }).waitFor();
   const deleteButton = deletion.page.getByRole('button', { name: 'Delete browser', exact: true });
   assert.equal(await deleteButton.isDisabled(), true);
   await deletion.page.locator('#confirm-delete').fill('Wrong name');
@@ -258,6 +266,105 @@ try {
     assert.equal(await normal.page.getByText(/Storage has increased/).count(), 0, 'Filesystem overhead or missing metrics must not trigger a capacity warning');
     await finish(normal, totalBytes === null ? 'unknown filesystem capacity does not raise a false warning' : 'normal filesystem overhead does not raise a false warning');
   }
+
+  const comparable = await fixture({ sizeGb: 20, status: 'running' });
+  await comparable.page.goto(`${origin}/browsers/new`);
+  await comparable.page.getByText('$0.1096/h', { exact: true }).waitFor();
+  await comparable.page.getByText('Est. running total $0.1096/h', { exact: true }).waitFor();
+  await comparable.page.getByText('Compute only', { exact: true }).waitFor();
+  await comparable.page.getByText('Storage, 26 GB', { exact: true }).waitFor();
+  await comparable.page.goto(`${origin}/billing`);
+  await comparable.page.getByText('$0.1096/h', { exact: true }).waitFor();
+  await comparable.page.getByText('$0.006/h', { exact: true }).waitFor();
+  await comparable.page.getByText('$0.10 per GB-month', { exact: true }).waitFor();
+  await comparable.page.goto(`${origin}/browsers/${instance.id}/usage`);
+  await comparable.page.getByText('Estimated running total now: $0.1109/h, excluding data transfer. This is not an extra charge.', { exact: true }).waitFor();
+  await comparable.page.getByText(/actual 20 GB data volume/).waitFor();
+  await comparable.page.getByText('Compute only: $0.10/h while awake, included in the running total.', { exact: true }).waitFor();
+  await finish(comparable, 'new-browser quotes share one all-in estimate while actual 20 GB usage is explicitly distinguished from the 10 GB default and compute-only component');
+
+  for (const mode of ['prepaid', 'pilot']) {
+    const locked = await fixture({ mode, balanceMicros: 2_000_000, reservedMicros: 2_000_000, availableMicros: 0, status: 'running' });
+    await locked.page.goto(`${origin}/billing`);
+    await locked.page.getByText('Total credit: $2.00', { exact: true }).waitFor();
+    await locked.page.getByText('Reserved for seven-day retention: $2.00', { exact: true }).waitFor();
+    assert.equal(await locked.page.getByText('Free pilot', { exact: true }).count(), 0);
+    await locked.page.goto(`${origin}/browsers`);
+    await locked.page.getByText(/positive available balance is required/).waitFor();
+    assert.equal(await locked.page.getByRole('button', { name: 'Open', exact: true }).isDisabled(), true);
+    await locked.page.goto(`${origin}/browsers/new`);
+    await locked.page.getByText(/At least .* available credit is needed/).waitFor();
+    assert.equal(await locked.page.getByRole('button', { name: 'Create browser', exact: true }).isDisabled(), true);
+    await locked.page.goto(`${origin}/browsers/${instance.id}/storage`);
+    await locked.page.getByText(/positive available balance is required/).waitFor();
+    assert.equal(await locked.page.getByRole('button', { name: 'Add storage', exact: true }).isDisabled(), true);
+    assert.equal(locked.state.requests.length, 0);
+    await finish(locked, `${mode} mode never treats reserved credit or zero available credit as spendable balance`);
+  }
+
+  const freeCreate = await fixture({ balanceMicros: 0, trialEligible: true });
+  await freeCreate.page.goto(`${origin}/browsers/new`);
+  await freeCreate.page.getByText('Free', { exact: true }).waitFor();
+  assert.equal(await freeCreate.page.getByRole('checkbox').isChecked(), true);
+  await freeCreate.page.getByRole('button', { name: 'Create browser', exact: true }).click();
+  await freeCreate.page.waitForURL('**/browsers');
+  assert.equal(freeCreate.state.requests[0].body.trial, true);
+  assert.equal(freeCreate.state.requests[0].body.storageGb, 2);
+  await finish(freeCreate, 'zero credit allows only the explicitly selected free trial with its own 2 GB storage quote');
+
+  for (const trialSeconds of [600, 0]) {
+    const trialAccess = await fixture({ trial: true, trialSeconds });
+    await trialAccess.page.goto(`${origin}/browsers/${instance.id}/usage`);
+    await trialAccess.page.getByText('This trial is free. Paid hourly rates apply only after you add credit and keep the browser.', { exact: true }).waitFor();
+    assert.equal(await trialAccess.page.getByRole('button', { name: 'Wake & open', exact: true }).isDisabled(), trialSeconds === 0);
+    assert.equal(await trialAccess.page.getByText(/Compute only:/).count(), 0, 'Free trial must not look like a current paid hourly charge');
+    await finish(trialAccess, trialSeconds > 0 ? 'remaining trial minutes are the only zero-credit access exception' : 'exhausted trial is blocked at zero credit');
+  }
+
+  for (const options of [{}, { legacySnapshots: true }, { legacySnapshots: true, balanceMicros: 0 }]) {
+    const removed = await fixture(options);
+    for (const path of [`/browsers/${instance.id}/storage`, `/browsers/${instance.id}/settings`, '/browsers/new', '/billing']) {
+      await removed.page.goto(`${origin}${path}`);
+      await removed.page.getByText(path.endsWith('/storage') ? 'Data volume: 10 GB' : path.endsWith('/settings') ? 'Name' : path.endsWith('/new') ? 'Create browser' : 'Billing & usage', { exact: true }).first().waitFor();
+      assert.equal(await removed.page.getByText(/snapshot|backup|profile archive/i).count(), 0, 'Snapshot UI must be removed, including for old enabled browsers');
+      assert.equal(await removed.page.getByRole('button', { name: 'Restore', exact: true }).count(), 0);
+    }
+    assert.equal(removed.state.requests.length, 0);
+    await finish(removed, options.legacySnapshots
+      ? `legacy snapshot data exposes no feature UI or API requests with ${options.balanceMicros === 0 ? 'zero' : 'funded'} credit`
+      : 'storage, settings, create and billing contain no snapshot features, rates or API requests');
+  }
+
+  const insufficientGrowth = await fixture({ availableMicros: 1_000_001 });
+  await insufficientGrowth.page.goto(`${origin}/browsers/${instance.id}/storage`);
+  await insufficientGrowth.page.getByLabel('New size (GB)', { exact: true }).fill('100');
+  await insufficientGrowth.page.getByText(/Additional seven-day retention reserve:/).first().waitFor();
+  assert.equal(await insufficientGrowth.page.getByRole('button', { name: 'Add storage', exact: true }).isDisabled(), true);
+  assert.equal(insufficientGrowth.state.requests.length, 0);
+  await finish(insufficientGrowth, 'storage growth requires available credit for both the minimum balance and additional seven-day reserve');
+
+  const growth = await fixture({ status: 'running', rootVolumeGb: 20 });
+  await growth.page.goto(`${origin}/browsers/${instance.id}/storage`);
+  await growth.page.getByText('Plus a 20 GB system disk (OS and browser), included in the storage charge.', { exact: true }).waitFor();
+  await growth.page.getByLabel('New size (GB)', { exact: true }).fill('35');
+  assert.equal(growth.state.requests.length, 0);
+  await growth.page.getByRole('button', { name: 'Add storage', exact: true }).click();
+  const growthDialog = growth.page.getByRole('dialog');
+  await growthDialog.getByText(/Storage grows from 10 GB to 35 GB.*from \$3.00 to \$5.50/).waitFor();
+  assert.equal(growth.state.requests.length, 0, 'Opening a quote must not resize or charge');
+  await growthDialog.getByRole('button', { name: 'Add storage', exact: true }).click();
+  await growthDialog.waitFor({ state: 'hidden' });
+  assert.deepEqual(growth.state.requests.map(({ method, path, body }) => ({ method, path, body })), [{ method: 'POST', path: `/api/v1/instances/${instance.id}/storage`, body: { sizeGb: 35, priceVersion: 'quote-1' } }]);
+  await finish(growth, 'a running browser grows to the explicitly confirmed capacity with actual system-disk pricing and the current quote');
+
+  const busyStop = await fixture({ status: 'starting', busy: true, balanceMicros: 0 });
+  await busyStop.page.goto(`${origin}/browsers`);
+  await busyStop.page.getByRole('button', { name: 'More actions', exact: true }).click();
+  const stopped = busyStop.page.waitForResponse((response) => response.request().method() === 'POST');
+  await busyStop.page.getByRole('menuitem', { name: 'Sleep now', exact: true }).click();
+  await stopped;
+  assert.equal(busyStop.state.requests[0].path, `/api/v1/instances/${instance.id}/stop`);
+  await finish(busyStop, 'a busy starting browser can always be stopped even with zero available balance');
 
   console.log(JSON.stringify({ result: 'passed', checks: results, productionRequests: 0 }, null, 2));
 } finally {

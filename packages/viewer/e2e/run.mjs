@@ -44,7 +44,7 @@ const size = await app.evaluate(() => {
   return { w: v.videoWidth, h: v.videoHeight };
 });
 
-// Input: move, click, a key, a scroll; IME text and a paste go through the gateway and the agent.
+// Every input shares Neko WebSocket JSON through the gateway and agent; WebRTC carries media.
 const box = await app.locator('video').boundingBox();
 await app.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
 await app.mouse.down();
@@ -57,16 +57,18 @@ const indicator = await app.textContent('[data-testid=connection-indicator]');
 await app.screenshot({ path: shot });
 
 const received = await neko.evaluate(() => window.received);
-const ops = new Set(received.map((r) => r.op));
-const moveToCenter = received.find((r) => r.op === 1);
+const events = new Set(received.map((r) => r.event));
+const moveToCenter = received.find((r) => r.event === 'control/move');
 const result = {
   video: size,
   box: { w: Math.round(box.width), h: Math.round(box.height) },
   indicator: indicator?.trim(),
-  sawMove: ops.has(1),
-  sawButton: ops.has(5) && ops.has(6),
-  sawKey: received.some((r) => r.op === 3 && r.code === 0x61),
-  sawScroll: ops.has(2),
+  sawMove: events.has('control/move'),
+  sawButton: events.has('control/buttondown') && events.has('control/buttonup'),
+  sawKey: received.some((r) => r.event === 'control/keydown' && r.payload.keysym === 0x61)
+    && received.some((r) => r.event === 'control/keyup' && r.payload.keysym === 0x61),
+  sawScroll: received.some((r) => r.event === 'control/scroll' && r.payload.delta_y < 0),
+  dataChannelInput: await neko.evaluate(() => window.dataChannelInput.length),
   firstMove: moveToCenter,
   screenSet: await neko.evaluate(() => window.screenSet ?? null),
   nekoEvents: [...new Set(await neko.evaluate(() => window.events))],
@@ -74,5 +76,5 @@ const result = {
 };
 console.log(JSON.stringify(result, null, 2));
 await browser.close();
-const ok = result.video.w > 0 && result.sawMove && result.sawButton && result.sawKey && result.sawScroll;
+const ok = result.video.w > 0 && result.sawMove && result.sawButton && result.sawKey && result.sawScroll && result.dataChannelInput === 0;
 process.exit(ok ? 0 : 1);

@@ -4,6 +4,7 @@ import { RemoteBrowser, type ConnectInfo, type ViewerState } from './remote-brow
 import type { ViewerStats } from './stats.js';
 import { TouchGestureController } from './touch.js';
 import { TextInputController } from './text-input.js';
+import type { InputFailure } from './input-queue.js';
 
 export interface RemoteBrowserHandle {
   sendCombo(names: string[]): void;
@@ -21,6 +22,7 @@ export interface RemoteBrowserViewProps {
   /** Called on any user input, for the idle timeout. */
   onInput?: () => void;
   onKeyboardChange?: (open: boolean) => void;
+  onInputError?: (reason: InputFailure) => void;
   muted?: boolean;
   className?: string;
   style?: CSSProperties;
@@ -31,7 +33,7 @@ export interface RemoteBrowserViewProps {
  * textarea that owns the keyboard (so IME composition works), and the remote cursor drawn locally.
  */
 export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserViewProps>(function RemoteBrowserView(
-  { getConnectInfo, onState, onStats, onInput, onKeyboardChange, muted = true, className, style },
+  { getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError, muted = true, className, style },
   ref,
 ) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -43,11 +45,14 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [touchDevice] = useState(() => typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0);
   const [cursor, setCursor] = useState('default');
-  const callbacks = useRef({ getConnectInfo, onState, onStats, onInput, onKeyboardChange });
-  callbacks.current = { getConnectInfo, onState, onStats, onInput, onKeyboardChange };
+  const callbacks = useRef({ getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError });
+  callbacks.current = { getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError };
 
   const updateKeyboard = (open: boolean) => {
     if (keyboardRequested.current === open) return;
+    // A key pressed before changing mode must be released on that original transport.
+    textInputRef.current?.reset();
+    if (keysRef.current) keysRef.current.value = '';
     keyboardRequested.current = open;
     setKeyboardOpen(open);
     callbacks.current.onKeyboardChange?.(open);
@@ -65,6 +70,10 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       getConnectInfo: () => callbacks.current.getConnectInfo(),
       onState: (s, a) => callbacks.current.onState?.(s, a),
       onStats: (s) => callbacks.current.onStats?.(s),
+      onInputError: (reason) => {
+        textInputRef.current?.reset();
+        callbacks.current.onInputError?.(reason);
+      },
       onStream: (stream) => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -112,27 +121,12 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     return () => ro.disconnect();
   }, []);
 
-  // Pointer and wheel input, coalesced once per animation frame.
+  // Preserve DOM order: a deferred RAF move/wheel must not be overtaken by a key or click.
   useEffect(() => {
     const box = boxRef.current;
     const video = videoRef.current;
     if (!box || !video) return;
     const pressedButtons = new Set<number>();
-    let pendingMove: { x: number; y: number } | null = null;
-    let wheel = { dx: 0, dy: 0, ctrl: false };
-    let frame = 0;
-    const flush = () => {
-      frame = 0;
-      const b = browserRef.current;
-      if (!b) return;
-      if (pendingMove) b.move(pendingMove.x, pendingMove.y);
-      pendingMove = null;
-      if (wheel.dx || wheel.dy) b.scroll(wheel.dx, wheel.dy, wheel.ctrl);
-      wheel = { dx: 0, dy: 0, ctrl: false };
-    };
-    const schedule = () => {
-      if (!frame) frame = requestAnimationFrame(flush);
-    };
     /** Client coordinates → remote pixels, accounting for letterboxing (object-fit: contain). */
     const toRemote = (clientX: number, clientY: number) => {
       const r = video.getBoundingClientRect();
@@ -149,9 +143,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       move: (x, y) => browserRef.current?.move(x, y),
       button: (down, x, y) => browserRef.current?.button(down, 0, x, y),
       scroll: (dx, dy) => {
-        wheel.dx += dx;
-        wheel.dy += dy;
-        schedule();
+        browserRef.current?.scroll(dx, dy);
       },
       activity: () => callbacks.current.onInput?.(),
     });
@@ -164,12 +156,11 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         e.preventDefault();
         return;
       }
-      pendingMove = toRemote(e.clientX, e.clientY);
-      if (pendingMove) schedule();
+      const point = toRemote(e.clientX, e.clientY);
+      if (point) browserRef.current?.move(point.x, point.y);
     };
     const onDown = (e: PointerEvent) => {
       if (e.pointerType === 'touch') {
-        pendingMove = null;
         if (touch.pointerDown(e)) {
           capture(e);
           if (!keyboardRequested.current) box.focus({ preventScroll: true });
@@ -189,6 +180,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     const onUp = (e: PointerEvent) => {
       if (e.pointerType === 'touch') {
         touch.pointerUp(e);
+        browserRef.current?.finishScroll();
         e.preventDefault();
         return;
       }
@@ -197,53 +189,60 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       browserRef.current?.button(false, e.button, p?.x, p?.y);
     };
     const reset = () => {
-      pendingMove = null;
-      wheel = { dx: 0, dy: 0, ctrl: false };
+      browserRef.current?.finishScroll();
       touch.reset();
       for (const button of pressedButtons) browserRef.current?.button(false, button);
       pressedButtons.clear();
       textInputRef.current?.reset();
     };
     const onCancel = (e: PointerEvent) => {
+      browserRef.current?.finishScroll();
       if (e.pointerType === 'touch') touch.pointerCancel(e);
       else {
-        pendingMove = null;
         for (const button of pressedButtons) browserRef.current?.button(false, button);
         pressedButtons.clear();
       }
     };
     const onHidden = () => { if (document.hidden) reset(); };
     const onWheel = (e: WheelEvent) => {
+      // The entire viewer owns scrolling, including its letterbox. Never scroll the local page.
+      e.preventDefault();
+      e.stopPropagation();
       const p = toRemote(e.clientX, e.clientY);
       if (!p) return;
-      pendingMove = p;
-      const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1;
-      wheel.dx += e.deltaX * unit;
-      wheel.dy += e.deltaY * unit;
-      wheel.ctrl ||= e.ctrlKey;
-      schedule();
+      browserRef.current?.move(p.x, p.y);
+      const line = 19;
+      browserRef.current?.scroll(
+        e.deltaX * (e.deltaMode === 1 ? line : e.deltaMode === 2 ? box.clientWidth : 1),
+        e.deltaY * (e.deltaMode === 1 ? line : e.deltaMode === 2 ? box.clientHeight : 1),
+        e.ctrlKey,
+      );
       callbacks.current.onInput?.();
-      e.preventDefault();
     };
+    // PointerEvent.preventDefault alone does not cancel Safari's native viewport panning.
+    const noTouchScroll = (e: TouchEvent) => { if (e.cancelable) e.preventDefault(); };
     const noMenu = (e: Event) => e.preventDefault();
     box.addEventListener('pointermove', onMove);
     box.addEventListener('pointerdown', onDown);
     box.addEventListener('pointerup', onUp);
     box.addEventListener('pointercancel', onCancel);
     box.addEventListener('lostpointercapture', onCancel);
-    box.addEventListener('wheel', onWheel, { passive: false });
+    box.addEventListener('wheel', onWheel, { passive: false, capture: true });
+    box.addEventListener('touchstart', noTouchScroll, { passive: false });
+    box.addEventListener('touchmove', noTouchScroll, { passive: false });
     box.addEventListener('contextmenu', noMenu);
     window.addEventListener('blur', reset);
     document.addEventListener('visibilitychange', onHidden);
     return () => {
       reset();
-      if (frame) cancelAnimationFrame(frame);
       box.removeEventListener('pointermove', onMove);
       box.removeEventListener('pointerdown', onDown);
       box.removeEventListener('pointerup', onUp);
       box.removeEventListener('pointercancel', onCancel);
       box.removeEventListener('lostpointercapture', onCancel);
-      box.removeEventListener('wheel', onWheel);
+      box.removeEventListener('wheel', onWheel, true);
+      box.removeEventListener('touchstart', noTouchScroll);
+      box.removeEventListener('touchmove', noTouchScroll);
       box.removeEventListener('contextmenu', noMenu);
       window.removeEventListener('blur', reset);
       document.removeEventListener('visibilitychange', onHidden);
@@ -280,8 +279,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   useImperativeHandle(ref, () => ({
     sendCombo: (names) => browserRef.current?.sendCombo(names),
     paste: (text) => {
-      browserRef.current?.setClipboard(text);
-      browserRef.current?.sendCombo(['Control', 'v']);
+      browserRef.current?.paste(text);
     },
     focus: () => {
       if (keyboardRequested.current || !touchDevice) keysRef.current?.focus({ preventScroll: true });
@@ -304,7 +302,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       tabIndex={0}
       aria-label="Remote browser"
       className={className}
-      style={{ overflow: 'hidden', touchAction: 'none', userSelect: 'none', cursor, ...style }}
+      style={{ overflow: 'hidden', overscrollBehavior: 'none', touchAction: 'none', userSelect: 'none', cursor, ...style }}
       onKeyDown={(e) => { if (textInputRef.current?.keyDown(e.nativeEvent)) e.preventDefault(); }}
       onKeyUp={(e) => { if (textInputRef.current?.keyUp(e.nativeEvent)) e.preventDefault(); }}
       onBlur={(e) => {
@@ -329,8 +327,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
           const text = e.clipboardData.getData('text/plain');
           e.preventDefault();
           if (text) {
-            browserRef.current?.setClipboard(text);
-            browserRef.current?.sendCombo(['Control', 'v']);
+            browserRef.current?.paste(text);
           }
         }}
       />

@@ -5,7 +5,9 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
-import { isPriceChanged, usePricing } from '../billing/hooks.js';
+import { isPriceChanged, useBilling, usePricing } from '../billing/hooks.js';
+import { canSpend } from '../billing/access.js';
+import { BalanceRequired } from '../billing/BalanceRequired.js';
 import { useManagedInstance } from './BrowserLayout.js';
 import { useLifecycle, useMe, useRecentSessions, useUpdateInstance, useVerifyIp } from './hooks.js';
 import { regionInfo } from './status.js';
@@ -31,6 +33,7 @@ export function SettingsPage() {
   const update = useUpdateInstance();
   const sessions = useRecentSessions(i.id);
   const pricing = usePricing();
+  const billing = useBilling();
   const region = regionInfo(i.regionId);
   const [name, setName] = useState(i.name);
   const [ipQuote, setIpQuote] = useState<RegionPricing | null>(null);
@@ -84,7 +87,7 @@ export function SettingsPage() {
           >
             {t('settings.verify')}
           </Button>
-          <Button disabled={!['running', 'sleeping'].includes(i.status) || onTrial || !price?.rates || !price.version} onClick={() => { setIpError(null); setIpQuote(price!); }}>
+          <Button disabled={!canSpend(billing.data) || !['running', 'sleeping'].includes(i.status) || onTrial || !price?.rates || !price.version} onClick={() => { setIpError(null); setIpQuote(price!); }}>
             {t('settings.requestIp')}
           </Button>
           {onTrial ? (
@@ -164,7 +167,7 @@ export function SettingsPage() {
           <Input id="confirm-delete" value={deleteText} onChange={(e) => setDeleteText(e.target.value)} autoComplete="off" />
           <Button
             variant="danger"
-            disabled={deleteText !== i.name || lifecycle.isPending || i.status === 'deleting'}
+            disabled={deleteText !== i.name || (lifecycle.isPending && lifecycle.variables.action === 'delete') || i.status === 'deleting'}
             onClick={() =>
               lifecycle.mutate({ id: i.id, action: 'delete' }, { onSuccess: () => navigate('/browsers'), onError: (e) => toast(errorMessage(e), 'error') })
             }
@@ -175,16 +178,17 @@ export function SettingsPage() {
       </Section>
 
       <Dialog open={ipQuote !== null} onOpenChange={(open) => !open && setIpQuote(null)} title={t('settings.requestIpTitle')} description={t('settings.requestIpBody')} closeLabel={t('common.cancel')}>
+        <BalanceRequired />
         {ipQuote?.rates ? (
           <p className="mb-4 rounded-[var(--radius-control)] bg-surface-2 px-3 py-2 text-sm">
-            {t('settings.requestIpCost', { amount: money(ipQuote.rates.ip * HOURS_PER_MONTH, locale) })}
+            {t('settings.requestIpCost', { amount: money(ipQuote.rates.ip, locale), monthly: money(ipQuote.rates.ip * HOURS_PER_MONTH, locale) })}
           </p>
         ) : null}
         <div className="flex justify-end gap-2">
           <Button onClick={() => setIpQuote(null)}>{t('common.cancel')}</Button>
           <Button
             variant="primary"
-            disabled={lifecycle.isPending || !ipQuote?.version}
+            disabled={lifecycle.isPending || !ipQuote?.version || !canSpend(billing.data)}
             onClick={() =>
               lifecycle.mutate(
                 { id: i.id, action: 'ip-change', body: { priceVersion: ipQuote!.version! } },

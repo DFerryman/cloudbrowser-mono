@@ -10,7 +10,7 @@ import { RegionId } from './regions.js';
  * Money is held in micro-dollars (USD × 1,000,000) so per-minute charges add up exactly.
  */
 export const MICROS_PER_USD = 1_000_000;
-/** Hours in a billing month, as AWS uses for monthly prices. */
+/** Display-only average month for projections. Actual GB-month usage uses calendar periods. */
 export const HOURS_PER_MONTH = 730;
 /** Data transfer is priced per GiB (AWS "GB"). */
 export const BYTES_PER_GB = 1024 ** 3;
@@ -60,7 +60,7 @@ export const Rates = z.object({
   ip: z.number().int(),
   /** Per GB-month of storage, data volume and system disk. */
   storage: z.number().int(),
-  /** Per GB-month of the data volume while snapshot backups are on. */
+  /** Historical/internal snapshot estimates; no user snapshot feature creates new charges. */
   snapshot: z.number().int(),
   /** Per GB sent from the browser to the internet (live view video, uploads). */
   transfer: z.number().int(),
@@ -97,6 +97,8 @@ export function priceVersion(rates: Rates, rootVolumeGb: number): string {
 export interface BrowserEstimate {
   /** Per hour while running (compute only). */
   runningHour: number;
+  /** Compute plus the fixed resources per hour while running, excluding variable data transfer. */
+  runningTotalHour: number;
   /** Per month for the dedicated IP, charged hourly whether awake or asleep. */
   ipMonth: number;
   /** Per month for the data volume plus the system disk. */
@@ -114,14 +116,42 @@ export function browserEstimate(rates: Rates, spec: { storageGb: number; rootVol
   const storageMonth = rates.storage * (spec.storageGb + spec.rootVolumeGb);
   const snapshotMonth = spec.backups ? rates.snapshot * spec.storageGb : 0;
   const alwaysOnMonth = ipMonth + storageMonth + snapshotMonth;
+  const alwaysOnHour = Math.round(alwaysOnMonth / HOURS_PER_MONTH);
   return {
     runningHour: rates.compute,
+    runningTotalHour: rates.compute + alwaysOnHour,
     ipMonth,
     storageMonth,
     snapshotMonth,
     alwaysOnMonth,
-    alwaysOnHour: Math.round(alwaysOnMonth / HOURS_PER_MONTH),
+    alwaysOnHour,
   };
+}
+
+/** UTC usage slices; monthly quantities use the actual duration of each billing month. */
+export function splitUsagePeriod(from: Date, to: Date): { day: string; hours: number; monthFraction: number }[] {
+  let cursor = from.getTime();
+  const end = to.getTime();
+  if (!Number.isFinite(cursor) || !Number.isFinite(end)) throw new RangeError('Invalid usage period');
+  const result: { day: string; hours: number; monthFraction: number }[] = [];
+  while (cursor < end) {
+    const date = new Date(cursor);
+    const year = date.getUTCFullYear();
+    const month = date.getUTCMonth();
+    const next = Math.min(end, Date.UTC(year, month, date.getUTCDate() + 1));
+    const monthMs = Date.UTC(year, month + 1, 1) - Date.UTC(year, month, 1);
+    const elapsed = next - cursor;
+    result.push({ day: date.toISOString().slice(0, 10), hours: elapsed / 3_600_000, monthFraction: elapsed / monthMs });
+    cursor = next;
+  }
+  return result;
+}
+
+/** Locks seven days of fixed-resource charges; this remains unspent credit, not an extra fee. */
+export function retentionReserve(rates: Rates, spec: { storageGb: number; rootVolumeGb: number; backups: boolean }, now = new Date()): number {
+  const slices = splitUsagePeriod(now, new Date(now.getTime() + 7 * 86_400_000));
+  const gbMonthRate = rates.storage * (spec.storageGb + spec.rootVolumeGb) + (spec.backups ? rates.snapshot * spec.storageGb : 0);
+  return Math.ceil(slices.reduce((amount, slice) => amount + rates.ip * slice.hours + gbMonthRate * slice.monthFraction, 0));
 }
 
 /** Ledger estimate (page 10) of a provider resource while it exists, in US cents per month. Pure. */

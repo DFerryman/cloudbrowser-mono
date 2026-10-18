@@ -169,6 +169,7 @@ export const browserInstances = sqliteTable(
     trialState: text('trial_state'),
     /** Running seconds used by the trial (metered by the engine). */
     trialUsedS: integer('trial_used_s').notNull().default(0),
+    trialUsedMs: integer('trial_used_ms').notNull().default(0),
     /** An unconverted trial browser is deleted and purged at this time (7 days after it last slept). */
     trialReclaimAt: ts('trial_reclaim_at'),
   },
@@ -394,6 +395,7 @@ export const instanceHealth = sqliteTable('instance_health', {
   meteredAt: ts('metered_at'),
   /** Last time the engine billed what the browser holds while it exists (IP, storage, snapshots). */
   baseMeteredAt: ts('base_metered_at'),
+  pendingComputeMs: integer('pending_compute_ms').notNull().default(0),
   /** Data volume usage reported by the agent's heartbeat. */
   diskUsedBytes: integer('disk_used_bytes'),
   diskTotalBytes: integer('disk_total_bytes'),
@@ -613,6 +615,19 @@ export const billingAccounts = sqliteTable('billing_accounts', {
   trialUsedAt: ts('trial_used_at'),
   updatedAt: ts('updated_at').notNull(),
 });
+
+/** Per-browser seven-day fixed-resource deposit; unspent money remains in the total balance. */
+export const browserReservations = sqliteTable('browser_reservations', {
+  instanceId: text('instance_id').primaryKey().references(() => browserInstances.id),
+  userId: text('user_id').notNull().references(() => user.id),
+  requiredMicros: integer('required_micros').notNull(),
+  reservedMicros: integer('reserved_micros').notNull(),
+  fixedHourMicros: integer('fixed_hour_micros').notNull(),
+  rates: json<{ compute: number; ip: number; storage: number; snapshot: number; transfer: number }>('rates').notNull(),
+  retentionStartedAt: ts('retention_started_at'),
+  retentionEndsAt: ts('retention_ends_at'),
+  updatedAt: ts('updated_at').notNull(),
+}, (t) => [index('browser_reservations_user_idx').on(t.userId)]);
 
 /**
  * Credits and other non-usage changes to a balance. `reference` makes each one idempotent, e.g.

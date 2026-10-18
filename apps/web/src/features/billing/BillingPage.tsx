@@ -1,4 +1,4 @@
-import { UsageItem, type BillingState, type Rates, type UsageTotals } from '@cloudbrowser/contracts';
+import { UsageItem, type BillingState, type UsageTotals } from '@cloudbrowser/contracts';
 import { Button, Card, cn, Section, Select, Skeleton, useToast } from '@cloudbrowser/ui';
 import { AlertTriangle, ExternalLink } from 'lucide-react';
 import { useState } from 'react';
@@ -8,7 +8,7 @@ import { useI18n } from '../../lib/i18n.js';
 import { cents, money } from '../../lib/money.js';
 import { regionKey } from '../instances/status.js';
 import { currentMonth, monthLabel, recentMonths, useAccountUsage, useBilling, useCheckout, usePortal, usePricing, useTransactions } from './hooks.js';
-import { PriceSource } from './PriceBreakdown.js';
+import { PriceBreakdown } from './PriceBreakdown.js';
 
 const ITEM_COLOR: Record<UsageItem, string> = {
   compute: 'bg-accent',
@@ -46,7 +46,7 @@ export function BillingPage() {
             <Transactions />
             <HowItWorks />
           </div>
-          <PriceList pilot={billing.data.mode === 'pilot'} />
+          <PriceList />
         </div>
       ) : null}
     </>
@@ -54,8 +54,8 @@ export function BillingPage() {
 }
 
 function runway(state: BillingState) {
-  if (state.burnHourMicros <= 0 || state.balanceMicros <= 0) return null;
-  return state.balanceMicros / state.burnHourMicros;
+  if (state.burnHourMicros <= 0 || state.availableMicros <= 0) return null;
+  return state.availableMicros / state.burnHourMicros;
 }
 
 function BalanceCard({ state }: { state: BillingState }) {
@@ -63,39 +63,41 @@ function BalanceCard({ state }: { state: BillingState }) {
   const toast = useToast();
   const checkout = useCheckout();
   const portal = usePortal();
-  const pilot = state.mode === 'pilot';
   const hours = runway(state);
   const m = (v: number) => money(v, locale);
   const alert = state.frozen
     ? t('billing.frozen')
     : state.dataKeptUntil
       ? t('billing.keptUntil', { date: new Date(state.dataKeptUntil).toLocaleDateString(locale) })
-      : !pilot && state.exhaustedAt
+      : state.exhaustedAt
         ? t('billing.exhausted')
-        : !pilot && state.balanceMicros <= state.lowBalanceMicros && !state.trial.eligible
+        : state.availableMicros <= state.lowBalanceMicros && !state.trial.eligible
           ? t('billing.low')
           : null;
 
   return (
     <Card className="flex flex-col p-5">
-      <h2 className="text-base font-semibold">{pilot ? t('billing.pilotTitle') : t('billing.balance')}</h2>
-      <p className={cn('mt-2 text-3xl font-semibold tabular-nums', state.balanceMicros < 0 && 'text-error')}>{m(state.balanceMicros)}</p>
-      <p className="mt-1 text-sm text-muted">{pilot ? t('billing.pilotHint') : t('billing.balanceHint')}</p>
+      <h2 className="text-base font-semibold">{t('billing.balance')}</h2>
+      <p className={cn('mt-2 text-3xl font-semibold tabular-nums', state.availableMicros <= 0 && 'text-error')}>{m(state.availableMicros ?? 0)}</p>
+      <p className="mt-1 text-sm text-muted">{t('billing.balanceHint')}</p>
+      <p className="mt-3 text-sm">{t('billing.totalBalance', { amount: m(state.balanceMicros) })}</p>
+      <p className="text-sm">{t('billing.reservedBalance', { amount: m(state.reservedMicros ?? 0) })}</p>
+      <p className="mt-1 text-xs text-muted">{t('billing.reserveHint')}</p>
       <div className="mt-3 space-y-1 text-sm">
         <p>{state.burnHourMicros > 0 ? t('billing.burn', { amount: m(state.burnHourMicros) }) : t('billing.burnNone')}</p>
-        {!pilot && hours !== null ? (
+        {hours !== null ? (
           <p className="text-muted">
             {t('billing.runway', { time: hours < 48 ? t('billing.runway.hours', { n: Math.floor(hours) }) : t('billing.runway.days', { n: Math.floor(hours / 24) }) })}
           </p>
         ) : null}
-        {!pilot ? <p className="text-xs text-muted">{t('billing.minBalance', { amount: m(state.minBalanceMicros) })}</p> : null}
+        <p className="text-xs text-muted">{t('billing.minBalance', { amount: m(state.minBalanceMicros) })}</p>
       </div>
       {alert ? (
         <p role="status" className="mt-3 flex gap-2 rounded-[var(--radius-control)] border border-error/40 bg-error/10 px-3 py-2 text-sm">
           <AlertTriangle className="mt-0.5 size-4 shrink-0 text-error" aria-hidden /> {alert}
         </p>
       ) : null}
-      {!pilot && state.trial.eligible ? (
+      {state.trial.eligible ? (
         <div className="mt-3 rounded-[var(--radius-control)] border border-accent/40 bg-accent/5 px-3 py-2 text-sm">
           <p>{t('trial.billingCta', { minutes: state.trial.minutes, region: t(regionKey(state.trial.regionId)) })}</p>
           <Link to="/browsers/new" className="mt-1 inline-block font-medium text-accent hover:underline">
@@ -145,7 +147,7 @@ function BalanceCard({ state }: { state: BillingState }) {
 /** Spending by item for a month, as a stacked bar and a list. */
 function ItemBreakdown({ totals }: { totals: UsageTotals }) {
   const { t, locale } = useI18n();
-  const items = UsageItem.options;
+  const items = UsageItem.options.filter((item) => item !== 'snapshot' || totals.byItem.snapshot !== 0);
   return (
     <div>
       {totals.totalMicros > 0 ? (
@@ -208,6 +210,7 @@ function UsageByBrowser({ month, setMonth }: { month: string; setMonth: (m: stri
   const { t, locale } = useI18n();
   const usage = useAccountUsage(month);
   const rows = usage.data?.byBrowser ?? [];
+  const items = UsageItem.options.filter((item) => item !== 'snapshot' || rows.some((row) => row.byItem.snapshot !== 0));
   return (
     <Section title={t('billing.byBrowser')}>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -231,7 +234,7 @@ function UsageByBrowser({ month, setMonth }: { month: string; setMonth: (m: stri
               <thead className="text-left text-xs text-muted">
                 <tr className="border-b border-border">
                   <th className="py-2 pr-3 font-medium">{t('settings.name')}</th>
-                  {UsageItem.options.map((i) => (
+                  {items.map((i) => (
                     <th key={i} className="py-2 pr-3 text-right font-medium">
                       {t(`billing.item.${i}`)}
                     </th>
@@ -245,7 +248,7 @@ function UsageByBrowser({ month, setMonth }: { month: string; setMonth: (m: stri
                     <td className="py-2 pr-3">
                       <BrowserName {...r} />
                     </td>
-                    {UsageItem.options.map((i) => (
+                    {items.map((i) => (
                       <td key={i} className="py-2 pr-3 text-right tabular-nums text-muted">
                         {money(r.byItem[i], locale)}
                       </td>
@@ -340,21 +343,12 @@ function HowItWorks() {
 }
 
 /** Customer prices per region, side by side. */
-function PriceList({ pilot }: { pilot: boolean }) {
-  const { t, locale } = useI18n();
+function PriceList() {
+  const { t } = useI18n();
   const pricing = usePricing();
   const regions = (pricing.data ?? []).filter((p) => p.rates);
-  const m = (v: number) => money(v, locale);
-  const cols = [
-    { key: 'running', label: t('price.running'), value: (r: Rates) => t('price.perHour', { amount: m(r.compute) }) },
-    { key: 'ip', label: t('price.ip'), value: (r: Rates) => t('price.perMonth', { amount: m(r.ip * 730) }) },
-    { key: 'storage', label: t('billing.item.storage'), value: (r: Rates) => t('price.perGbMonth', { amount: m(r.storage) }) },
-    { key: 'snapshot', label: t('billing.item.snapshot'), value: (r: Rates) => t('price.perGbMonth', { amount: m(r.snapshot) }) },
-    { key: 'transfer', label: t('billing.item.transfer'), value: (r: Rates) => t('price.perGb', { amount: m(r.transfer) }) },
-  ];
   return (
     <Section title={t('billing.prices')} description={t('billing.pricesHint')}>
-      {pilot ? <p className="mb-3 text-sm text-running">{t('price.pilot')}</p> : null}
       {pricing.isPending ? (
         <Skeleton className="h-24" />
       ) : (
@@ -363,16 +357,8 @@ function PriceList({ pilot }: { pilot: boolean }) {
             <div key={p.regionId} className="rounded-[var(--radius-control)] border border-border p-3">
               <h3 className="font-medium">{t(regionKey(p.regionId))}</h3>
               {p.machine ? <p className="text-xs text-muted">{t('price.machineShort', { vcpu: p.machine.vcpu, memory: p.machine.memoryGb })}</p> : null}
-              <dl className="mt-2 space-y-1 text-sm">
-                {cols.map((c) => (
-                  <div key={c.key} className="flex justify-between gap-3">
-                    <dt className="text-muted">{c.label}</dt>
-                    <dd className="tabular-nums">{c.value(p.rates!)}</dd>
-                  </div>
-                ))}
-              </dl>
               <div className="mt-2">
-                <PriceSource pricing={p} />
+                <PriceBreakdown pricing={p} />
               </div>
             </div>
           ))}

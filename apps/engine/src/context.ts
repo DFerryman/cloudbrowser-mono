@@ -55,6 +55,11 @@ export class RestartFrom extends Error {
   }
 }
 
+/** An obsolete worker must stop without compensation or changing the replacement job. */
+export class OperationSuperseded extends Error {
+  constructor() { super('This operation was superseded by a newer browser action.'); }
+}
+
 /** A permanent failure with a reason that is safe to show to the user. */
 export class StepFailed extends Error {
   constructor(readonly reason: string) {
@@ -75,6 +80,7 @@ export interface StepEnv {
   results: Record<string, Record<string, unknown>>;
   /** Increments each time the operation restarts from an earlier step. */
   round: number;
+  assertActive(): Promise<void>;
   ctx(step: string, extra?: string): OpContext;
   tags(kind: ResourceKind, generation: number): ResourceTags;
 }

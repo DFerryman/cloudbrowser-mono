@@ -157,16 +157,61 @@ describe('viewer text input', () => {
     expect(key).not.toHaveBeenCalled();
   });
 
-  it('keeps modifier shortcuts as key events in software mode', () => {
+  it('sends software modifier shortcuts as complete strokes even without keyup', () => {
     const { controller, key, typeText } = setup('software');
-    expect(controller.keyDown({ key: 'Control', code: 'ControlLeft', ctrlKey: true })).toBe(true);
+    expect(controller.keyDown({ key: 'Control', code: 'ControlLeft', ctrlKey: true })).toBe(false);
     expect(controller.keyDown({ key: 'a', code: 'KeyA', ctrlKey: true })).toBe(true);
-    expect(controller.keyUp({ key: 'a', code: 'KeyA', ctrlKey: false })).toBe(true);
-    expect(controller.keyUp({ key: 'Control', code: 'ControlLeft' })).toBe(true);
     expect(key.mock.calls.map(([down, event]) => [down, event.key])).toEqual([
       [true, 'Control'], [true, 'a'], [false, 'a'], [false, 'Control'],
     ]);
+    expect(controller.keyUp({ key: 'a', code: 'KeyA', ctrlKey: false })).toBe(false);
+    expect(controller.keyUp({ key: 'Control', code: 'ControlLeft' })).toBe(false);
     expect(typeText).not.toHaveBeenCalled();
+  });
+
+  it('does not hold a software Shift or a navigation key while waiting for an optional keyup', () => {
+    const { controller, key, typeText } = setup('software');
+    expect(controller.keyDown({ key: 'Shift', code: 'ShiftLeft', shiftKey: true })).toBe(false);
+    controller.keyDown({ key: 'a', code: '' });
+    controller.input({ inputType: 'insertText', data: 'a' }, 'a');
+    expect(typeText.mock.calls).toEqual([['a']]);
+    expect(key).not.toHaveBeenCalled();
+    expect(controller.keyDown({ key: 'ArrowLeft', code: '' })).toBe(true);
+    expect(key.mock.calls.map(([down, event]) => [down, event.key])).toEqual([
+      [true, 'ArrowLeft'], [false, 'ArrowLeft'],
+    ]);
+  });
+
+  it('keeps the first desktop mapping through repeats, case changes, and a code-less keyup', () => {
+    const { controller, key } = setup();
+    controller.keyDown({ key: 'a', code: 'KeyA', keyCode: 65 });
+    controller.keyDown({ key: 'A', code: 'KeyA', keyCode: 65, shiftKey: true });
+    expect(key).toHaveBeenCalledTimes(1);
+    expect(controller.keyUp({ key: 'A', code: '', keyCode: 65 })).toBe(true);
+    expect(key.mock.calls[1]).toMatchObject([false, { key: 'a', code: 'KeyA' }]);
+  });
+
+  it('matches a code-less desktop release by its original character regardless of case', () => {
+    const { controller, key } = setup();
+    controller.keyDown({ key: 'A', code: 'KeyA', shiftKey: true });
+    expect(controller.keyUp({ key: 'a', code: '' })).toBe(true);
+    expect(key.mock.calls[1]).toMatchObject([false, { key: 'A', code: 'KeyA' }]);
+  });
+
+  it('releases outstanding desktop keys when Safari loses the release identity', () => {
+    const { controller, releaseAllKeys } = setup();
+    controller.keyDown({ key: 'a', code: 'KeyA' });
+    expect(controller.keyUp({ key: 'Unidentified', code: '', keyCode: 229 })).toBe(true);
+    expect(releaseAllKeys).toHaveBeenCalledOnce();
+    expect(controller.keyUp({ key: 'a', code: 'KeyA' })).toBe(false);
+  });
+
+  it('releases desktop keys before an IME composition takes over', () => {
+    const { controller, releaseAllKeys } = setup();
+    controller.keyDown({ key: 'n', code: 'KeyN' });
+    controller.compositionStart();
+    expect(releaseAllKeys).toHaveBeenCalledOnce();
+    expect(controller.keyUp({ key: 'Process', code: '' })).toBe(false);
   });
 
   it('leaves Ctrl/Meta+V to the paste handler without sending a stray V keyup', () => {
@@ -199,7 +244,7 @@ describe('viewer text input', () => {
     controller.keyDown({ key: 'Control', code: 'ControlLeft', ctrlKey: true });
     controller.compositionStart();
     controller.reset();
-    expect(releaseAllKeys).toHaveBeenCalledOnce();
+    expect(releaseAllKeys).toHaveBeenCalledTimes(2); // Composition takes over, then the viewer resets.
     expect(controller.keyUp({ key: 'Control', code: 'ControlLeft' })).toBe(false);
     expect(controller.input({ inputType: 'insertText', data: 'a' }, 'a')).toBe(true);
     expect(typeText).toHaveBeenCalledWith('a');

@@ -52,6 +52,11 @@ try {
   const typed = (state) => inputCalls(state, 'typeText').map((call) => call.args[0]);
   const openPage = async (touch) => {
     const context = await browser.newContext({ viewport: { width: 1024, height: 768 }, hasTouch: touch, isMobile: touch });
+    // Playwright's Linux WPE build emits touch events but leaves this capability at zero.
+    // Supply the declared emulation capability; real iPad Safari reports its touch points.
+    if (engine === 'webkit') await context.addInitScript((points) => {
+      Object.defineProperty(navigator, 'maxTouchPoints', { get: () => points });
+    }, touch ? 5 : 0);
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
@@ -107,6 +112,12 @@ try {
     state = await snapshot(page);
     assert.equal(inputCalls(state, 'button').length, 0, 'A swipe must not create a remote click or drag');
     assert.ok(inputCalls(state, 'scroll').some((call) => call.args[1] > 0), 'Upward finger motion must scroll down');
+    assert.ok(state.wire.some((frame) => frame.event === 'control/scroll' && frame.payload.delta_y < 0), 'Neko scroll counts must use the down direction');
+    assert.ok(state.remoteScroll.y > 0 && state.remoteScroll.y < 1000, 'The remote document must move down by wheel clicks, not hundreds of clicks per pixel');
+    assert.deepEqual(state.localScroll, { x: 0, y: 0 }, 'Touch must never pan the local document');
+    const afterSwipe = state.remoteScroll.y;
+    await page.waitForTimeout(120);
+    assert.equal((await snapshot(page)).remoteScroll.y, afterSwipe, 'The remote position must not spring back after touchend');
     assert.notEqual(state.active, 'textarea');
     check('native touch swipe: remote scroll without click or keyboard');
 
@@ -160,6 +171,19 @@ try {
   assert.deepEqual(typed(await snapshot(page)), ['好'], 'Input-only fallback must preserve non-ASCII text');
   check('soft-keyboard native text and input-only fallback: exactly once');
 
+  await page.evaluate(() => window.touchHarness.resetRemote());
+  await clear(page);
+  await page.evaluate(() => {
+    window.touchHarness.nativeKey('keydown', 'Shift', 'ShiftLeft');
+    window.touchHarness.inputOnly('A');
+    window.touchHarness.nativeKey('keydown', 'ArrowLeft', 'ArrowLeft');
+  });
+  await page.waitForTimeout(500);
+  state = await snapshot(page);
+  assert.equal(state.remoteInput, 'A', 'A soft keyboard without keyup must insert its committed letter once');
+  assert.deepEqual(state.held, [], 'Neither Shift, ArrowLeft nor the last printable character may remain held');
+  check('soft keys with omitted keyup do not leave X11 autorepeat active');
+
   for (const [inputType, combo] of [['deleteContentBackward', 'Backspace'], ['insertLineBreak', 'Enter']]) {
     await clear(page);
     await page.evaluate((type) => window.touchHarness.edit(type), inputType);
@@ -180,11 +204,25 @@ try {
 
   await keyboardButton.tap();
   await settle(page);
+  state = await snapshot(page);
+  assert.equal(state.keyboard, 'false', `Closing the keyboard must keep it closed: ${JSON.stringify({
+    keyboardChanges: inputCalls(state, 'keyboardChange'), focusChanges: state.focusChanges,
+  })}`);
   await clear(page);
   await page.locator('.remote-screen').evaluate((box) => { box.style.bottom = '0px'; });
-  await settle(page);
+  await page.waitForFunction((height) => window.touchHarness.snapshot().calls.some((call) =>
+    call.method === 'setViewport' && Math.abs(Number(call.args[1]) - height) < 1), video.height, { timeout: 3000 }).catch(async (error) => {
+    console.error('Viewport restoration state:', await page.evaluate(() => ({
+      keyboard: window.touchHarness.snapshot().keyboard,
+      keyboardChanges: window.touchHarness.snapshot().calls.filter((call) => call.method === 'keyboardChange'),
+      focusChanges: window.touchHarness.snapshot().focusChanges,
+      viewportCalls: window.touchHarness.snapshot().calls.filter((call) => call.method === 'setViewport'),
+      boxHeight: document.querySelector('.remote-screen').getBoundingClientRect().height,
+    })));
+    throw error;
+  });
   state = await snapshot(page);
-  assert.ok(inputCalls(state, 'setViewport').some((call) => call.args[1] === video.height), 'Closing keyboard must restore normal remote viewport updates');
+  assert.ok(inputCalls(state, 'setViewport').some((call) => Math.abs(call.args[1] - video.height) < 1), 'Closing keyboard must restore normal remote viewport updates');
   check('closing keyboard restores normal remote viewport updates');
   await clear(page);
   await page.touchscreen.tap(point.x, point.y);
@@ -213,9 +251,48 @@ try {
   assert.deepEqual(inputCalls(state, 'key').filter((call) => call.args[1].key === 'a').map((call) => call.args[0]), [true, false]);
   assert.deepEqual(typed(state), [], 'Hardware key dispatch must not duplicate text insertion');
   await clear(dp);
+  await dp.evaluate(() => {
+    window.touchHarness.resetRemote();
+    window.touchHarness.nativeKey('keydown', 'Control', 'ControlLeft');
+    window.touchHarness.nativeKey('keydown', 'Shift', 'ShiftLeft');
+    window.touchHarness.inputOnly('aA:中文');
+  });
+  state = await snapshot(dp);
+  assert.equal(state.remoteInput, 'aA:中文', 'Committed text must stay literal while physical modifiers are held');
+  assert.deepEqual(state.held, [0xffe3, 0xffe1], 'Text insertion must restore physical holds after Neko paste resets');
+  await dp.evaluate(() => {
+    window.touchHarness.nativeKey('keyup', 'Shift', 'ShiftLeft');
+    window.touchHarness.nativeKey('keyup', 'Control', 'ControlLeft');
+  });
+  assert.deepEqual((await snapshot(dp)).held, []);
+  check('literal mixed text preserves and restores physical modifiers across atomic paste');
+  await clear(dp);
   await dp.mouse.wheel(0, 120);
   await settle(dp);
-  assert.ok(inputCalls(await snapshot(dp), 'scroll').some((call) => call.args[1] === 120));
+  state = await snapshot(dp);
+  assert.ok(inputCalls(state, 'scroll').some((call) => call.args[1] === 120));
+  assert.ok(state.remoteScroll.y > 0 && state.remoteScroll.y < 300, 'Desktop wheel must scroll the remote document down at a bounded speed');
+  assert.deepEqual(state.localScroll, { x: 0, y: 0 });
+  await clear(dp);
+  await dp.mouse.wheel(120, 0);
+  await settle(dp);
+  assert.ok((await snapshot(dp)).remoteScroll.x > 0, 'Horizontal trackpad deltas must scroll right');
+
+  await clear(dp);
+  await dp.evaluate(({ x, y }) => window.touchHarness.interleave(x, y), point);
+  const expectedOrder = ['control/move', 'control/keydown', 'control/move', 'control/scroll', 'control/keyup', 'control/paste'];
+  assert.deepEqual((await snapshot(dp)).wire.map((frame) => frame.event), expectedOrder, 'Mouse, wheel, key and IME boundaries must keep DOM order');
+  await clear(dp);
+  await dp.evaluate(({ x, y }) => {
+    window.touchHarness.socketBuffer(300000);
+    window.touchHarness.interleave(x, y);
+  }, point);
+  assert.deepEqual((await snapshot(dp)).wire, [], 'Backpressure must pause the complete input stream');
+  await dp.evaluate(() => window.touchHarness.socketBuffer(0));
+  await dp.waitForTimeout(40);
+  assert.deepEqual((await snapshot(dp)).wire.map((frame) => frame.event), expectedOrder, 'Queued text must not overtake keys or mouse input');
+  assert.deepEqual((await snapshot(dp)).held, []);
+  check('one FIFO across pointer/wheel/key/IME boundaries and WebSocket backpressure, without using the unreliable data channel');
   assert.deepEqual(desktop.errors, []);
   check('desktop click, hardware keyboard, and wheel remain usable');
   await desktop.context.close();

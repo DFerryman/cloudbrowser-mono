@@ -56,9 +56,13 @@ export const AgentReply = z.object({
 });
 export const AgentTurnRequest = z.object({ t: z.literal('turn_request') });
 /** A neko message for one viewer session. */
-export const AgentToViewer = z.object({ t: z.literal('viewer'), sessionId: z.string(), data: z.unknown() });
+export const AgentToViewer = z.object({ t: z.literal('viewer'), sessionId: z.string(), relayId: z.string().optional(), data: z.unknown() });
+export const AgentViewerError = z.object({
+  t: z.literal('viewer_error'), sessionId: z.string(), relayId: z.string().optional(),
+  reason: z.enum(['relay_unavailable', 'relay_failed', 'input_failed']),
+});
 
-export const AgentFrame = z.discriminatedUnion('t', [AgentHello, AgentEvent, AgentReply, AgentTurnRequest, AgentToViewer]);
+export const AgentFrame = z.discriminatedUnion('t', [AgentHello, AgentEvent, AgentReply, AgentTurnRequest, AgentToViewer, AgentViewerError]);
 export type AgentFrame = z.infer<typeof AgentFrame>;
 
 // --- gateway -> agent -----------------------------------------------------------------------
@@ -68,10 +72,10 @@ export type GatewayToAgent =
   | { t: 'welcome'; credential?: string }
   | { t: 'command'; id: string; kind: AgentCommandKind; payload: Record<string, unknown> }
   | { t: 'turn'; iceServers: IceServer[] }
-  | { t: 'viewer_open'; sessionId: string }
+  | { t: 'viewer_open'; sessionId: string; relayId?: string }
   /** A frame from the viewer: a neko message or IME text. */
-  | { t: 'viewer'; sessionId: string; data: ViewerFrame }
-  | { t: 'viewer_close'; sessionId: string };
+  | { t: 'viewer'; sessionId: string; relayId?: string; data: ViewerFrame }
+  | { t: 'viewer_close'; sessionId: string; relayId?: string };
 
 // --- viewer <-> gateway ---------------------------------------------------------------------
 
@@ -85,6 +89,8 @@ export type ViewerFrame = z.infer<typeof ViewerFrame>;
 
 export type GatewayToViewer =
   | { t: 'neko'; data: unknown }
+  /** Input could not be delivered; stop and require an explicit reconnect, never replay it. */
+  | { t: 'input_error'; reason: string }
   | { t: 'agent_online' }
   | { t: 'agent_offline' }
   /** Another tab or device opened this browser (one controller at a time). */

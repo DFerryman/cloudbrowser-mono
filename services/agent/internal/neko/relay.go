@@ -31,6 +31,7 @@ type Relay struct {
 type Session struct {
 	conn   *websocket.Conn
 	cancel context.CancelFunc
+	ctx    context.Context
 }
 
 // login signs in to neko v3 (POST /api/login) and returns the session token, from the response
@@ -107,7 +108,7 @@ func (r *Relay) Open(ctx context.Context, sessionID string, toViewer func(json.R
 		return nil, err
 	}
 	conn.SetReadLimit(4 << 20)
-	s := &Session{conn: conn, cancel: cancel}
+	s := &Session{conn: conn, cancel: cancel, ctx: sctx}
 	go func() {
 		defer cancel()
 		for {
@@ -122,8 +123,12 @@ func (r *Relay) Open(ctx context.Context, sessionID string, toViewer func(json.R
 }
 
 func (s *Session) Send(msg json.RawMessage) error {
-	return s.conn.Write(context.Background(), websocket.MessageText, msg)
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+	return s.conn.Write(ctx, websocket.MessageText, msg)
 }
+
+func (s *Session) Done() <-chan struct{} { return s.ctx.Done() }
 
 func (s *Session) Close() {
 	s.cancel()

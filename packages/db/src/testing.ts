@@ -59,6 +59,8 @@ export function createTestD1(): D1Database & { sqlite: DatabaseSync } {
       if (part.trim()) db.exec(part);
     }
   }
+  // Fixtures explicitly select the free simulator; production absence is fail-closed prepaid.
+  db.exec("INSERT INTO control_flags(key,value,updated_at) VALUES ('billing_required','false',0)");
   const d1 = {
     sqlite: db,
     prepare: (sql: string) => new Stmt(db, sql),

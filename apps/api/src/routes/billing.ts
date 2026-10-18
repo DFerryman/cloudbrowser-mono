@@ -15,17 +15,17 @@ import {
   RegionPricing,
 } from '@cloudbrowser/contracts';
 import { newId, pricingSettings, schema } from '@cloudbrowser/db';
-import { and, desc, eq, notInArray } from 'drizzle-orm';
+import { and, desc, eq, notInArray, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { creemFrom, type Creem } from '../billing/creem.js';
 import { offeredTopupPacks } from '../billing/ledger.js';
 import type { AppEnv } from '../env.js';
 import { billingAccount, entitlementsFor } from '../limits.js';
-import { allRegionPricing, currentBurn, regionPrice } from '../pricing.js';
+import { allRegionPricing, currentBurn, instancePrice, regionPrice } from '../pricing.js';
 import { problem } from '../problem.js';
 import { accountUsage, monthOf, monthTotals } from '../usage.js';
 
-const { billingCustomers, topupCheckouts, balanceTransactions, browserInstances } = schema;
+const { billingCustomers, topupCheckouts, balanceTransactions, browserInstances, browserReservations } = schema;
 
 export const billingRoute = new OpenAPIHono<AppEnv>({
   defaultHook: (result) => {
@@ -75,18 +75,18 @@ billingRoute.openapi(
       .from(browserInstances)
       .where(and(eq(browserInstances.userId, user.id), notInArray(browserInstances.status, ['purged', 'failed', 'deleting'])));
     let burnHourMicros = 0;
-    const prices = new Map<string, Awaited<ReturnType<typeof regionPrice>>>();
-    for (const inst of live) {
-      if (!prices.has(inst.regionId)) prices.set(inst.regionId, await regionPrice(db, inst.regionId));
-      burnHourMicros += currentBurn(prices.get(inst.regionId) ?? null, inst).hourMicros;
-    }
+    for (const inst of live) burnHourMicros += currentBurn(await instancePrice(db, inst.id, inst.regionId), inst).hourMicros;
+    const [retaining] = await db.select({ until: sql<number | null>`min(${browserReservations.retentionEndsAt})` }).from(browserReservations).where(eq(browserReservations.userId, user.id));
     const month = monthOf(undefined, now);
     const out: BillingState = {
       mode: (await entitlementsFor(db, user.id)).billing,
       enabled: creem !== null,
       balanceMicros: account.balanceMicros,
+      reservedMicros: account.reservedMicros,
+      availableMicros: account.availableMicros,
+      retentionDays: DATA_KEPT_DAYS,
       exhaustedAt: account.exhaustedAt?.toISOString() ?? null,
-      dataKeptUntil: account.exhaustedAt && account.balanceMicros <= 0 ? new Date(account.exhaustedAt.getTime() + DATA_KEPT_DAYS * 86_400_000).toISOString() : null,
+      dataKeptUntil: retaining?.until ? new Date(retaining.until).toISOString() : null,
       frozen: !!account.frozenAt,
       minBalanceMicros: settings.minBalanceMicros,
       lowBalanceMicros: settings.lowBalanceMicros,
@@ -119,7 +119,7 @@ billingRoute.openapi(
       .get('db')
       .select()
       .from(balanceTransactions)
-      .where(eq(balanceTransactions.userId, c.get('user').id))
+      .where(and(eq(balanceTransactions.userId, c.get('user').id), sql`${balanceTransactions.kind} <> 'usage'`))
       .orderBy(desc(balanceTransactions.createdAt))
       .limit(100);
     return c.json(

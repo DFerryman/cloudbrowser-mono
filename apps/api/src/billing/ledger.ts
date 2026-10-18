@@ -4,12 +4,12 @@
  * reference, applied in one D1 batch so a retried webhook or click never changes a balance twice.
  */
 import { MICROS_PER_USD, type TopUpPack } from '@cloudbrowser/contracts';
-import { eventRow, newId, pricingSettings, schema, type Db } from '@cloudbrowser/db';
+import { convertTrialStatements, eventRow, newId, pricingSettings, reservationQuote, reservedTotalSql, schema, type Db } from '@cloudbrowser/db';
 import { and, asc, eq, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import type { Env } from '../env.js';
 import type { Creem } from './creem.js';
 
-const { balanceTransactions, billingAccounts, events, topupPacks, auditLog, browserInstances } = schema;
+const { balanceTransactions, billingAccounts, events, topupPacks, auditLog, browserInstances, browserReservations } = schema;
 
 export type BalanceKind = 'topup' | 'refund' | 'dispute' | 'adjustment';
 
@@ -53,8 +53,11 @@ export async function applyBalance(
     + coalesce((SELECT sum(amount_micros) FROM balance_transactions WHERE order_id = ${reversal.orderId} AND kind IN ('refund', 'dispute')), 0))
     FROM balance_transactions AS original WHERE original.reference = ${`order:${reversal.orderId}`} AND original.kind = 'topup' AND original.gross_amount_cents > 0)` : change.amountMicros;
   const amount = sql`coalesce((SELECT ${balanceTransactions.amountMicros} FROM ${balanceTransactions} WHERE ${balanceTransactions.reference} = ${change.reference} AND ${balanceTransactions.appliedAt} IS NULL), 0)`;
-  const minimum = change.amountMicros > 0 && !reversal ? Math.max(1, (await pricingSettings(db)).minBalanceMicros) : 1;
-  const [inserted, , , converted] = await db.batch([
+  const minimum = Math.max(1, (await pricingSettings(db)).minBalanceMicros);
+  const [trial] = await db.select().from(browserInstances).where(and(eq(browserInstances.userId, change.userId), inArray(browserInstances.trialState, ['active', 'ended']), notInArray(browserInstances.status, ['deleting', 'purged', 'failed']), ne(browserInstances.desiredState, 'deleted'))).limit(1);
+  const quote = trial ? await reservationQuote(db, trial.regionId, { ...trial, instanceId: trial.id }, now) : null;
+  const held = reservedTotalSql(change.userId);
+  const [inserted, , , , , , converted] = await db.batch([
     db
       .insert(balanceTransactions)
       .values({
@@ -78,21 +81,32 @@ export async function applyBalance(
       .update(billingAccounts)
       .set({ balanceMicros: sql`${billingAccounts.balanceMicros} + ${amount}`, updatedAt: now })
       .where(eq(billingAccounts.userId, change.userId)),
-    // Conversion commits with the credit, so trial reclamation cannot slip between them.
-    db.update(browserInstances).set({ trialState: 'converted', trialReclaimAt: null, updatedAt: now })
-      .where(and(eq(browserInstances.userId, change.userId), inArray(browserInstances.trialState, ['active', 'ended']),
-        notInArray(browserInstances.status, ['deleting', 'purged', 'failed']), ne(browserInstances.desiredState, 'deleted'),
-        sql`${amount} > 0`, sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${change.userId} AND ${billingAccounts.balanceMicros} >= ${minimum})`))
-      .returning({ id: browserInstances.id }),
+    // A top-up restores spent retention deposits only when all of them and usable credit fit.
+    db.update(browserReservations).set({ reservedMicros: sql`${browserReservations.requiredMicros}`,
+      retentionStartedAt: null, retentionEndsAt: null, updatedAt: now,
+    }).where(and(eq(browserReservations.userId, change.userId), sql`${amount} > 0`,
+      sql`EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${browserReservations.instanceId} AND ${browserInstances.desiredState} <> 'deleted' AND ${browserInstances.status} NOT IN ('deleting', 'purged', 'failed'))`,
+      sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${change.userId}
+        AND ${billingAccounts.balanceMicros} >= coalesce((SELECT sum(br.required_micros) FROM browser_reservations br JOIN browser_instances bi ON bi.id = br.instance_id WHERE br.user_id = ${change.userId} AND bi.desired_state <> 'deleted' AND bi.status NOT IN ('deleting', 'purged', 'failed')), 0) + ${minimum})`)),
+    db.insert(browserReservations).select(sql`SELECT ${trial?.id ?? '-'}, ${change.userId}, ${quote?.requiredMicros ?? 0}, ${quote?.requiredMicros ?? 0},
+      ${quote?.fixedHourMicros ?? 0}, ${JSON.stringify(quote?.rates ?? {})}, NULL, NULL, ${now.getTime()}
+      WHERE ${Boolean(trial && quote)} AND ${amount} > 0 AND EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${trial?.id ?? '-'} AND ${browserInstances.trialState} IN ('active', 'ended') AND ${browserInstances.desiredState} <> 'deleted')
+      AND EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${change.userId}
+        AND ${billingAccounts.balanceMicros} >= ${held} + ${quote?.requiredMicros ?? 0} + ${minimum})`).onConflictDoNothing(),
+    // The paid epoch and conversion commit with the credit, so neither a meter nor reclamation
+    // can charge the last free interval or slip between the two updates.
+    ...convertTrialStatements(db, change.userId, now, sql`${amount} > 0 AND EXISTS (
+      SELECT 1 FROM browser_reservations WHERE instance_id = browser_instances.id
+      AND retention_started_at IS NULL AND reserved_micros >= required_micros)`),
     db
       .update(balanceTransactions)
       .set({ appliedAt: now })
       .where(and(eq(balanceTransactions.reference, change.reference), isNull(balanceTransactions.appliedAt))),
-    // Back above zero: the 30-day deletion clock and the sleep timer stop.
+    // Back above zero: the retention clock stops once the deposits and usable credit are funded.
     db
       .update(billingAccounts)
       .set({ exhaustedAt: null })
-      .where(and(eq(billingAccounts.userId, change.userId), sql`${billingAccounts.balanceMicros} > 0`)),
+      .where(and(eq(billingAccounts.userId, change.userId), sql`${billingAccounts.balanceMicros} - ${held} >= ${minimum}`)),
     db.insert(events).values(eventRow(change.userId, 'entitlements.updated', { balance: true }, now)),
     db.insert(auditLog).values({
       actor: change.actor,

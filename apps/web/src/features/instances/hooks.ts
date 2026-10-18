@@ -1,4 +1,4 @@
-import type { Accepted, Backup, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, Region } from '@cloudbrowser/contracts';
+import type { Accepted, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, Region } from '@cloudbrowser/contracts';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api.js';
 import { keys, queryClient } from '../../lib/query.js';
@@ -14,9 +14,6 @@ export type RecentSession = { id: string; startedAt: string; endedAt: string | n
 export const useRecentSessions = (id: string) =>
   useQuery({ queryKey: keys.sessions(id), queryFn: () => api<RecentSession[]>('GET', `/instances/${id}/sessions`) });
 
-export const useBackups = (id: string) =>
-  useQuery({ queryKey: keys.backups(id), queryFn: () => api<Backup[]>('GET', `/instances/${id}/backups`) });
-
 export const useStorage = (id: string) =>
   useQuery({ queryKey: keys.storage(id), queryFn: () => api<InstanceStorage>('GET', `/instances/${id}/storage`), refetchInterval: 30_000 });
 
@@ -27,7 +24,7 @@ const refresh = (instanceId?: string) => {
   void queryClient.invalidateQueries({ queryKey: keys.instances });
   void queryClient.invalidateQueries({ queryKey: keys.me });
   void queryClient.invalidateQueries({ queryKey: keys.billing });
-  // keys.instance(id) is the prefix of the browser's storage, backups and usage queries too.
+  // keys.instance(id) is the prefix of the browser's storage and usage queries too.
   if (instanceId) void queryClient.invalidateQueries({ queryKey: keys.instance(instanceId) });
 };
 
@@ -59,7 +56,7 @@ export function useCreateInstance() {
 /** Rename and settings edits are reversible, so they update the cache optimistically. */
 export function useUpdateInstance() {
   return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: Partial<Pick<Instance, 'name' | 'idleTimeoutS' | 'screen' | 'locale' | 'backupsEnabled'>> & { priceVersion?: string } }) =>
+    mutationFn: ({ id, patch }: { id: string; patch: Partial<Pick<Instance, 'name' | 'idleTimeoutS' | 'screen' | 'locale'>> & { priceVersion?: string } }) =>
       api<Instance>('PATCH', `/instances/${id}`, { body: patch }),
     onMutate: async ({ id, patch }) => {
       await queryClient.cancelQueries({ queryKey: keys.instances });
@@ -80,15 +77,6 @@ export function useVerifyIp() {
   return useMutation({
     mutationFn: (id: string) => api<IpCheck>('POST', `/instances/${id}/ip/verify`),
     onSettled: (_d, _e, id) => refresh(id),
-  });
-}
-
-/** Replaces the browser's data with a backup; the result arrives over SSE like any operation. */
-export function useRestoreBackup() {
-  return useMutation({
-    mutationFn: ({ id, backupId }: { id: string; backupId: string }) =>
-      api<Accepted>('POST', `/instances/${id}/backups/${backupId}/restore`, { idempotent: true }),
-    onSettled: (_d, _e, v) => refresh(v.id),
   });
 }
 

@@ -3,21 +3,21 @@
  *  - processes webhook events whose queue message was lost or failed;
  *  - refreshes the top-up products from Creem once an hour;
  *  - emails once when a balance falls below the low-balance threshold;
- *  - after a balance ran out: emails on day 1, 14 and 28, then deletes the browsers on day 30
- *    (soft delete, so they stay restorable for 7 more days, then purge releases data and IPs);
+ *  - after usable credit runs out: sends retention notices, then permanently deletes each browser
+ *    at its seven-day reservation deadline; unused held credit is released;
  *  - once a night, credits top-ups whose webhook never arrived (Creem's checkout is re-read).
  */
-import { BALANCE_GRACE_MS, DATA_KEPT_DAYS } from '@cloudbrowser/contracts';
-import { billingRequired, operationRow, pricingSettings, schema, type Db } from '@cloudbrowser/db';
+import { DATA_KEPT_DAYS } from '@cloudbrowser/contracts';
+import { billingRequired, operationRow, pricingSettings, reservedTotalSql, schema, type Db } from '@cloudbrowser/db';
 import { and, eq, gte, isNotNull, isNull, like, lte, notInArray, sql } from 'drizzle-orm';
 import type { Env } from '../env.js';
 import type { Creem } from './creem.js';
 import { notifyHub, refreshTopupPacks } from './ledger.js';
 import { creditCheckout, pendingWebhooks, processWebhook } from './webhooks.js';
 
-const { billingAccounts, auditLog, browserInstances, user, topupCheckouts, topupPacks, operations, events } = schema;
+const { billingAccounts, auditLog, browserInstances, user, topupCheckouts, topupPacks, operations, events, browserReservations } = schema;
 const DAY = 86_400_000;
-const NOTICE_DAYS = [1, 14, 28];
+const NOTICE_DAYS = [0, 3, 6];
 
 export async function billingSweep(env: Env, db: Db, creem: Creem | null, now: Date, opts: { nightly: boolean }) {
   const summary = { webhooks: 0, packs: 0, lowBalance: 0, notices: 0, deleted: 0, credited: 0 };
@@ -40,7 +40,7 @@ export async function billingSweep(env: Env, db: Db, creem: Creem | null, now: D
     const low = await db
       .select()
       .from(billingAccounts)
-      .where(and(gte(billingAccounts.balanceMicros, 1), lte(billingAccounts.balanceMicros, lowBalanceMicros), isNull(billingAccounts.lowNotifiedAt)));
+      .where(and(sql`${billingAccounts.balanceMicros} - coalesce((SELECT sum(reserved_micros) FROM browser_reservations WHERE user_id = ${billingAccounts.userId}),0) BETWEEN 1 AND ${lowBalanceMicros}`, isNull(billingAccounts.lowNotifiedAt)));
     for (const a of low) {
       await sendEmail(env, db, a.userId, 'low');
       await db.update(billingAccounts).set({ lowNotifiedAt: now }).where(eq(billingAccounts.userId, a.userId));
@@ -49,10 +49,10 @@ export async function billingSweep(env: Env, db: Db, creem: Creem | null, now: D
     await db
       .update(billingAccounts)
       .set({ lowNotifiedAt: null })
-      .where(and(isNotNull(billingAccounts.lowNotifiedAt), sql`${billingAccounts.balanceMicros} > ${lowBalanceMicros}`));
+      .where(and(isNotNull(billingAccounts.lowNotifiedAt), sql`${billingAccounts.balanceMicros} - coalesce((SELECT sum(reserved_micros) FROM browser_reservations WHERE user_id = ${billingAccounts.userId}),0) > ${lowBalanceMicros}`));
 
-    // Balance ran out: notices, then deletion after 30 days.
-    const out = await db.select().from(billingAccounts).where(and(isNotNull(billingAccounts.exhaustedAt), lte(billingAccounts.balanceMicros, 0)));
+    // Usable credit ran out: notices during the seven-day retention period.
+    const out = await db.select().from(billingAccounts).where(isNotNull(billingAccounts.exhaustedAt));
     for (const a of out) {
       const endedAt = a.exhaustedAt!.getTime();
       const days = Math.floor((now.getTime() - endedAt) / DAY);
@@ -69,8 +69,12 @@ export async function billingSweep(env: Env, db: Db, creem: Creem | null, now: D
           break; // one email per sweep
         }
       }
-      if (days >= DATA_KEPT_DAYS) summary.deleted += await deleteBrowsers(env, db, a.userId, now);
     }
+  }
+
+  if (await billingRequired(db)) {
+    const due = await db.selectDistinct({ userId: browserReservations.userId }).from(browserReservations).where(lte(browserReservations.retentionEndsAt, now));
+    for (const a of due) summary.deleted += await deleteBrowsers(env, db, a.userId, now);
   }
 
   if (opts.nightly && creem) {
@@ -107,21 +111,20 @@ async function sendEmail(env: Env, db: Db, userId: string, kind: 'low' | 'ended'
   if (!u || !env.EMAIL) return;
   const url = `${env.APP_URL}/billing`;
   const date = deleteOn?.toISOString().slice(0, 10) ?? '';
-  const minutes = Math.round(BALANCE_GRACE_MS / 60_000);
   const message =
     kind === 'low'
       ? {
           subject: 'Your CloudBrowser balance is low',
           text:
-            `Your prepaid balance is running low. When it reaches zero, running browsers go to sleep ${minutes} minutes later. Add credit: ${url}\n\n` +
-            `你的预付余额即将用完。余额为零后，运行中的浏览器会在 ${minutes} 分钟后进入休眠。充值：${url}`,
+            `Your prepaid balance is running low. When available credit is used up, browser access stops immediately. Your held deposit then pays fixed IP and disk costs for seven days. Add credit: ${url}\n\n` +
+            `你的预付余额即将用完。可用余额不足时立即停止使用，已预留余额仅支付接下来七天的 IP 和磁盘保留费。充值：${url}`,
         }
       : {
-          subject: (day ?? 0) >= 28 ? 'Your CloudBrowser browsers will be deleted soon' : 'Your CloudBrowser balance has run out',
+          subject: (day ?? 0) >= 6 ? 'Your CloudBrowser browsers will be deleted soon' : 'Your CloudBrowser balance has run out',
           text:
-            `Your prepaid balance has run out, so your browsers are asleep. Their dedicated IPs and storage are still charged, and they are kept until ${date}; ` +
+            `Your prepaid balance has run out, so your browsers are asleep. Their reserved credit pays only fixed IP and disk retention costs, and they are kept until ${date}; ` +
             `after that they are deleted and the IPs are released. Add credit to keep them: ${url}\n\n` +
-            `你的预付余额已用完，浏览器已进入休眠。专属 IP 和存储仍会计费，数据将保留到 ${date}，之后会被删除并释放 IP。充值即可保留：${url}`,
+            `你的预付余额已用完，浏览器已进入休眠。预留余额仅支付 IP 和磁盘保留费，数据将保留到 ${date}，之后会被删除并释放 IP。充值即可保留：${url}`,
         };
   try {
     await env.EMAIL.send({ from: { email: env.EMAIL_FROM ?? 'no-reply@example.com', name: 'CloudBrowser' }, to: u.email, ...message });
@@ -130,20 +133,21 @@ async function sendEmail(env: Env, db: Db, userId: string, kind: 'low' | 'ended'
   }
 }
 
-/** Soft-deletes every browser of a user whose balance ran out 30 days ago (page 6). */
+/** Permanently reclaims browsers whose individual seven-day retention deadline is due. */
 async function deleteBrowsers(env: Env, db: Db, userId: string, now: Date): Promise<number> {
   const live = await db
     .select({ id: browserInstances.id })
     .from(browserInstances)
-    .where(and(eq(browserInstances.userId, userId), notInArray(browserInstances.status, ['deleting', 'purged', 'failed'])));
+    .where(and(eq(browserInstances.userId, userId), notInArray(browserInstances.status, ['deleting', 'purged', 'failed']),
+      sql`EXISTS (SELECT 1 FROM ${browserReservations} WHERE ${browserReservations.instanceId} = ${browserInstances.id} AND ${browserReservations.retentionEndsAt} <= ${now.getTime()} AND ${browserReservations.retentionStartedAt} IS NOT NULL)`));
   let n = 0;
   for (const inst of live) {
     try {
-      const op = operationRow({ instanceId: inst.id, userId: null, kind: 'delete', params: { reason: 'billing' }, now });
-      // Recheck the account in the same transaction that admits deletion. A concurrent top-up
-      // resets exhausted_at and must save the browser even if this sweep selected it earlier.
-      const eligible = sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${userId}
-        AND ${billingAccounts.balanceMicros} <= 0 AND ${billingAccounts.exhaustedAt} <= ${now.getTime() - DATA_KEPT_DAYS * DAY})
+      const op = operationRow({ instanceId: inst.id, userId: null, kind: 'delete', params: { reason: 'billing', purgeNow: true }, now });
+      // Recheck the reservation in the deletion transaction. A sufficient concurrent top-up
+      // restores its deposit and cancels expiry even if this sweep selected it earlier.
+      const eligible = sql`EXISTS (SELECT 1 FROM ${browserReservations} WHERE ${browserReservations.instanceId} = ${inst.id}
+        AND ${browserReservations.retentionStartedAt} IS NOT NULL AND ${browserReservations.retentionEndsAt} <= ${now.getTime()})
         AND EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${inst.id} AND ${browserInstances.status} NOT IN ('deleting', 'purged', 'failed'))`;
       const exists = sql`EXISTS (SELECT 1 FROM ${operations} WHERE ${operations.id} = ${op.id})`;
       const [inserted] = await db.batch([
@@ -151,6 +155,7 @@ async function deleteBrowsers(env: Env, db: Db, userId: string, now: Date): Prom
           ${op.deadlineAt.getTime()}, NULL, NULL, ${JSON.stringify(op.params)}, ${now.getTime()}, ${now.getTime()}, NULL WHERE ${eligible}`)
           .returning({ id: operations.id }),
         db.update(browserInstances).set({ desiredState: 'deleted', updatedAt: now }).where(and(eq(browserInstances.id, inst.id), exists)),
+        db.update(browserReservations).set({ reservedMicros: 0, updatedAt: now }).where(and(eq(browserReservations.instanceId, inst.id), exists)),
         db.insert(events).select(sql`SELECT NULL, ${userId}, 'instance.updated', ${JSON.stringify({ instanceId: inst.id, operationId: op.id })}, ${now.getTime()} WHERE ${exists}`),
         db.insert(auditLog).select(sql`SELECT NULL, 'billing', 'operation.delete', ${`instance:${inst.id}`}, ${JSON.stringify({ operationId: op.id, reason: 'billing' })}, ${now.getTime()} WHERE ${exists}`),
       ]);

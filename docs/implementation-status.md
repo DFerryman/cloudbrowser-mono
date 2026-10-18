@@ -46,20 +46,21 @@ Cloudflare deployment.
   an action (create, more storage, snapshots, a new IP) carries a version; the API refuses the
   action with `price_changed` if prices moved in between.
 - **Prepaid balance with Creem** (page 6): users buy one-time top-up products through Creem's
-  hosted checkout; the amount credited is the product's price read from Creem, never the webhook
-  body, and each order is credited once. Webhooks are HMAC-verified, stored by event id and
+  hosted checkout; the amount credited is the verified checkout's actual paid USD amount
+  excluding tax, not a later catalogue price, and each order is credited once. Webhooks are HMAC-verified, stored by event id and
   processed from a queue; refunds and disputes debit the balance and a dispute freezes the
   account. The engine meters every browser per minute into `usage_records` (compute while
-  running; IP and storage always, because AWS bills them while the VM is stopped; snapshots while
-  on; data out from the agent's counter) and takes it from the balance. Below the minimum balance
-  nothing new starts; when the balance runs out, running browsers sleep 10 minutes later (warning
-  in the session view), sleeping browsers keep accruing IP and storage, users are emailed on day
-  1, 14 and 28, and browsers are deleted after 30 days. While `billing_required` is off (the
-  pilot), usage is metered at real prices but nothing is taken.
+  running; IP and provisioned disks while held; data out from the agent's counter). Storage
+  GB-months use actual UTC calendar-month fractions; 730 hours is a display projection only.
+  Seven days of fixed IP/disk costs are reserved from the total balance but remain unspent.
+  Only available credit can fund normal usage. At exhaustion, input access is revoked and VMs
+  stop without a grace period; the reserve funds seven days of retention before permanent purge.
+  Unused retained credit is released after deletion or funded resumption. Normal usage cannot
+  debit more than funded credit. Billing defaults to prepaid; explicit false is a test/pilot override.
 - **Free trial** (page 6): each user may create one browser for free, once, in Sydney: 10 minutes
   of running time, a 2 GB data volume, no snapshots, 5-minute auto-sleep. It is metered at cost
-  but charged nothing, sleeps when the 10 minutes are used, and is kept 7 days after it last went
-  to sleep, then deleted and purged. Adding credit before then converts it into a normal browser
+  but charged nothing, sleeps when the 10 minutes are used, and is kept until its fixed seven-day
+  deadline; repeated stops do not extend it. It is then deleted and purged. Adding enough credit before then converts it into a normal browser
   with the same data and IP; from then on it is charged like any other.
 - **Right-sized VMs**: one dedicated VM per browser, 2 vCPU / 4 GB (`c7i-flex.large`, then
   `c6i.large` and `c5.large` on a capacity error), with a 1 GB swap file, a 1 GB shared-memory cap
@@ -69,8 +70,11 @@ Cloudflare deployment.
 - **Storage** (page 6): new browsers get a 10 GB data volume (cap `storage_gb`); users can grow it
   up to `storage_max_gb` (100 GB) from the Storage tab, which shows used and total space and the
   monthly cost before confirming. The volume grows online (`ModifyVolume`) and agent 0.2.0 grows
-  the file system; at most once every 6 hours (an EBS limit). Daily snapshots are off by default
-  and their monthly cost is shown before they are turned on; turning them off deletes them.
+  the file system. AWS permits at most four volume modifications in a rolling 24-hour period,
+  and the previous modification must be complete before another starts. A mounted ext4 file
+  system can grow online without restarting Chrome or the VM. User snapshot controls, public
+  backup/restore routes and automatic daily snapshots are removed; existing snapshot resources
+  and temporary internal recovery snapshots are still cleaned up safely and are not user charges.
 - **Usage pages**: the Billing & usage page shows the balance, top-ups, transactions, this month's
   spend by item, by browser and by day, and the current price list. Each browser's Usage tab
   shows its own spend and what it costs per hour now.
@@ -164,8 +168,8 @@ Cloudflare does not offer VMs with a dedicated static egress IP.
 | Engine → gateway via `agent_commands` + `NOTIFY` | `agent_commands` + a `cloudbrowser-agent-commands` queue message | No binding from engine to gateway, so no deploy-order cycle; heartbeats are a delivery backstop. |
 | S3 archives with per-instance keys wrapped by KMS | **R2** (presigned PUT/GET via the S3 API) with per-instance keys wrapped by a Worker secret (`ARCHIVE_MASTER_KEY`, AES-256-GCM) | Same envelope scheme without a KMS: the plain key exists only in the gateway's frame to the agent, never in D1. Presigned URLs keep archive bytes off the Workers. |
 | Subscription plans (Personal, Pro) with an hours allowance | A prepaid balance topped up with Creem one-time products, charged per minute at AWS cost times a markup | Costs depend on the region and on what a browser keeps while asleep (IP, disks); a balance charges exactly that, with no plan maths, and the trial converts by adding credit. |
-| pg-boss job for Creem webhooks; nightly reconciliation job | `cloudbrowser-billing` queue consumed by the api Worker; the api's 5-minute cron (lost events, low-balance email, notices, deletion after 30 days) and a nightly backstop that credits paid orders a lost webhook missed | Same asynchronous, idempotent processing with Cloudflare primitives. |
-| Running-hours cap enforced by the engine | The engine meters usage every minute (at most 5 minutes per tick if a run is missed) and sleeps browsers 10 minutes after the balance runs out | The session view gets the deadline from the heartbeat and warns the user; starts are refused with `insufficient_balance`. |
+| pg-boss job for Creem webhooks; nightly reconciliation job | `cloudbrowser-billing` queue consumed by the api Worker; cron retries lost events and expires seven-day prepaid retention, plus a nightly paid-order backstop | Same asynchronous, idempotent processing with Cloudflare primitives. |
+| Running-hours cap enforced by the engine | Elapsed-time metering, available credit after a seven-day fixed-resource reserve, and immediate exhaustion stop intent | Gateway alarms expire input access; paid starts require sufficient available credit and a funded reserve. |
 | `/admin` limited by source IP at the load balancer | Dedicated `admin.console.nevazu.com` behind Cloudflare Access email OTP; API verifies signed JWT and exact email allowlist | No IP restriction; main-site cookies, the legacy admin table, and preview URLs cannot grant admin access. |
 | Alerts through CloudWatch alarms | `alerts` table written by every Worker, delivered by the api cron to Email Service and a chat webhook, acknowledged in the console | One place to see and acknowledge alerts; no extra service. |
 | Golden VM image built with Packer | Stock Ubuntu 24.04 plus a first-boot script; the agent binary and VM files ship in a container image | Lets the first real browser run without an image build in the user's AWS account; the Packer template uses the same files and replaces the install later. |

@@ -1,4 +1,4 @@
-import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, HOURS_PER_MONTH, SCREEN_SIZES, browserEstimate, type Instance, type Region } from '@cloudbrowser/contracts';
+import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, SCREEN_SIZES, browserEstimate, retentionReserve, type Instance, type Region } from '@cloudbrowser/contracts';
 import { Button, cn, Dialog, Input, Label, Select } from '@cloudbrowser/ui';
 import { ChevronRight } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
@@ -7,6 +7,7 @@ import { useI18n, type Locale } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
 import { useBilling, usePricing } from '../billing/hooks.js';
 import { PriceBreakdown } from '../billing/PriceBreakdown.js';
+import { canSpend, minimumSpendBalance } from '../billing/access.js';
 import { useCreateInstance, useInstances, useMe, useRegions } from './hooks.js';
 
 const UI_TO_BROWSER_LOCALE: Record<Locale, BrowserLocale> = { en: 'en-US', 'zh-CN': 'zh-CN' };
@@ -83,9 +84,12 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
   // The price of the chosen region is shown before creating, and sent back so it cannot change unseen.
   const price = pricing.data?.find((p) => p.regionId === regionId);
   const b = billing.data;
-  const rateOf = (id: string) => pricing.data?.find((p) => p.regionId === id)?.rates?.compute ?? null;
-  const prepaid = b?.mode === 'prepaid';
-  const balanceTooLow = prepaid && b ? b.balanceMicros < b.minBalanceMicros : false;
+  const rateOf = (id: string) => {
+    const p = pricing.data?.find((p) => p.regionId === id);
+    return p?.rates ? browserEstimate(p.rates, { storageGb: trial && b ? b.trial.storageGb : p.defaultStorageGb, rootVolumeGb: p.rootVolumeGb, backups: false }).runningTotalHour : null;
+  };
+  const reserve = price?.rates ? retentionReserve(price.rates, { storageGb: price.defaultStorageGb, rootVolumeGb: price.rootVolumeGb, backups: false }) : 0;
+  const balanceTooLow = !!b && !canSpend(b, reserve);
   // The one free trial (page 6): offered once, in its own region, while that region takes new browsers.
   const trialOffer = !!b?.trial.eligible && !!regions.data?.find((r) => r.id === b.trial.regionId)?.acceptingNew;
   const trial = trialOffer && useTrial;
@@ -167,7 +171,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
                         ? t('create.region.unavailable')
                         : t(`create.region.${r.id}.hint`)}</span>
                   {!disabled && rateOf(r.id) !== null ? (
-                    <span className="mt-1 text-xs font-medium tabular-nums">{t('price.perHour', { amount: money(rateOf(r.id)!, locale) })}</span>
+                    <span className="mt-1 text-xs font-medium tabular-nums">{t('price.runningShort', { amount: money(rateOf(r.id)!, locale) })}</span>
                   ) : null}
                 </label>
               );
@@ -212,17 +216,17 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
           {trial && b && price?.rates ? (
             <TrialPrice minutes={b.trial.minutes} days={b.trial.keptDays} gb={b.trial.storageGb} pricing={price} />
           ) : price ? (
-            <PriceBreakdown pricing={price} pilot={b?.mode === 'pilot'} />
+            <PriceBreakdown pricing={price} />
           ) : (
             <p className="text-sm text-muted">{t('common.loading')}</p>
           )}
           {trial ? null : <p className="text-xs text-muted">{t('create.chargesStart')}</p>}
-          {prepaid && b && !trial ? (
+          {b && !trial ? (
             <p className="border-t border-border pt-3 text-sm">
-              {t('create.balance', { amount: money(b.balanceMicros, locale) })}{' '}
+              {t('create.balance', { amount: money(b.availableMicros ?? 0, locale) })}{' '}
               {needsCredit ? (
                 <>
-                  <span className="text-error">{t('create.needCredit', { amount: money(b.minBalanceMicros, locale) })}</span>{' '}
+                  <span className="text-error">{t(b.frozen ? 'billing.frozen' : 'create.needCredit', { amount: money(minimumSpendBalance(b) + reserve, locale) })}</span>{' '}
                   <Link to="/billing" className="font-medium text-accent hover:underline">
                     {t('create.addCredit')}
                   </Link>
@@ -242,7 +246,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
           {initialInstance?.trial && initialInstance.trial.state !== 'converted' ? <p className="text-sm text-muted">{t('create.retryTrial')}</p> : null}
           <div className="flex justify-end gap-2">
             <Button onClick={onClose}>{t('common.cancel')}</Button>
-            <Button type="submit" variant="primary" disabled={create.isPending || pricing.isFetching || pricing.isError || atLimit || needsCredit || !price?.available || !price.version}>
+            <Button type="submit" variant="primary" disabled={create.isPending || pricing.isFetching || pricing.isError || !b || b.frozen || atLimit || needsCredit || !price?.available || !price.version}>
               {t('create.submit')}
             </Button>
           </div>
@@ -263,15 +267,16 @@ function TrialPrice({ minutes, days, gb, pricing }: { minutes: number; days: num
       <p>{t('trial.how', { minutes, days })}</p>
       <p className="text-muted">
         {t('trial.after', {
-          running: money(e.runningHour, locale),
+          running: money(e.runningTotalHour, locale),
           kept: money(e.alwaysOnMonth, locale),
           gb: gb + pricing.rootVolumeGb,
         })}
       </p>
       <p className="text-xs text-muted">
-        {t('price.ip')}: {t('price.perMonth', { amount: money(pricing.rates!.ip * HOURS_PER_MONTH, locale) })} · {t('billing.item.storage')}:{' '}
+        {t('price.ip')}: {t('price.perHour', { amount: money(pricing.rates!.ip, locale) })} · {t('billing.item.storage')}:{' '}
         {t('price.perMonth', { amount: money(e.storageMonth, locale) })}
       </p>
+      <p className="text-xs text-muted">{t('trial.reserve', { amount: money(retentionReserve(pricing.rates!, { storageGb: gb, rootVolumeGb: pricing.rootVolumeGb, backups: false }), locale) })}</p>
     </div>
   );
 }

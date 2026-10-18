@@ -123,20 +123,31 @@ export class Ec2Client {
    * One Query API call. `mutating` decides how a lost response is classified: a create that may
    * have happened is `unknown_outcome` (look up before retrying); a read is just `retryable`.
    */
-  async call(region: string, action: string, params: Params, deadline: number, mutating: boolean): Promise<XmlNode> {
+  async call(region: string, action: string, params: Params, deadline: number, mutating: boolean, assertActive?: () => Promise<void>): Promise<XmlNode> {
+    await assertActive?.();
     const body = new URLSearchParams({ Action: action, Version: '2016-11-15' });
     for (const [k, v] of Object.entries(params)) if (v !== undefined) body.set(k, String(v));
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new ExecutorError(mutating ? 'unknown_outcome' : 'retryable', `${action}: deadline passed`);
     const signer = this.signer('ec2', region);
-    let res: Response;
+    let req: Request;
     try {
-      const req = await signer.sign(this.url('ec2', region), {
+      req = await signer.sign(this.url('ec2', region), {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded; charset=utf-8' },
         body: body.toString(),
       });
-      res = await (this.opts.fetch ?? fetch)(req, { signal: AbortSignal.timeout(Math.min(remaining, 30_000)) });
+    } catch (e) {
+      throw new ExecutorError(mutating ? 'unknown_outcome' : 'retryable', `${action}: ${(e as Error).message}`);
+    }
+    // Signing can yield to a newer stop/delete intent. Keep this callback outside the provider
+    // error wrapper: an operation cancellation is neither an outage nor an unknown AWS outcome.
+    await assertActive?.();
+    const requestRemaining = deadline - Date.now();
+    if (requestRemaining <= 0) throw new ExecutorError(mutating ? 'unknown_outcome' : 'retryable', `${action}: deadline passed`);
+    let res: Response;
+    try {
+      res = await (this.opts.fetch ?? fetch)(req, { signal: AbortSignal.timeout(Math.min(requestRemaining, 30_000)) });
     } catch (e) {
       throw new ExecutorError(mutating ? 'unknown_outcome' : 'retryable', `${action}: ${(e as Error).message}`);
     }

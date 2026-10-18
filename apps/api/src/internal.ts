@@ -6,7 +6,7 @@
  */
 import { AgentFrame, type GatewayToAgent, type ViewerTokenClaims } from '@cloudbrowser/contracts';
 import { createDb, eventRow, schema, sha256Hex, unwrapArchiveKey, type Db } from '@cloudbrowser/db';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Env } from './env.js';
 import { turnIceServers } from './turn.js';
 
@@ -73,20 +73,32 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
   switch (frame.t) {
     case 'hello':
     case 'viewer':
+    case 'viewer_error':
       return null; // handled by the gateway
     case 'turn_request':
       // neko's own TURN allocation, refreshed by the agent at each wake (page 5).
       return { t: 'turn', iceServers: await turnIceServers(env, 24 * 3600) };
     case 'reply': {
-      await db
+      // A canceled operation cannot be revived by a command that was already in flight.
+      // Operation commands use <operation id>:<step>; periodic ipcheck commands are independent.
+      const prefix = frame.commandId.split(':')[0]!;
+      const operationId = frame.commandId.includes(':') && prefix !== 'ipcheck' ? prefix : null;
+      const recorded = await db
         .update(agentCommands)
         .set({
           status: frame.ok ? 'succeeded' : 'failed',
           reply: frame.ok ? (frame.result ?? {}) : { ...(frame.result ?? {}), error: frame.error ?? 'failed' },
           completedAt: now,
         })
-        .where(and(eq(agentCommands.id, frame.commandId), eq(agentCommands.instanceId, instanceId)));
-      await kickOperation(env, db, instanceId);
+        .where(and(
+          eq(agentCommands.id, frame.commandId), eq(agentCommands.instanceId, instanceId),
+          inArray(agentCommands.status, ['pending', 'delivered']), isNull(agentCommands.completedAt),
+          operationId ? sql`EXISTS (SELECT 1 FROM ${operations}
+            WHERE ${operations.id} = ${operationId} AND ${operations.instanceId} = ${instanceId}
+              AND ${operations.finishedAt} IS NULL)` : undefined,
+        ))
+        .returning({ id: agentCommands.id });
+      if (recorded.length) await kickOperation(env, db, instanceId);
       return null;
     }
     case 'event': {

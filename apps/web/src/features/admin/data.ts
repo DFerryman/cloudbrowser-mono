@@ -1,6 +1,7 @@
 import { useMutation, useQuery, type QueryKey } from '@tanstack/react-query';
 import { ApiError } from '../../lib/api.js';
 import { queryClient } from '../../lib/query.js';
+import { money as formatMoney } from '../../lib/money.js';
 
 /** Admin API under /api/v1/admin (page 10). Every query is refetched on window focus like the app. */
 export const adminKey = (...parts: unknown[]): QueryKey => ['admin', ...parts];
@@ -138,7 +139,6 @@ export type InstanceDetail = {
   resources: Row[];
   ipAddresses: Row[];
   operations: (Row & { id: string; kind: string; status: string })[];
-  backups: Row[];
   audit: (Row & { id: number; actor: string; action: string; createdAt: string; detail: unknown })[];
 };
 
@@ -190,8 +190,4 @@ export type PricingOverview = {
 export const when = (iso: unknown) => (typeof iso === 'string' && iso ? new Date(iso).toLocaleString() : '—');
 export const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 /** Micro-dollars, with enough digits for per-unit rates. */
-export const usd = (micros: number) => {
-  const v = micros / 1_000_000;
-  const digits = Math.abs(v) >= 1 || v === 0 ? 2 : Math.abs(v) >= 0.1 ? 3 : 4;
-  return `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(digits)}`;
-};
+export const usd = (micros: number) => formatMoney(micros, 'en-US');

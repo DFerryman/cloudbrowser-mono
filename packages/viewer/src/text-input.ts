@@ -1,3 +1,5 @@
+import { keyIdentity, matchingKeyIdentity, unidentifiedKey } from './keyboard.js';
+
 /** Keyboard and text events are separate on mobile: many soft keys have no usable keydown. */
 export interface TextKeyEvent {
   key: string;
@@ -47,6 +49,8 @@ function keyEdit(key: string): Edit | null {
   return null;
 }
 
+const modifierKey = (key: string) => ['Shift', 'Control', 'Alt', 'Meta', 'AltGraph'].includes(key);
+
 /**
  * A DOM-independent controller for the viewer's textarea.
  *
@@ -75,17 +79,27 @@ export class TextInputController {
 
     const modified = event.ctrlKey || event.metaKey || event.altKey;
     const edit = keyEdit(event.key);
-    if (this.callbacks.mode() === 'software' && !modified) {
-      if (edit) {
+    if (this.callbacks.mode() === 'software') {
+      // Soft keyboards can omit keyup entirely. Shift is reflected in the committed text;
+      // hardware shortcuts carry their modifier flags on the non-modifier key itself.
+      if (modifierKey(event.key)) return false;
+      if (!modified && edit) {
         this.sendEdit(edit);
         return true;
       }
-      if ([...event.key].length === 1) return false; // Let input carry the actual text.
+      if (!modified && [...event.key].length === 1) return false; // Let input carry the actual text.
+      return this.softwareStroke(event);
     }
 
+    // Neko/X11 already repeats a held key. Repeated keydowns would replace the original
+    // mapping when Shift or the input layout changes, leaving the first keysym held forever.
+    if (matchingKeyIdentity(this.forwarded, event) !== null) {
+      this.callbacks.activity?.();
+      return true;
+    }
     if (!this.callbacks.key(true, event)) return false;
     // DOM KeyboardEvent fields live on its prototype and are not enumerable.
-    this.forwarded.set(event.code || event.key, {
+    this.forwarded.set(keyIdentity(event), {
       key: event.key,
       code: event.code,
       ctrlKey: event.ctrlKey,
@@ -101,9 +115,17 @@ export class TextInputController {
   }
 
   keyUp(event: TextKeyEvent): boolean {
-    const id = event.code || event.key;
-    const down = this.forwarded.get(id);
-    if (!down) return false;
+    const id = matchingKeyIdentity(this.forwarded, event);
+    if (id === null) {
+      // Safari can replace both key and code with Unidentified after an IME transition.
+      // There is no reliable individual match, so end the outstanding remote presses.
+      if (unidentifiedKey(event) && this.forwarded.size > 0) {
+        this.releaseForwarded();
+        return true;
+      }
+      return false;
+    }
+    const down = this.forwarded.get(id)!;
     this.forwarded.delete(id);
     // Use the original mapping if the OS changed key/modifier fields before keyup.
     return this.callbacks.key(false, down);
@@ -141,6 +163,7 @@ export class TextInputController {
   }
 
   compositionStart(): void {
+    this.releaseForwarded();
     this.composing = true;
     this.clearTail();
     this.clearEdit();
@@ -165,6 +188,26 @@ export class TextInputController {
     this.forwarded.clear();
     this.clearTail();
     this.clearEdit();
+    this.callbacks.releaseAllKeys();
+  }
+
+  private softwareStroke(event: TextKeyEvent): boolean {
+    const modifiers: TextKeyEvent[] = [];
+    if (event.ctrlKey) modifiers.push({ key: 'Control', code: 'ControlLeft' });
+    if (event.metaKey) modifiers.push({ key: 'Meta', code: 'MetaLeft' });
+    if (event.altKey) modifiers.push({ key: 'Alt', code: 'AltLeft' });
+    if (event.shiftKey) modifiers.push({ key: 'Shift', code: 'ShiftLeft' });
+    const pressed = modifiers.filter((modifier) => this.callbacks.key(true, modifier));
+    const sent = this.callbacks.key(true, event);
+    if (sent) this.callbacks.key(false, event);
+    for (const modifier of pressed.reverse()) this.callbacks.key(false, modifier);
+    if (sent) this.callbacks.activity?.();
+    return sent;
+  }
+
+  private releaseForwarded(): void {
+    if (this.forwarded.size === 0) return;
+    this.forwarded.clear();
     this.callbacks.releaseAllKeys();
   }
 

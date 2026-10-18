@@ -7,6 +7,9 @@ import { CreateProgress } from './CreateProgress.js';
 import { useLifecycle, useUpdateInstance } from './hooks.js';
 import { regionInfo, STATUS_TONE, statusKey } from './status.js';
 import { TrialBadge } from './Trial.js';
+import { useBilling } from '../billing/hooks.js';
+import { canSpend, canUseBrowser } from '../billing/access.js';
+import { BalanceRequired } from '../billing/BalanceRequired.js';
 
 export function BrowserCard({ instance: i }: { instance: Instance }) {
   const { t, locale, errorMessage } = useI18n();
@@ -15,6 +18,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
   const toast = useToast();
   const lifecycle = useLifecycle();
   const update = useUpdateInstance();
+  const billing = useBilling();
   const region = regionInfo(i.regionId);
   const run = (p: Promise<unknown>) => p.catch((e) => toast(errorMessage(e), 'error'));
 
@@ -26,7 +30,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
   let primary: React.ReactNode;
   if (recoverable) {
     primary = (
-      <Button variant="secondary" className="flex-1 justify-center" disabled={lifecycle.isPending} onClick={() => run(lifecycle.mutateAsync({ id: i.id, action: 'undelete' }))}>
+      <Button variant="secondary" className="flex-1 justify-center" disabled={lifecycle.isPending || !canSpend(billing.data)} onClick={() => run(lifecycle.mutateAsync({ id: i.id, action: 'undelete' }))}>
         {t('browsers.restore')}
       </Button>
     );
@@ -44,7 +48,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
     );
   } else {
     primary = (
-      <Button variant="primary" className="flex-1 justify-center" disabled={creating} onClick={() => navigate(`/b/${i.id}`)}>
+      <Button variant="primary" className="flex-1 justify-center" disabled={creating || !canUseBrowser(billing.data, i)} onClick={() => navigate(`/b/${i.id}`)}>
         {i.status === 'sleeping' ? t('browsers.wakeOpen') : t('browsers.open')}
       </Button>
     );
@@ -76,6 +80,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
             ? t('browsers.usedAgo', { ago: ago(i.lastActiveAt)! })
             : t('browsers.neverUsed')}
       </p>
+      {!deleted && !failed ? <BalanceRequired instance={i} /> : null}
 
       {creating ? (
         <div className="mt-4">
@@ -111,13 +116,13 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
           <MenuItem disabled={failed} onSelect={() => navigate(`/browsers/${i.id}/usage`)}>
             <BarChart3 /> {t('manage.usage')}
           </MenuItem>
-          <MenuItem disabled={i.status !== 'running'} onSelect={() => void run(lifecycle.mutateAsync({ id: i.id, action: 'stop' }))}>
+          <MenuItem disabled={deleted || failed || i.status === 'sleeping' || (lifecycle.isPending && lifecycle.variables.action === 'stop')} onSelect={() => void run(lifecycle.mutateAsync({ id: i.id, action: 'stop' }))}>
             <Moon /> {t('browsers.sleepNow')}
           </MenuItem>
           <MenuSeparator />
           <MenuItem
             danger
-            disabled={deleted || creating}
+            disabled={deleted || (lifecycle.isPending && lifecycle.variables.action === 'delete')}
             onSelect={() => {
               if (window.confirm(t('browsers.deleteConfirm', { name: i.name }))) void run(lifecycle.mutateAsync({ id: i.id, action: 'delete' }));
             }}

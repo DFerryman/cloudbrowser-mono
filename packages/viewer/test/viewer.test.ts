@@ -63,11 +63,13 @@ describe('keyboard mapping', () => {
     expect(keysymFor({ key: 'Enter', code: 'Enter' }, pc)).toBe(0xff0d);
     expect(keysymFor({ key: 'F5', code: 'F5' }, pc)).toBe(0xffc2);
     expect(keysymFor({ key: 'Control', code: 'ControlRight' }, pc)).toBe(0xffe4);
+    expect(keysymFor({ key: 'Shift', code: '' }, pc)).toBe(0xffe1);
     expect(keysymFor({ key: 'Process', code: 'KeyA' }, pc)).toBeNull();
     expect(keysymFor({ key: 'Dead', code: 'Quote' }, pc)).toBeNull();
   });
   it('maps Cmd to Control on macOS', () => {
     expect(keysymFor({ key: 'Meta', code: 'MetaLeft' }, { macToPc: true })).toBe(0xffe3);
+    expect(keysymFor({ key: 'Meta', code: '' }, { macToPc: true })).toBe(0xffe3);
     expect(keysymFor({ key: 'Meta', code: 'MetaLeft' }, pc)).toBe(0xffeb);
     expect(keysymForName('Control')).toBe(0xffe3);
   });
@@ -85,6 +87,7 @@ it('rates connection quality like the toolbar indicator', () => {
 class FakeWS {
   static all: FakeWS[] = [];
   readyState = 1;
+  bufferedAmount = 0;
   sent: unknown[] = [];
   onmessage: ((e: { data: string }) => void) | null = null;
   onclose: (() => void) | null = null;
@@ -150,6 +153,14 @@ class FakePC {
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+/** Media is receive-only; input becomes ready after signaling and the control request. */
+async function readyInput(ws: FakeWS) {
+  ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+  await tick();
+  FakePC.last.connect();
+  ws.sent.length = 0;
+}
+
 describe('RemoteBrowser', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -158,7 +169,7 @@ describe('RemoteBrowser', () => {
 
   function setup(
     iceServers: { urls: string[]; username?: string; credential?: string }[] = [],
-    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs'> = {},
+    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'onInputError'> = {},
   ) {
     FakeWS.all = [];
     const getConnectInfo = vi.fn(async () => ({ gatewayUrl: 'wss://gw/v1/stream/i1', token: `tok${getConnectInfo.mock.calls.length}`, iceServers }));
@@ -206,10 +217,76 @@ describe('RemoteBrowser', () => {
     b.move(10, 20);
     expect(b.key(true, { key: 'a', code: 'KeyA' })).toBe(true);
     b.releaseAllKeys();
-    expect(dc.sent.map((x) => new Uint8Array(x)[0])).toEqual([0x01, 0x03, 0x04]);
+    expect(dc.sent).toEqual([]);
+    expect(ws.sent.slice(-3)).toEqual([
+      { t: 'neko', data: { event: 'control/move', payload: { x: 10, y: 20 } } },
+      { t: 'neko', data: { event: 'control/keydown', payload: { keysym: 0x61 } } },
+      { t: 'neko', data: { event: 'control/keyup', payload: { keysym: 0x61 } } },
+    ]);
 
     b.typeText('你好');
-    expect(ws.sent.at(-1)).toEqual({ t: 'ime', text: '你好' });
+    expect(ws.sent.at(-1)).toEqual({ t: 'neko', data: { event: 'control/paste', payload: { text: '你好' } } });
+  });
+
+  it('commits fractional wheel input before reversal, keyboard input, and a changed pointer target', async () => {
+    const { b } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    await readyInput(ws);
+    b.move(10, 20);
+    b.scroll(0, 120);
+    b.scroll(0, 15);
+    b.scroll(0, -1);
+    b.scroll(0, -15);
+    b.key(true, { key: 'a', code: 'KeyA' });
+    b.scroll(0, 120);
+    b.scroll(0, 15);
+    b.move(30, 40);
+    expect(ws.sent.map((frame: any) => [frame.data.event, frame.data.payload])).toEqual([
+      ['control/move', { x: 10, y: 20 }],
+      ['control/scroll', { delta_x: 0, delta_y: -1, control_key: false }],
+      ['control/scroll', { delta_x: 0, delta_y: -1, control_key: false }],
+      ['control/scroll', { delta_x: 0, delta_y: 1, control_key: false }],
+      ['control/scroll', { delta_x: 0, delta_y: 1, control_key: false }],
+      ['control/keydown', { keysym: 0x61 }],
+      ['control/scroll', { delta_x: 0, delta_y: -1, control_key: false }],
+      ['control/scroll', { delta_x: 0, delta_y: -1, control_key: false }],
+      ['control/move', { x: 30, y: 40 }],
+    ]);
+    b.disconnect();
+  });
+
+  it('restores physical holds after Neko atomic paste and preserves held modifiers around toolbar chords', async () => {
+    const { b } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    await readyInput(ws);
+    b.key(true, { key: 'Control', code: 'ControlLeft' });
+    b.paste('中文');
+    b.sendCombo(['Control', 't']);
+    b.key(false, { key: 'Control', code: 'ControlLeft' });
+    expect(ws.sent.map((frame: any) => [frame.data.event, frame.data.payload])).toEqual([
+      ['control/keydown', { keysym: 0xffe3 }],
+      ['control/paste', { text: '中文' }],
+      ['control/keydown', { keysym: 0xffe3 }],
+      ['control/keydown', { keysym: 0x74 }],
+      ['control/keyup', { keysym: 0x74 }],
+      ['control/keyup', { keysym: 0xffe3 }],
+    ]);
+    b.disconnect();
+  });
+
+  it('uses final shifted keysyms and still strokes a toolbar character that was already held', async () => {
+    const { b } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    await readyInput(ws);
+    b.key(true, { key: 't', code: 'KeyT' });
+    b.sendCombo(['Control', 'Shift', 't']);
+    b.key(false, { key: 't', code: 'KeyT' });
+    expect(ws.neko('control/keydown').map((payload: any) => payload.keysym)).toEqual([0x74, 0xffe3, 0xffe1, 0x54, 0x74]);
+    expect(ws.neko('control/keyup').map((payload: any) => payload.keysym)).toEqual([0x74, 0x54, 0xffe1, 0xffe3, 0x74]);
+    b.disconnect();
   });
 
   it('uses all candidates without a TURN relay', async () => {
@@ -226,15 +303,16 @@ describe('RemoteBrowser', () => {
     const { b } = setup();
     await b.connect();
     const ws = FakeWS.all[0]!;
+    await readyInput(ws);
     const down = (keysym: number) => ({ t: 'neko', data: { event: 'control/keydown', payload: { keysym } } });
     const up = (keysym: number) => ({ t: 'neko', data: { event: 'control/keyup', payload: { keysym } } });
     const key = (character: string) => [down(character.charCodeAt(0)), up(character.charCodeAt(0))];
     const shifted = (character: string) => [down(0xffe1), ...key(character), up(0xffe1)];
     b.typeSoftwareText('https://A.co/?q=B_2');
     expect(ws.sent).toEqual([
-      ...key('h'), ...key('t'), ...key('t'), ...key('p'), ...key('s'), ...shifted(';'),
-      ...key('/'), ...key('/'), ...shifted('a'), ...key('.'), ...key('c'), ...key('o'),
-      ...key('/'), ...shifted('/'), ...key('q'), ...key('='), ...shifted('b'), ...shifted('-'), ...key('2'),
+      ...key('h'), ...key('t'), ...key('t'), ...key('p'), ...key('s'), ...shifted(':'),
+      ...key('/'), ...key('/'), ...shifted('A'), ...key('.'), ...key('c'), ...key('o'),
+      ...key('/'), ...shifted('?'), ...key('q'), ...key('='), ...shifted('B'), ...shifted('_'), ...key('2'),
     ]);
     b.disconnect();
   });
@@ -243,6 +321,7 @@ describe('RemoteBrowser', () => {
     const { b } = setup();
     await b.connect();
     const ws = FakeWS.all[0]!;
+    await readyInput(ws);
     b.typeSoftwareText('你好🙂');
     expect(b.softwareKey(true, { key: 'Backspace', code: 'Backspace' })).toBe(true);
     b.softwareKey(false, { key: 'Backspace', code: 'Backspace' });
@@ -261,31 +340,81 @@ describe('RemoteBrowser', () => {
     const { b } = setup();
     await b.connect();
     const ws = FakeWS.all[0]!;
+    await readyInput(ws);
     b.typeSoftwareText('~!@#$%^&*()_+{}|:"<>?\r\n\t');
     const keys = ws.sent.map((frame: any) => [frame.data.event, frame.data.payload.keysym]);
-    const expected = [...'`1234567890-=[]\\;\',./'].flatMap((base) => [
-      ['control/keydown', 0xffe1], ['control/keydown', base.charCodeAt(0)],
-      ['control/keyup', base.charCodeAt(0)], ['control/keyup', 0xffe1],
+    const expected = [...'~!@#$%^&*()_+{}|:"<>?'].flatMap((character) => [
+      ['control/keydown', 0xffe1], ['control/keydown', character.charCodeAt(0)],
+      ['control/keyup', character.charCodeAt(0)], ['control/keyup', 0xffe1],
     ]);
     expected.push(['control/keydown', 0xff0d], ['control/keyup', 0xff0d], ['control/keydown', 0xff09], ['control/keyup', 0xff09]);
     expect(keys).toEqual(expected);
     b.disconnect();
   });
 
-  it('releases software-held keys separately and preserves an existing Shift during text insertion', async () => {
+  it('releases software-held keys before committed text rather than preserving a missing Shift keyup', async () => {
     const { b } = setup();
     await b.connect();
     const ws = FakeWS.all[0]!;
+    await readyInput(ws);
     b.softwareKey(true, { key: 'Shift', code: 'ShiftLeft' });
     b.typeSoftwareText('A');
-    expect(ws.neko('control/keyup')).toEqual([{ keysym: 0x61 }]);
+    expect(ws.neko('control/keyup')).toEqual([{ keysym: 0xffe1 }, { keysym: 0x41 }, { keysym: 0xffe1 }]);
     b.softwareKey(true, { key: 'ArrowLeft', code: 'ArrowLeft' });
     b.releaseAllKeys();
-    expect(ws.neko('control/keyup')).toEqual([{ keysym: 0x61 }, { keysym: 0xff51 }, { keysym: 0xffe1 }]);
+    expect(ws.neko('control/keyup')).toEqual([{ keysym: 0xffe1 }, { keysym: 0x41 }, { keysym: 0xffe1 }, { keysym: 0xff51 }]);
     const count = ws.sent.length;
     b.releaseAllKeys();
     expect(ws.sent).toHaveLength(count);
     expect(b.softwareKey(true, { key: 'Process', code: '' })).toBe(false);
+    b.disconnect();
+  });
+
+  it('reports a failed keyup and releases the keydown already handed to the transport', async () => {
+    const onInputError = vi.fn();
+    const { b } = setup([], { onInputError });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    await readyInput(ws);
+    const send = ws.send.bind(ws);
+    let failKeyup = true;
+    vi.spyOn(ws, 'send').mockImplementation((raw) => {
+      if (failKeyup && JSON.parse(raw).data?.event === 'control/keyup') {
+        failKeyup = false;
+        throw new Error('transport write failed');
+      }
+      send(raw);
+    });
+    b.typeSoftwareText('a');
+    expect(onInputError.mock.calls).toEqual([['transport']]);
+    expect(ws.neko('control/keydown')).toEqual([{ keysym: 0x61 }]);
+    expect(ws.neko('control/keyup')).toEqual([{ keysym: 0x61 }]);
+    const sent = ws.sent.length;
+    b.typeSoftwareText('b');
+    expect(ws.sent).toHaveLength(sent);
+    b.disconnect();
+  });
+
+  it('releases a transmitted key when its keyup is backpressured and the relay reports input failure', async () => {
+    const onInputError = vi.fn();
+    const { b } = setup([], { onInputError });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    await readyInput(ws);
+    const send = ws.send.bind(ws);
+    vi.spyOn(ws, 'send').mockImplementation((raw) => {
+      send(raw);
+      if (JSON.parse(raw).data?.event === 'control/keydown') ws.bufferedAmount = 512 * 1024;
+    });
+    b.typeSoftwareText('a');
+    expect(ws.neko('control/keydown')).toEqual([{ keysym: 0x61 }]);
+    expect(ws.neko('control/keyup')).toEqual([]);
+    ws.push({ t: 'input_error', reason: 'relay unavailable' });
+    expect(onInputError.mock.calls).toEqual([['relay']]);
+    expect(ws.neko('control/keyup')).toEqual([{ keysym: 0x61 }]);
+    ws.bufferedAmount = 0;
+    await tick();
+    expect(ws.neko('control/keyup')).toEqual([{ keysym: 0x61 }]);
     b.disconnect();
   });
 
@@ -495,6 +624,32 @@ describe('RemoteBrowser', () => {
     expect(states.at(-1)).toBe('reconnecting');
     await vi.advanceTimersByTimeAsync(500);
     expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    b.disconnect();
+  });
+
+  it('pauses preconnect input on a negotiation deadline and never replays its queued click', async () => {
+    vi.useFakeTimers();
+    const onInputError = vi.fn();
+    const { b, getConnectInfo } = setup([], { connectionTimeoutMs: 100, onInputError });
+    await b.connect();
+    const old = FakeWS.all[0]!;
+    old.push({ t: 'agent_online' });
+    b.button(true, 0, 100, 100);
+    b.button(false, 0, 100, 100);
+    expect(old.neko('control/buttondown')).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(onInputError).toHaveBeenCalledExactlyOnceWith('disconnected');
+    expect(old.readyState).toBe(3);
+    expect(getConnectInfo).toHaveBeenCalledTimes(1);
+
+    await b.connect(); // An explicit retry starts a fresh queue.
+    const current = FakeWS.all[1]!;
+    current.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    expect(current.neko('control/buttondown')).toEqual([]);
+    expect(current.neko('control/buttonup')).toEqual([]);
     b.disconnect();
   });
 

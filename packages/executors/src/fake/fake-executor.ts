@@ -106,17 +106,25 @@ export class FakeExecutor implements Executor {
 
   private async call<T>(method: keyof Executor, ctx: OpContext, fn: () => Promise<T>): Promise<T> {
     this.authorize(method);
+    await ctx.assertActive?.();
     if (Date.now() > ctx.deadline) throw new ExecutorError('unknown_outcome', `${method}: deadline passed`);
     if (this.delayMs > 0 && MUTATING.has(method)) await new Promise((r) => setTimeout(r, this.delayMs));
+    await ctx.assertActive?.();
     const fault = this.faults(method, ctx);
     if (fault && fault !== 'timeout_after_success') {
       throw new ExecutorError(fault, `${method}: injected ${fault}`);
     }
     const result = await fn();
+    await ctx.assertActive?.();
     if (fault === 'timeout_after_success') {
       throw new ExecutorError('unknown_outcome', `${method}: injected timeout after success`);
     }
     return result;
+  }
+
+  private async update(ctx: OpContext, id: string, changes: Parameters<FakeStore['update']>[1]) {
+    await ctx.assertActive?.();
+    return this.store.update(id, changes);
   }
 
   private authorize(method: keyof Executor) {
@@ -141,7 +149,7 @@ export class FakeExecutor implements Executor {
       // Mirrors the account guardrail that refuses creates without our tags.
       throw new ExecutorError('forbidden', `refusing to create an untagged ${kind}`);
     }
-    return { ...ctx.tags, 'cb:kind': kind };
+    return { ...ctx.tags, 'cb:kind': kind, 'cb:token': ctx.token };
   }
 
   private async mustGet(id: string, kind: ResourceKind): Promise<FakeRecord> {
@@ -184,6 +192,7 @@ export class FakeExecutor implements Executor {
       tags: this.requireTags(ctx, kind),
       createdAt: Date.now(),
     };
+    await ctx.assertActive?.();
     await this.store.insert(rec);
     return rec;
   }
@@ -234,9 +243,9 @@ export class FakeExecutor implements Executor {
       const previous = addr.attrs.nicId as string | undefined;
       if (previous && previous !== rec.id) {
         const old = await this.store.get(previous);
-        if (old) await this.store.update(previous, { attrs: { ...old.attrs, ipAllocationId: undefined } });
+        if (old) await this.update(ctx, previous, { attrs: { ...old.attrs, ipAllocationId: undefined } });
       }
-      await this.store.update(ip.allocationId, { state: 'associated', attrs: { ...addr.attrs, nicId: rec.id } });
+      await this.update(ctx, ip.allocationId, { state: 'associated', attrs: { ...addr.attrs, nicId: rec.id } });
       return { nicId: rec.id, zone: rec.zone! };
     });
   }
@@ -263,7 +272,7 @@ export class FakeExecutor implements Executor {
       const vol = await this.mustGet(volumeId, 'volume');
       this.requireOwner(ctx, vol);
       const size = Number(vol.attrs.sizeGb ?? 0);
-      if (size < sizeGb) await this.store.update(volumeId, { attrs: { ...vol.attrs, sizeGb } });
+      if (size < sizeGb) await this.update(ctx, volumeId, { attrs: { ...vol.attrs, sizeGb } });
       return { state: 'ready' as const, sizeGb: Math.max(size, sizeGb) };
     });
   }
@@ -278,9 +287,9 @@ export class FakeExecutor implements Executor {
       if (next.zone !== vm.zone) throw new ExecutorError('invalid', 'volume and VM are in different zones');
       const current = vm.attrs.volumeId as string;
       if (current === volumeId) return;
-      await this.store.update(current, { state: 'available' });
-      await this.store.update(volumeId, { state: 'in-use' });
-      await this.store.update(vm.id, { attrs: { ...vm.attrs, volumeId } });
+      await this.update(ctx, current, { state: 'available' });
+      await this.update(ctx, volumeId, { state: 'in-use' });
+      await this.update(ctx, vm.id, { attrs: { ...vm.attrs, volumeId } });
     });
   }
 
@@ -295,6 +304,14 @@ export class FakeExecutor implements Executor {
     return this.call('ensureVm', ctx, async () => {
       this.requireOwner(ctx, await this.mustGet(spec.nicId, 'network_interface'));
       this.requireOwner(ctx, await this.mustGet(spec.volumeId, 'volume'));
+      if (!(await this.store.findByToken('vm', ctx.token)) && (spec.maxVmHour !== undefined || spec.instanceTypePrices !== undefined)) {
+        const price = spec.instanceTypePrices?.['fake.large'];
+        if (typeof spec.maxVmHour !== 'number' || !Number.isFinite(spec.maxVmHour) || spec.maxVmHour < 0 ||
+            typeof price !== 'number' || !Number.isFinite(price) || price < 0) {
+          throw new ExecutorError('invalid', 'A valid confirmed VM hourly price and current provider price are required.');
+        }
+        if (price > spec.maxVmHour) throw new ExecutorError('capacity', 'No launch candidate fits the confirmed VM hourly price.');
+      }
       const rec = await this.createOnce(
         ctx,
         'vm',
@@ -311,8 +328,8 @@ export class FakeExecutor implements Executor {
         },
         'i',
       );
-      await this.store.update(spec.volumeId, { state: 'in-use' });
-      await this.store.update(spec.nicId, { state: 'in-use' });
+      await this.update(ctx, spec.volumeId, { state: 'in-use' });
+      await this.update(ctx, spec.nicId, { state: 'in-use' });
       return { vmId: rec.id, zone: rec.zone!, instanceType: 'fake.large', rootVolumeGb: Number(rec.attrs.rootVolumeGb ?? 16) };
     });
   }
@@ -323,17 +340,18 @@ export class FakeExecutor implements Executor {
       this.requireOwner(ctx, nic);
       this.requireOwner(ctx, await this.mustGet(ip.allocationId, 'ip'));
       const previous = nic.attrs.ipAllocationId as string | undefined;
-      if (previous && previous !== ip.allocationId) await this.store.update(previous, { state: 'allocated' });
-      await this.store.update(nicId, { attrs: { ...nic.attrs, ipAllocationId: ip.allocationId } });
+      if (previous && previous !== ip.allocationId) await this.update(ctx, previous, { state: 'allocated' });
+      await this.update(ctx, nicId, { attrs: { ...nic.attrs, ipAllocationId: ip.allocationId } });
       const addr = await this.mustGet(ip.allocationId, 'ip');
-      await this.store.update(ip.allocationId, { state: 'associated', attrs: { ...addr.attrs, nicId } });
+      await this.update(ctx, ip.allocationId, { state: 'associated', attrs: { ...addr.attrs, nicId } });
     });
   }
 
   ensureRunning(ctx: OpContext, p: Placement): Promise<RunState> {
     return this.call('ensureRunning', ctx, async () => {
       const vm = await this.mustGet(p.vmId, 'vm');
-      if (vm.state !== 'running') await this.store.update(vm.id, { state: 'running' });
+      this.requireOwner(ctx, vm);
+      if (vm.state !== 'running') await this.update(ctx, vm.id, { state: 'running' });
       return 'running' as const;
     });
   }
@@ -342,7 +360,8 @@ export class FakeExecutor implements Executor {
     return this.call('ensureStopped', ctx, async () => {
       const vm = await this.store.get(p.vmId);
       if (!vm || vm.state === 'deleted') return 'missing' as const;
-      if (vm.state !== 'stopped') await this.store.update(vm.id, { state: 'stopped' });
+      this.requireOwner(ctx, vm);
+      if (vm.state !== 'stopped') await this.update(ctx, vm.id, { state: 'stopped' });
       return 'stopped' as const;
     });
   }
@@ -381,7 +400,7 @@ export class FakeExecutor implements Executor {
       if (r.kind !== kind) throw new ExecutorError('invalid', `${providerId} is a ${r.kind}, not a ${kind}`);
       this.requireOwner(ctx, r);
       if (r.state === 'deleted') return;
-      await this.store.update(providerId, { state: 'deleted', attrs: {} });
+      await this.update(ctx, providerId, { state: 'deleted', attrs: {} });
       const confirmed = await this.store.get(providerId);
       if (confirmed && confirmed.state !== 'deleted') throw new ExecutorError('retryable', `still waiting for ${providerId} to be deleted`);
     });
@@ -392,7 +411,9 @@ export class FakeExecutor implements Executor {
       const all = await this.store.list(region);
       return all
         .filter((r) => r.state !== 'deleted' && r.tags['cb:managed'] === 'true')
-        .map((r) => ({ providerId: r.id, kind: r.kind, region: r.region, zone: r.zone, state: r.state, tags: r.tags }));
+        .map((r) => ({ providerId: r.id, kind: r.kind, region: r.region, zone: r.zone, state: r.state, tags: r.tags,
+          ...(r.kind === 'volume' && typeof r.attrs.sizeGb === 'number' ? { sizeGb: r.attrs.sizeGb } : {}),
+        }));
     });
   }
 

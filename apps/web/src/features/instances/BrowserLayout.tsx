@@ -6,13 +6,17 @@ import { useI18n } from '../../lib/i18n.js';
 import { useInstance } from './hooks.js';
 import { regionInfo, STATUS_TONE, statusKey } from './status.js';
 import { TrialBadge, TrialNotice } from './Trial.js';
+import { useBilling } from '../billing/hooks.js';
+import { canUseBrowser } from '../billing/access.js';
+import { BalanceRequired } from '../billing/BalanceRequired.js';
 
-/** The browser management area (page 1): one header and three tabs, Settings, Storage & backups and Usage. */
+/** The browser management area (page 1): one header and three tabs, Settings, Storage and Usage. */
 export function BrowserLayout() {
   const { id = '' } = useParams();
   const { t } = useI18n();
   const navigate = useNavigate();
   const instance = useInstance(id);
+  const billing = useBilling();
   if (instance.isPending) return <Skeleton className="h-96" />;
   if (instance.isError) return <p className="text-sm text-error">{t('error.not_found')}</p>;
   const i = instance.data;
@@ -42,11 +46,12 @@ export function BrowserLayout() {
             <TrialBadge trial={i.trial} />
           </div>
         </div>
-        <Button variant="primary" onClick={() => navigate(`/b/${i.id}`)} disabled={i.status === 'deleting' || i.status === 'failed'}>
+        <Button variant="primary" onClick={() => navigate(`/b/${i.id}`)} disabled={i.status === 'deleting' || i.status === 'failed' || !canUseBrowser(billing.data, i)}>
           {i.status === 'sleeping' ? t('browsers.wakeOpen') : t('browsers.open')}
         </Button>
       </div>
       <TrialNotice trial={i.trial} />
+      {i.status !== 'deleting' && i.status !== 'failed' ? <BalanceRequired instance={i} /> : null}
       <nav className="mb-6 flex gap-1 overflow-x-auto border-b border-border" aria-label={i.name}>
         {tabs.map((tab) => (
           <NavLink

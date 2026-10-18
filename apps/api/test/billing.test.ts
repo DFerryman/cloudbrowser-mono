@@ -1,10 +1,11 @@
-import { browserEstimate, customerRates, priceVersion, ProviderPriceSheet } from '@cloudbrowser/contracts';
+import { browserEstimate, customerRates, priceVersion, ProviderPriceSheet, splitUsagePeriod } from '@cloudbrowser/contracts';
 import { meterUsage } from '@cloudbrowser/engine';
-import { createDb } from '@cloudbrowser/db';
+import { createDb, prepaidBalance, reservationQuote } from '@cloudbrowser/db';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { billingSweep } from '../src/billing/sweep.js';
 import { creemFrom } from '../src/billing/creem.js';
+import { applyBalance } from '../src/billing/ledger.js';
 import { setup, signIn, SIMULATED_SHEET } from './helpers.js';
 
 const SECRET = 'whsec_test';
@@ -78,7 +79,7 @@ async function webhook(event: Record<string, unknown>, signature?: string) {
 }
 let n = 0;
 const event = (eventType: string, object: Record<string, unknown>) => ({ id: `evt_${++n}`, eventType, created_at: Date.now(), object });
-const prepaid = () => t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()})`);
+const prepaid = () => t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()}) ON CONFLICT(key) DO UPDATE SET value = 'true'`);
 const quoteVersion = async (regionId: string) => ((await t.call('GET', '/api/v1/pricing')).body.find((p: { regionId: string }) => p.regionId === regionId)?.version ?? 'unavailable') as string;
 const balance = async () => (await t.call('GET', '/api/v1/billing')).body.balanceMicros as number;
 
@@ -216,36 +217,38 @@ describe('prepaid balance', () => {
     expect((await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' , storageGb: 10, priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'a' })).body.type).toBe('account_frozen');
   });
 
-  it('sleeps browsers when the balance runs out, warns, keeps them 30 days, then deletes them', async () => {
+  it('sleeps browsers as available credit runs out, warns, and permanently deletes them after seven days', async () => {
     prepaid();
-    t.d1.sqlite.exec(`INSERT INTO billing_accounts (user_id, balance_micros, updated_at) VALUES ('${userId}', 2000000, ${Date.now()})`);
-    await t.call('POST', '/api/v1/instances', { name: 'w', regionId: 'tyo1' , storageGb: 10, priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'w' });
+    const db = createDb(t.d1 as never);
+    const quote = (await reservationQuote(db, 'tyo1', { storageGb: 10, backupsEnabled: false }))!;
+    await applyBalance(db, { userId, kind: 'adjustment', amountMicros: quote.requiredMicros + 1_000_000, reference: 'retention-credit', actor: 'test' }, new Date());
+    expect((await t.call('POST', '/api/v1/instances', { name: 'w', regionId: 'tyo1' , storageGb: 10, priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'w' })).status).toBe(202);
     await t.settle();
     const [inst] = (await t.call('GET', '/api/v1/instances')).body;
     expect(inst.status).toBe('running');
 
-    const db = createDb(t.d1 as never);
-    t.d1.sqlite.exec(`UPDATE billing_accounts SET balance_micros = 0`);
+    await applyBalance(db, { userId, kind: 'adjustment', amountMicros: -(await prepaidBalance(db, userId)).availableMicros, reference: 'use-available-credit', actor: 'test' }, new Date());
     const engineDeps = (at: number) => ({ db, now: () => new Date(at), notify: () => {} }) as never;
     const start = Date.now();
-    await meterUsage(engineDeps(start)); // runs out: the 10-minute warning starts
+    expect((await meterUsage(engineDeps(start))).stopped).toBe(1);
     const b = (await t.call('GET', '/api/v1/billing')).body;
     expect(b.exhaustedAt).not.toBeNull();
-    expect(Date.parse(b.dataKeptUntil) - start).toBeGreaterThan(29 * 86_400_000);
-    expect((await meterUsage(engineDeps(start + 11 * 60_000))).stopped).toBe(1);
+    expect(Date.parse(b.dataKeptUntil) - start).toBe(7 * 86_400_000);
+    expect(b).toMatchObject({ balanceMicros: quote.requiredMicros, reservedMicros: quote.requiredMicros, availableMicros: 0 });
     await t.env.OPERATIONS.send({ operationId: (t.d1.sqlite.prepare(`SELECT id FROM operations WHERE kind = 'stop'`).get() as { id: string }).id });
     await t.settle();
     expect((await t.call('GET', `/api/v1/instances/${inst.id}`)).body.status).toBe('sleeping');
     expect((await t.call('POST', `/api/v1/instances/${inst.id}/start`, undefined, { 'idempotency-key': 's' })).body.type).toBe('insufficient_balance');
 
-    // Day 1: a notice. Day 30: the browsers are deleted (restorable 7 more days, then purged).
+    // Day 1: a notice. The fixed-resource deposit funds the seven-day retention window.
     const sweep = (days: number) => billingSweep(t.env as never, db, creemFrom(t.env as never), new Date(start + days * 86_400_000), { nightly: false });
     expect((await sweep(1)).notices).toBe(1);
     expect((await sweep(1)).notices).toBe(0);
     expect(t.emails.at(-1)?.text).toMatch(/kept until/);
-    expect((await sweep(30)).deleted).toBe(1);
+    expect((await sweep(7)).deleted).toBe(1);
     await t.settle();
     expect(t.d1.sqlite.prepare(`SELECT desired_state AS d FROM browser_instances`).get()).toEqual({ d: 'deleted' });
+    expect(JSON.parse(String((t.d1.sqlite.prepare("SELECT params FROM operations WHERE kind = 'delete'").get() as { params: string }).params))).toMatchObject({ purgeNow: true });
   });
 
   it('emails once when the balance gets low', async () => {
@@ -265,7 +268,7 @@ describe('prepaid balance', () => {
 });
 
 describe('storage and usage of one browser', () => {
-  it('grows the volume after showing the price, at most once every 6 hours, and never shrinks it', async () => {
+  it('grows the volume after showing the price, up to four times per rolling day, and never shrinks it', async () => {
     const created = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' , storageGb: 10, priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'a' });
     await t.settle();
     const id = created.body.instanceId;
@@ -278,8 +281,14 @@ describe('storage and usage of one browser', () => {
     expect(grown.status).toBe(202);
     await t.settle();
     expect((await t.call('GET', `/api/v1/instances/${id}`)).body.storageGb).toBe(20);
-    expect((await t.call('GET', `/api/v1/instances/${id}/storage`)).body).toMatchObject({ sizeGb: 20, resizable: false, blockedReason: 'cooldown' });
-    expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 30 , priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'g4' })).body.type).toBe('invalid_state');
+    expect((await t.call('GET', `/api/v1/instances/${id}/storage`)).body).toMatchObject({ sizeGb: 20, resizable: true, blockedReason: null });
+    // Completing one change permits the next immediately; the former six-hour delay is gone.
+    for (const sizeGb of [30, 40, 50]) {
+      expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb, priceVersion: await quoteVersion('tyo1') }, { 'idempotency-key': `grow-${sizeGb}` })).status).toBe(202);
+      await t.settle();
+    }
+    expect((await t.call('GET', `/api/v1/instances/${id}/storage`)).body).toMatchObject({ sizeGb: 50, resizable: false, blockedReason: 'cooldown', nextResizeAt: expect.any(String) });
+    expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 60 , priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'g4' })).body.type).toBe('invalid_state');
   });
 
   it('shows what the browser has cost this month and what it costs now', async () => {
@@ -291,7 +300,11 @@ describe('storage and usage of one browser', () => {
     await meterUsage({ db, now: () => new Date(at), notify: () => {} } as never);
     await meterUsage({ db, now: () => new Date(at + 5 * 60_000), notify: () => {} } as never);
     const u = (await t.call('GET', `/api/v1/instances/${id}/usage`)).body;
-    expect(u.items.find((i: { item: string }) => i.item === 'compute')).toMatchObject({ amountMicros: 10_000 });
+    expect(u.items.find((i: { item: string }) => i.item === 'compute')).toMatchObject({ amountMicros: 0 });
+    const recorded = t.d1.sqlite.prepare("SELECT amount_micros AS estimate, cost_micros AS cost, charged_micros AS charged FROM usage_records WHERE item = 'compute'").get() as { estimate: number; cost: number; charged: number };
+    expect(recorded.estimate).toBeGreaterThanOrEqual(10_000);
+    expect(recorded.cost).toBeGreaterThan(0);
+    expect(recorded.charged).toBe(0); // The free pilot shows usage without collecting it.
     expect(u.now).toMatchObject({ runningHourMicros: 120_000 });
     expect(u.now.hourMicros).toBeGreaterThan(120_000);
     const account = (await t.call('GET', '/api/v1/usage')).body;
@@ -321,12 +334,13 @@ describe('free trial', () => {
     await t.settle();
     const id = created.body.instanceId;
     const inst = (await t.call('GET', `/api/v1/instances/${id}`)).body;
-    expect(inst).toMatchObject({ status: 'running', storageGb: 2, backupsEnabled: false, idleTimeoutS: 300, trial: { state: 'active', secondsLeft: 600 } });
+    expect(inst).toMatchObject({ status: 'running', storageGb: 2, idleTimeoutS: 300, trial: { state: 'active', secondsLeft: 600 } });
+    expect(inst).not.toHaveProperty('backupsEnabled');
     // Once per user.
     expect((await t.call('GET', '/api/v1/billing')).body.trial.eligible).toBe(false);
     expect((await t.call('POST', '/api/v1/instances', { name: 'again', regionId: 'syd1', trial: true , storageGb: 2, priceVersion: await quoteVersion('syd1')}, { 'idempotency-key': 't2' })).body.type).toBe('invalid_state');
     // No paid extras during the trial.
-    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { backupsEnabled: true })).body.type).toBe('invalid_state');
+    expect(await t.call('PATCH', `/api/v1/instances/${id}`, { backupsEnabled: true })).toMatchObject({ status: 400, body: { type: 'validation_failed' } });
     expect((await t.call('GET', `/api/v1/instances/${id}/storage`)).body.blockedReason).toBe('trial');
 
     // Metered at cost, charged nothing; after 10 minutes of running it goes to sleep.
@@ -417,6 +431,7 @@ describe('billing failure and concurrency regressions', () => {
     const id = await browser();
     const start = Date.now();
     await meterUsage(at(start));
+    const computeBefore = Number(sqlOne("SELECT coalesce(sum(quantity), 0) AS q FROM usage_records WHERE item = 'compute'").q);
     const original = t.d1.batch.bind(t.d1);
     let release!: () => void;
     let ready!: () => void;
@@ -435,7 +450,7 @@ describe('billing failure and concurrency regressions', () => {
     t.d1.batch = original;
     expect(sqlOne(`SELECT base_metered_at AS cursor FROM instance_health WHERE instance_id = '${id}'`).cursor).toBe(start + 120_000);
     await meterUsage(at(start + 180_000));
-    expect(Number(sqlOne("SELECT quantity AS q FROM usage_records WHERE item = 'compute'").q)).toBeCloseTo(3 / 60, 10);
+    expect(Number(sqlOne("SELECT quantity AS q FROM usage_records WHERE item = 'compute'").q) - computeBefore).toBeCloseTo(3 / 60, 10);
     expect(10_000_000 - await balance()).toBe(charged());
   });
 
@@ -458,7 +473,7 @@ describe('billing failure and concurrency regressions', () => {
     expect(10_000_000 - await balance()).toBe(charged());
   });
 
-  it('uses the existing machine price and root disk size while keeping the customer regional rate', async () => {
+  it('uses the existing machine price times markup and its actual root disk size', async () => {
     const id = await browser();
     const sheet = { ...SIMULATED_SHEET, instanceTypes: { ...SIMULATED_SHEET.instanceTypes, 'old.large': 0.2 } };
     t.d1.sqlite.prepare('UPDATE provider_prices SET sheet = ?').run(JSON.stringify(sheet));
@@ -466,19 +481,21 @@ describe('billing failure and concurrency regressions', () => {
     const start = Date.now();
     await meterUsage(at(start));
     await meterUsage(at(start + 300_000));
-    expect(sqlOne("SELECT unit_price_micros AS price, unit_cost_micros AS cost FROM usage_records WHERE item = 'compute'")).toEqual({ price: 120_000, cost: 200_000 });
-    expect(Number(sqlOne("SELECT quantity AS q FROM usage_records WHERE item = 'storage'").q)).toBeCloseTo(42 * (5 / 60) / 730, 10);
+    expect(sqlOne("SELECT unit_price_micros AS price, unit_cost_micros AS cost FROM usage_records WHERE item = 'compute'")).toEqual({ price: 240_000, cost: 200_000 });
+    const monthFraction = splitUsagePeriod(new Date(start), new Date(start + 300_000)).reduce((sum, p) => sum + p.monthFraction, 0);
+    expect(Number(sqlOne("SELECT quantity AS q FROM usage_records WHERE item = 'storage'").q)).toBeCloseTo(42 * monthFraction, 10);
   });
 
   it('does not invent cost for a known unpriced machine or advance its billing cursor', async () => {
     const id = await browser();
     const start = Date.now();
     await meterUsage(at(start));
+    const chargedBefore = charged();
     t.d1.sqlite.prepare('UPDATE placements SET instance_type = ? WHERE instance_id = ?').run('unknown.large', id);
     await meterUsage(at(start + 60_000));
     await meterUsage(at(start + 120_000));
     expect(sqlOne(`SELECT base_metered_at AS cursor FROM instance_health WHERE instance_id = '${id}'`).cursor).toBe(start);
-    expect(charged()).toBe(0);
+    expect(charged()).toBe(chargedBefore);
     expect(sqlOne("SELECT count(*) AS n FROM alerts WHERE dedupe_key LIKE 'machine-price:%'").n).toBe(1);
   });
 
@@ -489,13 +506,14 @@ describe('billing failure and concurrency regressions', () => {
     await meterUsage(at(start));
     await meterUsage(at(start + 300_000));
     const before = Number(sqlOne("SELECT quantity AS q FROM usage_records WHERE item = 'storage'").q);
-    expect(before).toBeCloseTo(26 * (5 / 60) / 730, 10);
+    const monthFraction = (from: number, to: number) => splitUsagePeriod(new Date(from), new Date(to)).reduce((sum, p) => sum + p.monthFraction, 0);
+    expect(before).toBeCloseTo(26 * monthFraction(start, start + 300_000), 10);
     expect(charged()).toBe(0);
     expect(await balance()).toBe(10_000_000);
     expect(Number(sqlOne('SELECT sum(cost_micros) AS c FROM usage_records').c)).toBeGreaterThan(0);
     t.d1.sqlite.prepare("UPDATE resources SET state = 'deleted' WHERE instance_id = ? AND kind = 'vm'").run(id);
     await meterUsage(at(start + 600_000));
-    expect(Number(sqlOne("SELECT quantity AS q FROM usage_records WHERE item = 'storage'").q) - before).toBeCloseTo(10 * (5 / 60) / 730, 10);
+    expect(Number(sqlOne("SELECT quantity AS q FROM usage_records WHERE item = 'storage'").q) - before).toBeCloseTo(10 * monthFraction(start + 300_000, start + 600_000), 10);
     const cost = Number(sqlOne('SELECT sum(cost_micros) AS c FROM usage_records').c);
     t.d1.sqlite.prepare("UPDATE resources SET state = 'deleted' WHERE instance_id = ?").run(id);
     await meterUsage(at(start + 900_000));
@@ -503,10 +521,13 @@ describe('billing failure and concurrency regressions', () => {
     expect(await balance()).toBe(10_000_000);
   });
 
-  it('saves a browser if its owner adds credit while a 30-day deletion sweep is admitting work', async () => {
+  it('saves a browser if its owner funds the deposit while a seven-day deletion sweep is admitting work', async () => {
     const id = await browser();
     const now = Date.now();
-    t.d1.sqlite.prepare('UPDATE billing_accounts SET balance_micros = 0, exhausted_at = ?').run(now - 31 * 86_400_000);
+    expect((await t.call('POST', `/api/v1/instances/${id}/stop`, undefined, { 'idempotency-key': 'before-retention' })).status).toBe(202);
+    await t.settle();
+    await applyBalance(db(), { userId, kind: 'adjustment', amountMicros: -(await prepaidBalance(db(), userId)).availableMicros, reference: 'race-exhaust', actor: 'test' }, new Date(now));
+    await meterUsage(at(now));
     const original = t.d1.batch.bind(t.d1);
     let topped = false;
     t.d1.batch = (async (statements: D1PreparedStatement[]) => {
@@ -517,8 +538,14 @@ describe('billing failure and concurrency regressions', () => {
       }
       return original(statements);
     }) as typeof t.d1.batch;
-    expect((await billingSweep(t.env as never, db(), null, new Date(now), { nightly: false })).deleted).toBe(0);
-    expect(sqlOne(`SELECT desired_state AS state FROM browser_instances WHERE id = '${id}'`).state).toBe('running');
+    try {
+      expect((await billingSweep(t.env as never, db(), null, new Date(now + 7 * 86_400_000), { nightly: false })).deleted).toBe(0);
+    } finally {
+      t.d1.batch = original;
+    }
+    expect(topped).toBe(true); // The sweep really selected an expired hold before the top-up.
+    expect(sqlOne(`SELECT desired_state AS state FROM browser_instances WHERE id = '${id}'`).state).toBe('stopped');
+    expect(sqlOne(`SELECT retention_started_at AS at FROM browser_reservations WHERE instance_id = '${id}'`).at).toBeNull();
     expect(sqlOne("SELECT count(*) AS n FROM operations WHERE kind = 'delete'").n).toBe(0);
   });
 });

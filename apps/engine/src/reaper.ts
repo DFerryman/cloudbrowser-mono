@@ -19,6 +19,12 @@ export async function reaperTick(deps: EngineDeps) {
   const now = deps.now();
   const summary = { purgesQueued: 0, purgesRun: 0, failedCleanups: 0, released: 0, orphans: 0, backupsExpired: 0 };
 
+  // A delayed provider response or reconciler adoption can expose an owned resource after a
+  // previous purge. Reopen cleanup instead of leaving it behind under a tombstoned browser.
+  await db.update(browserInstances).set({ status: 'deleting', purgeAfter: now, updatedAt: now }).where(and(
+    eq(browserInstances.status, 'purged'),
+    sql`exists(select 1 from resources where instance_id = ${browserInstances.id} and state <> 'deleted')`,
+  ));
   // 1. Permanent user deletions are eligible immediately; system recovery windows keep their deadline.
   const expired = await db
     .select({ id: browserInstances.id, userId: browserInstances.userId })
@@ -46,6 +52,7 @@ export async function reaperTick(deps: EngineDeps) {
     .from(browserInstances)
     .where(eq(browserInstances.status, 'failed'));
   for (const inst of failed) {
+    await db.update(schema.browserReservations).set({ reservedMicros: 0, updatedAt: now }).where(eq(schema.browserReservations.instanceId, inst.id));
     const kinds = await db
       .selectDistinct({ executor: resources.executor })
       .from(resources)

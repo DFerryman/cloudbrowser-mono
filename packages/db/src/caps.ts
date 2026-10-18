@@ -26,7 +26,7 @@ export async function billingRequired(db: Db): Promise<boolean> {
     .select()
     .from(schema.controlFlags)
     .where(eq(schema.controlFlags.key, 'billing_required'));
-  return flag?.value === 'true';
+  return flag?.value !== 'false';
 }
 
 /** Calendar month (UTC) of a date, e.g. 2026-10. */

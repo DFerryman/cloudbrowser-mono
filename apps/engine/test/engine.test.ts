@@ -1,4 +1,5 @@
-import { createDb, operationRow, schema, type Db } from '@cloudbrowser/db';
+import { createDb, operationRow, prepaidBalance, reservationQuote, schema, type Db } from '@cloudbrowser/db';
+import { splitUsagePeriod } from '@cloudbrowser/contracts';
 import { createTestD1 } from '@cloudbrowser/db/testing';
 import { ExecutorError, FakeExecutor, MemoryFakeStore, type Executor, type FaultPlan } from '@cloudbrowser/executors';
 import { and, eq, ne } from 'drizzle-orm';
@@ -145,6 +146,17 @@ beforeEach(async () => {
   w = new World();
   await w.seedUser();
 });
+
+/** Existing provider snapshots still need restore/cleanup coverage after public snapshots retire. */
+async function legacySnapshot() {
+  const { snapshotVolume } = await import('../src/steps.js');
+  const deps = w.deps();
+  const placement = (await w.placement())!;
+  await snapshotVolume({ deps, executor: deps.executor('fake'), instance: { id: 'inst1' },
+    tags: (kind, generation) => ({ ...readContext('legacy-snapshot', 'test').tags, 'cb:instance': 'inst1', 'cb:gen': String(generation), 'cb:kind': kind }),
+  }, placement, 'legacy', 'legacy-snapshot-fixture');
+  return (await w.db.select().from(backups).where(eq(backups.kind, 'snapshot')))[0]!;
+}
 
 describe('create', () => {
   it('creates one VM, interface, volume and IP, verifies the IP and ends running', async () => {
@@ -325,10 +337,8 @@ describe('lifecycle', () => {
 
   it('changes the IP only on request, and keeps the old one for 30 days', async () => {
     const before = (await w.placement())!.ipAddress!;
-    w.random = (() => {
-      let x = 0.9;
-      return () => (x = (x + 0.37) % 1);
-    })();
+    const nextOctet = Number(before.split('.').at(-1)) === 1 ? 2 : 1;
+    w.random = () => (nextOctet - 0.5) / 254;
     expect(await w.settle(await w.enqueue('inst1', 'change_ip'))).toEqual({ state: 'succeeded' });
     const after = (await w.placement())!.ipAddress!;
     expect(after).not.toBe(before);
@@ -514,14 +524,12 @@ describe('backups, restore and recover', () => {
     return w.db.select().from(placements).where(eq(placements.instanceId, 'inst1'));
   }
 
-  it('takes one provider snapshot a day and restores it while the browser sleeps', async () => {
+  it('does not schedule new snapshots but can restore an existing legacy snapshot while asleep', async () => {
     const { dailySnapshots } = await import('../src/scheduler.js');
-    // Snapshots are billed, so they are off until the owner turns them on.
     expect(await dailySnapshots(w.deps())).toBe(0);
     await w.db.update(browserInstances).set({ backupsEnabled: true }).where(eq(browserInstances.id, 'inst1'));
-    expect(await dailySnapshots(w.deps())).toBe(1);
-    expect(await dailySnapshots(w.deps())).toBe(0); // not again within 23 h
-    const [snap] = await w.db.select().from(backups);
+    expect(await dailySnapshots(w.deps())).toBe(0); // An old database flag cannot resume the retired feature.
+    const snap = await legacySnapshot();
     expect(snap?.kind).toBe('snapshot');
 
     const restoreWhileRunning = await w.enqueue('inst1', 'restore');
@@ -648,7 +656,7 @@ describe('metering and the prepaid balance', () => {
     (await w.db.select().from(operations).where(eq(operations.kind, 'stop'))).map((o) => (o.params as { reason?: string }).reason);
   const usage = async (item: string) => (await w.db.select().from(usageRecords).where(eq(usageRecords.item, item)))[0];
   const balance = async () => (await w.db.select().from(billingAccounts).where(eq(billingAccounts.userId, 'u1')))[0];
-  const prepaid = () => w.db.insert(controlFlags).values({ key: 'billing_required', value: 'true', updatedAt: w.clock });
+  const prepaid = () => w.db.insert(controlFlags).values({ key: 'billing_required', value: 'true', updatedAt: w.clock }).onConflictDoUpdate({ target: controlFlags.key, set: { value: 'true' } });
   const meter = async () => (await import('../src/metering.js')).meterUsage(w.deps());
 
   it('stores each region’s price sheet from the provider and prices the ledger with it', async () => {
@@ -669,11 +677,13 @@ describe('metering and the prepaid balance', () => {
     await meter();
     w.advance(5 * 60_000);
     await meter();
-    // 10 minutes running at $0.10/h × 120% = 2,000 micro-dollars.
+    // 10 minutes running at $0.10/h × 120% = 20,000 micro-dollars.
     expect(await usage('compute')).toMatchObject({ unitPriceMicros: 120_000, unitCostMicros: 100_000, amountMicros: 20_000, costMicros: 16_667 });
     expect((await usage('ip'))?.amountMicros).toBe(1_000); // $0.006/h for 10 minutes
     // (10 GB data + 16 GB system) × $0.096/GB-month for 10 minutes.
-    expect((await usage('storage'))?.amountMicros).toBe(Math.round((26 * 96_000) / 730 / 6));
+    const monthHours = new Date(Date.UTC(w.clock.getUTCFullYear(), w.clock.getUTCMonth() + 1, 1)).getTime()
+      - new Date(Date.UTC(w.clock.getUTCFullYear(), w.clock.getUTCMonth(), 1)).getTime();
+    expect((await usage('storage'))?.amountMicros).toBe(Math.round(26 * 96_000 * (10 * 60_000) / monthHours));
     expect(await usage('snapshot')).toBeUndefined(); // off by default
 
     await w.settle(await w.enqueue('inst1', 'stop'));
@@ -710,30 +720,37 @@ describe('metering and the prepaid balance', () => {
     expect(await usage('compute')).toMatchObject({ unitPriceMicros: 150_000, unitCostMicros: 100_000 });
   });
 
-  it('takes usage from the balance, warns when it runs out and puts browsers to sleep 10 minutes later', async () => {
+  it('spends only available credit, immediately stops at exhaustion and retains the funded fixed-resource deposit', async () => {
+    const { applyBalance } = await import('../../api/src/billing/ledger.js');
+    const quote = (await reservationQuote(w.db, 'tyo1', { storageGb: 10, backupsEnabled: false }, w.clock))!;
+    await applyBalance(w.db, { userId: 'u1', kind: 'adjustment', amountMicros: quote.requiredMicros + 1_000_000, reference: 'fund-deposit', actor: 'test' }, w.clock);
     await prepaid();
-    await w.db.insert(billingAccounts).values({ userId: 'u1', balanceMicros: 15_000, updatedAt: w.clock });
     await meter();
+    expect((await prepaidBalance(w.db, 'u1')).reservedMicros).toBe(quote.requiredMicros);
+    await applyBalance(w.db, { userId: 'u1', kind: 'adjustment', amountMicros: -985_000, reference: 'prior-paid-usage', actor: 'test' }, w.clock);
     w.advance(5 * 60_000);
     await meter(); // 10,000 compute + IP and storage
-    expect((await balance())!.balanceMicros).toBeLessThan(5_000);
+    expect((await prepaidBalance(w.db, 'u1')).availableMicros).toBeLessThan(5_000);
     expect((await balance())!.exhaustedAt).toBeNull();
     w.advance(5 * 60_000);
     await meter(); // runs out
-    expect((await balance())!.balanceMicros).toBeLessThan(0);
+    expect(await prepaidBalance(w.db, 'u1')).toMatchObject({ balanceMicros: quote.requiredMicros, reservedMicros: quote.requiredMicros, availableMicros: 0 });
     expect((await balance())!.exhaustedAt).toEqual(w.clock);
-    expect(await stopReasons()).toEqual([]);
-    w.advance(9 * 60_000);
-    await meter();
-    expect(await stopReasons()).toEqual([]);
+    expect(await stopReasons()).toEqual(['balance']);
+    const [reservation] = await w.db.select().from(schema.browserReservations);
+    expect(reservation).toMatchObject({ retentionStartedAt: w.clock, retentionEndsAt: new Date(w.clock.getTime() + 7 * 86_400_000) });
+    const [stop] = await w.db.select().from(operations).where(eq(operations.kind, 'stop'));
+    await w.settle(stop!.id);
     w.advance(60_000);
     await meter();
-    expect(await stopReasons()).toEqual(['balance']);
+    expect((await prepaidBalance(w.db, 'u1')).availableMicros).toBe(0);
+    expect((await balance())!.balanceMicros).toBeLessThan(quote.requiredMicros);
+    expect((await balance())!.balanceMicros).toBeGreaterThan(0);
 
-    // A top-up clears the clock.
-    await w.db.update(billingAccounts).set({ balanceMicros: 5_000_000 }).where(eq(billingAccounts.userId, 'u1'));
-    await meter();
+    // A real sufficient top-up refills the deposit and clears retention atomically.
+    await applyBalance(w.db, { userId: 'u1', kind: 'adjustment', amountMicros: 5_000_000, reference: 'restore-credit', actor: 'test' }, w.clock);
     expect((await balance())!.exhaustedAt).toBeNull();
+    expect((await w.db.select().from(schema.browserReservations))[0]).toMatchObject({ reservedMicros: quote.requiredMicros, retentionStartedAt: null, retentionEndsAt: null });
   });
 
   it('puts a frozen account’s browsers to sleep at once', async () => {
@@ -742,17 +759,21 @@ describe('metering and the prepaid balance', () => {
     expect(await stopReasons()).toEqual(['frozen']);
   });
 
-  it('charges snapshots only while they are on and exist, and deletes them when turned off', async () => {
+  it('records the cost of existing snapshots without charging users and deletes them when turned off', async () => {
     const { dailySnapshots } = await import('../src/scheduler.js');
     await w.db.update(browserInstances).set({ backupsEnabled: true }).where(eq(browserInstances.id, 'inst1'));
     await meter();
     w.advance(60 * 60_000);
     await meter();
     expect(await usage('snapshot')).toBeUndefined(); // on, but no snapshot yet
-    expect(await dailySnapshots(w.deps())).toBe(1);
+    expect(await dailySnapshots(w.deps())).toBe(0);
+    await legacySnapshot();
+    const snapshotStart = w.clock;
     w.advance(5 * 60_000);
     await meter();
-    expect((await usage('snapshot'))?.amountMicros).toBe(Math.round((10 * 60_000) / 730 / 12)); // 10 GB × $0.06 for 5 minutes
+    const fraction = splitUsagePeriod(snapshotStart, w.clock).reduce((sum, p) => sum + p.monthFraction, 0);
+    expect(await usage('snapshot')).toMatchObject({ amountMicros: 0, chargedMicros: 0, costMicros: Math.round(10 * 50_000 * fraction) });
+    expect((await usage('snapshot'))?.costMicros).toBeGreaterThan(0);
 
     await w.db.update(browserInstances).set({ backupsEnabled: false }).where(eq(browserInstances.id, 'inst1'));
     await reaperTick(w.deps('reaper'));
@@ -851,6 +872,11 @@ describe('on the aws-ec2 executor', () => {
         sleep: async () => {},
         pollMs: 1,
       });
+
+    // Real launch admission needs a provider price sheet, including every configured fallback.
+    const simulated = await w.executor('runtime').prices(readContext('prices', 'test'), 'ap-northeast-1');
+    const sheet = { ...simulated, source: 'aws-price-list' as const, instanceType: 'c7i-flex.large', vmHour: 0.11, instanceTypes: { 'c7i-flex.large': 0.11, 'c6i.large': 0.1, 'c5.large': 0.1 } };
+    await w.db.insert(schema.providerPrices).values({ regionId: 'tyo1', executor: 'aws-ec2', providerRegion: 'ap-northeast-1', sheet, fetchedAt: w.clock });
 
     expect(await w.settle(await w.newInstance())).toEqual({ state: 'succeeded' });
     const p = (await w.placement())!;

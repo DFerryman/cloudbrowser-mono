@@ -1,7 +1,8 @@
 import type { AgentCommandKind } from '@cloudbrowser/contracts';
 import { schema, type AgentCommandsMessage, type Db } from '@cloudbrowser/db';
 import type { Executor, OpContext, Placement } from '@cloudbrowser/executors';
-import { and, eq, gte } from 'drizzle-orm';
+import { fencedInsert } from './fencing.js';
+import { and, eq, gte, sql } from 'drizzle-orm';
 
 const { agentCommands, instanceHealth } = schema;
 
@@ -62,10 +63,10 @@ export class GatewayAgentBridge implements AgentBridge {
   }
 
   async send(cmd: AgentCommand) {
-    await this.db
-      .insert(agentCommands)
-      .values({ id: cmd.id, instanceId: cmd.instanceId, kind: cmd.kind, payload: cmd.payload, status: 'pending', createdAt: this.now() })
-      .onConflictDoNothing();
+    const prefix = cmd.id.split(':')[0]!;
+    const fence = !cmd.id.includes(':') || cmd.id.startsWith('ipcheck:') ? sql`1` :
+      sql`exists(select 1 from operations where id = ${prefix} and instance_id = ${cmd.instanceId} and finished_at is null)`;
+    await fencedInsert(this.db, 'agent_commands', { id: cmd.id, instance_id: cmd.instanceId, kind: cmd.kind, payload: cmd.payload, status: 'pending', created_at: this.now() }, fence);
     const [row] = await this.db.select({ status: agentCommands.status }).from(agentCommands).where(eq(agentCommands.id, cmd.id));
     if (row?.status === 'pending') await this.poke({ instanceId: cmd.instanceId });
   }

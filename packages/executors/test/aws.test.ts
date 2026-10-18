@@ -545,4 +545,37 @@ describe('aws-ec2 storage growth', () => {
     expect(await ex.resizeVolume(ctx('resize'), REGION, vol.volumeId, 30)).toEqual({ state: 'ready', sizeGb: 40 });
     expect(ec2.calls.filter((c) => c.action === 'ModifyVolume')).toHaveLength(1);
   });
+
+  it('waits for the prior modification to complete before submitting a different target', async () => {
+    const { ex, ec2 } = setup();
+    const { vol } = await create(ex);
+    await ex.resizeVolume(ctx('resize'), REGION, vol.volumeId, 40);
+    ec2.modifications[0]!.state = 'optimizing';
+    expect(await ex.resizeVolume(ctx('same'), REGION, vol.volumeId, 40)).toEqual({ state: 'ready', sizeGb: 40 });
+    expect(await ex.resizeVolume(ctx('next'), REGION, vol.volumeId, 50)).toEqual({ state: 'pending', sizeGb: 50 });
+    expect(ec2.calls.filter((c) => c.action === 'ModifyVolume')).toHaveLength(1);
+    ec2.modifications[0]!.state = 'completed';
+    expect(await ex.resizeVolume(ctx('next'), REGION, vol.volumeId, 50)).toEqual({ state: 'pending', sizeGb: 50 });
+    expect(ec2.calls.filter((c) => c.action === 'ModifyVolume')).toHaveLength(2);
+    expect(ec2.calls.some((c) => ['StopInstances', 'StartInstances', 'DetachVolume', 'CreateSnapshot'].includes(c.action))).toBe(false);
+  });
+
+  it('checks volume ownership even when an accepted modification already has the requested size', async () => {
+    const { ex, ec2 } = setup();
+    const { vol } = await create(ex);
+    await ex.resizeVolume(ctx('resize'), REGION, vol.volumeId, 40);
+    ec2.modifications[0]!.state = 'optimizing';
+    const other = { ...ctx('foreign'), tags: { ...ctx('foreign').tags, 'cb:instance': 'other-user-browser' } };
+    await expect(ex.resizeVolume(other, REGION, vol.volumeId, 40)).rejects.toMatchObject({ errorClass: 'forbidden' });
+    expect(ec2.calls.filter((c) => c.action === 'ModifyVolume')).toHaveLength(1);
+  });
+
+  it('does not treat an unknown modification state as usable capacity', async () => {
+    const { ex, ec2 } = setup();
+    const { vol } = await create(ex);
+    await ex.resizeVolume(ctx('resize'), REGION, vol.volumeId, 40);
+    ec2.modifications[0]!.state = 'unknown';
+    await expect(ex.resizeVolume(ctx('resize'), REGION, vol.volumeId, 40)).rejects.toMatchObject({ errorClass: 'retryable' });
+    expect(ec2.calls.filter((c) => c.action === 'ModifyVolume')).toHaveLength(1);
+  });
 });

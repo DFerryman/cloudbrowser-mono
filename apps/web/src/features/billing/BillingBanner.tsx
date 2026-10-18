@@ -12,11 +12,10 @@ export function BillingBanner() {
   let message: string | null = null;
   let urgent = true;
   if (b.frozen) message = t('banner.frozen');
-  else if (b.mode === 'pilot') return null;
   else if (b.dataKeptUntil) message = t('banner.kept', { date: new Date(b.dataKeptUntil).toLocaleDateString(locale) });
   else if (b.exhaustedAt) message = t('banner.exhausted');
-  else if (b.balanceMicros <= b.lowBalanceMicros) {
-    message = t('banner.low', { amount: money(b.balanceMicros, locale) });
+  else if ((b.availableMicros ?? 0) <= b.lowBalanceMicros) {
+    message = t('banner.low', { amount: money(b.availableMicros ?? 0, locale) });
     urgent = false;
   }
   if (!message) return null;

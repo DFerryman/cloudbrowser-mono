@@ -1,11 +1,10 @@
-import { eventRow, operationRow, raiseAlert, schema } from '@cloudbrowser/db';
+import { settleRunningStatements, eventRow, operationRow, raiseAlert, reservedTotalSql, schema } from '@cloudbrowser/db';
 import type { ExecutorKind } from '@cloudbrowser/executors';
-import { and, asc, eq, gte, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
 import { placementRef, readContext, type EngineDeps } from './context.js';
 import { runOperation } from './runner.js';
-import { snapshotVolume } from './steps.js';
 
-const { operations, browserInstances, instanceHealth, viewerSessions, placements, events, auditLog, backups } = schema;
+const { operations, browserInstances, instanceHealth, viewerSessions, placements, events, auditLog, billingAccounts, browserReservations } = schema;
 
 /** Runs every operation that is due and not leased by another worker. */
 export async function runPending(deps: EngineDeps, limit = 20): Promise<number> {
@@ -40,8 +39,22 @@ export async function requestStop(deps: EngineDeps, inst: { id: string; userId: 
   const { db } = deps;
   const now = deps.now();
   const row = operationRow({ instanceId: inst.id, userId: null, kind: 'stop', params: { reason }, now });
+  // Recheck the reason with the stop admission: inventory or billing reads can race a wake,
+  // top-up or trial conversion. Aborting the batch also prevents a stray unfinished operation.
+  const reasonStillApplies = reason === 'intent_reconcile' ? sql`${browserInstances.desiredState} = 'stopped'`
+    : reason === 'trial' ? sql`${browserInstances.trialState} = 'ended'`
+    : reason === 'frozen' ? sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${inst.userId} AND ${billingAccounts.frozenAt} IS NOT NULL)`
+    : reason === 'balance' ? sql`(${browserInstances.trialState} IS NULL OR ${browserInstances.trialState} = 'converted') AND (
+      NOT EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${inst.userId} AND ${billingAccounts.balanceMicros} - ${reservedTotalSql(inst.userId)} > 0)
+      OR NOT EXISTS (SELECT 1 FROM ${browserReservations} WHERE ${browserReservations.instanceId} = ${inst.id} AND ${browserReservations.retentionStartedAt} IS NULL AND ${browserReservations.reservedMicros} >= ${browserReservations.requiredMicros}))`
+    : sql`1`;
+
   try {
     await db.batch([
+      db.insert(auditLog).values({ actor: 'engine', action: 'operation.stop.guard', target: `instance:${inst.id}`,
+        createdAt: sql`CASE WHEN EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${inst.id} AND ${browserInstances.desiredState} <> 'deleted' AND ${browserInstances.status} <> 'purged' AND (${reasonStillApplies})) THEN ${now.getTime()} ELSE NULL END`,
+      }),
+      ...settleRunningStatements(db, inst.id, now),
       db.insert(operations).values(row),
       db.update(browserInstances).set({ desiredState: 'stopped', updatedAt: now }).where(eq(browserInstances.id, inst.id)),
       db.insert(events).values(eventRow(inst.userId, 'operation.updated', { operationId: row.id, instanceId: inst.id }, now)),
@@ -140,7 +153,7 @@ function pauseNetwork(deps: EngineDeps, instanceId: string, detail: Record<strin
     db
       .update(browserInstances)
       .set({ status: 'needs_attention', statusReason: 'Network paused while we check your dedicated IP.', updatedAt: at })
-      .where(eq(browserInstances.id, instanceId)),
+      .where(and(eq(browserInstances.id, instanceId), eq(browserInstances.desiredState, 'running'), eq(browserInstances.status, 'running'))),
     db.insert(auditLog).values({ actor: 'engine', action: 'ip.check_failed', target: `instance:${instanceId}`, detail, createdAt: at }),
   ] as const;
 }
@@ -219,48 +232,7 @@ export async function periodicIpChecks(deps: EngineDeps) {
 }
 
 
-/**
- * Daily provider snapshot of the volume of every browser whose owner turned snapshots on (page 4;
- * they are billed per GB-month, so they are off by default). The engine takes them rather than AWS
- * Data Lifecycle Manager so they are in the ledger and follow each browser's setting. Runs hourly
- * and skips volumes snapshotted within the last 23 hours.
- */
-export async function dailySnapshots(deps: EngineDeps): Promise<number> {
-  const { db } = deps;
-  const now = deps.now();
-  const rows = await db
-    .select({ inst: browserInstances, placement: placements })
-    .from(browserInstances)
-    .innerJoin(placements, and(eq(placements.instanceId, browserInstances.id), eq(placements.status, 'current')))
-    .where(and(eq(browserInstances.backupsEnabled, true), inArray(browserInstances.status, ['running', 'sleeping', 'needs_attention', 'waiting_capacity'])));
-  let taken = 0;
-  for (const { inst, placement } of rows) {
-    const [recent] = await db
-      .select({ id: backups.id })
-      .from(backups)
-      .where(and(eq(backups.instanceId, inst.id), eq(backups.kind, 'snapshot'), gte(backups.createdAt, new Date(now.getTime() - 23 * 3_600_000))));
-    if (recent) continue;
-    const executor = deps.executor(placement.executor as ExecutorKind);
-    const tags = (kind: string, generation: number) => ({
-      'cb:managed': 'true' as const,
-      'cb:env': deps.envName,
-      'cb:instance': inst.id,
-      'cb:op': 'daily-snapshot',
-      'cb:gen': String(generation),
-      'cb:kind': kind as never,
-    });
-    try {
-      await snapshotVolume(
-        { deps, executor, instance: inst, op: null, tags },
-        placement,
-        'daily',
-        `daily:${inst.id}:${now.toISOString().slice(0, 10)}`,
-      );
-      taken++;
-    } catch (e) {
-      console.error('daily snapshot failed', inst.id, e);
-    }
-  }
-  return taken;
+/** Kept for internal callers upgrading from older engine builds. Public daily snapshots are removed. */
+export async function dailySnapshots(_deps: EngineDeps): Promise<number> {
+  return 0;
 }
-

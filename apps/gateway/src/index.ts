@@ -71,6 +71,14 @@ export default {
 
 /** Only a trusted service binding can invoke this entrypoint; no public management URL exists. */
 export class Internal extends WorkerEntrypoint<Env> {
+  async revokeViewers(instanceId: string): Promise<void> {
+    if (!/^[A-Za-z0-9]+$/.test(instanceId)) throw new Error('invalid instance id');
+    const response = await stub(this.env, instanceId).fetch('https://gateway/revoke-viewers', {
+      method: 'POST', headers: { 'x-cb-instance': instanceId },
+    });
+    if (!response.ok) throw new Error('gateway viewer revocation failed');
+  }
+
   async revokeInstance(instanceId: string): Promise<void> {
     if (!/^[A-Za-z0-9]+$/.test(instanceId)) throw new Error('invalid instance id');
     const response = await stub(this.env, instanceId).fetch('https://gateway/revoke', {
