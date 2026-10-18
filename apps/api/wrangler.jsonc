@@ -23,9 +23,9 @@
     "GATEWAY_URL": "wss://connect.nevazu.com",
     // Prepaid top-ups with Creem (page 6). Off until the API base, the top-up product ids and the
     // secrets CREEM_API_KEY and CREEM_WEBHOOK_SECRET are all set. Test mode: https://test-api.creem.io
-    "CREEM_API_BASE": "",
+    "CREEM_API_BASE": "https://test-api.creem.io",
     // Comma-separated ids of one-time USD products, one per top-up amount (e.g. $10, $25, $50).
-    "CREEM_TOPUP_PRODUCTS": "",
+    "CREEM_TOPUP_PRODUCTS": "prod_6x6SPeSN7qccKr9yDQUPoV",
     // Independent operator origin, protected by Cloudflare Access email OTP.
     // Keep the Access policy and server-side email allowlist in sync. No IP restriction.
     "ADMIN_URL": "https://admin.console.nevazu.com",
