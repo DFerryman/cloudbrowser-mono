@@ -172,6 +172,11 @@ pnpm exec wrangler secret put ALERT_WEBHOOK_URL    # Slack-compatible incoming w
 and `ALERT_EMAILS` in `apps/api/wrangler.jsonc` (comma-separated; Email Service must be able to
 send to them).
 
+## 3d. Real browsers on AWS
+
+Browsers run on the simulator until a region is switched to `aws-ec2`. The AWS account, the
+CloudFormation stack, the access keys and the images are in [docs/aws.md](aws.md).
+
 ## 4. Migrate and deploy
 
 ```bash

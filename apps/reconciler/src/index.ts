@@ -1,9 +1,9 @@
 /** The reconciler Worker: checks the ledger against each provider with read-only credentials. */
 import { createDb } from '@cloudbrowser/db';
-import { createExecutor, type Executor, type ExecutorKind } from '@cloudbrowser/executors';
+import { createExecutor, type Executor, type ExecutorEnv, type ExecutorKind } from '@cloudbrowser/executors';
 import { reconcileLedger, snapshotQuotasAndSpend, type ReconcilerDeps } from './reconcile.js';
 
-export interface Env {
+export interface Env extends Pick<ExecutorEnv, 'AWS_ACCESS_KEY_ID' | 'AWS_SECRET_ACCESS_KEY' | 'AWS_REGIONS'> {
   DB: D1Database;
   ENV_NAME?: string;
 }
@@ -16,7 +16,16 @@ function makeDeps(env: Env): ReconcilerDeps {
     now: () => new Date(),
     executor(kind) {
       let ex = cache.get(kind);
-      if (!ex) cache.set(kind, (ex = createExecutor(kind, 'readonly', { FAKE_PROVIDER_DB: env.DB })));
+      if (!ex) {
+        // aws-ec2: the read-only IAM user's key.
+        ex = createExecutor(kind, 'readonly', {
+          FAKE_PROVIDER_DB: env.DB,
+          AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID,
+          AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY,
+          AWS_REGIONS: env.AWS_REGIONS,
+        });
+        cache.set(kind, ex);
+      }
       return ex;
     },
   };

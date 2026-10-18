@@ -1,0 +1,23 @@
+[Unit]
+Description=CloudBrowser agent
+# Wants (not Requires): the agent stops and starts the browser container itself.
+Wants=cloudbrowser-browser.service network-online.target
+After=cloudbrowser-browser.service network-online.target
+
+[Service]
+EnvironmentFile=/etc/cloudbrowser/cloudbrowser.env
+ExecStart=/usr/local/bin/cloudbrowser-agent \
+  --user-data /etc/cloudbrowser/agent.json \
+  --state-dir /var/lib/cloudbrowser \
+  --profile-dir /data/browser/profile \
+  --nft-dir /etc/cloudbrowser/nft \
+  --echo ${ECHO_URL} \
+  --neko-url http://127.0.0.1:8080 \
+  --neko-password-file /etc/cloudbrowser/neko-password \
+  --browser-start "systemctl start cloudbrowser-browser" \
+  --browser-stop "systemctl stop cloudbrowser-browser"
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

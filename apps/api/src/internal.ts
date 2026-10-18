@@ -10,7 +10,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import type { Env } from './env.js';
 import { turnIceServers } from './turn.js';
 
-const { archiveKeys, agentCredentials, agentCommands, instanceHealth, browserInstances, operations, viewerSessions, viewerTokens, auditLog, events } = schema;
+const { placements, archiveKeys, agentCredentials, agentCommands, instanceHealth, browserInstances, operations, viewerSessions, viewerTokens, auditLog, events } = schema;
 
 export type AgentAuth =
   | { ok: true; generation: number; credential?: string }
@@ -105,9 +105,15 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
         await db.insert(instanceHealth).values({ instanceId, ...set }).onConflictDoUpdate({ target: instanceHealth.instanceId, set });
       } else if (frame.kind === 'ip_check') {
         const observed = Array.isArray(d.observed) ? d.observed.filter((x): x is string => typeof x === 'string') : [];
+        // The address websites must see is the placement's static IP, not whatever the agent expects.
+        const [current] = await db
+          .select({ ip: placements.ipAddress })
+          .from(placements)
+          .where(and(eq(placements.instanceId, instanceId), eq(placements.status, 'current')));
+        const expected = current?.ip ?? (typeof d.expected === 'string' ? d.expected : null);
         const lastIpCheck = {
-          ok: d.ok === true,
-          expected: typeof d.expected === 'string' ? d.expected : null,
+          ok: d.ok === true && !!expected && observed.length > 0 && observed.every((o) => o === expected),
+          expected,
           observed,
           checkedAt: now.toISOString(),
           ...(typeof d.detail === 'string' ? { detail: d.detail } : {}),

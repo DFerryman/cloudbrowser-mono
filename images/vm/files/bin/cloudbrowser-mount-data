@@ -1,0 +1,27 @@
+#!/bin/bash
+# Mounts the browser's data volume (the second EBS disk) at /data, formatting it only when it has
+# no file system yet (a new browser). Runs at every boot: a restore may have swapped the volume.
+set -euo pipefail
+
+root_disk=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)")
+disk=""
+for i in $(seq 1 150); do
+  while read -r name type model; do
+    [ "$type" = disk ] || continue
+    [ "$(basename "$name")" = "$root_disk" ] && continue
+    case "$model" in *"Elastic Block Store"*) disk="$name"; break ;; esac
+  done < <(lsblk -dnpo NAME,TYPE,MODEL)
+  [ -n "$disk" ] && break
+  sleep 2
+done
+[ -n "$disk" ] || { echo "data volume not attached" >&2; exit 1; }
+
+if ! blkid "$disk" >/dev/null 2>&1; then
+  mkfs.ext4 -q -L cbdata "$disk"
+fi
+mkdir -p /data
+mountpoint -q /data || mount -o noatime "$disk" /data
+
+uid=$(cat /etc/cloudbrowser/browser-uid)
+install -d -o "$uid" -g "$uid" -m 0700 /data/browser /data/browser/profile /data/browser/downloads
+echo "data volume $disk mounted at /data"

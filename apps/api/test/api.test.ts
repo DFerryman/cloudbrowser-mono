@@ -209,6 +209,14 @@ describe('gateway internal API and live view', () => {
     expect(c.status).toBe('succeeded');
     expect(JSON.parse(c.reply).observed).toEqual(['203.0.113.5']);
     await expect(api.agentMessage(id, 1, { t: 'bogus' })).rejects.toThrow();
+
+    // An IP check passes only if Chrome sees exactly the browser's static IP, whatever the agent thinks.
+    const ip = (t.d1.sqlite.prepare(`SELECT ip_address AS ip FROM placements WHERE instance_id = ?`).get(id) as { ip: string }).ip;
+    const lastCheck = () => JSON.parse((t.d1.sqlite.prepare('SELECT last_ip_check AS c FROM instance_health WHERE instance_id = ?').get(id) as { c: string }).c);
+    await api.agentMessage(id, 1, { t: 'event', kind: 'ip_check', data: { ok: true, observed: [ip], expected: '' } });
+    expect(lastCheck()).toMatchObject({ ok: true, expected: ip });
+    await api.agentMessage(id, 1, { t: 'event', kind: 'ip_check', data: { ok: true, observed: ['192.0.2.77'], expected: '' } });
+    expect(lastCheck()).toMatchObject({ ok: false, expected: ip, observed: ['192.0.2.77'] });
   });
 
   it('hands the gateway the plain archive key only while it exists', async () => {

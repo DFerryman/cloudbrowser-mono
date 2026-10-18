@@ -1,26 +1,30 @@
 #!/usr/bin/env bash
-# Runs once inside the Packer build VM.
+# Packer golden image (later): the same layout the first-boot script (packages/executors/src/aws/
+# user-data.ts) builds on a stock image, pre-installed so a new VM does not install anything.
+# Runs once inside the Packer build VM. No user data or secrets are baked in.
 set -euxo pipefail
 
+export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends containerd nftables ca-certificates
+apt-get install -y --no-install-recommends docker.io nftables ca-certificates curl
 apt-get purge -y snapd || true
+install -d /etc/docker
+echo '{ "iptables": false, "ip6tables": false, "bridge": "none", "log-driver": "json-file", "log-opts": { "max-size": "10m", "max-file": "3" } }' >/etc/docker/daemon.json
+systemctl restart docker
 
-# Agent: one static binary run by systemd.
 install -m 0755 /tmp/cloudbrowser-agent /usr/local/bin/cloudbrowser-agent
-install -m 0644 /tmp/cloudbrowser/cloudbrowser-agent.service /etc/systemd/system/cloudbrowser-agent.service
-install -d -m 0755 /etc/cloudbrowser/nft
-install -m 0644 /tmp/cloudbrowser/nft/normal.nft /tmp/cloudbrowser/nft/closed.nft /etc/cloudbrowser/nft/
-systemctl enable containerd cloudbrowser-agent
-
-# Firewall baseline: no inbound, IPv4 only, no private or metadata destinations from the browser.
-install -m 0644 /tmp/cloudbrowser/nft/normal.nft /etc/nftables.conf
-systemctl enable nftables
+install -d /usr/local/lib/cloudbrowser /etc/cloudbrowser/nft
+install -m 0755 /tmp/cloudbrowser/bin/* /usr/local/lib/cloudbrowser/
+install -m 0644 /tmp/cloudbrowser/systemd/*.service /etc/systemd/system/
 
 # The browser image is pre-pulled, so a wake does not wait for a download.
-ctr -n cloudbrowser images pull "$BROWSER_IMAGE"
-echo "$BROWSER_IMAGE" > /etc/cloudbrowser/browser-image
+docker pull "$BROWSER_IMAGE"
+uid=$(docker run --rm --entrypoint id "$BROWSER_IMAGE" -u neko)
+echo "$uid" >/etc/cloudbrowser/browser-uid
+for f in normal closed; do sed "s/@BROWSER_UID@/$uid/g" "/tmp/cloudbrowser/nft/$f.nft.in" >"/etc/cloudbrowser/nft/$f.nft"; done
+cp /etc/cloudbrowser/nft/normal.nft /etc/nftables.conf
+systemctl enable nftables
+# The units are enabled by the VM's first boot, once its user data (agent.json) exists.
 
-# No user data or logs in the image.
 cloud-init clean --logs
 rm -rf /tmp/cloudbrowser /tmp/cloudbrowser-agent

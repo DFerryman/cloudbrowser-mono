@@ -113,6 +113,8 @@ async function screenIp(env: StepEnv): Promise<StepOutcome> {
 
 /** How long a new or woken VM may take until its agent reports `ready` (page 10: create step 8). */
 const AGENT_START_TIMEOUT_MS = 10 * 60_000;
+/** A new VM on a stock image installs Docker and pulls the browser image on its first boot. */
+const AGENT_FIRST_BOOT_TIMEOUT_MS = 16 * 60_000;
 /** How long the engine waits for a command reply before giving up on it. */
 const COMMAND_TIMEOUT_MS = 60_000;
 const COMMAND_POLL_MS = 2_000;
@@ -125,7 +127,8 @@ async function awaitAgentFor(env: StepEnv, p: PlacementRow): Promise<StepOutcome
   // The agent must report ready after this operation began, so a stale report from before a stop does not count.
   const status = await env.agent.status(env.instance.id, p.generation, env.op.createdAt);
   if (status === 'ready') return {};
-  if (env.deps.now().getTime() - env.op.createdAt.getTime() > AGENT_START_TIMEOUT_MS) {
+  const limit = env.op.kind === 'create' || env.op.kind === 'recover' ? AGENT_FIRST_BOOT_TIMEOUT_MS : AGENT_START_TIMEOUT_MS;
+  if (env.deps.now().getTime() - env.op.createdAt.getTime() > limit) {
     throw new StepFailed('The browser did not start in time.');
   }
   return { wait: 3_000, reason: 'waiting for the agent' };

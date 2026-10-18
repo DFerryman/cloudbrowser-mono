@@ -1,0 +1,637 @@
+/**
+ * `aws-ec2` executor (page 10, "Provider mapping"): Elastic IP on the VM's primary network
+ * interface, encrypted gp3 data volume attached as a second disk, VM stopped (never terminated)
+ * while the browser sleeps.
+ *
+ * Idempotency: every create carries a ClientToken where EC2 has one and is tagged `cb:token`, so a
+ * repeated call (or a call whose response was lost) finds the resource by lookup instead of
+ * creating a second one. AllocateAddress and CreateSnapshot have no ClientToken: lookup only.
+ */
+import {
+  ExecutorError,
+  type BindingCheck,
+  type Capabilities,
+  type CredentialMode,
+  type Executor,
+  type IpAllocation,
+  type NetworkInterfaceRef,
+  type ObservedResource,
+  type ObservedState,
+  type OpContext,
+  type Placement,
+  type QuotaSnapshot,
+  type ResourceKind,
+  type RunState,
+  type SnapshotRef,
+  type VmRef,
+  type VmSpec,
+  type VolumeRef,
+} from '../executor.js';
+import { Ec2Client, Ec2Error, isNotFound, type ClientOptions, type Params } from './client.js';
+import { bootstrapScript } from './user-data.js';
+import { items, tags as tagsOf, text, type XmlNode } from './xml.js';
+
+/** Network created by infra/aws/cloudbrowser.yaml, per provider region (Worker var AWS_REGIONS). */
+export interface AwsRegionConfig {
+  /** Availability zone → outbound-only subnet. The first zone is the default for new browsers. */
+  subnets: Record<string, string>;
+  securityGroupId: string;
+  /** Tried in order on a capacity error. 2 vCPU / 8 GB by default. */
+  instanceTypes?: string[];
+  /** Pin an AMI; by default the latest Canonical Ubuntu 24.04 LTS (amd64) image. */
+  ami?: string;
+}
+
+export interface AwsExecutorOptions extends ClientOptions {
+  mode: CredentialMode;
+  regions: Record<string, AwsRegionConfig>;
+  appUrl: string;
+  agentImage: string;
+  browserImage: string;
+  /** Root disk (OS, Docker images); user data lives on the separate data volume. */
+  rootVolumeGb?: number;
+  sleep?: (ms: number) => Promise<void>;
+  /** Poll interval while waiting for state changes. */
+  pollMs?: number;
+}
+
+export const DEFAULT_INSTANCE_TYPES = ['m7i-flex.large', 'm6i.large', 't3.large'];
+const DATA_DEVICE = '/dev/sdf';
+const UBUNTU_OWNER = '099720109477'; // Canonical
+const UBUNTU_NAME = 'ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*';
+
+const MUTATING: ReadonlySet<keyof Executor> = new Set([
+  'allocateIp',
+  'ensureNetworkInterface',
+  'ensureVolume',
+  'ensureVm',
+  'associateIp',
+  'ensureRunning',
+  'ensureStopped',
+  'snapshot',
+  'ensureVolumeFromSnapshot',
+  'swapVolume',
+  'ensureDeleted',
+]);
+
+/** EC2 ClientToken: at most 64 ASCII characters, so long tokens are hashed. */
+async function clientToken(token: string, suffix = '') {
+  const raw = `${token}${suffix}`;
+  if (raw.length <= 64 && /^[\x20-\x7e]+$/.test(raw)) return raw;
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw)));
+  return `cb-${[...digest].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 56)}`;
+}
+
+function b64(s: string) {
+  const bytes = new TextEncoder().encode(s);
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+/** `TagSpecification.N.*` parameters. */
+function tagSpec(n: number, resourceType: string, tags: Record<string, string>): Params {
+  const out: Params = { [`TagSpecification.${n}.ResourceType`]: resourceType };
+  Object.entries(tags).forEach(([k, v], i) => {
+    out[`TagSpecification.${n}.Tag.${i + 1}.Key`] = k;
+    out[`TagSpecification.${n}.Tag.${i + 1}.Value`] = v;
+  });
+  return out;
+}
+
+function filters(f: Record<string, string | string[]>): Params {
+  const out: Params = {};
+  Object.entries(f).forEach(([name, values], i) => {
+    out[`Filter.${i + 1}.Name`] = name;
+    (Array.isArray(values) ? values : [values]).forEach((v, j) => (out[`Filter.${i + 1}.Value.${j + 1}`] = v));
+  });
+  return out;
+}
+
+const RUN_STATES: Record<string, RunState> = {
+  pending: 'pending',
+  running: 'running',
+  stopping: 'stopping',
+  stopped: 'stopped',
+  'shutting-down': 'terminated',
+  terminated: 'terminated',
+};
+
+export class AwsExecutor implements Executor {
+  readonly kind = 'aws-ec2' as const;
+  readonly capabilities: Capabilities = {
+    zonalVolumes: true,
+    nativeIdempotency: true,
+    movableIp: true,
+    // Tokyo list prices (estimates for the ledger and spend guard): Elastic IP $0.005/h, gp3
+    // $0.096/GB-month for 20 GB plus a 16 GB root disk, snapshots about $1/month each.
+    monthlyCostCents: { ip: 365, volume: 192, vm: 154, snapshot: 100 },
+    vmHourCents: 12,
+  };
+
+  private readonly ec2: Ec2Client;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly pollMs: number;
+  private readonly amiCache = new Map<string, string>();
+
+  constructor(private readonly opts: AwsExecutorOptions) {
+    this.ec2 = new Ec2Client(opts);
+    this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.pollMs = opts.pollMs ?? 3000;
+  }
+
+  // --- helpers -------------------------------------------------------------------------------
+
+  private authorize(method: keyof Executor) {
+    const readOnly: ReadonlySet<keyof Executor> = new Set(['describe', 'verifyEgress', 'listManaged', 'quotas', 'zones']);
+    if (this.opts.mode === 'readonly' && !readOnly.has(method)) throw new ExecutorError('forbidden', `${method} needs more than read-only credentials`);
+    if (this.opts.mode === 'runtime' && method === 'ensureDeleted') throw new ExecutorError('forbidden', 'ensureDeleted requires the reaper credentials');
+    if (this.opts.mode === 'reaper' && MUTATING.has(method) && method !== 'ensureDeleted' && method !== 'ensureStopped') {
+      throw new ExecutorError('forbidden', `${method} is not allowed with the reaper credentials`);
+    }
+  }
+
+  private region(region: string): AwsRegionConfig {
+    const cfg = this.opts.regions[region];
+    if (!cfg || !Object.keys(cfg.subnets).length) throw new ExecutorError('invalid', `AWS region ${region} is not configured (AWS_REGIONS)`);
+    return cfg;
+  }
+
+  private call(ctx: OpContext, region: string, action: string, params: Params, mutating = true) {
+    return this.ec2.call(region, action, params, ctx.deadline, mutating);
+  }
+
+  private read(ctx: OpContext, region: string, action: string, params: Params) {
+    return this.ec2.call(region, action, params, ctx.deadline, false);
+  }
+
+  /** All pages of a Describe call. */
+  private async readAll(ctx: OpContext, region: string, action: string, setName: string, params: Params): Promise<XmlNode[]> {
+    const out: XmlNode[] = [];
+    let next: string | undefined;
+    do {
+      const res = await this.read(ctx, region, action, { ...params, ...(next ? { NextToken: next } : {}) });
+      out.push(...items(res, setName));
+      next = text(res, 'nextToken') || undefined;
+    } while (next);
+    return out;
+  }
+
+  private requireTags(ctx: OpContext, kind: ResourceKind | 'root_volume'): Record<string, string> {
+    if (ctx.tags['cb:managed'] !== 'true' || !ctx.tags['cb:instance'] || !ctx.tags['cb:op']) {
+      throw new ExecutorError('forbidden', `refusing to create an untagged ${kind}`);
+    }
+    return { ...ctx.tags, 'cb:kind': kind, 'cb:token': ctx.token, Name: `cloudbrowser-${ctx.tags['cb:instance']}` };
+  }
+
+  /** Polls `check` until it returns a value or the deadline is near. */
+  private async waitFor<T>(ctx: OpContext, what: string, check: () => Promise<T | null>): Promise<T> {
+    for (;;) {
+      const v = await check();
+      if (v !== null) return v;
+      if (Date.now() + this.pollMs + 2000 > ctx.deadline) throw new ExecutorError('retryable', `still waiting for ${what}`);
+      await this.sleep(this.pollMs);
+    }
+  }
+
+  private async instance(ctx: OpContext, region: string, vmId: string): Promise<XmlNode | null> {
+    try {
+      const res = await this.read(ctx, region, 'DescribeInstances', { 'InstanceId.1': vmId });
+      return items(items(res, 'reservationSet')[0], 'instancesSet')[0] ?? null;
+    } catch (e) {
+      if (isNotFound(e)) return null;
+      throw e;
+    }
+  }
+
+  private async volume(ctx: OpContext, region: string, volumeId: string): Promise<XmlNode | null> {
+    try {
+      const res = await this.read(ctx, region, 'DescribeVolumes', { 'VolumeId.1': volumeId });
+      return items(res, 'volumeSet')[0] ?? null;
+    } catch (e) {
+      if (isNotFound(e)) return null;
+      throw e;
+    }
+  }
+
+  private async byToken(ctx: OpContext, region: string, action: string, setName: string, extra: Record<string, string | string[]> = {}) {
+    const found = await this.readAll(ctx, region, action, setName, filters({ 'tag:cb:token': ctx.token, ...extra }));
+    return found[0] ?? null;
+  }
+
+  private stateOf(inst: XmlNode | null): RunState {
+    if (!inst) return 'missing';
+    return RUN_STATES[text(inst, 'instanceState', 'name') ?? ''] ?? 'pending';
+  }
+
+  private async latestUbuntu(ctx: OpContext, region: string): Promise<string> {
+    const cached = this.amiCache.get(region);
+    if (cached) return cached;
+    const images = await this.readAll(ctx, region, 'DescribeImages', 'imagesSet', {
+      'Owner.1': UBUNTU_OWNER,
+      ...filters({ name: UBUNTU_NAME, architecture: 'x86_64', state: 'available' }),
+    });
+    const latest = images.sort((a, b) => (text(b, 'creationDate') ?? '').localeCompare(text(a, 'creationDate') ?? ''))[0];
+    const id = text(latest, 'imageId');
+    if (!id) throw new ExecutorError('invalid', `no Ubuntu 24.04 image found in ${region}`);
+    this.amiCache.set(region, id);
+    return id;
+  }
+
+  /** Public IPv4 and any IPv6 addresses on the VM's interfaces (or on one interface without a VM). */
+  private async publicAddresses(ctx: OpContext, region: string, p: Placement): Promise<string[]> {
+    const enis = p.vmId
+      ? await this.readAll(ctx, region, 'DescribeNetworkInterfaces', 'networkInterfaceSet', filters({ 'attachment.instance-id': p.vmId }))
+      : [];
+    if (!enis.length && p.nicId) {
+      try {
+        enis.push(...(await this.readAll(ctx, region, 'DescribeNetworkInterfaces', 'networkInterfaceSet', { 'NetworkInterfaceId.1': p.nicId })));
+      } catch (e) {
+        if (!isNotFound(e)) throw e;
+      }
+    }
+    const out = new Set<string>();
+    for (const eni of enis) {
+      for (const ip of items(eni, 'privateIpAddressesSet')) {
+        const pub = text(ip, 'association', 'publicIp');
+        if (pub) out.add(pub);
+      }
+      const direct = text(eni, 'association', 'publicIp');
+      if (direct) out.add(direct);
+      for (const v6 of items(eni, 'ipv6AddressesSet')) {
+        const a = text(v6, 'ipv6Address');
+        if (a) out.add(a);
+      }
+    }
+    return [...out];
+  }
+
+  private async ensureAttached(ctx: OpContext, region: string, vmId: string, volumeId: string) {
+    const vol = await this.volume(ctx, region, volumeId);
+    if (!vol) throw new ExecutorError('invalid', `volume ${volumeId} does not exist`);
+    const att = items(vol, 'attachmentSet')[0];
+    if (att && text(att, 'instanceId') === vmId) {
+      if (text(att, 'status') === 'attached') return;
+    } else if (att) {
+      throw new ExecutorError('invalid', `volume ${volumeId} is attached to ${text(att, 'instanceId')}`);
+    } else {
+      await this.call(ctx, region, 'AttachVolume', { VolumeId: volumeId, InstanceId: vmId, Device: DATA_DEVICE });
+    }
+    await this.waitFor(ctx, `volume ${volumeId} to attach`, async () => {
+      const v = await this.volume(ctx, region, volumeId);
+      return text(items(v ?? undefined, 'attachmentSet')[0], 'status') === 'attached' ? true : null;
+    });
+  }
+
+  // --- Executor --------------------------------------------------------------------------------
+
+  zones(region: string): string[] {
+    return Object.keys(this.region(region).subnets);
+  }
+
+  async allocateIp(ctx: OpContext, region: string): Promise<IpAllocation> {
+    this.authorize('allocateIp');
+    this.region(region);
+    const found = await this.byToken(ctx, region, 'DescribeAddresses', 'addressesSet');
+    if (found) return { allocationId: text(found, 'allocationId')!, address: text(found, 'publicIp')! };
+    const res = await this.call(ctx, region, 'AllocateAddress', { Domain: 'vpc', ...tagSpec(1, 'elastic-ip', this.requireTags(ctx, 'ip')) });
+    return { allocationId: text(res, 'allocationId')!, address: text(res, 'publicIp')! };
+  }
+
+  async ensureNetworkInterface(ctx: OpContext, region: string, ip: IpAllocation, zone?: string): Promise<NetworkInterfaceRef> {
+    this.authorize('ensureNetworkInterface');
+    const cfg = this.region(region);
+    const az = zone ?? Object.keys(cfg.subnets)[0]!;
+    const subnet = cfg.subnets[az];
+    if (!subnet) throw new ExecutorError('invalid', `no subnet configured for ${az}`);
+    let eni = await this.byToken(ctx, region, 'DescribeNetworkInterfaces', 'networkInterfaceSet');
+    if (!eni) {
+      const res = await this.call(ctx, region, 'CreateNetworkInterface', {
+        SubnetId: subnet,
+        'SecurityGroupId.1': cfg.securityGroupId,
+        Description: `cloudbrowser ${ctx.tags['cb:instance']}`,
+        ClientToken: await clientToken(ctx.token),
+        ...tagSpec(1, 'network-interface', this.requireTags(ctx, 'network_interface')),
+      });
+      eni = res.children.find((c) => c.name === 'networkInterface') ?? null;
+    }
+    const nicId = text(eni ?? undefined, 'networkInterfaceId');
+    if (!nicId) throw new ExecutorError('unknown_outcome', 'CreateNetworkInterface returned no id');
+    // The address has one association; reassociating moves it here (recover keeps the same IP).
+    await this.associateIp(ctx, region, nicId, ip);
+    return { nicId, zone: text(eni ?? undefined, 'availabilityZone') ?? az };
+  }
+
+  async associateIp(ctx: OpContext, region: string, nicId: string, ip: IpAllocation): Promise<void> {
+    this.authorize('associateIp');
+    const res = await this.read(ctx, region, 'DescribeAddresses', { 'AllocationId.1': ip.allocationId });
+    const addr = items(res, 'addressesSet')[0];
+    if (text(addr, 'networkInterfaceId') === nicId) return;
+    await this.call(ctx, region, 'AssociateAddress', { AllocationId: ip.allocationId, NetworkInterfaceId: nicId, AllowReassociation: true });
+  }
+
+  async ensureVolume(ctx: OpContext, region: string, zone: string, sizeGb: number): Promise<VolumeRef> {
+    this.authorize('ensureVolume');
+    this.region(region);
+    let vol = await this.byToken(ctx, region, 'DescribeVolumes', 'volumeSet');
+    if (!vol) {
+      vol = await this.call(ctx, region, 'CreateVolume', {
+        AvailabilityZone: zone,
+        Size: sizeGb,
+        VolumeType: 'gp3',
+        Encrypted: true,
+        ClientToken: await clientToken(ctx.token),
+        ...tagSpec(1, 'volume', this.requireTags(ctx, 'volume')),
+      });
+    }
+    return { volumeId: text(vol, 'volumeId')!, zone: text(vol, 'availabilityZone') ?? zone, sizeGb: Number(text(vol, 'size') ?? sizeGb) };
+  }
+
+  async ensureVm(ctx: OpContext, region: string, spec: VmSpec): Promise<VmRef> {
+    this.authorize('ensureVm');
+    const cfg = this.region(region);
+    let inst = await this.byToken(ctx, region, 'DescribeInstances', 'reservationSet', {
+      'instance-state-name': ['pending', 'running', 'stopping', 'stopped'],
+    });
+    let vmId = text(items(inst ?? undefined, 'instancesSet')[0], 'instanceId');
+    if (!vmId) {
+      const ami = cfg.ami ?? (await this.latestUbuntu(ctx, region));
+      const types = cfg.instanceTypes?.length ? cfg.instanceTypes : DEFAULT_INSTANCE_TYPES;
+      const userData = bootstrapScript({
+        instanceId: spec.instanceId,
+        gatewayUrl: spec.gatewayUrl,
+        bootstrapToken: spec.bootstrapToken,
+        appUrl: this.opts.appUrl,
+        agentImage: this.opts.agentImage,
+        browserImage: this.opts.browserImage,
+      });
+      for (const [i, type] of types.entries()) {
+        try {
+          const res = await this.call(ctx, region, 'RunInstances', {
+            ImageId: ami,
+            InstanceType: type,
+            MinCount: 1,
+            MaxCount: 1,
+            ClientToken: await clientToken(ctx.token, `:${i}`),
+            'NetworkInterface.1.DeviceIndex': 0,
+            'NetworkInterface.1.NetworkInterfaceId': spec.nicId,
+            'BlockDeviceMapping.1.DeviceName': '/dev/sda1',
+            'BlockDeviceMapping.1.Ebs.VolumeSize': this.opts.rootVolumeGb ?? 16,
+            'BlockDeviceMapping.1.Ebs.VolumeType': 'gp3',
+            'BlockDeviceMapping.1.Ebs.Encrypted': true,
+            'BlockDeviceMapping.1.Ebs.DeleteOnTermination': true,
+            DisableApiTermination: true,
+            InstanceInitiatedShutdownBehavior: 'stop',
+            // IMDSv2 only, one hop: the browser's user is blocked from it by the VM firewall too.
+            'MetadataOptions.HttpTokens': 'required',
+            'MetadataOptions.HttpPutResponseHopLimit': 1,
+            'MetadataOptions.HttpEndpoint': 'enabled',
+            UserData: b64(userData),
+            ...tagSpec(1, 'instance', this.requireTags(ctx, 'vm')),
+            ...tagSpec(2, 'volume', this.requireTags(ctx, 'root_volume')),
+          });
+          vmId = text(items(res, 'instancesSet')[0], 'instanceId');
+          break;
+        } catch (e) {
+          // No capacity for this type (or not offered in this zone): try the next allowed type.
+          if (e instanceof ExecutorError && e.errorClass === 'capacity' && i < types.length - 1) continue;
+          throw e;
+        }
+      }
+      if (!vmId) throw new ExecutorError('unknown_outcome', 'RunInstances returned no instance id');
+    }
+    const id = vmId;
+    // The data volume can only be attached once the VM is running (or stopped).
+    const zone = await this.waitFor(ctx, `VM ${id} to start`, async () => {
+      const i = await this.instance(ctx, region, id);
+      const state = this.stateOf(i);
+      if (state === 'terminated' || state === 'missing') throw new ExecutorError('capacity', `VM ${id} ended while starting`);
+      return state === 'running' || state === 'stopped' ? (text(i ?? undefined, 'placement', 'availabilityZone') ?? spec.zone) : null;
+    });
+    await this.ensureAttached(ctx, region, id, spec.volumeId);
+    return { vmId: id, zone };
+  }
+
+  async ensureRunning(ctx: OpContext, p: Placement): Promise<RunState> {
+    this.authorize('ensureRunning');
+    const region = p.providerRegion;
+    let inst = await this.instance(ctx, region, p.vmId);
+    let state = this.stateOf(inst);
+    if (state === 'terminated' || state === 'missing') throw new ExecutorError('invalid', `VM ${p.vmId} no longer exists`);
+    if (state === 'stopping') {
+      await this.waitFor(ctx, `VM ${p.vmId} to stop`, async () => (this.stateOf(await this.instance(ctx, region, p.vmId)) === 'stopped' ? true : null));
+      state = 'stopped';
+    }
+    if (state === 'stopped') await this.call(ctx, region, 'StartInstances', { 'InstanceId.1': p.vmId });
+    return this.waitFor(ctx, `VM ${p.vmId} to run`, async () => {
+      inst = await this.instance(ctx, region, p.vmId);
+      const s = this.stateOf(inst);
+      if (s === 'stopped') throw new ExecutorError('capacity', `VM ${p.vmId} stopped again while starting`);
+      return s === 'running' ? ('running' as const) : null;
+    });
+  }
+
+  async ensureStopped(ctx: OpContext, p: Placement): Promise<RunState> {
+    this.authorize('ensureStopped');
+    const region = p.providerRegion;
+    const state = this.stateOf(await this.instance(ctx, region, p.vmId));
+    if (state === 'missing' || state === 'terminated') return 'missing';
+    if (state === 'stopped') return 'stopped';
+    if (state === 'running' || state === 'pending') await this.call(ctx, region, 'StopInstances', { 'InstanceId.1': p.vmId });
+    return this.waitFor(ctx, `VM ${p.vmId} to stop`, async () => {
+      const s = this.stateOf(await this.instance(ctx, region, p.vmId));
+      return s === 'stopped' ? ('stopped' as const) : s === 'missing' || s === 'terminated' ? ('missing' as const) : null;
+    });
+  }
+
+  async snapshot(ctx: OpContext, region: string, volumeId: string): Promise<SnapshotRef> {
+    this.authorize('snapshot');
+    let snap = await this.byToken(ctx, region, 'DescribeSnapshots', 'snapshotSet', {});
+    if (!snap) {
+      snap = await this.call(ctx, region, 'CreateSnapshot', {
+        VolumeId: volumeId,
+        Description: `cloudbrowser ${ctx.tags['cb:instance']} ${ctx.step}`,
+        ...tagSpec(1, 'snapshot', this.requireTags(ctx, 'snapshot')),
+      });
+    }
+    return { snapshotId: text(snap, 'snapshotId')!, sizeGb: Number(text(snap, 'volumeSize') ?? 0) };
+  }
+
+  async ensureVolumeFromSnapshot(ctx: OpContext, region: string, zone: string, snapshotId: string, sizeGb: number): Promise<VolumeRef> {
+    this.authorize('ensureVolumeFromSnapshot');
+    let vol = await this.byToken(ctx, region, 'DescribeVolumes', 'volumeSet');
+    if (!vol) {
+      // A snapshot can only be used once it is complete (a first snapshot takes minutes).
+      await this.waitFor(ctx, `snapshot ${snapshotId} to complete`, async () => {
+        const res = await this.read(ctx, region, 'DescribeSnapshots', { 'SnapshotId.1': snapshotId });
+        const s = text(items(res, 'snapshotSet')[0], 'status');
+        if (s === 'error') throw new ExecutorError('invalid', `snapshot ${snapshotId} failed`);
+        return s === 'completed' ? true : null;
+      });
+      vol = await this.call(ctx, region, 'CreateVolume', {
+        AvailabilityZone: zone,
+        SnapshotId: snapshotId,
+        Size: sizeGb,
+        VolumeType: 'gp3',
+        Encrypted: true,
+        ClientToken: await clientToken(ctx.token),
+        ...tagSpec(1, 'volume', this.requireTags(ctx, 'volume')),
+      });
+    }
+    return { volumeId: text(vol, 'volumeId')!, zone: text(vol, 'availabilityZone') ?? zone, sizeGb: Number(text(vol, 'size') ?? sizeGb) };
+  }
+
+  async swapVolume(ctx: OpContext, p: Placement, volumeId: string): Promise<void> {
+    this.authorize('swapVolume');
+    const region = p.providerRegion;
+    const inst = await this.instance(ctx, region, p.vmId);
+    if (this.stateOf(inst) !== 'stopped') throw new ExecutorError('invalid', 'swapVolume needs a stopped VM');
+    const attached = await this.readAll(
+      ctx,
+      region,
+      'DescribeVolumes',
+      'volumeSet',
+      filters({ 'attachment.instance-id': p.vmId, 'attachment.device': DATA_DEVICE }),
+    );
+    for (const v of attached) {
+      const id = text(v, 'volumeId')!;
+      if (id === volumeId) return this.ensureAttached(ctx, region, p.vmId, volumeId);
+      await this.call(ctx, region, 'DetachVolume', { VolumeId: id, InstanceId: p.vmId });
+      await this.waitFor(ctx, `volume ${id} to detach`, async () => (text((await this.volume(ctx, region, id)) ?? undefined, 'status') === 'available' ? true : null));
+    }
+    await this.ensureAttached(ctx, region, p.vmId, volumeId);
+  }
+
+  async describe(ctx: OpContext, p: Placement): Promise<ObservedState> {
+    this.authorize('describe');
+    const region = p.providerRegion;
+    const inst = await this.instance(ctx, region, p.vmId);
+    const vol = p.volumeId ? await this.volume(ctx, region, p.volumeId) : null;
+    return {
+      vm: this.stateOf(inst),
+      publicAddresses: await this.publicAddresses(ctx, region, p),
+      volumeAttached: !!vol && text(items(vol, 'attachmentSet')[0], 'instanceId') === p.vmId,
+    };
+  }
+
+  async verifyEgress(ctx: OpContext, p: Placement): Promise<BindingCheck> {
+    this.authorize('verifyEgress');
+    const publicAddresses = await this.publicAddresses(ctx, p.providerRegion, p);
+    const ok = publicAddresses.length === 1 && publicAddresses[0] === p.ipAddress;
+    return {
+      ok,
+      expected: p.ipAddress,
+      publicAddresses,
+      ...(ok ? {} : { detail: `expected only ${p.ipAddress}, found [${publicAddresses.join(', ')}]` }),
+    };
+  }
+
+  async ensureDeleted(ctx: OpContext, region: string, kind: ResourceKind, providerId: string): Promise<void> {
+    this.authorize('ensureDeleted');
+    const managed = (t: Record<string, string>) => {
+      if (t['cb:managed'] !== 'true') throw new ExecutorError('forbidden', `${providerId} is not managed by us`);
+    };
+    try {
+      switch (kind) {
+        case 'vm': {
+          const inst = await this.instance(ctx, region, providerId);
+          const state = this.stateOf(inst);
+          if (state === 'missing' || state === 'terminated') return;
+          managed(tagsOf(inst!));
+          await this.call(ctx, region, 'ModifyInstanceAttribute', { InstanceId: providerId, 'DisableApiTermination.Value': false });
+          await this.call(ctx, region, 'TerminateInstances', { 'InstanceId.1': providerId });
+          return;
+        }
+        case 'volume': {
+          const vol = await this.volume(ctx, region, providerId);
+          if (!vol || text(vol, 'status') === 'deleted') return;
+          managed(tagsOf(vol));
+          await this.call(ctx, region, 'DeleteVolume', { VolumeId: providerId });
+          return;
+        }
+        case 'network_interface': {
+          const res = await this.read(ctx, region, 'DescribeNetworkInterfaces', { 'NetworkInterfaceId.1': providerId });
+          const eni = items(res, 'networkInterfaceSet')[0];
+          if (!eni) return;
+          managed(tagsOf(eni));
+          await this.call(ctx, region, 'DeleteNetworkInterface', { NetworkInterfaceId: providerId });
+          return;
+        }
+        case 'ip': {
+          const res = await this.read(ctx, region, 'DescribeAddresses', { 'AllocationId.1': providerId });
+          const addr = items(res, 'addressesSet')[0];
+          if (!addr) return;
+          managed(tagsOf(addr));
+          const association = text(addr, 'associationId');
+          if (association) await this.call(ctx, region, 'DisassociateAddress', { AssociationId: association });
+          await this.call(ctx, region, 'ReleaseAddress', { AllocationId: providerId });
+          return;
+        }
+        case 'snapshot': {
+          const res = await this.read(ctx, region, 'DescribeSnapshots', { 'SnapshotId.1': providerId });
+          const snap = items(res, 'snapshotSet')[0];
+          if (!snap) return;
+          managed(tagsOf(snap));
+          await this.call(ctx, region, 'DeleteSnapshot', { SnapshotId: providerId });
+          return;
+        }
+      }
+    } catch (e) {
+      if (isNotFound(e)) return; // already gone
+      throw e;
+    }
+  }
+
+  async listManaged(ctx: OpContext, region: string): Promise<ObservedResource[]> {
+    this.authorize('listManaged');
+    const f = filters({ 'tag:cb:managed': 'true', 'tag:cb:env': ctx.tags['cb:env'] });
+    const out: ObservedResource[] = [];
+    const add = (kind: ResourceKind, id: string | undefined, node: XmlNode, state: string, zone: string | null) => {
+      if (id) out.push({ providerId: id, kind, region, zone, state, tags: tagsOf(node) });
+    };
+    for (const r of await this.readAll(ctx, region, 'DescribeInstances', 'reservationSet', f)) {
+      for (const i of items(r, 'instancesSet')) {
+        const state = text(i, 'instanceState', 'name') ?? '';
+        if (state !== 'terminated') add('vm', text(i, 'instanceId'), i, state, text(i, 'placement', 'availabilityZone') ?? null);
+      }
+    }
+    for (const v of await this.readAll(ctx, region, 'DescribeVolumes', 'volumeSet', f)) {
+      // Root disks belong to their VM and go with it.
+      if (tagsOf(v)['cb:kind'] === 'root_volume') continue;
+      add('volume', text(v, 'volumeId'), v, text(v, 'status') ?? '', text(v, 'availabilityZone') ?? null);
+    }
+    for (const n of await this.readAll(ctx, region, 'DescribeNetworkInterfaces', 'networkInterfaceSet', f)) {
+      add('network_interface', text(n, 'networkInterfaceId'), n, text(n, 'status') ?? '', text(n, 'availabilityZone') ?? null);
+    }
+    for (const a of await this.readAll(ctx, region, 'DescribeAddresses', 'addressesSet', f)) {
+      add('ip', text(a, 'allocationId'), a, text(a, 'associationId') ? 'associated' : 'allocated', null);
+    }
+    for (const s of await this.readAll(ctx, region, 'DescribeSnapshots', 'snapshotSet', { 'Owner.1': 'self', ...f })) {
+      add('snapshot', text(s, 'snapshotId'), s, text(s, 'status') ?? '', null);
+    }
+    return out;
+  }
+
+  async quotas(ctx: OpContext, region: string): Promise<QuotaSnapshot[]> {
+    this.authorize('quotas');
+    const out: QuotaSnapshot[] = [];
+    const ipLimit = await this.ec2.serviceQuota(region, 'ec2', 'L-0263D0A3', ctx.deadline); // EC2-VPC Elastic IPs
+    if (ipLimit !== null) {
+      const used = (await this.readAll(ctx, region, 'DescribeAddresses', 'addressesSet', {})).length;
+      out.push({ metric: 'static_ips', limit: ipLimit, used });
+    }
+    const cpuLimit = await this.ec2.serviceQuota(region, 'ec2', 'L-1216C47A', ctx.deadline); // Running On-Demand Standard vCPUs
+    if (cpuLimit !== null) {
+      let used = 0;
+      for (const r of await this.readAll(ctx, region, 'DescribeInstances', 'reservationSet', filters({ 'instance-state-name': ['pending', 'running'] }))) {
+        for (const i of items(r, 'instancesSet')) {
+          used += Number(text(i, 'cpuOptions', 'coreCount') ?? 1) * Number(text(i, 'cpuOptions', 'threadsPerCore') ?? 2);
+        }
+      }
+      out.push({ metric: 'vcpus', limit: cpuLimit, used });
+    }
+    return out;
+  }
+}
+
+export { Ec2Error };

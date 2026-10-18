@@ -1,11 +1,11 @@
 import { createDb, schema, type AgentCommandsMessage, type OperationMessage } from '@cloudbrowser/db';
 import { and, eq, inArray } from 'drizzle-orm';
-import { createExecutor, type Executor, type ExecutorKind } from '@cloudbrowser/executors';
+import { createExecutor, type Executor, type ExecutorEnv, type ExecutorKind } from '@cloudbrowser/executors';
 import { FakeAgentBridge, GatewayAgentBridge, type AgentBridge } from './agent.js';
 import { r2ArchiveStore } from './archives.js';
 import { placementRef, readContext, type EngineDeps, type EngineMode } from './context.js';
 
-export interface Env {
+export interface Env extends Omit<ExecutorEnv, 'FAKE_PROVIDER_DB'> {
   DB: D1Database;
   /** Operation dispatch (Cloudflare Queues). The worker deployment produces and consumes. */
   OPERATIONS?: Queue<OperationMessage>;
@@ -47,6 +47,13 @@ export function makeDeps(env: Env, waitUntil: (p: Promise<unknown>) => void = ()
         FAKE_PROVIDER_DB: env.DB,
         FAKE_DELAY_MS: env.FAKE_DELAY_MS,
         FAKE_FAULTS: env.FAKE_FAULTS,
+        // aws-ec2: this deployment's IAM user (runtime for the engine, delete-only for the reaper).
+        AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID,
+        AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY,
+        AWS_REGIONS: env.AWS_REGIONS,
+        APP_URL: env.APP_URL,
+        AGENT_IMAGE: env.AGENT_IMAGE,
+        BROWSER_IMAGE: env.BROWSER_IMAGE,
       });
       executors.set(kind, ex);
     }

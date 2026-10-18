@@ -25,6 +25,9 @@
     "ENV_NAME": "dev",
     // Written into each VM's user data: the session gateway's public URL.
     "GATEWAY_URL": "ws://localhost:8790",
+    // Public origin of the app: real VMs check their IP at ${APP_URL}/api/echo/ip (docs/aws.md).
+    // AWS keys and AWS_REGIONS are secrets (wrangler secret put).
+    "APP_URL": "http://localhost:8787",
     "FAKE_DELAY_MS": "700",
     // Profile archives (page 4): the agent uploads to presigned R2 URLs. Archives are off until
     // these are set together with the secrets R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY and

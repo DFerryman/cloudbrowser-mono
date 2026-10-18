@@ -62,6 +62,17 @@ Cloudflare deployment.
 - **Alerts**: a shared `raiseAlert` (deduplicated while open) used by the reconciler (circuit
   breaker, findings, spend 80%/100%), the engine (failed IP checks, quota/forbidden/invalid errors)
   and billing (drift, disputes); delivered to email and a Slack-compatible webhook by the api cron.
+- **AWS executor** (`packages/executors/src/aws`, guide: `docs/aws.md`): Elastic IP on its own
+  network interface, encrypted gp3 data volume, VM from stock Ubuntu 24.04 with IMDSv2 and
+  termination protection; ClientToken plus `cb:token` tag lookup for every create; instance-type
+  fallback on capacity; snapshot, restore, volume swap and moving the IP for `recover`; deletes with
+  the reaper user only; listing by tag and Service Quotas for the reconciler. Signed with SigV4
+  (aws4fetch) against the EC2 Query API; tested against an in-memory EC2. A first-boot script
+  installs Docker and runs the browser image (neko + Chrome, host network, WebRTC advertising the
+  static IP) and the agent from `ghcr.io` images built by `.github/workflows/images.yml`. The VM
+  firewall restricts only the browser's uid (no private, link-local or metadata addresses).
+  CloudFormation (`infra/aws/cloudbrowser.yaml`) creates the network and three IAM users scoped to
+  `cb:managed=true` resources. Not run against a real AWS account yet.
 - **Reconciler** (`apps/reconciler`): ledger vs provider by tag, adoption, orphan and missing
   findings, circuit breaker, quota and spend snapshots feeding the spend guard.
 - **API** (`apps/api`): the page 2 API surface except downloads — Better Auth
@@ -133,6 +144,8 @@ Cloud), because Cloudflare does not offer VMs with a dedicated static egress IP.
 | Running-hours cap enforced by the engine | The engine meters `running` time per user and month every minute (at most 5 minutes per tick if a run is missed) and sleeps browsers 10 minutes after the hours run out | The session view gets the deadline from the heartbeat and warns the user; starts are refused with `hours_exhausted`. |
 | `/admin` limited by source IP at the load balancer | `ADMIN_IP_ALLOWLIST` checked in the api (404 for everyone else) plus a Cloudflare WAF rule | Two layers; the in-app check also covers preview URLs. |
 | Alerts through CloudWatch alarms | `alerts` table written by every Worker, delivered by the api cron to Email Service and a chat webhook, acknowledged in the console | One place to see and acknowledge alerts; no extra service. |
+| Golden VM image built with Packer | Stock Ubuntu 24.04 plus a first-boot script; the agent binary and VM files ship in a container image | Lets the first real browser run without an image build in the user's AWS account; the Packer template uses the same files and replaces the install later. |
+| Browser container supervised by the agent through containerd | systemd units (`cloudbrowser-data`, `-browser`, `-agent`) with Docker; the agent stops and starts the container around archives and restores | Standard tooling on Ubuntu; same behavior. |
 | Random bootstrap token stored hashed | HMAC-derived token (Worker secret `BOOTSTRAP_SECRET`), only the hash stored | `create_vm` can mint it after a crash without the token ever being written down. |
 
 Considered and **not** used:
@@ -147,8 +160,8 @@ Considered and **not** used:
 
 ## Not built yet (next phases)
 
-- **Real browsers**: `aws-ec2` / `oci-compute` executors (Phase 1, after the provider trial on
-  page 11); building and signing the images.
+- **Real browsers**: the first run against a real AWS account; `oci-compute` executor (Phase 1,
+  page 11); a pre-built golden image and image signing.
 - **Live view extras**: file upload and download channels, quality modes (Auto / Sharp text /
   Smooth motion), pausing video after 60 s in a hidden tab, touch gestures, sending quality
   aggregates to `viewer_sessions`. The neko event names and data-channel opcodes follow neko v3 and

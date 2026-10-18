@@ -1,4 +1,5 @@
 import { ExecutorError, type CredentialMode, type Executor, type ExecutorKind } from './executor.js';
+import { AwsExecutor, type AwsRegionConfig } from './aws/aws-executor.js';
 import { FakeExecutor, type FaultPlan } from './fake/fake-executor.js';
 import { D1FakeStore } from './fake/store.js';
 
@@ -12,6 +13,28 @@ export interface ExecutorEnv {
    * `{"ensureRunning":{"class":"capacity","rate":0.5}}`.
    */
   FAKE_FAULTS?: string;
+  /** `aws-ec2`: the IAM user's key for this process's mode (runtime, reaper or read-only). */
+  AWS_ACCESS_KEY_ID?: string;
+  AWS_SECRET_ACCESS_KEY?: string;
+  /** JSON: provider region → network ids, from the CloudFormation stack's outputs. */
+  AWS_REGIONS?: string;
+  /** Public origin of the app; VMs check their IP against `${APP_URL}/api/echo/ip`. */
+  APP_URL?: string;
+  /** Container images the VMs run (built by .github/workflows/images.yml). */
+  AGENT_IMAGE?: string;
+  BROWSER_IMAGE?: string;
+}
+
+export const DEFAULT_AGENT_IMAGE = 'ghcr.io/dferryman/cloudbrowser-agent:main';
+export const DEFAULT_BROWSER_IMAGE = 'ghcr.io/dferryman/cloudbrowser-browser:main';
+
+function awsRegions(raw: string | undefined): Record<string, AwsRegionConfig> {
+  if (!raw) throw new ExecutorError('invalid', 'AWS_REGIONS is not set (paste the CloudFormation output)');
+  try {
+    return JSON.parse(raw) as Record<string, AwsRegionConfig>;
+  } catch {
+    throw new ExecutorError('invalid', 'AWS_REGIONS is not valid JSON');
+  }
 }
 
 type FaultConfig = Record<string, { class: string; rate: number }>;
@@ -37,7 +60,20 @@ export function createExecutor(kind: ExecutorKind, mode: CredentialMode, env: Ex
         faults: faultsFromEnv(env.FAKE_FAULTS),
       });
     }
-    case 'aws-ec2':
+    case 'aws-ec2': {
+      if (!env.AWS_ACCESS_KEY_ID || !env.AWS_SECRET_ACCESS_KEY) {
+        throw new ExecutorError('forbidden', 'AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are not set for this Worker');
+      }
+      return new AwsExecutor({
+        mode,
+        accessKeyId: env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+        regions: awsRegions(env.AWS_REGIONS),
+        appUrl: env.APP_URL ?? '',
+        agentImage: env.AGENT_IMAGE || DEFAULT_AGENT_IMAGE,
+        browserImage: env.BROWSER_IMAGE || DEFAULT_BROWSER_IMAGE,
+      });
+    }
     case 'oci-compute':
     case 'fly-machines':
       // Built in Phase 1, after the provider trial (page 8).

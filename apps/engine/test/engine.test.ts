@@ -32,8 +32,12 @@ class World {
     return new FakeExecutor({ store: this.store, mode, faults: (m, c) => this.faults(m, c), random: () => this.random() });
   }
 
+  /** Runs the engine on another executor (e.g. aws-ec2 against an in-memory EC2). */
+  executorOverride: ((mode: 'runtime' | 'reaper') => Executor) | null = null;
+
   deps(mode: EngineMode = 'worker'): EngineDeps {
-    const ex: Executor = this.executor(mode === 'reaper' ? 'reaper' : 'runtime');
+    const pick = (m: 'runtime' | 'reaper'): Executor => this.executorOverride?.(m) ?? this.executor(m);
+    const ex: Executor = pick(mode === 'reaper' ? 'reaper' : 'runtime');
     const now = () => this.clock;
     const placementOf = async (id: string) => {
       const rows = await this.db.select().from(placements).where(eq(placements.instanceId, id));
@@ -43,7 +47,7 @@ class World {
     const agent =
       this.agentMode === 'gateway'
         ? new GatewayAgentBridge(this.db, async (m) => void this.pokes.push(m.instanceId), now)
-        : new FakeAgentBridge(this.executor('runtime'), () => readContext('agent', 'test'), placementOf, now);
+        : new FakeAgentBridge(pick('runtime'), () => readContext('agent', 'test'), placementOf, now);
     return {
       db: this.db,
       mode,
@@ -686,5 +690,52 @@ describe('plans and active hours', () => {
     const snaps = [0, 10].map((d) => ({ id: `s${d}`, kind: 'snapshot', createdAt: new Date(now.getTime() - d * 86_400_000) }));
     expect(expiredBackups(snaps, now)).toEqual(['s10']);
     expect(expiredBackups(snaps, now, 14)).toEqual([]);
+  });
+});
+
+describe('on the aws-ec2 executor', () => {
+  it('creates, sleeps, wakes, deletes and purges a browser with real EC2 semantics', async () => {
+    const { AwsExecutor } = await import('@cloudbrowser/executors');
+    const { FakeEc2 } = await import('../../../packages/executors/test/fake-ec2.js');
+    const ec2 = new FakeEc2();
+    w.executorOverride = (mode) =>
+      new AwsExecutor({
+        mode,
+        accessKeyId: 'AKIDTEST',
+        secretAccessKey: 'secret',
+        regions: { 'ap-northeast-1': { subnets: { 'ap-northeast-1a': 'subnet-a', 'ap-northeast-1c': 'subnet-c' }, securityGroupId: 'sg-1' } },
+        appUrl: 'https://app.test',
+        agentImage: 'agent',
+        browserImage: 'browser',
+        endpoint: () => 'https://ec2.test/',
+        fetch: ec2.fetch,
+        sleep: async () => {},
+        pollMs: 1,
+      });
+
+    expect(await w.settle(await w.newInstance())).toEqual({ state: 'succeeded' });
+    const p = (await w.placement())!;
+    expect(ec2.instances.get(p.vmId!)).toMatchObject({ state: 'running', protected: true });
+    expect(ec2.volumes.get(p.volumeId!)).toMatchObject({ instance: p.vmId, device: '/dev/sdf' });
+    expect(ec2.addresses.get(p.ipAllocationId!)).toMatchObject({ eni: p.networkId, publicIp: p.ipAddress });
+    expect((await w.instance()).status).toBe('running');
+
+    await w.settle(await w.enqueue('inst1', 'stop'));
+    expect(ec2.instances.get(p.vmId!)?.state).toBe('stopped');
+    expect((await w.instance()).status).toBe('sleeping');
+    await w.settle(await w.enqueue('inst1', 'start'));
+    expect(ec2.instances.get(p.vmId!)?.state).toBe('running');
+    expect((await w.instance()).status).toBe('running');
+
+    // Delete, then the reaper purges everything after 7 days; the runtime user never deleted anything.
+    await w.settle(await w.enqueue('inst1', 'delete'));
+    w.advance(8 * 86_400_000);
+    await reaperTick(w.deps('reaper'));
+    expect((await w.instance()).status).toBe('purged');
+    expect(ec2.instances.get(p.vmId!)?.state).toBe('terminated');
+    expect(ec2.addresses.size).toBe(0);
+    expect([...ec2.volumes.values()]).toEqual([]);
+    expect(ec2.enis.size).toBe(0);
+    expect(ec2.calls.filter((c) => /^(Terminate|Delete|Release)/.test(c.action)).length).toBeGreaterThan(0);
   });
 });

@@ -1,0 +1,13 @@
+[Unit]
+Description=CloudBrowser data volume
+After=local-fs.target
+Before=cloudbrowser-browser.service cloudbrowser-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/cloudbrowser/cloudbrowser-mount-data
+TimeoutStartSec=360
+
+[Install]
+WantedBy=multi-user.target

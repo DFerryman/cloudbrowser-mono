@@ -1,6 +1,9 @@
 #!/usr/sbin/nft -f
-# Normal browsing (page 3, "Leak prevention inside the VM").
-flush ruleset
+# Normal browsing (page 3, "Leak prevention inside the VM"). The browser runs on the host network
+# as uid @BROWSER_UID@; only its traffic is restricted, so the agent and the OS keep the metadata
+# service and the VPC resolver.
+table inet cloudbrowser
+delete table inet cloudbrowser
 
 table inet cloudbrowser {
   set private4 {
@@ -14,20 +17,11 @@ table inet cloudbrowser {
     ct state established,related accept
   }
 
-  chain forward {
-    type filter hook forward priority 0; policy drop;
-    ct state established,related accept
-    # The browser container: IPv4 to the internet only.
-    meta nfproto ipv6 drop
-    udp dport 53 ip daddr 169.254.169.253 accept   # the region's DNS resolver (AWS VPC resolver)
-    ip daddr @private4 drop
-    tcp dport { 25, 465, 587 } drop                 # no mail
-    accept
-  }
-
   chain output {
     type filter hook output priority 0; policy accept;
+    oif lo accept
     meta nfproto ipv6 drop
     tcp dport { 25, 465, 587 } drop
+    meta skuid @BROWSER_UID@ ip daddr @private4 drop
   }
 }

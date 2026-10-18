@@ -7,11 +7,14 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/agent"
 	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/chrome"
@@ -33,7 +36,11 @@ func main() {
 		stateDir     = flag.String("state-dir", "/data/agent", "where the long-lived credential is kept")
 		profileDir   = flag.String("profile-dir", "/data/profile", "Chrome's user data dir; archived at each sleep")
 		cdp          = flag.String("cdp", "http://127.0.0.1:9222", "Chrome DevTools endpoint (loopback only)")
-		nekoWS       = flag.String("neko-ws", "", "neko WebSocket URL with the owner token (loopback only)")
+		nekoWS       = flag.String("neko-ws", "", "development: neko WebSocket URL with a fixed token (loopback only)")
+		nekoURL      = flag.String("neko-url", "", "neko on the loopback interface, e.g. http://127.0.0.1:8080; viewers sign in with --neko-password-file")
+		nekoPassFile = flag.String("neko-password-file", "/etc/cloudbrowser/neko-password", "neko admin password (written at first boot)")
+		browserStart = flag.String("browser-start", "", "shell command that starts the browser container, e.g. systemctl start cloudbrowser-browser")
+		browserStop  = flag.String("browser-stop", "", "shell command that stops the browser container after Chrome closed")
 		echo         = flag.String("echo", "https://app.example.com/api/echo/ip", "comma-separated IP echo URLs")
 		expectedIP   = flag.String("expected-ip", "", "the instance's static IP, if known")
 		nftDir       = flag.String("nft-dir", "/etc/cloudbrowser/nft", "nftables rule files; empty disables firewall switching")
@@ -61,6 +68,9 @@ func main() {
 	}
 
 	var browser agent.Browser = chrome.New(*cdp)
+	if *browserStart != "" || *browserStop != "" {
+		browser = containerBrowser{Browser: browser, start: *browserStart, stop: *browserStop, log: log}
+	}
 	if *fakeEgressIP != "" {
 		browser = fakeBrowser{ip: *fakeEgressIP}
 	}
@@ -69,7 +79,15 @@ func main() {
 		fw = firewall.NFT{RulesDir: *nftDir}
 	}
 	var nk agent.Neko
-	if *nekoWS != "" {
+	switch {
+	case *nekoURL != "":
+		pw, err := os.ReadFile(*nekoPassFile)
+		if err != nil {
+			log.Error("read neko password", "err", err)
+			os.Exit(1)
+		}
+		nk = nekoAdapter{&neko.Relay{BaseURL: *nekoURL, Username: "agent", Password: strings.TrimSpace(string(pw))}}
+	case *nekoWS != "":
 		nk = nekoAdapter{&neko.Relay{URL: *nekoWS}}
 	}
 
@@ -91,6 +109,43 @@ func main() {
 		log.Error("agent stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+// containerBrowser runs Chrome inside the browser container (systemd unit cloudbrowser-browser).
+// Closing stops the container after Chrome has closed gracefully, so nothing restarts Chrome
+// while its profile is archived or swapped; starting starts the container again.
+type containerBrowser struct {
+	agent.Browser
+	start, stop string
+	log         *slog.Logger
+}
+
+func run(ctx context.Context, command string) error {
+	if command == "" {
+		return nil
+	}
+	out, err := exec.CommandContext(ctx, "sh", "-c", command).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %v: %s", command, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func (b containerBrowser) Start(ctx context.Context) (int, error) {
+	if err := run(ctx, b.start); err != nil {
+		return 0, err
+	}
+	return b.Browser.Start(ctx)
+}
+
+func (b containerBrowser) Close(ctx context.Context) error {
+	// Browser.close lets Chrome flush its stores; the container stop follows either way.
+	if err := b.Browser.Close(ctx); err != nil {
+		b.log.Warn("graceful chrome close", "err", err)
+	}
+	sctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	return run(sctx, b.stop)
 }
 
 type nekoAdapter struct{ r *neko.Relay }

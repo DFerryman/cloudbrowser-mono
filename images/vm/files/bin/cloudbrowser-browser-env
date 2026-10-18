@@ -1,0 +1,19 @@
+#!/bin/bash
+# Writes neko's environment for this boot. The static IP is read from the instance metadata, so
+# WebRTC advertises the address the viewer's TURN relay must reach (no inbound ports are open;
+# the security group lets replies to neko's own traffic back in).
+set -euo pipefail
+token=$(curl -fsS -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
+ip=$(curl -fsS -m 5 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/public-ipv4 || true)
+install -d -m 0700 /run/cloudbrowser
+umask 077
+cat >/run/cloudbrowser/neko.env <<ENV
+NEKO_SERVER_BIND=127.0.0.1:8080
+NEKO_WEBRTC_NAT1TO1=${ip}
+NEKO_MEMBER_PROVIDER=multiuser
+NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD=$(cat /etc/cloudbrowser/neko-password)
+NEKO_MEMBER_MULTIUSER_USER_PASSWORD=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+NEKO_SESSION_COOKIE_ENABLED=false
+NEKO_SESSION_IMPLICIT_HOSTING=true
+NEKO_SESSION_MERCIFUL_RECONNECT=true
+ENV

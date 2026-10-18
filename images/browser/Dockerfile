@@ -19,4 +19,7 @@ COPY neko.yaml /etc/neko/neko.yaml
 
 # neko and Chrome run as the unprivileged `neko` user; the root file system is mounted read-only
 # by the agent, with /data (the instance's volume) and /tmp writable.
+LABEL org.opencontainers.image.source="https://github.com/DFerryman/cloudbrowser-mono"
+LABEL org.opencontainers.image.description="CloudBrowser browser image: neko v3 + Google Chrome"
+
 USER neko

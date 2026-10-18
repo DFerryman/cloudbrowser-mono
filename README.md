@@ -27,11 +27,14 @@ services/
   agent/        Go: in-VM agent (gateway tunnel, Chrome over CDP, IP checks, neko relay, nftables)
 images/
   browser/      neko v3 + Chrome container (policies, fonts, flags)
-  vm/           Packer golden VM image (agent unit, nftables rules)
+  agent/        agent binary + VM files, copied out by a VM's first boot
+  vm/           VM files (systemd units, scripts, nftables rules) and the Packer golden image
+infra/
+  aws/          CloudFormation: VPC, security group, runtime/reaper/read-only IAM users
 packages/
   contracts/    zod schemas shared by api and web (OpenAPI is generated from them)
   db/           Drizzle schema + D1 migrations (single schema authority)
-  executors/    Executor interface + `fake` executor (aws-ec2 / oci-compute / fly-machines later)
+  executors/    Executor interface, `aws-ec2` and the `fake` executor (oci-compute later)
   viewer/       Live-view client: neko v3 over the gateway, WebRTC, input, IME, clipboard, stats
   ui/           Design tokens and components
 ```
@@ -101,6 +104,11 @@ WebRTC video plays and that mouse, click, key and scroll input arrives over the 
 
 Cron handlers (idle sleep, IP checks, reaper, reconciler) can be triggered locally with
 `wrangler dev --test-scheduled` and `curl "http://localhost:<port>/__scheduled?cron=*+*+*+*+*"`.
+
+## Real browsers
+
+Regions start on the simulator (`fake` executor). To run real VMs on AWS, follow
+[docs/aws.md](docs/aws.md).
 
 ## Checks
 
