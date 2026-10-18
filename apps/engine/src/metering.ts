@@ -124,7 +124,8 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
       if (hasSnapshot) add(part.day, 'snapshot', inst.storageGb * part.monthFraction);
     }
     if (running) for (const part of splitUsagePeriod(computeFrom, now)) add(part.day, 'compute', part.hours);
-    if (pendingMs > 0) add(usageDay(now), 'compute', pendingMs / 3_600_000);
+    // Running time settled by a stop follows the same missed-run cap as running time metered here.
+    if (pendingMs > 0) add(usageDay(now), 'compute', Math.min(pendingMs, MAX_METER_STEP_MS) / 3_600_000);
     add(usageDay(now), 'transfer', txBytes / BYTES_PER_GB);
     const stmts: BatchItem<'sqlite'>[] = [];
     const reference = `usage:${inst.id}:${from}:${now.getTime()}`;

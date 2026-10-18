@@ -8,7 +8,7 @@ import { FakeAgentBridge, GatewayAgentBridge } from '../src/agent.js';
 import { placementRef, readContext, type EngineDeps, type EngineMode } from '../src/context.js';
 import { reaperTick } from '../src/reaper.js';
 import { runOperation } from '../src/runner.js';
-import { checkInstanceIp, idleStops } from '../src/scheduler.js';
+import { checkInstanceIp, idleStops, requestStop } from '../src/scheduler.js';
 
 const { browserInstances, operations, resources, ipAddresses, placements, user, backups } = schema;
 const MASTER_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
@@ -902,5 +902,100 @@ describe('on the aws-ec2 executor', () => {
     expect([...ec2.volumes.values()]).toEqual([]);
     expect(ec2.enis.size).toBe(0);
     expect(ec2.calls.filter((c) => /^(Terminate|Delete|Release)/.test(c.action)).length).toBeGreaterThan(0);
+  });
+});
+
+describe('billing totals stay consistent', () => {
+  const { billingAccounts, balanceTransactions, usageRecords, controlFlags, instanceHealth } = schema;
+  const meter = async () => (await import('../src/metering.js')).meterUsage(w.deps());
+
+  /** Every place that shows money must agree with the balance and the ledger of debits. */
+  async function expectConsistent() {
+    const { accountUsage, instanceUsage, monthTotals } = await import('../../api/src/usage.js');
+    const records = await w.db.select().from(usageRecords);
+    const txs = await w.db.select().from(balanceTransactions);
+    const [account] = await w.db.select().from(billingAccounts).where(eq(billingAccounts.userId, 'u1'));
+    const charged = records.reduce((a, r) => a + r.chargedMicros, 0);
+    // The balance is exactly the applied transactions, and usage debits are exactly what usage records say was charged.
+    expect(account?.balanceMicros ?? 0).toBe(txs.filter((t) => t.appliedAt).reduce((a, t) => a + t.amountMicros, 0));
+    expect(-txs.filter((t) => t.kind === 'usage' && t.appliedAt).reduce((a, t) => a + t.amountMicros, 0)).toBe(charged);
+    for (const r of records) {
+      expect(r.chargedMicros).toBeGreaterThanOrEqual(0);
+      expect(r.chargedMicros).toBeLessThanOrEqual(r.amountMicros);
+      expect(r.amountMicros).toBe(Math.round(r.quantity * r.unitPriceMicros));
+      expect(r.costMicros).toBe(Math.round(r.quantity * r.unitCostMicros));
+    }
+    const months = [...new Set(records.map((r) => r.day.slice(0, 7)))];
+    let all = 0;
+    for (const month of months) {
+      const u = await accountUsage(w.db, 'u1', month);
+      const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+      expect(sum(Object.values(u.byItem))).toBe(u.totalMicros);
+      expect(sum(u.byBrowser.map((b) => b.totalMicros))).toBe(u.totalMicros);
+      expect(sum(u.byDay.map((d) => d.totalMicros))).toBe(u.totalMicros);
+      expect((await monthTotals(w.db, 'u1', month)).totalMicros).toBe(u.totalMicros);
+      for (const b of u.byBrowser) {
+        const one = await instanceUsage(w.db, b.instanceId, month, { hourMicros: 0, runningHourMicros: 0, alwaysOnMonthMicros: 0 });
+        expect(one.totalMicros).toBe(b.totalMicros);
+        expect(sum(one.items.map((i) => i.amountMicros))).toBe(one.totalMicros);
+        expect(sum(one.byDay.map((d) => d.totalMicros))).toBe(one.totalMicros);
+      }
+      all += u.totalMicros;
+    }
+    expect(all).toBe(charged);
+  }
+
+  it('caps running time settled by a stop like running time metered after a missed run', async () => {
+    const { refreshPrices } = await import('../src/prices.js');
+    await refreshPrices(w.deps());
+    await w.settle(await w.newInstance('inst1', 'tyo1'));
+    await w.settle(await w.newInstance('inst2', 'tyo1'));
+    await meter();
+    w.advance(30 * 60_000); // the meter missed 30 minutes
+    expect(await requestStop(w.deps(), { id: 'inst2', userId: 'u1' }, 'idle')).toBe(true); // settles inst2's running time
+    await meter();
+    const compute = async (id: string) => (await w.db.select().from(usageRecords).where(and(eq(usageRecords.instanceId, id), eq(usageRecords.item, 'compute'))))[0]?.amountMicros;
+    expect(await compute('inst1')).toBe(10_000); // 5 minutes at $0.12/h
+    expect(await compute('inst2')).toBe(await compute('inst1'));
+  });
+
+  it('agrees across balance, debits, month, browser, day and item totals through a month boundary and exhaustion', async () => {
+    const { applyBalance } = await import('../../api/src/billing/ledger.js');
+    const { refreshPrices } = await import('../src/prices.js');
+    w.clock = new Date('2026-10-31T23:30:00Z');
+    await refreshPrices(w.deps());
+    await w.db.insert(controlFlags).values({ key: 'billing_required', value: 'true', updatedAt: w.clock }).onConflictDoUpdate({ target: controlFlags.key, set: { value: 'true' } });
+    await applyBalance(w.db, { userId: 'u1', kind: 'adjustment', amountMicros: 20_000_000, reference: 'seed', actor: 'test' }, w.clock);
+    await w.settle(await w.newInstance('inst1', 'tyo1'));
+    await w.settle(await w.newInstance('inst2', 'syd1'));
+    await meter();
+    for (let minute = 1; minute <= 60; minute++) {
+      w.advance(60_000 + 137); // never aligned to whole seconds
+      if (minute === 10) await w.db.update(instanceHealth).set({ netTxBytes: 3 * 1024 ** 3 + 12_345 }).where(eq(instanceHealth.instanceId, 'inst1'));
+      if (minute === 20) await w.settle(await w.enqueue('inst2', 'stop'));
+      if (minute === 25) await w.db.update(instanceHealth).set({ netTxBytes: 5 * 1024 ** 3 }).where(eq(instanceHealth.instanceId, 'inst1'));
+      if (minute === 40) await w.settle(await w.enqueue('inst2', 'start'));
+      await meter();
+    }
+    await expectConsistent();
+    expect(new Set((await w.db.select().from(usageRecords)).map((r) => r.day.slice(0, 7)))).toEqual(new Set(['2026-10', '2026-11']));
+
+    // Spend down to a few cents: debits stop at available credit and the deposit then pays retention.
+    const left = await prepaidBalance(w.db, 'u1');
+    await applyBalance(w.db, { userId: 'u1', kind: 'adjustment', amountMicros: -(left.availableMicros - 3_000), reference: 'drain', actor: 'test' }, w.clock);
+    for (let minute = 0; minute < 30; minute++) {
+      w.advance(60_000);
+      await meter();
+      const stops = await w.db.select().from(operations).where(and(eq(operations.kind, 'stop'), eq(operations.status, 'queued')));
+      for (const s of stops) await w.settle(s.id);
+    }
+    const after = await prepaidBalance(w.db, 'u1');
+    expect(after.availableMicros).toBe(0);
+    expect(after.balanceMicros).toBe(after.reservedMicros);
+    expect(after.reservedMicros).toBeGreaterThan(0);
+    // The last funded minute was capped at available credit, and retention then drew on the deposits.
+    expect((await w.db.select().from(usageRecords)).some((r) => r.chargedMicros < r.amountMicros && r.unitPriceMicros > 0)).toBe(true);
+    expect((await w.db.select().from(schema.browserReservations)).every((h) => h.retentionStartedAt && h.reservedMicros < h.requiredMicros)).toBe(true);
+    await expectConsistent();
   });
 });

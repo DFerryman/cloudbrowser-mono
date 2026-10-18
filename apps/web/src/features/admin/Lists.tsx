@@ -274,7 +274,12 @@ export function UsersPage() {
           </span>,
           when(u.createdAt),
           <span className="flex flex-wrap items-center gap-1.5">
-            <span className={u.balanceMicros < 0 ? 'text-error tabular-nums' : 'tabular-nums'}>{usd(u.balanceMicros)}</span>
+            <span className="tabular-nums" title="Total = available + held seven-day deposits">
+              <span className={u.balanceMicros < 0 ? 'text-error' : undefined}>{usd(u.balanceMicros)}</span>
+              <span className="block text-xs text-muted">
+                {usd(u.availableMicros)} available · {usd(u.reservedMicros)} held
+              </span>
+            </span>
             {u.frozenAt ? <Pill tone="bad">frozen</Pill> : u.exhaustedAt ? <Pill tone="warn">ran out</Pill> : null}
             <Button size="sm" variant="ghost" onClick={() => setCredit(u)}>
               Credit

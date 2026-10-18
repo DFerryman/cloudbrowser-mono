@@ -148,7 +148,10 @@ export type UserRow = {
   createdAt: string;
   browsers: number;
   suspended: number;
+  /** Total unspent credit, including the held deposits; available + held. */
   balanceMicros: number;
+  reservedMicros: number;
+  availableMicros: number;
   exhaustedAt: string | null;
   frozenAt: string | null;
   admin: boolean;
@@ -178,6 +181,7 @@ export type PricingOverview = {
     grossMarginMicros: number;
     byItem: Record<string, { revenueMicros: number; costMicros: number }>;
     topupMicros: number;
+    topupGrossMicros: number;
     topups: number;
     refundMicros: number;
     creditMicros: number;

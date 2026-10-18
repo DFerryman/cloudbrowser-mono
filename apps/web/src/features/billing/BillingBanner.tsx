@@ -1,6 +1,7 @@
 import { Link } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
+import { isLowBalance } from './access.js';
 import { useBilling } from './hooks.js';
 
 /** One line above every page when the balance needs attention (page 6). */
@@ -14,8 +15,8 @@ export function BillingBanner() {
   if (b.frozen) message = t('banner.frozen');
   else if (b.dataKeptUntil) message = t('banner.kept', { date: new Date(b.dataKeptUntil).toLocaleDateString(locale) });
   else if (b.exhaustedAt) message = t('banner.exhausted');
-  else if ((b.availableMicros ?? 0) <= b.lowBalanceMicros) {
-    message = t('banner.low', { amount: money(b.availableMicros ?? 0, locale) });
+  else if (isLowBalance(b)) {
+    message = t('banner.low', { amount: money(b.availableMicros, locale) });
     urgent = false;
   }
   if (!message) return null;

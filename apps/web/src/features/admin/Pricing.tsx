@@ -10,6 +10,8 @@ const ITEMS = [
   ['storage', 'Storage (per GB-month)'],
   ['transfer', 'Data out (per GB)'],
 ] as const;
+/** Usage rows: every item, so they add up to the totals. Snapshots are internal recovery costs, never charged. */
+const USAGE_ROWS = [...ITEMS.map(([key, label]) => [key, label.replace(/ \(.*\)/, '')] as const), ['snapshot', 'Snapshots (internal, not charged)'] as const];
 
 /**
  * Prices and margin (page 6): AWS cost per region from the AWS Price List API, the customer price
@@ -57,25 +59,32 @@ export function PricingPage() {
           <Tile label="Charged to customers" value={usd(mo.revenueMicros)} />
           <Tile label="Est. AWS cost of metered usage" value={usd(mo.costMicros)} />
           <Tile label={`Gross margin${marginPct !== null ? ` (${marginPct}%)` : ''}`} value={usd(mo.grossMarginMicros)} tone={mo.grossMarginMicros < 0 ? 'bad' : undefined} />
-          <Tile label="Top-ups received" value={`${usd(mo.topupMicros)} · ${mo.topups}`} />
+          <Tile label={`Top-ups credited (${mo.topups})`} value={usd(mo.topupMicros)} />
         </div>
         <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Tile label="Est. payment fees" value={usd(mo.estimatedFeesMicros)} />
+          <Tile label={`Est. payment fees (on ${usd(mo.topupGrossMicros)} paid incl. tax)`} value={usd(mo.estimatedFeesMicros)} />
           <Tile label="Refunds and disputes" value={usd(mo.refundMicros)} tone={mo.refundMicros > 0 ? 'warn' : undefined} />
           <Tile label="Credits granted" value={usd(mo.creditMicros)} />
           <Tile label="AWS projected (all resources)" value={mo.projectedAwsCents !== null ? `$${(mo.projectedAwsCents / 100).toFixed(2)}` : '—'} />
         </div>
         <p className="mt-2 text-xs text-muted">
           Costs use AWS public unit prices and platform usage, not an AWS bill. Free-tier allowances, credits and discounts are not reconciled.
+          Charged is what was taken from balances; costs also include free trials and browsers being deleted, which are metered but never charged.
           AWS projected (from the reconciler) also includes resources not charged to anyone: browsers being created,
           resources awaiting cleanup, old IPs kept 30 days after a change, and internal recovery resources. Outstanding balances: {usd(d.balances.totalMicros)} (of which{' '}
           {usd(d.balances.negativeMicros)} below zero).
         </p>
         <Table
-          rows={ITEMS.map(([key, label]) => ({ key, label, ...(mo.byItem[key] ?? { revenueMicros: 0, costMicros: 0 }) }))}
+          rows={[
+            ...USAGE_ROWS.map(([key, label]) => ({ key, label, ...(mo.byItem[key] ?? { revenueMicros: 0, costMicros: 0 }) })),
+            { key: 'total', label: 'Total', revenueMicros: mo.revenueMicros, costMicros: mo.costMicros },
+          ]}
           rowKey={(r) => r.key}
           columns={['Item', 'Charged', 'Est. AWS cost', 'Est. margin']}
-          cells={(r) => [r.label.replace(/ \(.*\)/, ''), usd(r.revenueMicros), usd(r.costMicros), usd(r.revenueMicros - r.costMicros)]}
+          cells={(r) => {
+            const strong = (v: string) => (r.key === 'total' ? <span className="font-semibold">{v}</span> : v);
+            return [strong(r.label), strong(usd(r.revenueMicros)), strong(usd(r.costMicros)), strong(usd(r.revenueMicros - r.costMicros))];
+          }}
         />
       </section>
 

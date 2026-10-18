@@ -8,3 +8,5 @@ export function canUseBrowser(billing: BillingState | undefined, instance: Insta
   if (!billing || billing.frozen) return false;
   return hasTrialTime(instance) || billing.availableMicros >= (instance.status === 'running' ? 1 : minimumSpendBalance(billing));
 }
+/** One rule for every low-credit warning: only where usage is paid, and not before a new user's free trial. */
+export const isLowBalance = (billing: BillingState) => billing.mode === 'prepaid' && !billing.trial.eligible && billing.availableMicros <= billing.lowBalanceMicros;

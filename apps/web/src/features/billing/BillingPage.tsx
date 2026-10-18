@@ -7,6 +7,7 @@ import { PageHeader } from '../../app/AppShell.js';
 import { useI18n } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
 import { regionKey } from '../instances/status.js';
+import { isLowBalance } from './access.js';
 import { DailyCharges } from './DailyCharges.js';
 import { currentMonth, monthLabel, recentMonths, useAccountUsage, useBilling, useCheckout, usePortal, useTransactions } from './hooks.js';
 
@@ -70,7 +71,7 @@ function BalanceCard({ state }: { state: BillingState }) {
       ? t('billing.keptUntil', { date: new Date(state.dataKeptUntil).toLocaleDateString(locale) })
       : state.exhaustedAt
         ? t('billing.exhausted')
-        : state.availableMicros <= state.lowBalanceMicros && !state.trial.eligible
+        : isLowBalance(state)
           ? t('billing.low')
           : null;
 

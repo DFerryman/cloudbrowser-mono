@@ -219,7 +219,17 @@ describe('admin console', () => {
     await signIn(t, ADMIN_EMAIL);
     const users = (await callAdmin('GET', '/api/v1/admin/users', undefined, IP)).body;
     expect(users.find((u: { email: string }) => u.email === ADMIN_EMAIL).admin).toBe(true);
-    expect(users.find((u: { email: string }) => u.email === 'user@example.com')).toMatchObject({ browsers: 1, suspended: 0, balanceMicros: 0, frozenAt: null });
+    expect(users.find((u: { email: string }) => u.email === 'user@example.com')).toMatchObject({ browsers: 1, suspended: 0, balanceMicros: 0, reservedMicros: 0, availableMicros: 0, frozenAt: null });
+    // The console splits a balance exactly as the user's Billing page does.
+    await callAdmin('POST', `/api/v1/admin/users/${owner}/credit`, { amountMicros: 5_000_000, reason: 'pilot credit' }, IP);
+    t.d1.sqlite.prepare(`INSERT INTO browser_reservations (instance_id, user_id, required_micros, reserved_micros, fixed_hour_micros, rates, updated_at)
+      VALUES (?, ?, 1200000, 1200000, 7000, '{}', ?) ON CONFLICT (instance_id) DO UPDATE SET reserved_micros = 1200000, required_micros = 1200000`).run(browser, owner, Date.now());
+    const split = (await callAdmin('GET', '/api/v1/admin/users?q=user@', undefined, IP)).body[0];
+    await signIn(t, 'user@example.com');
+    const mine = (await t.call('GET', '/api/v1/billing')).body;
+    expect(split).toMatchObject({ balanceMicros: mine.balanceMicros, reservedMicros: mine.reservedMicros, availableMicros: mine.availableMicros });
+    expect(split).toMatchObject({ balanceMicros: 5_000_000, reservedMicros: 1_200_000, availableMicros: 3_800_000 });
+    await signIn(t, ADMIN_EMAIL);
     await callAdmin('POST', `/api/v1/admin/users/${owner}/actions`, { action: 'suspend', reason: 'chargeback' }, IP);
     expect((await callAdmin('GET', '/api/v1/admin/users?q=user@', undefined, IP)).body[0].suspended).toBe(1);
   });
@@ -256,6 +266,26 @@ describe('admin console', () => {
     month = (await callAdmin('GET', '/api/v1/admin/pricing')).body.month;
     expect(month).toMatchObject({ revenueMicros: 120_000, costMicros: 100_000, grossMarginMicros: 20_000 });
     expect(month.byItem.compute).toEqual({ revenueMicros: 120_000, costMicros: 100_000 });
+  });
+
+  it('adds every item to the totals and estimates payment fees on what customers paid, tax included', async () => {
+    const day = new Date().toISOString().slice(0, 10);
+    const insert = t.d1.sqlite.prepare(`INSERT INTO usage_records
+      (instance_id, user_id, region_id, item, day, unit_price_micros, unit_cost_micros, quantity, amount_micros, charged_micros, cost_micros, updated_at)
+      VALUES (?, ?, 'tyo1', ?, ?, ?, ?, 1, ?, ?, ?, ?)`);
+    insert.run(browser, owner, 'compute', day, 120_000, 100_000, 120_000, 120_000, 100_000, Date.now());
+    insert.run(browser, owner, 'snapshot', day, 0, 50_000, 0, 0, 50_000, Date.now()); // internal recovery snapshot: cost only
+    t.d1.sqlite.prepare(`INSERT INTO balance_transactions (id, user_id, kind, amount_micros, reference, order_id, gross_amount_cents, currency, actor, created_at, applied_at)
+      VALUES ('tx-paid', ?, 'topup', 10000000, 'order:o1', 'o1', 1100, 'USD', 'creem', ?, ?)`).run(owner, Date.now(), Date.now());
+    const before = (await callAdmin('GET', '/api/v1/admin/pricing')).body;
+    await callAdmin('PUT', '/api/v1/admin/pricing/settings', { ...before.settings, paymentFeeBps: 390, paymentFeeFixedCents: 40, reason: 'creem fees' }, IP);
+    const { month } = (await callAdmin('GET', '/api/v1/admin/pricing')).body;
+    const items = Object.values(month.byItem as Record<string, { revenueMicros: number; costMicros: number }>);
+    expect(items.reduce((a, i) => a + i.revenueMicros, 0)).toBe(month.revenueMicros);
+    expect(items.reduce((a, i) => a + i.costMicros, 0)).toBe(month.costMicros);
+    expect(month.byItem.snapshot).toEqual({ revenueMicros: 0, costMicros: 50_000 });
+    // $10.00 credited from $11.00 paid (tax $1.00): 3.9% of $11.00 + $0.40 = $0.829.
+    expect(month).toMatchObject({ topupMicros: 10_000_000, topupGrossMicros: 11_000_000, topups: 1, estimatedFeesMicros: 829_000 });
   });
 
   it('raises alerts once, delivers them to email and the chat webhook, and acknowledges them', async () => {

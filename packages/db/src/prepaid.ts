@@ -103,11 +103,11 @@ export async function prepaidAccess(db: Db, userId: string, instanceId: string, 
     if (inst.trialState === 'active' || inst.trialState === 'ended' || holds.get(inst.id)?.retentionStartedAt) continue;
     const sheet = sheets.get(inst.regionId);
     if (!sheet) return denied('balance');
-    const rates = customerRates(sheet, settings.markupPercent);
     const machine = machines.get(inst.id);
     const vmPrice = machine?.instanceType ? sheet.instanceTypes[machine.instanceType] : sheet.vmHour;
     if (vmPrice === undefined) return denied('balance');
-    rates.compute = Math.round(vmPrice * 1_000_000 * settings.markupPercent / 100);
+    // The same rounding as metering: the cost to a micro-dollar first, then the markup.
+    const rates = customerRates({ ...sheet, vmHour: vmPrice }, settings.markupPercent);
     const fixed = holds.get(inst.id)?.fixedHourMicros ?? 0;
     const running = inst.status === 'running';
     hour += fixed + (running ? rates.compute : 0);

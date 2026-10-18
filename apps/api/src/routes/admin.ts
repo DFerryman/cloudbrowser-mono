@@ -36,6 +36,7 @@ const {
   webhookEvents,
   billingAccounts,
   balanceTransactions,
+  browserReservations,
   usageRecords,
   providerPrices,
   regions,
@@ -408,15 +409,25 @@ adminRoute.get('/users', async (c) => {
     .where(and(inArray(browserInstances.userId, ids), sql`${browserInstances.status} <> 'purged'`))
     .groupBy(browserInstances.userId);
   const accounts = await db.select().from(billingAccounts).where(inArray(billingAccounts.userId, ids));
+  const held = await db
+    .select({ userId: browserReservations.userId, micros: sql<number>`coalesce(sum(${browserReservations.reservedMicros}), 0)` })
+    .from(browserReservations)
+    .where(inArray(browserReservations.userId, ids))
+    .groupBy(browserReservations.userId);
   return c.json(
     rows.map((r) => {
       const n = counts.find((x) => x.userId === r.id);
       const a = accounts.find((x) => x.userId === r.id);
+      // The same split as the user's own Billing page: the total includes the held deposits.
+      const balanceMicros = a?.balanceMicros ?? 0;
+      const reservedMicros = Number(held.find((x) => x.userId === r.id)?.micros ?? 0);
       return {
         ...r,
         browsers: Number(n?.n ?? 0),
         suspended: Number(n?.suspended ?? 0),
-        balanceMicros: a?.balanceMicros ?? 0,
+        balanceMicros,
+        reservedMicros,
+        availableMicros: Math.max(0, balanceMicros - reservedMicros),
         exhaustedAt: a?.exhaustedAt ?? null,
         frozenAt: a?.frozenAt ?? null,
         admin: isAdminEmail(c.env, r.email),
@@ -487,7 +498,12 @@ adminRoute.get('/pricing', async (c) => {
     .where(like(usageRecords.day, `${month}-%`))
     .groupBy(usageRecords.item);
   const tx = await db
-    .select({ kind: balanceTransactions.kind, n: sql<number>`count(*)`, amount: sql<number>`sum(${balanceTransactions.amountMicros})` })
+    .select({
+      kind: balanceTransactions.kind,
+      n: sql<number>`count(*)`,
+      amount: sql<number>`sum(${balanceTransactions.amountMicros})`,
+      grossCents: sql<number>`coalesce(sum(${balanceTransactions.grossAmountCents}), 0)`,
+    })
     .from(balanceTransactions)
     .where(gte(balanceTransactions.createdAt, monthStart))
     .groupBy(balanceTransactions.kind);
@@ -505,7 +521,11 @@ adminRoute.get('/pricing', async (c) => {
   const costMicros = usageRows.reduce((a, r) => a + Number(r.cost ?? 0), 0);
   const topups = tx.find((t) => t.kind === 'topup');
   const topupMicros = Number(topups?.amount ?? 0);
-  const feesMicros = Math.round((topupMicros * settings.paymentFeeBps) / 10_000) + Number(topups?.n ?? 0) * settings.paymentFeeFixedCents * 10_000;
+  // The payment provider takes its fee from what the customer paid, tax included, not from the
+  // credit (which excludes tax). Credits granted by operators have no gross amount and no fee.
+  // One cent is 10,000 micro-dollars, so cents × basis points is already micro-dollars.
+  const grossCents = Number(topups?.grossCents ?? 0);
+  const feesMicros = Math.round(grossCents * settings.paymentFeeBps) + Number(topups?.n ?? 0) * settings.paymentFeeFixedCents * 10_000;
   return c.json({
     settings,
     regions: regionRows.map((r) => {
@@ -532,6 +552,7 @@ adminRoute.get('/pricing', async (c) => {
       grossMarginMicros: revenueMicros - costMicros,
       byItem,
       topupMicros,
+      topupGrossMicros: grossCents * 10_000,
       topups: Number(topups?.n ?? 0),
       refundMicros: -Number(tx.find((t) => t.kind === 'refund')?.amount ?? 0) - Number(tx.find((t) => t.kind === 'dispute')?.amount ?? 0),
       creditMicros: Number(tx.find((t) => t.kind === 'adjustment')?.amount ?? 0),
