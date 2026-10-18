@@ -118,8 +118,10 @@ try {
   await create.page.getByRole('button', { name: 'Create browser', exact: true }).click();
   await rejected(create, '/api/v1/instances');
   assert.equal(await create.page.getByLabel('Name', { exact: true }).inputValue(), 'Keep my entered name');
+  // The replacement quote is shown (region row and running total), and its compute-only part in the details.
+  await create.page.getByText('$0.2191/h', { exact: true }).first().waitFor();
+  await create.page.getByRole('button', { name: 'Price details', exact: true }).click();
   await create.page.getByText('$0.20/h', { exact: true }).first().waitFor();
-  await create.page.getByText('$0.2191/h', { exact: true }).waitFor();
   await create.page.getByRole('button', { name: 'Create browser', exact: true }).click();
   await create.page.waitForURL('**/browsers');
   assert.equal(create.state.requests[1].body.priceVersion, 'quote-2');
@@ -132,7 +134,7 @@ try {
   await capacity.page.getByRole('button', { name: 'Create browser', exact: true }).click();
   await rejected(capacity, '/api/v1/instances');
   assert.equal(capacity.state.requests[0].body.storageGb, 10);
-  await capacity.page.getByText('Storage, 116 GB', { exact: true }).waitFor();
+  await capacity.page.getByText('Dedicated IP and 116 GB of storage', { exact: true }).waitFor();
   await capacity.page.getByRole('button', { name: 'Create browser', exact: true }).click();
   await capacity.page.waitForURL('**/browsers');
   assert.equal(capacity.state.requests[1].body.storageGb, 100);
@@ -269,31 +271,35 @@ try {
 
   const comparable = await fixture({ sizeGb: 20, status: 'running' });
   await comparable.page.goto(`${origin}/browsers/new`);
-  await comparable.page.getByText('$0.1096/h', { exact: true }).waitFor();
-  await comparable.page.getByText('Est. running total $0.1096/h', { exact: true }).waitFor();
+  // A new browser is quoted all-in (compute, IP and the 10 GB default) in its region row and the cost summary.
+  await comparable.page.getByText('$0.1096/h', { exact: true }).first().waitFor();
+  assert.equal(await comparable.page.getByText('$0.1096/h', { exact: true }).count(), 2);
+  await comparable.page.getByText('Dedicated IP and 26 GB of storage', { exact: true }).waitFor();
+  await comparable.page.getByRole('button', { name: 'Price details', exact: true }).click();
   await comparable.page.getByText('Compute only', { exact: true }).waitFor();
   await comparable.page.getByText('Storage, 26 GB', { exact: true }).waitFor();
-  await comparable.page.goto(`${origin}/billing`);
-  await comparable.page.getByText('$0.1096/h', { exact: true }).waitFor();
   await comparable.page.getByText('$0.006/h', { exact: true }).waitFor();
   await comparable.page.getByText('$0.10 per GB-month', { exact: true }).waitFor();
+  // The existing browser's own rates use its actual 20 GB volume.
   await comparable.page.goto(`${origin}/browsers/${instance.id}/usage`);
-  await comparable.page.getByText('Estimated running total now: $0.1109/h, excluding data transfer. This is not an extra charge.', { exact: true }).waitFor();
-  await comparable.page.getByText(/actual 20 GB data volume/).waitFor();
-  await comparable.page.getByText('Compute only: $0.10/h while awake, included in the running total.', { exact: true }).waitFor();
+  await comparable.page.getByText('$0.1109/h', { exact: true }).waitFor();
+  await comparable.page.getByText('Computer, dedicated IP and 36 GB of storage', { exact: true }).waitFor();
+  await comparable.page.getByText('Now', { exact: true }).waitFor();
   await finish(comparable, 'new-browser quotes share one all-in estimate while actual 20 GB usage is explicitly distinguished from the 10 GB default and compute-only component');
 
   for (const mode of ['prepaid', 'pilot']) {
     const locked = await fixture({ mode, balanceMicros: 2_000_000, reservedMicros: 2_000_000, availableMicros: 0, status: 'running' });
     await locked.page.goto(`${origin}/billing`);
-    await locked.page.getByText('Total credit: $2.00', { exact: true }).waitFor();
-    await locked.page.getByText('Reserved for seven-day retention: $2.00', { exact: true }).waitFor();
+    const tile = (label) => locked.page.locator('dl > div', { has: locked.page.getByText(label, { exact: true }) });
+    await locked.page.getByRole('heading', { name: 'Total balance', exact: true }).waitFor();
+    await tile('Held amount').getByText('$2.00', { exact: true }).waitFor();
+    await tile('Available amount').getByText('$0.00', { exact: true }).waitFor();
     assert.equal(await locked.page.getByText('Free pilot', { exact: true }).count(), 0);
     await locked.page.goto(`${origin}/browsers`);
     await locked.page.getByText(/positive available balance is required/).waitFor();
     assert.equal(await locked.page.getByRole('button', { name: 'Open', exact: true }).isDisabled(), true);
     await locked.page.goto(`${origin}/browsers/new`);
-    await locked.page.getByText(/At least .* available credit is needed/).waitFor();
+    await locked.page.getByText(/Needs .* of available credit/).waitFor();
     assert.equal(await locked.page.getByRole('button', { name: 'Create browser', exact: true }).isDisabled(), true);
     await locked.page.goto(`${origin}/browsers/${instance.id}/storage`);
     await locked.page.getByText(/positive available balance is required/).waitFor();
@@ -304,8 +310,10 @@ try {
 
   const freeCreate = await fixture({ balanceMicros: 0, trialEligible: true });
   await freeCreate.page.goto(`${origin}/browsers/new`);
-  await freeCreate.page.getByText('Free', { exact: true }).waitFor();
-  assert.equal(await freeCreate.page.getByRole('checkbox').isChecked(), true);
+  await freeCreate.page.getByText('Free', { exact: true }).first().waitFor();
+  // With no credit the trial plan is preselected, and paying as you go stays one click away.
+  assert.equal(await freeCreate.page.getByRole('radio', { name: /Free trial/ }).isChecked(), true);
+  assert.equal(await freeCreate.page.getByRole('radio', { name: /Pay as you go/ }).isChecked(), false);
   await freeCreate.page.getByRole('button', { name: 'Create browser', exact: true }).click();
   await freeCreate.page.waitForURL('**/browsers');
   assert.equal(freeCreate.state.requests[0].body.trial, true);
@@ -338,7 +346,7 @@ try {
   const insufficientGrowth = await fixture({ availableMicros: 1_000_001 });
   await insufficientGrowth.page.goto(`${origin}/browsers/${instance.id}/storage`);
   await insufficientGrowth.page.getByLabel('New size (GB)', { exact: true }).fill('100');
-  await insufficientGrowth.page.getByText(/Additional seven-day retention reserve:/).first().waitFor();
+  await insufficientGrowth.page.getByText(/Additional held amount:/).first().waitFor();
   assert.equal(await insufficientGrowth.page.getByRole('button', { name: 'Add storage', exact: true }).isDisabled(), true);
   assert.equal(insufficientGrowth.state.requests.length, 0);
   await finish(insufficientGrowth, 'storage growth requires available credit for both the minimum balance and additional seven-day reserve');

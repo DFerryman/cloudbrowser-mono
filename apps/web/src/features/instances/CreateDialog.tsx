@@ -1,16 +1,23 @@
-import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, SCREEN_SIZES, browserEstimate, retentionReserve, type Instance, type Region } from '@cloudbrowser/contracts';
+import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, REGION_INFO, SCREEN_SIZES, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
 import { Button, cn, Dialog, Input, Label, Select } from '@cloudbrowser/ui';
-import { ChevronRight } from 'lucide-react';
-import { useEffect, useState, type FormEvent } from 'react';
+import { AlertCircle, ChevronRight, Gift, Info, Wallet } from 'lucide-react';
+import { useEffect, useId, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { useI18n, type Locale } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
 import { useBilling, usePricing } from '../billing/hooks.js';
-import { PriceBreakdown } from '../billing/PriceBreakdown.js';
+import { PriceBreakdown, PriceSource } from '../billing/PriceBreakdown.js';
+import { RateRow } from '../billing/RateRow.js';
 import { canSpend, minimumSpendBalance } from '../billing/access.js';
 import { useCreateInstance, useInstances, useMe, useRegions } from './hooks.js';
+import { regionKey } from './status.js';
 
 const UI_TO_BROWSER_LOCALE: Record<Locale, BrowserLocale> = { en: 'en-US', 'zh-CN': 'zh-CN' };
+const LANGUAGES: { value: BrowserLocale; label: string }[] = [
+  { value: 'zh-CN', label: '简体中文' },
+  { value: 'en-US', label: 'English (US)' },
+  { value: 'ja-JP', label: '日本語' },
+];
 
 /** Measures latency from the user's own network as a hint; the region is never picked for them. */
 function useLatency(regions: Region[] | undefined) {
@@ -42,8 +49,16 @@ function useLatency(regions: Region[] | undefined) {
   return ms;
 }
 
+type Plan = 'trial' | 'paid';
+
+/**
+ * Creating a browser (page 1): what it is called, where it lives (permanently) and what it costs,
+ * read top to bottom. The price the user saw is sent back with the request, so it cannot change
+ * unseen. When the free trial is on offer it is a plan of its own, next to paying as you go.
+ */
 export function CreateDialog({ open, initialInstance, onClose, onCreated }: { open: boolean; initialInstance?: Instance; onClose: () => void; onCreated: (instanceId: string) => void }) {
   const { t, locale, errorMessage } = useI18n();
+  const formId = useId();
   const regions = useRegions();
   const instances = useInstances();
   const me = useMe();
@@ -57,7 +72,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
   const [browserLocale, setBrowserLocale] = useState<BrowserLocale>(UI_TO_BROWSER_LOCALE[locale]);
   const [screen, setScreen] = useState<(typeof SCREEN_SIZES)[number]>('auto');
   const [advanced, setAdvanced] = useState(false);
-  const [useTrial, setUseTrial] = useState(false);
+  const [plan, setPlan] = useState<Plan>('paid');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -71,6 +86,25 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
       setError(null);
     }
   }, [open, initialInstance?.id]);
+
+  const b = billing.data;
+  const atLimit = me.data ? me.data.usage.browsers >= me.data.entitlements.maxBrowsers : false;
+  // The one free trial (page 6): offered once, in its own region, while that region takes new browsers.
+  const trialOffer = !!b?.trial.eligible && !!regions.data?.find((r) => r.id === b.trial.regionId)?.acceptingNew;
+  const trial = trialOffer && plan === 'trial';
+  const storageFor = (p: RegionPricing) => (trial && b ? b.trial.storageGb : p.defaultStorageGb);
+  const price = pricing.data?.find((p) => p.regionId === regionId);
+  const reserve = price?.rates ? retentionReserve(price.rates, { storageGb: price.defaultStorageGb, rootVolumeGb: price.rootVolumeGb, backups: false }) : 0;
+  const balanceTooLow = !!b && !canSpend(b, reserve);
+  const needsCredit = balanceTooLow && !trial;
+
+  // Suggest the trial when the balance cannot pay for a browser yet; the user can still switch.
+  useEffect(() => {
+    if (open) setPlan(trialOffer && balanceTooLow ? 'trial' : 'paid');
+  }, [open, trialOffer, balanceTooLow]);
+  useEffect(() => {
+    if (trial && b) setRegionId(b.trial.regionId);
+  }, [trial, b]);
   // Never preselect a region that cannot take new browsers.
   useEffect(() => {
     const list = regions.data;
@@ -80,27 +114,6 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
     }
   }, [regions.data, regionId]);
 
-  const atLimit = me.data ? me.data.usage.browsers >= me.data.entitlements.maxBrowsers : false;
-  // The price of the chosen region is shown before creating, and sent back so it cannot change unseen.
-  const price = pricing.data?.find((p) => p.regionId === regionId);
-  const b = billing.data;
-  const rateOf = (id: string) => {
-    const p = pricing.data?.find((p) => p.regionId === id);
-    return p?.rates ? browserEstimate(p.rates, { storageGb: trial && b ? b.trial.storageGb : p.defaultStorageGb, rootVolumeGb: p.rootVolumeGb, backups: false }).runningTotalHour : null;
-  };
-  const reserve = price?.rates ? retentionReserve(price.rates, { storageGb: price.defaultStorageGb, rootVolumeGb: price.rootVolumeGb, backups: false }) : 0;
-  const balanceTooLow = !!b && !canSpend(b, reserve);
-  // The one free trial (page 6): offered once, in its own region, while that region takes new browsers.
-  const trialOffer = !!b?.trial.eligible && !!regions.data?.find((r) => r.id === b.trial.regionId)?.acceptingNew;
-  const trial = trialOffer && useTrial;
-  const needsCredit = balanceTooLow && !trial;
-  useEffect(() => {
-    if (open) setUseTrial(trialOffer && balanceTooLow);
-  }, [open, trialOffer, balanceTooLow]);
-  useEffect(() => {
-    if (trial && b) setRegionId(b.trial.regionId);
-  }, [trial, b]);
-
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     const parsed = CreateInstanceBody.safeParse({ name, regionId, locale: browserLocale, screen, priceVersion: price?.version ?? undefined, storageGb: trial ? b!.trial.storageGb : price?.defaultStorageGb, ...(trial ? { trial: true } : {}) });
@@ -108,6 +121,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
       setError(t('error.validation_failed'));
       return;
     }
+    setError(null);
     try {
       const res = await create.mutateAsync(parsed.data);
       onCreated(res.instanceId);
@@ -116,83 +130,108 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
     }
   };
 
+  const blocked = create.isPending || pricing.isFetching || pricing.isError || !b || b.frozen || atLimit || needsCredit || !price?.available || !price.version;
+  const notice = error
+    ?? (atLimit && me.data ? t('create.atLimit', { max: me.data.entitlements.maxBrowsers }) : null)
+    ?? (b?.frozen ? t('billing.frozen') : null);
+
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()} title={t('create.title')} closeLabel={t('common.cancel')} size="lg">
-      <form onSubmit={submit} className="grid gap-6 md:grid-cols-[minmax(0,1fr)_minmax(0,320px)]">
-        <div className="space-y-5">
+    <Dialog
+      open={open}
+      onOpenChange={(o) => !o && onClose()}
+      title={t('create.title')}
+      description={t('create.subtitle')}
+      closeLabel={t('common.cancel')}
+      footer={
+        <div className="space-y-3">
+          {notice ? (
+            <p role="alert" className="flex gap-2 text-sm text-error">
+              <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden /> {notice}
+            </p>
+          ) : null}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <FundingStatus trial={trial} needsCredit={needsCredit} needed={b ? minimumSpendBalance(b) + reserve : 0} />
+            <div className="flex gap-2 sm:shrink-0">
+              <Button className="flex-1 justify-center sm:flex-none" onClick={onClose}>
+                {t('common.cancel')}
+              </Button>
+              <Button type="submit" form={formId} variant="primary" className="flex-1 justify-center sm:flex-none" disabled={blocked}>
+                {create.isPending ? t('create.creating') : t('create.submit')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="space-y-6">
+        {initialInstance?.trial && initialInstance.trial.state !== 'converted' ? (
+          <p className="rounded-[var(--radius-control)] border border-border bg-surface px-3 py-2 text-sm text-muted">{t('create.retryTrial')}</p>
+        ) : null}
+
+        {trialOffer && b ? (
+          <fieldset>
+            <legend className="mb-2 text-sm font-medium">{t('create.plan')}</legend>
+            <div className="grid gap-2 sm:grid-cols-2" role="radiogroup">
+              <Choice name="plan" checked={plan === 'trial'} onChange={() => setPlan('trial')} icon={<Gift className="size-4" />}
+                title={t('create.plan.trial')}
+                hint={t('create.plan.trialHint', { minutes: b.trial.minutes, region: t(regionKey(b.trial.regionId)) })} />
+              <Choice name="plan" checked={plan === 'paid'} onChange={() => setPlan('paid')} icon={<Wallet className="size-4" />}
+                title={t('create.plan.paid')}
+                hint={t('create.plan.paidHint')} />
+            </div>
+          </fieldset>
+        ) : null}
+
         <div>
           <Label htmlFor="name">{t('create.name')}</Label>
           <Input id="name" value={name} maxLength={64} required onChange={(e) => setName(e.target.value)} />
         </div>
 
-        {trialOffer && b ? (
-          <label className="flex cursor-pointer items-start gap-3 rounded-[var(--radius-control)] border border-accent/50 bg-accent/5 p-3">
-            <input type="checkbox" className="mt-1 size-4 accent-[var(--color-accent)]" checked={useTrial} onChange={(e) => setUseTrial(e.target.checked)} />
-            <span>
-              <span className="block text-sm font-medium">{t('trial.option')}</span>
-              <span className="block text-xs text-muted">
-                {t('trial.optionHint', { minutes: b.trial.minutes, region: t(`create.region.${b.trial.regionId}`), gb: b.trial.storageGb })}
-              </span>
-            </span>
-          </label>
-        ) : null}
-
         <fieldset>
-          <legend className="mb-1.5 text-sm font-medium">{t('create.region')}</legend>
-          <div className="grid gap-2 sm:grid-cols-2">
+          <legend className="mb-2 text-sm font-medium">{t('create.region')}</legend>
+          <div className="divide-y divide-border overflow-hidden rounded-[var(--radius-control)] border border-border" role="radiogroup">
             {(regions.data ?? []).map((r) => {
               const trialOnly = r.acceptingNew && trial && r.id !== b?.trial.regionId;
               const disabled = !r.acceptingNew || trialOnly;
+              const p = pricing.data?.find((x) => x.regionId === r.id);
+              const hourly = p?.rates ? browserEstimate(p.rates, { storageGb: storageFor(p), rootVolumeGb: p.rootVolumeGb, backups: false }).runningTotalHour : null;
               return (
-                <label
+                <RegionRow
                   key={r.id}
-                  className={cn(
-                    'flex cursor-pointer flex-col rounded-[var(--radius-control)] border p-3 transition-colors',
-                    regionId === r.id ? 'border-accent ring-1 ring-accent' : 'border-border hover:bg-surface',
-                    disabled && 'cursor-not-allowed opacity-60',
-                  )}
-                >
-                  <input
-                    type="radio"
-                    name="region"
-                    value={r.id}
-                    className="sr-only"
-                    checked={regionId === r.id}
-                    disabled={disabled}
-                    onChange={() => setRegionId(r.id)}
-                  />
-                  <span className="flex items-center justify-between font-medium">
-                    {t(`create.region.${r.id}`)}
-                    {latency[r.id] !== undefined ? <span className="font-mono text-xs text-muted">{latency[r.id]} ms</span> : null}
-                  </span>
-                  <span className="text-xs text-muted">{trialOnly && b
-                      ? t('trial.regionOnly', { region: t(`create.region.${b.trial.regionId}`) })
-                      : disabled
-                        ? t('create.region.unavailable')
-                        : t(`create.region.${r.id}.hint`)}</span>
-                  {!disabled && rateOf(r.id) !== null ? (
-                    <span className="mt-1 text-xs font-medium tabular-nums">{t('price.runningShort', { amount: money(rateOf(r.id)!, locale) })}</span>
-                  ) : null}
-                </label>
+                  region={r}
+                  checked={regionId === r.id}
+                  disabled={disabled}
+                  onChange={() => setRegionId(r.id)}
+                  hint={!r.acceptingNew ? t('create.region.unavailable') : trialOnly ? t('create.region.notInTrial') : t(`create.region.${r.id}.hint`)}
+                  latency={latency[r.id]}
+                  price={disabled ? null : trial ? t('trial.free') : hourly !== null ? t('price.perHour', { amount: money(hourly, locale) }) : null}
+                />
               );
             })}
+            {regions.isPending ? <div className="h-32 bg-surface-2 [animation:cb-pulse_1.5s_ease-in-out_infinite]" /> : null}
           </div>
-          <p className="mt-2 text-xs leading-relaxed text-muted">{t('create.note')}</p>
+          <p className="mt-2 flex gap-2 text-xs leading-relaxed text-muted">
+            <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            <span>{t('create.permanent')}</span>
+          </p>
         </fieldset>
 
         <div>
-          <button type="button" className="flex items-center gap-1 text-sm font-medium" aria-expanded={advanced} onClick={() => setAdvanced((a) => !a)}>
-            <ChevronRight className={cn('size-4 transition-transform', advanced && 'rotate-90')} />
+          <button type="button" className="flex w-full items-center gap-1.5 text-left text-sm font-medium" aria-expanded={advanced} onClick={() => setAdvanced((a) => !a)}>
+            <ChevronRight className={cn('size-4 text-muted transition-transform', advanced && 'rotate-90')} aria-hidden />
             {t('create.advanced')}
+            {!advanced ? (
+              <span className="ml-1 truncate font-normal text-muted">
+                · {LANGUAGES.find((l) => l.value === browserLocale)?.label ?? browserLocale} · {screen === 'auto' ? t('create.screen.auto') : screen.replace('x', ' × ')}
+              </span>
+            ) : null}
           </button>
           {advanced ? (
-            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div className="mt-3 grid gap-3 pl-5 sm:grid-cols-2">
               <div>
                 <Label htmlFor="locale">{t('create.language')}</Label>
                 <Select id="locale" value={browserLocale} onChange={(e) => setBrowserLocale(e.target.value as BrowserLocale)}>
-                  <option value="zh-CN">简体中文</option>
-                  <option value="en-US">English (US)</option>
-                  <option value="ja-JP">日本語</option>
+                  {LANGUAGES.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
                 </Select>
               </div>
               <div>
@@ -209,78 +248,144 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
           ) : null}
         </div>
 
-        </div>
-
-        <aside className="space-y-3 rounded-[var(--radius-card)] border border-border bg-surface p-4 md:row-span-2">
-          <h3 className="text-sm font-semibold">{t('create.priceTitle', { region: t(`create.region.${regionId}`) })}</h3>
-          {trial && b && price?.rates ? (
-            <TrialPrice minutes={b.trial.minutes} days={b.trial.keptDays} gb={b.trial.storageGb} pricing={price} />
-          ) : price ? (
-            <PriceBreakdown pricing={price} />
+        <section aria-labelledby={`${formId}-cost`} className="rounded-[var(--radius-card)] border border-border bg-surface p-4">
+          <h3 id={`${formId}-cost`} className="text-sm font-semibold">
+            {t('create.cost', { region: t(regionKey(regionId)) })}
+          </h3>
+          {!price ? (
+            <p className="mt-2 text-sm text-muted">{pricing.isError ? t('price.unavailable') : t('common.loading')}</p>
+          ) : !price.rates ? (
+            <p className="mt-2 text-sm text-muted">{t('price.unavailable')}</p>
+          ) : trial && b ? (
+            <TrialCost pricing={price} minutes={b.trial.minutes} days={b.trial.keptDays} gb={b.trial.storageGb} />
           ) : (
-            <p className="text-sm text-muted">{t('common.loading')}</p>
+            <PaidCost pricing={price} reserve={reserve} />
           )}
-          {trial ? null : <p className="text-xs text-muted">{t('create.chargesStart')}</p>}
-          {b && !trial ? (
-            <div className="space-y-1 border-t border-border pt-3 text-sm">
-              <p>{t('billing.totalBalance', { amount: money(b.balanceMicros, locale) })}</p>
-              <p className="text-muted">{t('billing.availableAndReserved', {
-                available: money(b.availableMicros, locale),
-                reserved: money(b.reservedMicros, locale),
-              })}</p>
-              {needsCredit ? (
-                <p>
-                  <span className="text-error">{t(b.frozen ? 'billing.frozen' : 'create.needCredit', { amount: money(minimumSpendBalance(b) + reserve, locale) })}</span>{' '}
-                  <Link to="/billing" className="font-medium text-accent hover:underline">
-                    {t('create.addCredit')}
-                  </Link>
-                </p>
-              ) : null}
-            </div>
-          ) : null}
-        </aside>
-
-        <div className="space-y-3">
-          {atLimit && me.data ? <p className="text-sm text-muted">{t('create.atLimit', { max: me.data.entitlements.maxBrowsers })}</p> : null}
-          {error ? (
-            <p role="alert" className="text-sm text-error">
-              {error}
-            </p>
-          ) : null}
-          {initialInstance?.trial && initialInstance.trial.state !== 'converted' ? <p className="text-sm text-muted">{t('create.retryTrial')}</p> : null}
-          <div className="flex justify-end gap-2">
-            <Button onClick={onClose}>{t('common.cancel')}</Button>
-            <Button type="submit" variant="primary" disabled={create.isPending || pricing.isFetching || pricing.isError || !b || b.frozen || atLimit || needsCredit || !price?.available || !price.version}>
-              {t('create.submit')}
-            </Button>
-          </div>
-        </div>
+        </section>
       </form>
     </Dialog>
   );
 }
 
-/** What the free trial costs (nothing), what happens to it, and what it costs once the user keeps it. */
-function TrialPrice({ minutes, days, gb, pricing }: { minutes: number; days: number; gb: number; pricing: NonNullable<ReturnType<typeof usePricing>['data']>[number] }) {
+/** A large radio option: the plan. */
+function Choice({ name, checked, onChange, icon, title, hint }: { name: string; checked: boolean; onChange: () => void; icon: ReactNode; title: string; hint: string }) {
+  return (
+    <label
+      className={cn(
+        'flex cursor-pointer gap-3 rounded-[var(--radius-control)] border p-3 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent',
+        checked ? 'border-accent bg-accent/5' : 'border-border hover:bg-surface',
+      )}
+    >
+      <input type="radio" name={name} className="sr-only" checked={checked} onChange={onChange} />
+      <span className={cn('mt-0.5 grid size-7 shrink-0 place-items-center rounded-full', checked ? 'bg-accent text-accent-fg' : 'bg-surface-2 text-muted')} aria-hidden>
+        {icon}
+      </span>
+      <span className="min-w-0">
+        <span className="block text-sm font-medium">{title}</span>
+        <span className="block text-xs text-muted">{hint}</span>
+      </span>
+    </label>
+  );
+}
+
+/** One region: where, how far away, and what a browser there costs per running hour. */
+function RegionRow({ region, checked, disabled, onChange, hint, latency, price }: {
+  region: Region; checked: boolean; disabled: boolean; onChange: () => void; hint: string; latency?: number; price: string | null;
+}) {
+  const { t } = useI18n();
+  return (
+    <label
+      className={cn(
+        'flex items-center gap-3 px-3 py-3 transition-colors has-[:focus-visible]:bg-accent/5',
+        disabled ? 'cursor-not-allowed opacity-55' : 'cursor-pointer',
+        checked && !disabled ? 'bg-accent/5' : !disabled && 'hover:bg-surface',
+      )}
+    >
+      <input type="radio" name="region" value={region.id} className="peer sr-only" checked={checked} disabled={disabled} onChange={onChange} />
+      <span className={cn('grid size-4 shrink-0 place-items-center rounded-full border', checked && !disabled ? 'border-accent' : 'border-border')} aria-hidden>
+        {checked && !disabled ? <span className="size-2 rounded-full bg-accent" /> : null}
+      </span>
+      <span className="w-7 shrink-0 rounded bg-surface-2 py-0.5 text-center font-mono text-[11px] font-medium text-muted" aria-hidden>
+        {REGION_INFO[region.id].country}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium">{t(regionKey(region.id))}</span>
+        <span className="block truncate text-xs text-muted">{hint}</span>
+      </span>
+      <span className="shrink-0 text-right">
+        {price ? <span className="block text-sm font-medium tabular-nums">{price}</span> : null}
+        {latency !== undefined && !disabled ? <span className="block font-mono text-xs text-muted">{latency} ms</span> : null}
+      </span>
+    </label>
+  );
+}
+
+/** The three numbers that matter, the deposit, and the full breakdown on request. */
+function PaidCost({ pricing, reserve }: { pricing: RegionPricing; reserve: number }) {
+  const { t, locale } = useI18n();
+  const [details, setDetails] = useState(false);
+  const m = (v: number) => money(v, locale);
+  const e = browserEstimate(pricing.rates!, { storageGb: pricing.defaultStorageGb, rootVolumeGb: pricing.rootVolumeGb, backups: false });
+  return (
+    <div className="mt-2">
+      <div className="divide-y divide-border">
+        <RateRow strong label={t('create.cost.running')} hint={pricing.machine ? t('create.cost.runningHint', { vcpu: pricing.machine.vcpu, memory: pricing.machine.memoryGb }) : undefined} value={t('price.perHour', { amount: m(e.runningTotalHour) })} />
+        <RateRow label={t('create.cost.asleep')} hint={t('create.cost.asleepHint', { gb: pricing.defaultStorageGb + pricing.rootVolumeGb })} value={t('price.perHour', { amount: m(e.alwaysOnHour) })} />
+        <RateRow label={t('create.cost.transfer')} hint={t('create.cost.transferHint')} value={t('price.perGb', { amount: m(pricing.rates!.transfer) })} />
+        <RateRow label={t('create.cost.held')} hint={t('create.cost.heldHint')} value={m(reserve)} />
+      </div>
+      <p className="mt-2 text-xs text-muted">{t('create.chargesStart')}</p>
+      <button type="button" className="mt-3 flex items-center gap-1 text-sm font-medium text-accent hover:underline" aria-expanded={details} onClick={() => setDetails((d) => !d)}>
+        <ChevronRight className={cn('size-4 transition-transform', details && 'rotate-90')} aria-hidden />
+        {t('create.cost.details')}
+      </button>
+      {details ? (
+        <div className="mt-3 border-t border-border pt-3">
+          <PriceBreakdown pricing={pricing} />
+        </div>
+      ) : (
+        <div className="mt-2">
+          <PriceSource pricing={pricing} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** What the free trial costs (nothing), what happens to it, and what it costs once kept. */
+function TrialCost({ pricing, minutes, days, gb }: { pricing: RegionPricing; minutes: number; days: number; gb: number }) {
   const { t, locale } = useI18n();
   const e = browserEstimate(pricing.rates!, { storageGb: gb, rootVolumeGb: pricing.rootVolumeGb, backups: false });
   return (
-    <div className="space-y-3 text-sm">
-      <p className="text-2xl font-semibold text-running">{t('trial.free')}</p>
-      {pricing.machine ? <p className="text-xs text-muted">{t('price.machineShort', { vcpu: pricing.machine.vcpu, memory: pricing.machine.memoryGb })}</p> : null}
-      <p>{t('trial.how', { minutes, days })}</p>
-      <p className="text-muted">
-        {t('trial.after', {
-          running: money(e.runningTotalHour, locale),
-          kept: money(e.alwaysOnMonth, locale),
-          gb: gb + pricing.rootVolumeGb,
-        })}
+    <div className="mt-2 space-y-2 text-sm">
+      <p className="flex items-baseline justify-between gap-4">
+        <span className="font-medium">{t('create.cost.trialTitle', { minutes })}</span>
+        <span className="text-base font-semibold text-running">{t('trial.free')}</span>
       </p>
-      <p className="text-xs text-muted">
-        {t('price.ip')}: {t('price.perHour', { amount: money(pricing.rates!.ip, locale) })} · {t('billing.item.storage')}:{' '}
-        {t('price.perMonth', { amount: money(e.storageMonth, locale) })}
+      {pricing.machine ? <p className="text-xs text-muted">{t('price.machineShort', { vcpu: pricing.machine.vcpu, memory: pricing.machine.memoryGb })} · {t('create.cost.trialStorage', { gb })}</p> : null}
+      <p className="text-muted">{t('trial.how', { minutes, days })}</p>
+      <p className="border-t border-border pt-2 text-xs text-muted">
+        {t('create.cost.afterTrial', { running: money(e.runningTotalHour, locale), asleep: money(e.alwaysOnHour, locale) })}
       </p>
-      <p className="text-xs text-muted">{t('trial.reserve', { amount: money(retentionReserve(pricing.rates!, { storageGb: gb, rootVolumeGb: pricing.rootVolumeGb, backups: false }), locale) })}</p>
     </div>
   );
+}
+
+/** Left of the actions: whether the balance covers this browser, and where to add credit. */
+function FundingStatus({ trial, needsCredit, needed }: { trial: boolean; needsCredit: boolean; needed: number }) {
+  const { t, locale } = useI18n();
+  const { data: b } = useBilling();
+  if (!b) return <span />;
+  if (trial) return <p className="text-sm text-muted">{t('create.footer.noCredit')}</p>;
+  if (needsCredit && !b.frozen) {
+    return (
+      <p className="text-sm">
+        <span className="text-error">{t('create.footer.need', { amount: money(needed, locale) })}</span>{' '}
+        <Link to="/billing" className="font-medium whitespace-nowrap text-accent hover:underline">
+          {t('create.addCredit')}
+        </Link>
+      </p>
+    );
+  }
+  return <p className="text-sm text-muted">{t('create.footer.available', { amount: money(b.availableMicros, locale) })}</p>;
 }

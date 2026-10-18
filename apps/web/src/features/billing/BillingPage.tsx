@@ -1,11 +1,11 @@
 import { UsageItem, type BillingState, type UsageTotals } from '@cloudbrowser/contracts';
 import { Button, Card, cn, Section, Select, Skeleton, useToast } from '@cloudbrowser/ui';
-import { AlertTriangle, ExternalLink } from 'lucide-react';
+import { AlertTriangle, ExternalLink, Gift, Plus } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { PageHeader } from '../../app/AppShell.js';
 import { useI18n } from '../../lib/i18n.js';
-import { money } from '../../lib/money.js';
+import { cents, money } from '../../lib/money.js';
 import { regionKey } from '../instances/status.js';
 import { isLowBalance } from './access.js';
 import { DailyCharges } from './DailyCharges.js';
@@ -74,78 +74,77 @@ function BalanceCard({ state }: { state: BillingState }) {
         : isLowBalance(state)
           ? t('billing.low')
           : null;
+  const topUp = (productId: string) => checkout.mutate(productId, { onError: (e) => toast(errorMessage(e), 'error') });
 
   return (
     <Card className="flex flex-col p-5">
-      <h2 className="text-base font-semibold">{t('billing.balance')}</h2>
-      <p className={cn('mt-2 text-3xl font-semibold tabular-nums', state.balanceMicros < 0 && 'text-error')}>{m(state.balanceMicros)}</p>
-      <p className="mt-1 text-sm text-muted">{t('billing.balanceHint')}</p>
-      <dl className="mt-3 space-y-1 text-sm">
-        <div className="flex items-center justify-between gap-3">
-          <dt className="text-muted">{t('billing.availableBalance')}</dt>
-          <dd className={cn('tabular-nums', state.availableMicros <= 0 && 'text-error')}>{m(state.availableMicros)}</dd>
+      <div className="flex items-start justify-between gap-3">
+        <h2 className="text-base font-semibold">{t('billing.balance')}</h2>
+        {state.enabled ? (
+          <Button variant="ghost" size="sm" className="-mt-1 -mr-2 text-muted" disabled={portal.isPending} onClick={() => portal.mutate(undefined, { onError: (e) => toast(errorMessage(e), 'error') })}>
+            <ExternalLink /> {t('billing.receipts')}
+          </Button>
+        ) : null}
+      </div>
+      <p className={cn('mt-1 text-3xl font-semibold tabular-nums', state.balanceMicros < 0 && 'text-error')}>{m(state.balanceMicros)}</p>
+      <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
+        <div className="rounded-[var(--radius-control)] bg-surface-2 px-3 py-2">
+          <dt className="text-xs text-muted">{t('billing.availableBalance')}</dt>
+          <dd className={cn('font-medium tabular-nums', state.availableMicros <= 0 && state.mode === 'prepaid' && !state.trial.eligible && 'text-error')}>{m(state.availableMicros)}</dd>
         </div>
-        <div className="flex items-center justify-between gap-3">
-          <dt className="text-muted">{t('billing.reservedBalance')}</dt>
-          <dd className="tabular-nums">{m(state.reservedMicros)}</dd>
+        <div className="rounded-[var(--radius-control)] bg-surface-2 px-3 py-2">
+          <dt className="text-xs text-muted">{t('billing.reservedBalance')}</dt>
+          <dd className="font-medium tabular-nums">{m(state.reservedMicros)}</dd>
         </div>
       </dl>
-      <p className="mt-1 text-xs text-muted">{t('billing.reserveHint')}</p>
-      <div className="mt-3 space-y-1 text-sm">
-        <p>{state.burnHourMicros > 0 ? t('billing.burn', { amount: m(state.burnHourMicros) }) : t('billing.burnNone')}</p>
+      <p className="mt-2 text-xs text-muted">{t('billing.reserveHint')}</p>
+
+      <div className="mt-4">
+        {!state.enabled ? (
+          <p className="text-sm text-muted">{t('billing.unavailable')}</p>
+        ) : state.topUps.length === 0 ? (
+          <p className="text-sm text-muted">{t('billing.noTopUps')}</p>
+        ) : state.topUps.length === 1 ? (
+          <Button variant="primary" className="w-full justify-center" disabled={checkout.isPending || state.frozen} onClick={() => topUp(state.topUps[0]!.productId)}>
+            <Plus /> {t('billing.topUp')}
+          </Button>
+        ) : (
+          <div className="grid grid-cols-2 gap-2">
+            {state.topUps.map((p) => (
+              <Button key={p.productId} variant="primary" className="justify-center" disabled={checkout.isPending || state.frozen} onClick={() => topUp(p.productId)}>
+                <Plus /> {money(cents(p.amountCents), locale)}
+              </Button>
+            ))}
+          </div>
+        )}
+        {state.enabled && state.topUps.length ? <p className="mt-2 text-xs text-muted">{t('billing.topUpHint')}</p> : null}
+      </div>
+
+      {alert ? (
+        <p role="status" className="mt-4 flex gap-2 rounded-[var(--radius-control)] border border-error/40 bg-error/10 px-3 py-2 text-sm">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-error" aria-hidden /> {alert}
+        </p>
+      ) : null}
+      {state.trial.eligible ? (
+        <div className="mt-4 flex gap-3 rounded-[var(--radius-control)] border border-accent/40 bg-accent/5 px-3 py-2.5 text-sm">
+          <Gift className="mt-0.5 size-4 shrink-0 text-accent" aria-hidden />
+          <div>
+            <p>{t('trial.billingCta', { minutes: state.trial.minutes, region: t(regionKey(state.trial.regionId)) })}</p>
+            <Link to="/browsers/new" className="mt-1 inline-block font-medium text-accent hover:underline">
+              {t('trial.start')}
+            </Link>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-5 space-y-1 border-t border-border pt-4 text-sm">
+        <p>{state.burnHourMicros > 0 ? t('billing.burnShort', { amount: m(state.burnHourMicros) }) : t('billing.burnNone')}</p>
         {hours !== null ? (
           <p className="text-muted">
             {t('billing.runway', { time: hours < 48 ? t('billing.runway.hours', { n: Math.floor(hours) }) : t('billing.runway.days', { n: Math.floor(hours / 24) }) })}
           </p>
         ) : null}
         <p className="text-xs text-muted">{t('billing.minBalance', { amount: m(state.minBalanceMicros) })}</p>
-      </div>
-      {alert ? (
-        <p role="status" className="mt-3 flex gap-2 rounded-[var(--radius-control)] border border-error/40 bg-error/10 px-3 py-2 text-sm">
-          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-error" aria-hidden /> {alert}
-        </p>
-      ) : null}
-      {state.trial.eligible ? (
-        <div className="mt-3 rounded-[var(--radius-control)] border border-accent/40 bg-accent/5 px-3 py-2 text-sm">
-          <p>{t('trial.billingCta', { minutes: state.trial.minutes, region: t(regionKey(state.trial.regionId)) })}</p>
-          <Link to="/browsers/new" className="mt-1 inline-block font-medium text-accent hover:underline">
-            {t('trial.start')}
-          </Link>
-        </div>
-      ) : null}
-
-      <div className="mt-5 border-t border-border pt-4">
-        {!state.enabled ? (
-          <p className="mt-1 text-sm text-muted">{t('billing.unavailable')}</p>
-        ) : state.topUps.length === 0 ? (
-          <p className="mt-1 text-sm text-muted">{t('billing.noTopUps')}</p>
-        ) : (
-          <div className="grid grid-cols-2 gap-2">
-            {state.topUps.map((p) => (
-              <Button
-                key={p.productId}
-                variant="primary"
-                className="justify-center"
-                disabled={checkout.isPending || state.frozen}
-                onClick={() => checkout.mutate(p.productId, { onError: (e) => toast(errorMessage(e), 'error') })}
-              >
-                {t('billing.topUp')}
-              </Button>
-            ))}
-          </div>
-        )}
-        <p className="mt-2 text-xs text-muted">{t('billing.topUpHint')}</p>
-        {state.enabled ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="mt-2 -ml-3"
-            disabled={portal.isPending}
-            onClick={() => portal.mutate(undefined, { onError: (e) => toast(errorMessage(e), 'error') })}
-          >
-            <ExternalLink /> {t('billing.receipts')}
-          </Button>
-        ) : null}
       </div>
     </Card>
   );

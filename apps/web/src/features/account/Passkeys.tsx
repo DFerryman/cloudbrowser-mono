@@ -36,7 +36,7 @@ export function Passkeys() {
   const supported = typeof window !== 'undefined' && 'PublicKeyCredential' in window;
 
   return (
-    <div className="mb-4">
+    <div>
       <h3 className="mb-1 text-sm font-medium">{t('passkeys.title')}</h3>
       {list.data?.length ? (
         <ul className="mb-2 divide-y divide-border text-sm">
@@ -56,7 +56,7 @@ export function Passkeys() {
       ) : (
         <p className="mb-2 text-sm text-muted">{t('passkeys.none')}</p>
       )}
-      <Button disabled={!supported || add.isPending} onClick={() => add.mutate()}>
+      <Button size="sm" disabled={!supported || add.isPending} onClick={() => add.mutate()}>
         <KeyRound /> {t('passkeys.add')}
       </Button>
     </div>

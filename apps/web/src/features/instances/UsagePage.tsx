@@ -4,7 +4,8 @@ import { useState } from 'react';
 import { Link } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
 import { money, quantity } from '../../lib/money.js';
-import { currentMonth, monthLabel, recentMonths } from '../billing/hooks.js';
+import { currentMonth, monthLabel, recentMonths, usePricing } from '../billing/hooks.js';
+import { RateRow } from '../billing/RateRow.js';
 import { useManagedInstance } from './BrowserLayout.js';
 import { useInstanceUsage } from './hooks.js';
 
@@ -18,6 +19,10 @@ export function UsagePage() {
   const items = UsageItem.options.filter((item) => item !== 'snapshot' || u?.byDay.some((day) => day.byItem.snapshot !== 0));
   const trial = !!i.trial && i.trial.state !== 'converted';
   const m = (v: number) => money(v, locale);
+  const pricing = usePricing();
+  const price = pricing.data?.find((p) => p.regionId === i.regionId);
+  // The same 730-hour projection as every hourly estimate of fixed resources.
+  const alwaysOnHour = u ? Math.round(u.now.alwaysOnMonthMicros / HOURS_PER_MONTH) : 0;
 
   return (
     <div className="space-y-4">
@@ -34,24 +39,24 @@ export function UsagePage() {
           </Select></div>
         </Card>
         <Card className="p-5 lg:col-span-2">
-          {u ? (
-            <div className="space-y-1 text-sm">
-              {trial ? <p className="font-medium text-running">{t('usage.trialFree')}</p> : <>
-              <p className="font-medium">
-                {u.now.hourMicros === 0
-                  ? t('usage.nowNothing')
-                  : i.status === 'running'
-                    ? t('usage.nowRunning', { amount: m(u.now.hourMicros) })
-                    : t('usage.nowAsleep', { amount: m(u.now.hourMicros) })}
-              </p>
-              <p className="text-muted">{t('usage.runningRate', { amount: m(u.now.runningHourMicros) })}</p>
-              <p className="text-muted">{t('usage.keptRate', { amount: m(u.now.alwaysOnMonthMicros), hourly: m(Math.round(u.now.alwaysOnMonthMicros / HOURS_PER_MONTH)) })}</p>
-              <p className="text-muted">{t('usage.actualStorage', { gb: i.storageGb })}</p>
-              <p className="pt-2 text-xs text-muted">{t('usage.note')}</p>
-              </>}
-            </div>
+          <h2 className="text-base font-semibold">{t('usage.ratesTitle')}</h2>
+          {!u ? (
+            <Skeleton className="mt-3 h-20" />
+          ) : trial ? (
+            <p className="mt-2 text-sm font-medium text-running">{t('usage.trialFree')}</p>
+          ) : u.now.hourMicros === 0 && u.now.alwaysOnMonthMicros === 0 ? (
+            <p className="mt-2 text-sm text-muted">{t('usage.nowNothing')}</p>
           ) : (
-            <Skeleton className="h-20" />
+            <>
+              <div className="mt-2 divide-y divide-border">
+                <RateRow strong={i.status === 'running'} label={t('usage.running')} hint={t('usage.runningHint', { gb: i.storageGb + (price?.rootVolumeGb ?? 0) })}
+                  value={t('price.perHour', { amount: m(u.now.runningHourMicros + alwaysOnHour) })} badge={i.status === 'running' ? <NowBadge /> : null} />
+                <RateRow strong={i.status !== 'running'} label={t('usage.asleep')} hint={t('usage.asleepHint', { gb: i.storageGb + (price?.rootVolumeGb ?? 0) })}
+                  value={t('price.perHour', { amount: m(alwaysOnHour) })} badge={i.status !== 'running' ? <NowBadge /> : null} />
+                {price?.rates ? <RateRow label={t('price.transfer')} value={t('price.perGb', { amount: m(price.rates.transfer) })} /> : null}
+              </div>
+              <p className="mt-2 text-xs text-muted">{t('usage.ratesNote')}</p>
+            </>
           )}
         </Card>
       </div>
@@ -59,7 +64,7 @@ export function UsagePage() {
       <Section title={t('usage.title')}>
         {usage.isPending ? (
           <Skeleton className="h-32" />
-        ) : !u || u.totalMicros === 0 ? (
+        ) : !u || !u.items.some((row) => row.quantity > 0) ? (
           <p className="text-sm text-muted">{t('usage.none')}</p>
         ) : (
           <table className="w-full text-sm">
@@ -71,7 +76,7 @@ export function UsagePage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {u.items.map((row) => (
+              {u.items.filter((row) => row.quantity > 0 || row.amountMicros !== 0).map((row) => (
                 <tr key={row.item}>
                   <td className="py-2 pr-3">{t(`billing.item.${row.item}`)}</td>
                   <td className="py-2 pr-3 text-right tabular-nums text-muted">{t(`usage.unit.${USAGE_UNITS[row.item]}`, { n: quantity(row.quantity, locale) })}</td>
@@ -123,4 +128,9 @@ export function UsagePage() {
       </p>
     </div>
   );
+}
+
+function NowBadge() {
+  const { t } = useI18n();
+  return <span className="rounded-full bg-accent/10 px-1.5 py-px text-[11px] font-medium text-accent">{t('usage.now')}</span>;
 }

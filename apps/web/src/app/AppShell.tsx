@@ -1,6 +1,7 @@
 import { cn, Menu, MenuItem, MenuSeparator, Skeleton } from '@cloudbrowser/ui';
 import { Globe, LayoutGrid, LogOut, UserRound, Wallet } from 'lucide-react';
 import { NavLink, Navigate, Outlet, useLocation } from 'react-router';
+import { isLowBalance } from '../features/billing/access.js';
 import { BillingBanner } from '../features/billing/BillingBanner.js';
 import { useBilling } from '../features/billing/hooks.js';
 import { money } from '../lib/money.js';
@@ -87,20 +88,21 @@ export function AppShell() {
         </nav>
         <div className="mt-auto flex flex-col gap-2">
           {me.data ? (
-            <div className="hidden space-y-0.5 px-2.5 text-xs text-muted lg:block">
+            <NavLink to="/billing" className="hidden rounded-[var(--radius-control)] px-2.5 py-2 text-xs text-muted transition-colors hover:bg-surface-2 lg:block">
               {billing.data ? (
                 <>
-                  <p>{t('nav.balance', { amount: money(billing.data.balanceMicros, locale) })}</p>
-                  <p className={billing.data.availableMicros <= billing.data.lowBalanceMicros ? 'text-error' : ''}>
-                    {t('billing.availableAndReserved', {
+                  <p>{t('nav.balanceLabel')}</p>
+                  <p className="mt-0.5 text-sm font-semibold text-fg tabular-nums">{money(billing.data.balanceMicros, locale)}</p>
+                  <p className={cn('tabular-nums', isLowBalance(billing.data) && 'text-error')}>
+                    {t('nav.availableHeld', {
                       available: money(billing.data.availableMicros, locale),
                       reserved: money(billing.data.reservedMicros, locale),
                     })}
                   </p>
                 </>
               ) : null}
-              <p>{t('nav.usage', { used: me.data.usage.browsers, max: me.data.entitlements.maxBrowsers })}</p>
-            </div>
+              <p className="mt-1.5">{t('nav.usage', { used: me.data.usage.browsers, max: me.data.entitlements.maxBrowsers })}</p>
+            </NavLink>
           ) : (
             <Skeleton className="mx-2.5 hidden h-4 lg:block" />
           )}
