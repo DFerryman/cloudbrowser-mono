@@ -1,7 +1,7 @@
-import { Button, Dialog, Input, Select, useToast } from '@cloudbrowser/ui';
+import { Button, Dialog, Input, Label, Select, useToast } from '@cloudbrowser/ui';
 import { useState } from 'react';
 import { Link } from 'react-router';
-import { post, useAdmin, useAdminAction, when, type AlertRow, type OperationRow, type Row, type UserRow } from './data.js';
+import { post, usd, useAdmin, useAdminAction, when, type AlertRow, type OperationRow, type Row, type UserRow } from './data.js';
 import { Json, Mono, PageTitle, Pill, ReasonDialog, statusTone, Table } from './ui.js';
 
 export function AlertsPage() {
@@ -243,6 +243,11 @@ export function UsersPage() {
   const users = useAdmin<UserRow[]>(`/users?q=${encodeURIComponent(query)}`);
   const [pending, setPending] = useState<{ user: UserRow; action: 'suspend' | 'unsuspend' } | null>(null);
   const act = useAdminAction((v: { id: string; action: string; reason: string }) => post(`/users/${v.id}/actions`, { action: v.action, reason: v.reason }));
+  const [credit, setCredit] = useState<UserRow | null>(null);
+  const [amount, setAmount] = useState('5');
+  const [unfreeze, setUnfreeze] = useState<UserRow | null>(null);
+  const grant = useAdminAction((v: { id: string; amountMicros: number; reason: string }) => post(`/users/${v.id}/credit`, { amountMicros: v.amountMicros, reason: v.reason }));
+  const thaw = useAdminAction((v: { id: string; reason: string }) => post(`/users/${v.id}/unfreeze`, { reason: v.reason }));
   return (
     <div>
       <PageTitle title="Users">
@@ -260,7 +265,7 @@ export function UsersPage() {
       <Table
         rows={users.data}
         rowKey={(u) => u.id}
-        columns={['Email', 'Joined', 'Plan', 'Browsers', 'Kill switch']}
+        columns={['Email', 'Joined', 'Balance', 'Browsers', 'Kill switch']}
         cells={(u) => [
           <span>
             {u.email} {u.admin ? <Pill>staff</Pill> : null}
@@ -268,15 +273,18 @@ export function UsersPage() {
             <Mono>{u.id}</Mono>
           </span>,
           when(u.createdAt),
-          u.subscription ? (
-            <span>
-              {u.subscription.plan} · {u.subscription.status}
-              {u.subscription.plan.startsWith('pro') ? ` · ${u.subscription.units}` : ''}
-              {u.subscription.revoked ? <Pill tone="bad">revoked</Pill> : null}
-            </span>
-          ) : (
-            <span className="text-muted">pilot / none</span>
-          ),
+          <span className="flex flex-wrap items-center gap-1.5">
+            <span className={u.balanceMicros < 0 ? 'text-error tabular-nums' : 'tabular-nums'}>{usd(u.balanceMicros)}</span>
+            {u.frozenAt ? <Pill tone="bad">frozen</Pill> : u.exhaustedAt ? <Pill tone="warn">ran out</Pill> : null}
+            <Button size="sm" variant="ghost" onClick={() => setCredit(u)}>
+              Credit
+            </Button>
+            {u.frozenAt ? (
+              <Button size="sm" variant="ghost" onClick={() => setUnfreeze(u)}>
+                Unfreeze
+              </Button>
+            ) : null}
+          </span>,
           <Link to={`/browsers?q=${encodeURIComponent(u.email)}`} className="text-accent hover:underline">
             {u.browsers}
             {u.suspended ? ` (${u.suspended} suspended)` : ''}
@@ -307,6 +315,31 @@ export function UsersPage() {
             { onSuccess: () => setPending(null), onError: (e) => toast((e as Error).message, 'error') },
           )
         }
+      />
+      <ReasonDialog
+        open={credit !== null}
+        title={credit ? `Credit or debit ${credit.email}` : ''}
+        description="Adds the amount below (USD; negative to take away) to the prepaid balance. It shows as a credit from us in the user's history."
+        confirm="Apply"
+        busy={grant.isPending}
+        onClose={() => setCredit(null)}
+        onConfirm={(reason) => {
+          const micros = Math.round(Number(amount) * 1_000_000);
+          if (!credit || !Number.isFinite(micros) || micros === 0) return;
+          grant.mutate({ id: credit.id, amountMicros: micros, reason }, { onSuccess: () => setCredit(null), onError: (e) => toast((e as Error).message, 'error') });
+        }}
+      >
+        <Label htmlFor="credit-amount">Amount (USD)</Label>
+        <Input id="credit-amount" type="number" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} className="mb-3 w-40" />
+      </ReasonDialog>
+      <ReasonDialog
+        open={unfreeze !== null}
+        title={unfreeze ? `Unfreeze ${unfreeze.email}` : ''}
+        description="Lifts the hold placed after a payment dispute. The user can create and wake browsers again if their balance allows."
+        confirm="Unfreeze"
+        busy={thaw.isPending}
+        onClose={() => setUnfreeze(null)}
+        onConfirm={(reason) => unfreeze && thaw.mutate({ id: unfreeze.id, reason }, { onSuccess: () => setUnfreeze(null), onError: (e) => toast((e as Error).message, 'error') })}
       />
     </div>
   );

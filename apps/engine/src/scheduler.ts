@@ -220,10 +220,10 @@ export async function periodicIpChecks(deps: EngineDeps) {
 
 
 /**
- * Daily provider snapshot of every browser's volume (page 4). On AWS a Data Lifecycle Manager
- * policy on our tag can do this instead; the engine does it so every executor gets the same
- * schedule and the snapshots are in the ledger. Runs hourly and skips volumes snapshotted within
- * the last 23 hours.
+ * Daily provider snapshot of the volume of every browser whose owner turned snapshots on (page 4;
+ * they are billed per GB-month, so they are off by default). The engine takes them rather than AWS
+ * Data Lifecycle Manager so they are in the ledger and follow each browser's setting. Runs hourly
+ * and skips volumes snapshotted within the last 23 hours.
  */
 export async function dailySnapshots(deps: EngineDeps): Promise<number> {
   const { db } = deps;
@@ -232,7 +232,7 @@ export async function dailySnapshots(deps: EngineDeps): Promise<number> {
     .select({ inst: browserInstances, placement: placements })
     .from(browserInstances)
     .innerJoin(placements, and(eq(placements.instanceId, browserInstances.id), eq(placements.status, 'current')))
-    .where(inArray(browserInstances.status, ['running', 'sleeping', 'needs_attention', 'waiting_capacity']));
+    .where(and(eq(browserInstances.backupsEnabled, true), inArray(browserInstances.status, ['running', 'sleeping', 'needs_attention', 'waiting_capacity'])));
   let taken = 0;
   for (const { inst, placement } of rows) {
     const [recent] = await db

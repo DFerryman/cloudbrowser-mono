@@ -1,10 +1,10 @@
-import type { Entitlements } from '@cloudbrowser/contracts';
-import { billingRequired, schema, usageMonth, userCaps as sharedUserCaps, type Db } from '@cloudbrowser/db';
+import { MICROS_PER_USD, TRIAL, type Entitlements } from '@cloudbrowser/contracts';
+import { billingRequired, pricingSettings, schema, userCaps as sharedUserCaps, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, ne, notInArray, sql } from 'drizzle-orm';
-import { planOf } from './billing/sync.js';
+import { storageLimits } from './pricing.js';
 import { problem } from './problem.js';
 
-const { caps, browserInstances, operations, controlFlags, spendSnapshots, quotaSnapshots, regions, activeUsage } = schema;
+const { caps, browserInstances, operations, controlFlags, spendSnapshots, quotaSnapshots, regions, billingAccounts } = schema;
 
 /** Statuses that hold a browser slot (a dedicated IP and a volume). */
 const HOLDS_SLOT = sql`${browserInstances.status} NOT IN ('purged', 'failed', 'deleting')`;
@@ -19,32 +19,73 @@ export async function capsFor(db: Db, scopes: string[]): Promise<Map<string, num
   return out;
 }
 
-/** Pilot defaults, then what the subscription buys, then operator overrides (page 6). */
+/** Defaults, then operator overrides. What a user may spend is their prepaid balance (page 6). */
 export const userCaps = sharedUserCaps;
 
-/**
- * The invite-only pilot runs on `user:default` caps (plan `pilot`). A Creem subscription writes
- * its own caps (plan `personal`/`pro`); once billing is required, no subscription means `none`.
- */
-export async function entitlementsFor(db: Db, userId: string, now = new Date()): Promise<Entitlements> {
+/** The pilot (`billing_required` off) is free; otherwise usage is paid from the prepaid balance. */
+export async function entitlementsFor(db: Db, userId: string): Promise<Entitlements> {
   const c = await userCaps(db, userId);
   return {
-    plan: await planOf(db, userId, now, await billingRequired(db)),
+    billing: (await billingRequired(db)) ? 'prepaid' : 'pilot',
     maxBrowsers: c.get('instances') ?? 0,
     maxRunning: c.get('running') ?? 0,
     idleTimeoutMaxS: c.get('idle_timeout_max_s') ?? 1800,
     ipChangesPerMonth: c.get('ip_changes_per_month') ?? 0,
-    hoursPerMonth: c.get('hours_per_month') ?? null,
+    maxStorageGb: (await storageLimits(db, userId)).maxGb,
   };
 }
 
-/** Active seconds this month (metered by the engine) and when the hours ran out, if they did. */
-export async function activeTime(db: Db, userId: string, now = new Date()) {
-  const [row] = await db
-    .select()
-    .from(activeUsage)
-    .where(and(eq(activeUsage.userId, userId), eq(activeUsage.month, usageMonth(now))));
-  return { seconds: row?.seconds ?? 0, exhaustedAt: row?.exhaustedAt ?? null };
+export async function billingAccount(db: Db, userId: string) {
+  const [row] = await db.select().from(billingAccounts).where(eq(billingAccounts.userId, userId));
+  return { balanceMicros: row?.balanceMicros ?? 0, exhaustedAt: row?.exhaustedAt ?? null, frozenAt: row?.frozenAt ?? null, trialUsedAt: row?.trialUsedAt ?? null };
+}
+
+/** An unconverted free trial browser (page 6). */
+export const isTrial = (row: { trialState: string | null }) => row.trialState === 'active' || row.trialState === 'ended';
+
+/**
+ * Paying turns the user's trial browser into a normal one, with the same data and IP: from then on
+ * it is charged like any other browser and is no longer reclaimed after 7 days.
+ */
+export async function convertTrials(db: Db, userId: string, now: Date) {
+  return db
+    .update(browserInstances)
+    .set({ trialState: 'converted', trialReclaimAt: null, updatedAt: now })
+    .where(and(eq(browserInstances.userId, userId), inArray(browserInstances.trialState, ['active', 'ended'])))
+    .returning({ id: browserInstances.id });
+}
+
+/** Claims the user's one free trial; false if it was used before. */
+export async function claimTrial(db: Db, userId: string, now: Date): Promise<boolean> {
+  await db.insert(billingAccounts).values({ userId, balanceMicros: 0, updatedAt: now }).onConflictDoNothing();
+  const claimed = await db
+    .update(billingAccounts)
+    .set({ trialUsedAt: now, updatedAt: now })
+    .where(and(eq(billingAccounts.userId, userId), sql`${billingAccounts.trialUsedAt} IS NULL`))
+    .returning({ id: billingAccounts.userId });
+  return claimed.length > 0;
+}
+
+export const trialSecondsLeft = (row: { trialUsedS: number }) => Math.max(0, TRIAL.runningSeconds - row.trialUsedS);
+
+const usd = (micros: number) => `$${(micros / MICROS_PER_USD).toFixed(2)}`;
+
+/**
+ * Creating or waking a browser costs money from then on, so it needs the minimum balance (unless
+ * the deployment runs the free pilot). A frozen account can do neither.
+ */
+export async function admitSpend(db: Db, userId: string, action: 'create a browser' | 'wake a browser' | 'add storage' | 'turn on snapshots') {
+  const account = await billingAccount(db, userId);
+  if (account.frozenAt) throw problem(403, 'account_frozen', 'Your account is on hold because of a payment dispute. Contact support.');
+  if (!(await billingRequired(db))) return;
+  const { minBalanceMicros } = await pricingSettings(db);
+  if (account.balanceMicros < Math.max(1, minBalanceMicros)) {
+    throw problem(
+      402,
+      'insufficient_balance',
+      `Your balance is ${usd(account.balanceMicros)}; at least ${usd(minBalanceMicros)} is needed to ${action}. Add credit on the Billing page.`,
+    );
+  }
 }
 
 async function count(db: Db, where: ReturnType<typeof and>) {
@@ -56,7 +97,6 @@ export async function usage(db: Db, userId: string) {
   return {
     browsers: await count(db, and(eq(browserInstances.userId, userId), HOLDS_SLOT)),
     running: await count(db, and(eq(browserInstances.userId, userId), inArray(browserInstances.status, RUNNING_STATUSES))),
-    hoursUsed: Math.round(((await activeTime(db, userId)).seconds / 3600) * 10) / 10,
   };
 }
 
@@ -95,7 +135,7 @@ async function checkRegionRoom(db: Db, regionId: string) {
  * Bounded before created (page 10, rule 5): plan, region and global caps, provider quota headroom,
  * the spend guard and the circuit breaker are all checked before a create is admitted.
  */
-export async function admitCreate(db: Db, userId: string, regionId: string, now: Date) {
+export async function admitCreate(db: Db, userId: string, regionId: string, now: Date, opts: { trial?: boolean } = {}) {
   const [freeze] = await db.select().from(controlFlags).where(eq(controlFlags.key, 'creation_freeze'));
   if (freeze?.value === 'true') throw problem(503, 'creation_frozen', 'New browsers are temporarily unavailable.');
 
@@ -114,8 +154,10 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
   const c = await userCaps(db, userId);
   const u = await usage(db, userId);
   if (u.browsers >= (c.get('instances') ?? 0)) {
-    throw problem(403, 'plan_limit', `Your plan allows ${c.get('instances') ?? 0} browsers.`, { limit: 'instances' });
+    throw problem(403, 'plan_limit', `Your account allows ${c.get('instances') ?? 0} browsers.`, { limit: 'instances' });
   }
+  // The free trial needs no credit (page 6).
+  if (!opts.trial) await admitSpend(db, userId, 'create a browser');
   const [daily] = await db
     .select({ n: sql<number>`count(*)` })
     .from(operations)
@@ -138,20 +180,34 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
 
 /** Running caps, checked before every start (page 10). */
 export async function admitStart(db: Db, userId: string, instanceId: string, regionId: string) {
-  const [inst] = await db.select({ suspendedAt: browserInstances.suspendedAt }).from(browserInstances).where(eq(browserInstances.id, instanceId));
+  const [inst] = await db
+    .select({ suspendedAt: browserInstances.suspendedAt, trialState: browserInstances.trialState, trialUsedS: browserInstances.trialUsedS, trialReclaimAt: browserInstances.trialReclaimAt })
+    .from(browserInstances)
+    .where(eq(browserInstances.id, instanceId));
   if (inst?.suspendedAt) throw problem(403, 'suspended', 'This browser is suspended. Contact support.');
   const c = await userCaps(db, userId);
   if ((c.get('running') ?? 0) === 0) {
-    throw problem(403, 'plan_limit', 'Your plan does not include running browsers. Renew it to wake this one; its data and IP are kept.', { limit: 'running' });
+    throw problem(403, 'plan_limit', 'Your account cannot run browsers right now. Contact support; data and IPs are kept.', { limit: 'running' });
   }
-  const hours = c.get('hours_per_month');
-  if (hours !== undefined && (await activeTime(db, userId)).seconds >= hours * 3600) {
-    throw problem(429, 'hours_exhausted', `This month’s ${hours} active hours are used up. Browsers keep their data and IP.`, { limit: 'hours_per_month' });
+  if (inst && isTrial(inst) && inst.trialState === 'active' && trialSecondsLeft(inst) > 0) {
+    // Free trial minutes left: waking is free.
+  } else if (inst && isTrial(inst)) {
+    // The trial is used up: with enough credit, waking it converts it into a normal browser.
+    const account = await billingAccount(db, userId);
+    if (account.frozenAt) throw problem(403, 'account_frozen', 'Your account is on hold because of a payment dispute. Contact support.');
+    const { minBalanceMicros } = await pricingSettings(db);
+    if (account.balanceMicros < Math.max(1, minBalanceMicros)) {
+      const until = inst.trialReclaimAt ? ` It is kept until ${inst.trialReclaimAt.toISOString().slice(0, 10)}.` : '';
+      throw problem(402, 'insufficient_balance', `Your free ${TRIAL.runningSeconds / 60} minutes are used. Add at least ${usd(minBalanceMicros)} of credit to keep using this browser with its data and IP.${until}`);
+    }
+    await convertTrials(db, userId, new Date());
+  } else {
+    await admitSpend(db, userId, 'wake a browser');
   }
   const others = and(ne(browserInstances.id, instanceId), inArray(browserInstances.status, RUNNING_STATUSES));
   const mine = await count(db, and(eq(browserInstances.userId, userId), others));
   if (mine >= (c.get('running') ?? 0)) {
-    throw problem(403, 'plan_limit', `Your plan allows ${c.get('running') ?? 0} running browser(s) at a time. Put another one to sleep first.`, {
+    throw problem(403, 'plan_limit', `Your account allows ${c.get('running') ?? 0} running browser(s) at a time. Put another one to sleep first.`, {
       limit: 'running',
     });
   }

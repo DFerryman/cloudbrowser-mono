@@ -99,21 +99,28 @@ Optional:
 - `ENV_NAME` (`prod`/`staging`) in the engine, reaper and reconciler configs: the `cb:env` tag on
   provider resources, same value in all three.
 
-## 3b. Billing with Creem (optional for the pilot)
+## 3b. Prices and billing with Creem
 
-The pilot runs without payments: invited users get the `user:default` caps (plan *pilot*).
-Billing turns on when every value below is set; until then `/v1/billing/*` answers 503 and the
-account page shows the pilot plan.
+**Prices** come from the AWS Price List API; nothing is configured here. The engine refreshes
+each AWS region's sheet every 12 hours (the runtime IAM user needs `pricing:GetProducts`, in the
+CloudFormation template since this release). Set the **markup** (customer price = AWS cost ×
+markup, default 120%), the minimum balance to start browsers and the low-balance warning in the
+operator console → *Pricing & margin*, which also shows each region's cost and price and can
+refresh prices now.
 
-1. **Creem dashboard (test mode first):** create four products and note their ids:
-   *Personal monthly* ($29/month) and *Personal yearly* ($290/year) as fixed-price products;
-   *Pro monthly* ($25/month) and *Pro yearly* ($250/year) as **seat-based** products (price per
-   unit, units = browsers). Submit the store for review early; it can take days.
+**Billing** is a prepaid balance. The pilot runs without payments: usage is metered and shown at
+the real prices, but nothing is charged. Top-ups turn on when every value below is set; until then
+`/v1/billing/checkout` answers 503.
+
+1. **Creem dashboard (test mode first):** create one **one-time** product in **USD** per top-up
+   amount, e.g. *Credit $10*, *Credit $25*, *Credit $50*, and note their ids. The amount credited
+   is the product's price, read from Creem. Submit the store for review early; it can take days.
 2. **Webhook:** Developers → Webhooks → add `https://<your app domain>/api/webhooks/creem` and copy
-   the signing secret. Every event type can be enabled; unknown ones are stored and ignored.
+   the signing secret. `checkout.completed`, `refund.created` and `dispute.created` are used;
+   other events are stored and ignored.
 3. **API key:** Developers → API keys (test mode keys only work against `https://test-api.creem.io`).
 4. `apps/api/wrangler.jsonc` → `vars`: `CREEM_API_BASE` (`https://test-api.creem.io`, later
-   `https://api.creem.io`) and the four `CREEM_PRODUCT_*` ids. Secrets:
+   `https://api.creem.io`) and `CREEM_TOPUP_PRODUCTS` (the product ids, comma-separated). Secrets:
 
 ```bash
 cd apps/api
@@ -121,8 +128,9 @@ pnpm exec wrangler secret put CREEM_API_KEY
 pnpm exec wrangler secret put CREEM_WEBHOOK_SECRET
 ```
 
-5. **Require a plan** once you sell (no free tier, page 6): users without a subscription then get
-   no browsers. Leave it off during the invite-only pilot.
+5. **Charge for usage** once you sell: browsers then draw from the balance, nothing starts below
+   the minimum balance, and each new user gets the one free trial browser (10 minutes in Sydney).
+   Leave it off during the invite-only pilot.
 
 ```sql
 INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', unixepoch() * 1000)
@@ -130,12 +138,13 @@ INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', '
 ```
 
 What happens automatically: webhooks are verified, stored by event id and processed from the
-`cloudbrowser-billing` queue (every event re-fetches the subscription from Creem, so order and
-duplicates do not matter); the api's 5-minute cron retries lost events, applies period ends and
-the 7-day grace for failed payments, emails users on day 1, 14 and 28 after access ends and
-deletes their browsers on day 30 (restorable 7 more days); at 03:00 UTC it re-syncs every
-subscription and logs drift to `audit_log` (`billing.drift`). The engine meters active hours every
-minute and puts browsers to sleep 10 minutes after a plan's hours run out.
+`cloudbrowser-billing` queue; a completed checkout is re-fetched from Creem and credited once per
+order. The engine meters usage every minute and takes it from the balance; when it runs out,
+running browsers sleep 10 minutes later. The api's 5-minute cron retries lost events, refreshes
+the top-up products hourly, emails a low-balance warning, emails users on day 1, 14 and 28 after
+the balance ran out and deletes their browsers on day 30 (restorable 7 more days); a nightly run
+credits any paid order a lost webhook missed. Credit can also be added by hand in the console
+(*Users* → Credit), which is recorded as an adjustment.
 
 ## 3c. Operator console and alerts
 
@@ -226,9 +235,12 @@ UPDATE caps SET "limit" = 3 WHERE scope = 'user:default' AND metric = 'instances
 INSERT INTO caps VALUES ('user:<user id>', 'instances', 5);    -- per-user override
 UPDATE control_flags SET value = 'false' WHERE key = 'creation_freeze';   -- clear the circuit breaker
 SELECT * FROM drift_findings WHERE status = 'open';
-SELECT * FROM subscriptions;                                   -- billing mirror (Creem is the source of truth)
+SELECT * FROM billing_accounts;                                -- balances, when they ran out, trial used
+SELECT * FROM balance_transactions ORDER BY created_at DESC;   -- top-ups, refunds, disputes, adjustments
 SELECT * FROM webhook_events WHERE processed_at IS NULL;      -- Creem events not applied yet (with error)
-SELECT * FROM active_usage WHERE month = strftime('%Y-%m', 'now');   -- active seconds per user
+SELECT user_id, SUM(amount_micros) / 1e6 AS usd, SUM(cost_micros) / 1e6 AS aws_usd
+  FROM usage_records WHERE day >= strftime('%Y-%m-01', 'now') GROUP BY user_id;   -- this month
+SELECT region_id, fetched_at, sheet FROM provider_prices;      -- AWS prices per region
 SELECT * FROM alerts WHERE acknowledged_at IS NULL;          -- open operator alerts
 ```
 

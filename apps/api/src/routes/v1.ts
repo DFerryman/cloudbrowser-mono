@@ -7,6 +7,8 @@ import {
   DEFAULT_IDLE_TIMEOUT_S,
   IDLE_TIMEOUT_OPTIONS_S,
   Instance,
+  InstanceStorage,
+  InstanceUsage,
   IpChangeRequestBody,
   IpCheck,
   Me,
@@ -14,6 +16,9 @@ import {
   Problem,
   REGION_INFO,
   Region,
+  ResizeStorageBody,
+  BALANCE_GRACE_MS,
+  TRIAL,
   UpdateInstanceBody,
   ViewerSession,
   signViewerToken,
@@ -21,20 +26,31 @@ import {
   type RegionId,
 } from '@cloudbrowser/contracts';
 import { turnIceServers } from '../turn.js';
-import { eventRow, newId, schema } from '@cloudbrowser/db';
+import { billingRequired, eventRow, newId, schema, userCaps } from '@cloudbrowser/db';
 import { and, asc, desc, eq, isNull, ne } from 'drizzle-orm';
 import type { AppEnv } from '../env.js';
-import { activeTime, admitCreate, admitIpChange, admitStart, entitlementsFor, regionAcceptingNew, usage } from '../limits.js';
+import { admitCreate, admitIpChange, admitSpend, admitStart, billingAccount, claimTrial, entitlementsFor, isTrial, regionAcceptingNew, trialSecondsLeft, usage } from '../limits.js';
+import { currentBurn, regionPrice, requirePrice, storageLimits } from '../pricing.js';
+import { instanceUsage, monthOf } from '../usage.js';
 import { billingRoute } from './billing.js';
-
-/** Same as the engine's: running browsers sleep this long after the month's hours run out. */
-const HOURS_GRACE_MS = 10 * 60_000;
 import { enqueueOperation, notifyUser, replayed, requireIdempotencyKey } from '../ops.js';
 import { problem } from '../problem.js';
 import { toInstances, toOperation } from '../views.js';
 import { eventsRoute } from './events.js';
 
 const { browserInstances, regions, operations, viewerSessions, instanceHealth, placements, events, auditLog, backups } = schema;
+
+/** AWS allows one change to a volume every 6 hours. */
+const RESIZE_COOLDOWN_MS = 6 * 3_600_000;
+/** The first agent that grows the file system and reports disk usage. */
+const RESIZE_AGENT_VERSION = '0.2.0';
+const newerOrEqual = (v: string | null, min: string) => {
+  if (!v) return false;
+  const a = v.split('.').map(Number);
+  const b = min.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+  return true;
+};
 
 export const v1 = new OpenAPIHono<AppEnv>({
   defaultHook: (result) => {
@@ -155,43 +171,58 @@ v1.openapi(
 
     const body = c.req.valid('json');
     const now = new Date();
-    await admitCreate(db, user.id, body.regionId, now);
+    // The free trial (page 6): only where usage is paid, only in its region, once per user.
+    const trial = body.trial === true && (await entitlementsFor(db, user.id)).billing === 'prepaid';
+    if (trial && body.regionId !== TRIAL.regionId) throw problem(400, 'validation_failed', `The free trial runs in ${REGION_INFO[TRIAL.regionId].city} only.`);
+    await admitCreate(db, user.id, body.regionId, now, { trial });
+    // The user must have been shown this region's current prices (create dialog).
+    await requirePrice(db, body.regionId, body.priceVersion);
+    if (trial && !(await claimTrial(db, user.id, now))) throw problem(409, 'invalid_state', 'You have already used your free trial.');
 
     const info = REGION_INFO[body.regionId];
     const locale: BrowserLocale = body.locale ?? 'en-US';
     const screen = body.screen ?? 'auto';
     const instanceId = newId(now.getTime());
-    const result = await enqueueOperation(c, {
-      instanceId,
-      kind: 'create',
-      key,
-      route,
-      before: [
-        db.insert(browserInstances).values({
-          id: instanceId,
-          userId: user.id,
-          name: body.name,
-          regionId: body.regionId,
-          status: 'creating',
-          desiredState: 'running',
-          idleTimeoutS: DEFAULT_IDLE_TIMEOUT_S,
-          locale,
-          screen,
-          fingerprint: { timezone: info.timezone, locale, screen, chromeMajor: null },
-          createdAt: now,
-          updatedAt: now,
-        }),
-      ],
-      after: [
-        db.insert(auditLog).values({
-          actor: `user:${user.id}`,
-          action: 'instance.create',
-          target: `instance:${instanceId}`,
-          detail: { regionId: body.regionId },
-          createdAt: now,
-        }),
-      ],
-    });
+    const result = await (async () => {
+      try {
+        return await enqueueOperation(c, {
+          instanceId,
+          kind: 'create',
+          key,
+          route,
+          before: [
+            db.insert(browserInstances).values({
+              id: instanceId,
+              userId: user.id,
+              name: body.name,
+              regionId: body.regionId,
+              status: 'creating',
+              desiredState: 'running',
+              idleTimeoutS: trial ? TRIAL.idleTimeoutS : DEFAULT_IDLE_TIMEOUT_S,
+              ...(trial ? { trialState: 'active' } : {}),
+              locale,
+              screen,
+              fingerprint: { timezone: info.timezone, locale, screen, chromeMajor: null },
+              createdAt: now,
+              updatedAt: now,
+            }),
+          ],
+          after: [
+            db.insert(auditLog).values({
+              actor: `user:${user.id}`,
+              action: 'instance.create',
+              target: `instance:${instanceId}`,
+              detail: { regionId: body.regionId, priceVersion: body.priceVersion ?? null, trial },
+              createdAt: now,
+            }),
+          ],
+        });
+      } catch (e) {
+        // Nothing was created: the trial is still unused.
+        if (trial) await db.update(schema.billingAccounts).set({ trialUsedAt: null }).where(eq(schema.billingAccounts.userId, user.id));
+        throw e;
+      }
+    })();
     return c.json(result, 202);
   },
 );
@@ -215,7 +246,7 @@ v1.openapi(
     method: 'patch',
     path: '/instances/{id}',
     tags: ['instances'],
-    description: 'Rename, idle timeout, screen size or language. The region can never be changed.',
+    description: 'Rename, idle timeout, screen size, language or snapshot backups. The region can never be changed.',
     request: { params: IdParam, body: { content: { 'application/json': { schema: UpdateInstanceBody } }, required: true } },
     responses: { 200: jsonResponse(Instance, 'Updated browser'), ...errors, 403: problemResponse('Plan limit') },
   }),
@@ -223,7 +254,13 @@ v1.openapi(
     const db = c.get('db');
     const user = c.get('user');
     const row = await ownedInstance(c, c.req.valid('param').id);
-    const body = c.req.valid('json');
+    const { priceVersion, ...body } = c.req.valid('json');
+    if (body.backupsEnabled === true && isTrial(row)) throw problem(409, 'invalid_state', 'Snapshots are not part of the free trial. Add credit to keep this browser first.');
+    if (body.backupsEnabled === true && !row.backupsEnabled) {
+      // Snapshots are billed per GB-month: the user must have seen the price, and be able to pay it.
+      await requirePrice(db, row.regionId, priceVersion);
+      await admitSpend(db, user.id, 'turn on snapshots');
+    }
     if (body.idleTimeoutS !== undefined) {
       const max = (await entitlementsFor(db, user.id)).idleTimeoutMaxS;
       if (!(IDLE_TIMEOUT_OPTIONS_S as readonly number[]).includes(body.idleTimeoutS)) {
@@ -391,6 +428,7 @@ v1.openapi(
     if (row.status !== 'running' && row.status !== 'sleeping') {
       throw problem(409, 'invalid_state', 'A new IP can be requested while the browser is running or sleeping.');
     }
+    if (isTrial(row)) throw problem(409, 'invalid_state', 'A new IP is not part of the free trial. Add credit to keep this browser first.');
     await admitIpChange(db, user.id, new Date());
     const result = await enqueueOperation(c, {
       instanceId: row.id,
@@ -496,6 +534,133 @@ v1.openapi(
       ],
     });
     return c.json(result, 202);
+  },
+);
+
+// --- storage and usage (pages 4 and 6) ----------------------------------------------------------
+
+async function storageOf(c: Vars, row: typeof browserInstances.$inferSelect): Promise<InstanceStorage> {
+  const db = c.get('db');
+  const [h] = await db.select().from(instanceHealth).where(eq(instanceHealth.instanceId, row.id));
+  const [p] = await db
+    .select({ executor: placements.executor })
+    .from(placements)
+    .where(and(eq(placements.instanceId, row.id), eq(placements.status, 'current')));
+  const [lastResize] = await db
+    .select({ finishedAt: operations.finishedAt })
+    .from(operations)
+    .where(and(eq(operations.instanceId, row.id), eq(operations.kind, 'resize_volume'), eq(operations.status, 'succeeded')))
+    .orderBy(desc(operations.finishedAt))
+    .limit(1);
+  const [busy] = await db.select({ id: operations.id }).from(operations).where(and(eq(operations.instanceId, row.id), isNull(operations.finishedAt)));
+  const snaps = await db
+    .select({ id: backups.id })
+    .from(backups)
+    .where(and(eq(backups.instanceId, row.id), eq(backups.kind, 'snapshot'), eq(backups.status, 'complete')));
+  const { maxGb } = await storageLimits(db, row.userId);
+  const price = await regionPrice(db, row.regionId);
+  const nextAt = lastResize?.finishedAt ? lastResize.finishedAt.getTime() + RESIZE_COOLDOWN_MS : 0;
+  const blockedReason: InstanceStorage['blockedReason'] = isTrial(row)
+    ? 'trial'
+    : !['running', 'sleeping'].includes(row.status)
+    ? 'state'
+    : busy
+      ? 'busy'
+      : row.storageGb >= maxGb
+        ? 'max'
+        : nextAt > Date.now()
+          ? 'cooldown'
+          : p && p.executor !== 'fake' && !newerOrEqual(h?.agentVersion ?? null, RESIZE_AGENT_VERSION)
+            ? 'agent'
+            : null;
+  return {
+    sizeGb: row.storageGb,
+    rootVolumeGb: price?.sheet.rootVolumeGb ?? 0,
+    maxGb,
+    usedBytes: h?.diskUsedBytes ?? null,
+    totalBytes: h?.diskTotalBytes ?? null,
+    reportedAt: h?.diskReportedAt?.toISOString() ?? null,
+    resizable: blockedReason === null,
+    blockedReason,
+    nextResizeAt: nextAt > Date.now() ? new Date(nextAt).toISOString() : null,
+    snapshots: { count: snaps.length, retentionDays: (await userCaps(db, row.userId)).get('snapshot_retention_days') ?? 7 },
+  };
+}
+
+v1.openapi(
+  createRoute({
+    method: 'get',
+    path: '/instances/{id}/storage',
+    tags: ['instances'],
+    description: 'Data volume size, space used (reported by the browser while it runs) and whether it can grow now.',
+    request: { params: IdParam },
+    responses: { 200: jsonResponse(InstanceStorage, 'Storage'), ...errors },
+  }),
+  async (c) => c.json(await storageOf(c, await ownedInstance(c, c.req.valid('param').id)), 200),
+);
+
+v1.openapi(
+  createRoute({
+    method: 'post',
+    path: '/instances/{id}/storage',
+    tags: ['instances'],
+    description: 'Grows the data volume (it can never shrink). Billed per GB-month from the moment it grows; one change every 6 hours.',
+    request: { params: IdParam, headers: IdempotencyHeader, body: { content: { 'application/json': { schema: ResizeStorageBody } }, required: true } },
+    responses: { ...accepted, ...errors, 402: problemResponse('Not enough credit'), 503: problemResponse('Prices unavailable') },
+  }),
+  async (c) => {
+    const db = c.get('db');
+    const user = c.get('user');
+    const id = c.req.valid('param').id;
+    const key = requireIdempotencyKey(c);
+    const route = `POST /v1/instances/${id}/storage`;
+    const earlier = await replayed(db, user.id, key, route);
+    if (earlier) return c.json(earlier, 202);
+    const row = await ownedInstance(c, id);
+    const { sizeGb, priceVersion } = c.req.valid('json');
+    const storage = await storageOf(c, row);
+    if (sizeGb <= row.storageGb) throw problem(400, 'validation_failed', `Storage can only grow: choose more than ${row.storageGb} GB.`);
+    if (sizeGb > storage.maxGb) throw problem(403, 'plan_limit', `Storage can grow up to ${storage.maxGb} GB.`, { limit: 'storage_max_gb' });
+    if (storage.blockedReason === 'cooldown') throw problem(409, 'invalid_state', 'Storage can grow once every 6 hours. Try again later.');
+    if (storage.blockedReason === 'state') throw problem(409, 'invalid_state', 'Storage can grow while the browser is running or sleeping.');
+    if (storage.blockedReason === 'trial') throw problem(409, 'invalid_state', 'Add credit to keep this trial browser before adding storage.');
+    if (storage.blockedReason === 'agent') throw problem(409, 'invalid_state', 'This browser was created before storage could grow. Create a new browser to get more space.');
+    await requirePrice(db, row.regionId, priceVersion);
+    await admitSpend(db, user.id, 'add storage');
+    const result = await enqueueOperation(c, {
+      instanceId: row.id,
+      kind: 'resize_volume',
+      key,
+      route,
+      params: { sizeGb, from: row.storageGb },
+      after: [
+        db.insert(auditLog).values({
+          actor: `user:${user.id}`,
+          action: 'storage.resize_requested',
+          target: `instance:${row.id}`,
+          detail: { from: row.storageGb, to: sizeGb, priceVersion: priceVersion ?? null },
+          createdAt: new Date(),
+        }),
+      ],
+    });
+    return c.json(result, 202);
+  },
+);
+
+v1.openapi(
+  createRoute({
+    method: 'get',
+    path: '/instances/{id}/usage',
+    tags: ['instances'],
+    description: 'This browser’s usage and charges for a month (UTC), per item and per day, and what it costs right now.',
+    request: { params: IdParam, query: z.object({ month: z.string().regex(/^\d{4}-\d{2}$/).optional() }) },
+    responses: { 200: jsonResponse(InstanceUsage, 'Usage'), ...errors },
+  }),
+  async (c) => {
+    const db = c.get('db');
+    const row = await ownedInstance(c, c.req.valid('param').id);
+    const now = currentBurn(await regionPrice(db, row.regionId), row);
+    return c.json(await instanceUsage(db, row.id, monthOf(c.req.valid('query').month), now), 200);
   },
 );
 
@@ -616,8 +781,8 @@ v1.openapi(
 const HeartbeatBody = z.object({ input: z.boolean() });
 const HeartbeatResult = z.object({
   sleepAt: z.string().nullable(),
-  /** `hours`: the plan's active hours are used up; the browser sleeps at `sleepAt` regardless of input. */
-  reason: z.enum(['idle', 'hours']).optional(),
+  /** `balance`: the prepaid balance is used up; the browser sleeps at `sleepAt` regardless of input. */
+  reason: z.enum(['idle', 'balance', 'trial']).optional(),
 });
 
 v1.openapi(
@@ -650,11 +815,16 @@ v1.openapi(
     if (!inst || inst.status !== 'running') return c.json({ sleepAt: null }, 200);
     const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, h?.lastInputAt?.getTime() ?? 0);
     const idleAt = last + inst.idleTimeoutS * 1000;
-    // Out of active hours: the engine puts the browser to sleep 10 minutes after they ran out (page 6).
-    const { exhaustedAt } = await activeTime(db, inst.userId, now);
-    const hoursAt = exhaustedAt ? exhaustedAt.getTime() + HOURS_GRACE_MS : Infinity;
-    return hoursAt < idleAt
-      ? c.json({ sleepAt: new Date(hoursAt).toISOString(), reason: 'hours' as const }, 200)
+    // Balance used up: the engine puts the browser to sleep 10 minutes after it ran out (page 6).
+    const { exhaustedAt } = (await billingRequired(db)) ? await billingAccount(db, inst.userId) : { exhaustedAt: null };
+    // A free trial browser sleeps when its minutes are used, whatever the input.
+    if (inst.trialState === 'active') {
+      const trialAt = now.getTime() + trialSecondsLeft(inst) * 1000;
+      if (trialAt < idleAt) return c.json({ sleepAt: new Date(trialAt).toISOString(), reason: 'trial' as const }, 200);
+    }
+    const balanceAt = exhaustedAt && !isTrial(inst) ? exhaustedAt.getTime() + BALANCE_GRACE_MS : Infinity;
+    return balanceAt < idleAt
+      ? c.json({ sleepAt: new Date(balanceAt).toISOString(), reason: 'balance' as const }, 200)
       : c.json({ sleepAt: new Date(idleAt).toISOString(), reason: 'idle' as const }, 200);
   },
 );

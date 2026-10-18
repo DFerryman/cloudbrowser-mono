@@ -1,40 +1,33 @@
-import { planLimits, subscriptionAccess } from '@cloudbrowser/contracts';
-import { meterAndEnforce } from '@cloudbrowser/engine';
+import { browserEstimate, customerRates, priceVersion, ProviderPriceSheet } from '@cloudbrowser/contracts';
+import { meterUsage } from '@cloudbrowser/engine';
 import { createDb } from '@cloudbrowser/db';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { billingSweep } from '../src/billing/sweep.js';
 import { creemFrom } from '../src/billing/creem.js';
-import { setup, signIn } from './helpers.js';
+import { setup, signIn, SIMULATED_SHEET } from './helpers.js';
 
 const SECRET = 'whsec_test';
 const BASE = 'https://test-api.creem.io';
-const PRODUCTS = { personal_monthly: 'prod_pm', personal_yearly: 'prod_py', pro_monthly: 'prod_rm', pro_yearly: 'prod_ry' };
 
 /**
- * A stand-in for Creem's API (page 6). Field names follow Creem's docs and must be confirmed against
- * recorded test-mode payloads before launch.
+ * A stand-in for Creem's API (page 6): one-time top-up products and checkouts. Field names follow
+ * Creem's docs and must be confirmed against recorded test-mode payloads before launch.
  */
 class FakeCreem {
-  subs = new Map<string, Record<string, unknown>>();
-  checkouts: Record<string, unknown>[] = [];
+  products: Record<string, Record<string, unknown>> = {
+    prod_10: { id: 'prod_10', name: '$10 credit', price: 1000, currency: 'USD', billing_type: 'onetime' },
+    prod_25: { id: 'prod_25', name: '$25 credit', price: 2500, currency: 'USD', billing_type: 'onetime' },
+    prod_sub: { id: 'prod_sub', name: 'A subscription', price: 900, currency: 'USD', billing_type: 'recurring' },
+  };
+  checkouts = new Map<string, Record<string, unknown>>();
   calls: { method: string; path: string; body: unknown }[] = [];
 
-  subscription(id: string, patch: Partial<{ status: string; product: string; units: number; userId: string; end: string }>) {
-    const prev = this.subs.get(id) as Record<string, unknown> | undefined;
-    const items = (prev?.items as Record<string, unknown>[] | undefined) ?? [{ id: `item_${id}`, units: 1 }];
-    const next = {
-      id,
-      object: 'subscription',
-      status: patch.status ?? prev?.status ?? 'active',
-      product: { id: patch.product ?? (prev?.product as { id: string } | undefined)?.id ?? PRODUCTS.personal_monthly },
-      customer: { id: 'cust_1', email: 'pilot@example.com' },
-      items: [{ ...items[0], units: patch.units ?? items[0]!.units }],
-      current_period_end_date: patch.end ?? prev?.current_period_end_date ?? '2026-12-01T00:00:00.000Z',
-      metadata: patch.userId ? { userId: patch.userId } : (prev?.metadata ?? {}),
-    };
-    this.subs.set(id, next);
-    return next;
+  /** Creem marks the checkout paid (what the hosted checkout does when the buyer pays). */
+  pay(id: string, orderId = `ord_${id}`) {
+    const c = this.checkouts.get(id)!;
+    this.checkouts.set(id, { ...c, status: 'completed', order: { id: orderId, status: 'paid', amount: 1100, sub_total: 1000, tax_amount: 100, currency: 'USD' }, customer: { id: 'cust_1' } });
+    return this.checkouts.get(id)!;
   }
 
   fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -44,18 +37,19 @@ class FakeCreem {
     this.calls.push({ method, path: url.pathname, body });
     if (init?.headers && (init.headers as Record<string, string>)['x-api-key'] !== 'creem_test_key') return new Response('no key', { status: 401 });
     const ok = (v: unknown) => new Response(JSON.stringify(v), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (method === 'GET' && url.pathname === '/v1/products') {
+      const p = this.products[url.searchParams.get('product_id') ?? ''];
+      return p ? ok(p) : new Response('not found', { status: 404 });
+    }
     if (method === 'POST' && url.pathname === '/v1/checkouts') {
-      this.checkouts.push(body);
-      return ok({ id: `ch_${this.checkouts.length}`, checkout_url: `https://checkout.test/ch_${this.checkouts.length}` });
+      const id = `ch_${this.checkouts.size + 1}`;
+      this.checkouts.set(id, { id, status: 'pending', request_id: body.request_id, product: body.product_id, metadata: body.metadata });
+      return ok({ id, checkout_url: `https://checkout.test/${id}` });
     }
-    if (method === 'GET' && url.pathname === '/v1/subscriptions') {
-      const s = this.subs.get(url.searchParams.get('subscription_id') ?? '');
-      return s ? ok(s) : new Response('not found', { status: 404 });
+    if (method === 'GET' && url.pathname === '/v1/checkouts') {
+      const c = this.checkouts.get(url.searchParams.get('checkout_id') ?? '');
+      return c ? ok(c) : new Response('not found', { status: 404 });
     }
-    const up = url.pathname.match(/^\/v1\/subscriptions\/([^/]+)\/upgrade$/);
-    if (method === 'POST' && up) return ok(this.subscription(up[1]!, { product: body.product_id }));
-    const upd = url.pathname.match(/^\/v1\/subscriptions\/([^/]+)$/);
-    if (method === 'POST' && upd) return ok(this.subscription(upd[1]!, { units: body.items[0].units }));
     if (method === 'POST' && url.pathname === '/v1/customers/billing') return ok({ customer_portal_link: `https://portal.test/${body.customer_id}` });
     return new Response('unexpected', { status: 500 });
   };
@@ -82,6 +76,16 @@ async function webhook(event: Record<string, unknown>, signature?: string) {
 }
 let n = 0;
 const event = (eventType: string, object: Record<string, unknown>) => ({ id: `evt_${++n}`, eventType, created_at: Date.now(), object });
+const prepaid = () => t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()})`);
+const balance = async () => (await t.call('GET', '/api/v1/billing')).body.balanceMicros as number;
+
+/** Starts a top-up checkout as the signed-in user and pays it in Creem. */
+async function topUp(productId = 'prod_10') {
+  const res = await t.call('POST', '/api/v1/billing/checkout', { productId });
+  expect(res.body.url).toMatch(/^https:\/\/checkout\.test\//);
+  const id = String(res.body.url).split('/').pop()!;
+  return { id, paid: creem.pay(id) };
+}
 
 beforeEach(async () => {
   t = setup();
@@ -92,10 +96,7 @@ beforeEach(async () => {
     CREEM_API_BASE: BASE,
     CREEM_API_KEY: 'creem_test_key',
     CREEM_WEBHOOK_SECRET: SECRET,
-    CREEM_PRODUCT_PERSONAL_MONTHLY: PRODUCTS.personal_monthly,
-    CREEM_PRODUCT_PERSONAL_YEARLY: PRODUCTS.personal_yearly,
-    CREEM_PRODUCT_PRO_MONTHLY: PRODUCTS.pro_monthly,
-    CREEM_PRODUCT_PRO_YEARLY: PRODUCTS.pro_yearly,
+    CREEM_TOPUP_PRODUCTS: 'prod_25, prod_10, prod_sub',
     // The billing queue delivers to the api Worker's own consumer, in process.
     BILLING: {
       send: async (body: { eventId: string }) =>
@@ -107,144 +108,135 @@ beforeEach(async () => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-describe('plans', () => {
-  it('maps every plan to its limits', () => {
-    expect(planLimits('personal_monthly')).toMatchObject({ maxBrowsers: 1, maxRunning: 1, hoursPerMonth: 60, idleTimeoutMaxS: 1800, storageGb: 20, fpsMax: 30, snapshotRetentionDays: 7 });
-    expect(planLimits('personal_yearly', 5).maxBrowsers).toBe(1);
-    expect(planLimits('pro_monthly', 3)).toMatchObject({ maxBrowsers: 3, maxRunning: 3, hoursPerMonth: 180, idleTimeoutMaxS: 3600, storageGb: 30, fpsMax: 60, snapshotRetentionDays: 14 });
-    expect(planLimits('pro_yearly', 1).maxBrowsers).toBe(2); // Pro minimum
-    expect(planLimits('pro_yearly', 500).maxBrowsers).toBe(50);
+describe('prices', () => {
+  const sheet = ProviderPriceSheet.parse(SIMULATED_SHEET);
+
+  it('are the provider cost times the markup, per unit, in micro-dollars', () => {
+    expect(customerRates(sheet, 100)).toEqual({ compute: 100_000, ip: 5_000, storage: 80_000, snapshot: 50_000, transfer: 90_000 });
+    expect(customerRates(sheet, 120)).toEqual({ compute: 120_000, ip: 6_000, storage: 96_000, snapshot: 60_000, transfer: 108_000 });
+    expect(priceVersion(customerRates(sheet, 120), 16)).not.toBe(priceVersion(customerRates(sheet, 125), 16));
   });
 
-  it('grants access by status: grace for past due, until period end after cancel', () => {
-    const now = new Date('2026-11-10T00:00:00Z');
-    const end = new Date('2026-11-20T00:00:00Z');
-    const past = new Date('2026-11-01T00:00:00Z');
-    const at = (status: string, currentPeriodEnd: Date | null = end, pastDueSince: Date | null = null) =>
-      subscriptionAccess({ status, currentPeriodEnd, pastDueSince }, now);
-    expect(at('active')).toBe('active');
-    expect(at('trialing')).toBe('active');
-    expect(at('scheduled_cancel')).toBe('ending');
-    expect(at('canceled')).toBe('ending');
-    expect(at('canceled', past)).toBe('none');
-    expect(at('past_due', end, new Date('2026-11-05T00:00:00Z'))).toBe('grace');
-    expect(at('past_due', end, new Date('2026-11-02T00:00:00Z'))).toBe('none');
-    expect(at('paused')).toBe('none');
-    expect(at('expired')).toBe('none');
-    expect(at('something_new')).toBe('none');
+  it('estimate what a browser costs running, and per month while it is kept', () => {
+    const e = browserEstimate(customerRates(sheet, 120), { storageGb: 10, rootVolumeGb: 16, backups: true });
+    expect(e).toMatchObject({ runningHour: 120_000, ipMonth: 4_380_000, storageMonth: 2_496_000, snapshotMonth: 600_000, alwaysOnMonth: 7_476_000 });
+  });
+
+  it('are shown per region, and creating needs the version the user saw', async () => {
+    const prices = (await t.call('GET', '/api/v1/pricing')).body;
+    const tyo = prices.find((p: { regionId: string }) => p.regionId === 'tyo1');
+    expect(tyo).toMatchObject({ available: true, source: 'simulated', rootVolumeGb: 16, defaultStorageGb: 10, maxStorageGb: 100 });
+    const stale = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1', priceVersion: 'old' }, { 'idempotency-key': 'a' });
+    expect(stale).toMatchObject({ status: 409, body: { type: 'price_changed' } });
+    const ok = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1', priceVersion: tyo.version }, { 'idempotency-key': 'b' });
+    expect(ok.status).toBe(202);
+  });
+
+  it('nothing can be bought in a region before its prices are read', async () => {
+    t = setup({ prices: false });
+    t.d1.sqlite.exec(`INSERT INTO invites (email) VALUES ('p2@example.com')`);
+    await signIn(t, 'p2@example.com');
+    expect((await t.call('GET', '/api/v1/pricing')).body[0]).toMatchObject({ available: false, rates: null, version: null });
+    const res = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' }, { 'idempotency-key': 'a' });
+    expect(res).toMatchObject({ status: 503, body: { type: 'price_unavailable' } });
   });
 });
 
-describe('billing', () => {
-  it('stays on the pilot plan without a subscription, and requires one once billing is on', async () => {
-    expect((await t.call('GET', '/api/v1/me')).body.entitlements.plan).toBe('pilot');
-    t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', 0)`);
-    const me = (await t.call('GET', '/api/v1/me')).body;
-    expect(me.entitlements).toMatchObject({ plan: 'none', maxBrowsers: 0 });
-    const res = await t.call('POST', '/api/v1/instances', { name: 'x', regionId: 'tyo1' }, { 'idempotency-key': 'n1' });
-    expect(res.body.type).toBe('plan_limit');
+describe('prepaid balance', () => {
+  it('runs the pilot for free and requires credit once billing is on', async () => {
+    expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ mode: 'pilot', enabled: true, balanceMicros: 0 });
+    prepaid();
+    expect((await t.call('GET', '/api/v1/me')).body.entitlements.billing).toBe('prepaid');
+    const res = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' }, { 'idempotency-key': 'a' });
+    expect(res).toMatchObject({ status: 402, body: { type: 'insufficient_balance' } });
   });
 
-  it('grants access only from the webhook, never from the checkout redirect', async () => {
-    const checkout = await t.call('POST', '/api/v1/billing/checkout', { plan: 'pro_monthly', browsers: 3 });
-    expect(checkout.body.url).toBe('https://checkout.test/ch_1');
-    expect(creem.checkouts[0]).toMatchObject({ product_id: PRODUCTS.pro_monthly, units: 3, metadata: { userId } });
-    expect((await t.call('POST', '/api/v1/billing/checkout', { plan: 'pro_monthly', browsers: 1 })).status).toBe(400);
-    expect((await t.call('GET', '/api/v1/me')).body.entitlements.plan).toBe('pilot'); // nothing granted yet
+  it('offers the one-time USD top-ups configured in Creem, cheapest first', async () => {
+    const b = (await t.call('GET', '/api/v1/billing')).body;
+    expect(b.topUps).toEqual([
+      { productId: 'prod_10', name: '$10 credit', amountCents: 1000, currency: 'USD' },
+      { productId: 'prod_25', name: '$25 credit', amountCents: 2500, currency: 'USD' },
+    ]);
+    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_sub' })).body.type).toBe('validation_failed');
+  });
 
-    creem.subscription('sub_1', { status: 'active', product: PRODUCTS.pro_monthly, units: 3, userId });
-    expect(await webhook(event('checkout.completed', { id: 'ch_1', request_id: creem.checkouts[0]!.request_id, customer: { id: 'cust_1' }, subscription: { id: 'sub_1' }, metadata: { userId } }))).toBe(200);
-    const me = (await t.call('GET', '/api/v1/me')).body;
-    expect(me.entitlements).toMatchObject({ plan: 'pro', maxBrowsers: 3, maxRunning: 3, hoursPerMonth: 180, idleTimeoutMaxS: 3600 });
-    const billing = (await t.call('GET', '/api/v1/billing')).body;
-    expect(billing).toMatchObject({ enabled: true, subscription: { plan: 'pro_monthly', browsers: 3, access: 'active' }, hours: { used: 0, included: 180 } });
+  it('credits a top-up once, from Creem’s record of the paid checkout, never from the redirect', async () => {
+    prepaid();
+    await t.call('GET', '/api/v1/billing');
+    const res = await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_10' });
+    const id = String(res.body.url).split('/').pop()!;
+    expect(creem.checkouts.get(id)).toMatchObject({ product: 'prod_10', metadata: { userId } });
+    // The buyer comes back before paying: nothing is credited.
+    expect(await balance()).toBe(0);
+    await webhook(event('checkout.completed', { id, status: 'pending' }));
+    expect(await balance()).toBe(0);
+
+    creem.pay(id);
+    // The webhook body is not trusted: even a forged amount credits what Creem says was bought.
+    const evt = event('checkout.completed', { id, order: { amount: 999_999 } });
+    expect(await webhook(evt)).toBe(200);
+    expect(await balance()).toBe(10_000_000);
+    expect(await webhook(evt)).toBe(200); // duplicate delivery
+    await webhook(event('checkout.completed', { id })); // a second event for the same order
+    expect(await balance()).toBe(10_000_000);
+    expect((await t.call('GET', '/api/v1/billing/transactions')).body).toEqual([
+      expect.objectContaining({ kind: 'topup', amountMicros: 10_000_000, description: '$10 credit' }),
+    ]);
+
+    // Now a browser can be created, and the receipts portal works.
+    expect((await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' }, { 'idempotency-key': 'a' })).status).toBe(202);
     expect((await t.call('POST', '/api/v1/billing/portal')).body.url).toBe('https://portal.test/cust_1');
-    expect((await t.call('POST', '/api/v1/billing/checkout', { plan: 'personal_monthly' })).body.type).toBe('invalid_state');
   });
 
-  it('rejects bad signatures and ignores duplicates', async () => {
-    const e = event('subscription.paid', { id: 'sub_x' });
-    expect(await webhook(e, 'deadbeef')).toBe(401);
-    expect(await webhook(e, 'not-hex')).toBe(401);
-    expect(t.d1.sqlite.prepare('SELECT count(*) AS n FROM webhook_events').get()).toEqual({ n: 0 });
-    creem.subscription('sub_x', { userId });
-    expect(await webhook(e)).toBe(200);
-    expect(await webhook(e)).toBe(200);
-    expect(t.d1.sqlite.prepare('SELECT count(*) AS n FROM webhook_events').get()).toEqual({ n: 1 });
-    expect(creem.calls.filter((c) => c.path === '/v1/subscriptions')).toHaveLength(1);
+  it('rejects bad signatures and credits a lost webhook from the nightly check', async () => {
+    const { id } = await topUp();
+    expect(await webhook(event('checkout.completed', { id }), 'deadbeef')).toBe(401);
+    expect(await balance()).toBe(0);
+    const db = createDb(t.d1 as never);
+    const summary = await billingSweep(t.env as never, db, creemFrom(t.env as never), new Date(), { nightly: true });
+    expect(summary.credited).toBe(1);
+    expect(await balance()).toBe(10_000_000);
   });
 
-  it('ends in Creem’s state whatever the order and number of deliveries', async () => {
-    creem.subscription('sub_2', { status: 'active', product: PRODUCTS.personal_monthly, userId });
-    const paid = event('subscription.paid', { id: 'sub_2', metadata: { userId } });
-    const update = event('subscription.update', { id: 'sub_2' });
-    // The update (to Pro, 4 browsers) arrives before `paid`, and every event is delivered 3 times.
-    creem.subscription('sub_2', { product: PRODUCTS.pro_yearly, units: 4 });
-    for (let i = 0; i < 3; i++) for (const e of [update, paid]) await webhook(e);
-    expect((await t.call('GET', '/api/v1/me')).body.entitlements).toMatchObject({ plan: 'pro', maxBrowsers: 4 });
-    const state = t.d1.sqlite.prepare(`SELECT plan, units, status FROM subscriptions`).all();
-    expect(state).toEqual([{ plan: 'pro_yearly', units: 4, status: 'active' }]);
+  it('takes refunds back out of the balance, and freezes the account on a dispute', async () => {
+    const { id, paid } = await topUp('prod_25');
+    await webhook(event('checkout.completed', { id }));
+    expect(await balance()).toBe(25_000_000);
+    const order = (paid.order as { id: string }).id;
+    await webhook(event('refund.created', { id: 'ref_1', refund_amount: 500, order: { id: order } }));
+    await webhook(event('refund.created', { id: 'ref_1', refund_amount: 500, order: { id: order } }));
+    expect(await balance()).toBe(20_000_000);
+
+    await webhook(event('dispute.created', { id: 'dsp_1', amount: 2500, order: order }));
+    const b = (await t.call('GET', '/api/v1/billing')).body;
+    expect(b).toMatchObject({ frozen: true, balanceMicros: -5_000_000 });
+    expect((await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' }, { 'idempotency-key': 'a' })).body.type).toBe('account_frozen');
   });
 
-  it('changes browsers on Pro with proration, and refuses to drop below the browsers in use', async () => {
-    creem.subscription('sub_3', { status: 'active', product: PRODUCTS.pro_monthly, units: 2, userId });
-    await webhook(event('subscription.paid', { id: 'sub_3' }));
-    for (const k of ['a', 'b']) await t.call('POST', '/api/v1/instances', { name: k, regionId: 'tyo1' }, { 'idempotency-key': k });
-    await t.settle();
-    expect((await t.call('POST', '/api/v1/instances', { name: 'c', regionId: 'tyo1' }, { 'idempotency-key': 'c' })).body.type).toBe('plan_limit');
-
-    const more = await t.call('POST', '/api/v1/billing/browsers', { browsers: 3 });
-    expect(more.body.subscription.browsers).toBe(3);
-    expect(creem.calls.find((c) => c.path === '/v1/subscriptions/sub_3')?.body).toEqual({
-      items: [{ id: 'item_sub_3', units: 3 }],
-      update_behavior: 'proration-charge-immediately',
-    });
-    // Creation is allowed right away, from Creem's re-fetched state.
-    expect((await t.call('POST', '/api/v1/instances', { name: 'c', regionId: 'tyo1' }, { 'idempotency-key': 'c2' })).status).toBe(202);
-    await t.settle();
-    expect((await t.call('POST', '/api/v1/billing/browsers', { browsers: 2 })).body.type).toBe('too_many_browsers');
-    expect((await t.call('POST', '/api/v1/billing/plan', { plan: 'personal_monthly' })).body.type).toBe('too_many_browsers');
-  });
-
-  it('upgrades Personal to Pro', async () => {
-    creem.subscription('sub_4', { status: 'active', product: PRODUCTS.personal_monthly, userId });
-    await webhook(event('subscription.paid', { id: 'sub_4' }));
-    const res = await t.call('POST', '/api/v1/billing/plan', { plan: 'pro_monthly', browsers: 2 });
-    expect(res.body.subscription).toMatchObject({ plan: 'pro_monthly', browsers: 2 });
-    expect(creem.calls.find((c) => c.path === '/v1/subscriptions/sub_4/upgrade')?.body).toEqual({
-      product_id: PRODUCTS.pro_monthly,
-      update_behavior: 'proration-charge-immediately',
-    });
-  });
-
-  it('puts browsers to sleep when access ends, keeps them 30 days, then deletes them', async () => {
-    creem.subscription('sub_5', { status: 'active', product: PRODUCTS.personal_monthly, userId });
-    await webhook(event('subscription.paid', { id: 'sub_5' }));
+  it('sleeps browsers when the balance runs out, warns, keeps them 30 days, then deletes them', async () => {
+    prepaid();
+    t.d1.sqlite.exec(`INSERT INTO billing_accounts (user_id, balance_micros, updated_at) VALUES ('${userId}', 2000000, ${Date.now()})`);
     await t.call('POST', '/api/v1/instances', { name: 'w', regionId: 'tyo1' }, { 'idempotency-key': 'w' });
     await t.settle();
     const [inst] = (await t.call('GET', '/api/v1/instances')).body;
     expect(inst.status).toBe('running');
 
-    creem.subscription('sub_5', { status: 'expired' });
-    await webhook(event('subscription.expired', { id: 'sub_5' }));
-    expect((await t.call('GET', '/api/v1/me')).body.entitlements).toMatchObject({ plan: 'none', maxRunning: 0 });
-
-    // The engine's minute cron sleeps it at once; starts are refused.
     const db = createDb(t.d1 as never);
-    const engineDeps = { db, now: () => new Date(), notify: () => {} } as never;
-    expect((await meterAndEnforce(engineDeps)).stopped).toBe(1);
+    t.d1.sqlite.exec(`UPDATE billing_accounts SET balance_micros = 0`);
+    const engineDeps = (at: number) => ({ db, now: () => new Date(at), notify: () => {} }) as never;
+    const start = Date.now();
+    await meterUsage(engineDeps(start)); // runs out: the 10-minute warning starts
+    const b = (await t.call('GET', '/api/v1/billing')).body;
+    expect(b.exhaustedAt).not.toBeNull();
+    expect(Date.parse(b.dataKeptUntil) - start).toBeGreaterThan(29 * 86_400_000);
+    expect((await meterUsage(engineDeps(start + 11 * 60_000))).stopped).toBe(1);
     await t.env.OPERATIONS.send({ operationId: (t.d1.sqlite.prepare(`SELECT id FROM operations WHERE kind = 'stop'`).get() as { id: string }).id });
     await t.settle();
     expect((await t.call('GET', `/api/v1/instances/${inst.id}`)).body.status).toBe('sleeping');
-    expect((await t.call('POST', `/api/v1/instances/${inst.id}/start`, undefined, { 'idempotency-key': 's' })).body.type).toBe('plan_limit');
-
-    const billing = (await t.call('GET', '/api/v1/billing')).body;
-    expect(billing.subscription.access).toBe('none');
-    const keptUntil = Date.parse(billing.dataKeptUntil);
-    expect(keptUntil - Date.now()).toBeGreaterThan(29 * 86_400_000);
+    expect((await t.call('POST', `/api/v1/instances/${inst.id}/start`, undefined, { 'idempotency-key': 's' })).body.type).toBe('insufficient_balance');
 
     // Day 1: a notice. Day 30: the browsers are deleted (restorable 7 more days, then purged).
-    const sweep = (days: number) => billingSweep(t.env as never, db, creemFrom(t.env as never), new Date(Date.now() + days * 86_400_000), { nightly: false });
+    const sweep = (days: number) => billingSweep(t.env as never, db, creemFrom(t.env as never), new Date(start + days * 86_400_000), { nightly: false });
     expect((await sweep(1)).notices).toBe(1);
     expect((await sweep(1)).notices).toBe(0);
     expect(t.emails.at(-1)?.text).toMatch(/kept until/);
@@ -253,35 +245,134 @@ describe('billing', () => {
     expect(t.d1.sqlite.prepare(`SELECT desired_state AS d FROM browser_instances`).get()).toEqual({ d: 'deleted' });
   });
 
-  it('revokes on a full refund and only logs a partial one', async () => {
-    creem.subscription('sub_6', { status: 'active', product: PRODUCTS.personal_monthly, userId });
-    await webhook(event('subscription.paid', { id: 'sub_6' }));
-    await webhook(event('refund.created', { id: 'ref_1', refund_amount: 500, transaction: { amount_paid: 2900 }, subscription: { id: 'sub_6' } }));
-    expect((await t.call('GET', '/api/v1/me')).body.entitlements.plan).toBe('personal');
-    await webhook(event('refund.created', { id: 'ref_2', refund_amount: 2900, transaction: { amount_paid: 2900 }, subscription: { id: 'sub_6' } }));
-    expect((await t.call('GET', '/api/v1/me')).body.entitlements.plan).toBe('none');
-    // A later sync from Creem does not undo the revocation.
-    await webhook(event('subscription.update', { id: 'sub_6' }));
-    expect((await t.call('GET', '/api/v1/me')).body.entitlements.plan).toBe('none');
-  });
-
-  it('refuses starts once the month’s hours are used up', async () => {
-    creem.subscription('sub_7', { status: 'active', product: PRODUCTS.personal_monthly, userId });
-    await webhook(event('subscription.paid', { id: 'sub_7' }));
-    await t.call('POST', '/api/v1/instances', { name: 'h', regionId: 'tyo1' }, { 'idempotency-key': 'h' });
-    await t.settle();
-    const [inst] = (await t.call('GET', '/api/v1/instances')).body;
-    await t.call('POST', `/api/v1/instances/${inst.id}/stop`, undefined, { 'idempotency-key': 'st' });
-    await t.settle();
-    const month = new Date().toISOString().slice(0, 7);
-    t.d1.sqlite.prepare(`INSERT INTO active_usage (user_id, month, seconds) VALUES (?, ?, ?)`).run(userId, month, 60 * 3600);
-    expect((await t.call('GET', '/api/v1/me')).body.usage.hoursUsed).toBe(60);
-    expect((await t.call('POST', `/api/v1/instances/${inst.id}/start`, undefined, { 'idempotency-key': 'go' })).body.type).toBe('hours_exhausted');
+  it('emails once when the balance gets low', async () => {
+    prepaid();
+    t.d1.sqlite.exec(`INSERT INTO billing_accounts (user_id, balance_micros, updated_at) VALUES ('${userId}', 1500000, ${Date.now()})`);
+    const db = createDb(t.d1 as never);
+    expect((await billingSweep(t.env as never, db, null, new Date(), { nightly: false })).lowBalance).toBe(1);
+    expect((await billingSweep(t.env as never, db, null, new Date(), { nightly: false })).lowBalance).toBe(0);
+    expect(t.emails.at(-1)?.text).toMatch(/running low/);
   });
 
   it('answers 503 when Creem is not configured', async () => {
     Object.assign(t.env, { CREEM_API_KEY: undefined });
-    expect((await t.call('POST', '/api/v1/billing/checkout', { plan: 'personal_monthly' })).body.type).toBe('billing_unavailable');
+    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_10' })).body.type).toBe('billing_unavailable');
     expect((await t.call('GET', '/api/v1/billing')).body.enabled).toBe(false);
+  });
+});
+
+describe('storage and usage of one browser', () => {
+  it('grows the volume after showing the price, at most once every 6 hours, and never shrinks it', async () => {
+    const created = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' }, { 'idempotency-key': 'a' });
+    await t.settle();
+    const id = created.body.instanceId;
+    expect((await t.call('GET', `/api/v1/instances/${id}/storage`)).body).toMatchObject({ sizeGb: 10, rootVolumeGb: 16, maxGb: 100, resizable: true, blockedReason: null });
+
+    expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 8 }, { 'idempotency-key': 'g0' })).status).toBe(400);
+    expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 500 }, { 'idempotency-key': 'g1' })).body.type).toBe('plan_limit');
+    expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 20, priceVersion: 'old' }, { 'idempotency-key': 'g2' })).body.type).toBe('price_changed');
+    const grown = await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 20 }, { 'idempotency-key': 'g3' });
+    expect(grown.status).toBe(202);
+    await t.settle();
+    expect((await t.call('GET', `/api/v1/instances/${id}`)).body.storageGb).toBe(20);
+    expect((await t.call('GET', `/api/v1/instances/${id}/storage`)).body).toMatchObject({ sizeGb: 20, resizable: false, blockedReason: 'cooldown' });
+    expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 30 }, { 'idempotency-key': 'g4' })).body.type).toBe('invalid_state');
+  });
+
+  it('shows what the browser has cost this month and what it costs now', async () => {
+    const created = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' }, { 'idempotency-key': 'a' });
+    await t.settle();
+    const id = created.body.instanceId;
+    const db = createDb(t.d1 as never);
+    const at = Date.now();
+    await meterUsage({ db, now: () => new Date(at), notify: () => {} } as never);
+    await meterUsage({ db, now: () => new Date(at + 5 * 60_000), notify: () => {} } as never);
+    const u = (await t.call('GET', `/api/v1/instances/${id}/usage`)).body;
+    expect(u.items.find((i: { item: string }) => i.item === 'compute')).toMatchObject({ amountMicros: 10_000 });
+    expect(u.now).toMatchObject({ runningHourMicros: 120_000 });
+    expect(u.now.hourMicros).toBeGreaterThan(120_000);
+    const account = (await t.call('GET', '/api/v1/usage')).body;
+    expect(account.byBrowser).toEqual([expect.objectContaining({ instanceId: id, deleted: false, totalMicros: u.totalMicros })]);
+  });
+});
+
+describe('free trial', () => {
+  const syd = () => t.d1.sqlite.exec(`UPDATE regions SET enabled = 1, executor = 'fake' WHERE id = 'syd1'`);
+  const db = () => createDb(t.d1 as never);
+  const engineAt = (at: number) => ({ db: db(), now: () => new Date(at), notify: () => {} }) as never;
+  const runOps = async () => {
+    for (const { id } of t.d1.sqlite.prepare(`SELECT id FROM operations WHERE finished_at IS NULL`).all() as { id: string }[]) {
+      await t.env.OPERATIONS.send({ operationId: id });
+    }
+    await t.settle();
+  };
+
+  it('gives each user one free browser in Sydney: 10 minutes, 2 GB, kept 7 days after it sleeps, then reclaimed', async () => {
+    const { reclaimTrials } = await import('@cloudbrowser/engine');
+    prepaid();
+    syd();
+    expect((await t.call('GET', '/api/v1/billing')).body.trial).toMatchObject({ eligible: true, regionId: 'syd1', minutes: 10, storageGb: 2, keptDays: 7 });
+    expect((await t.call('POST', '/api/v1/instances', { name: 'x', regionId: 'tyo1', trial: true }, { 'idempotency-key': 'x' })).status).toBe(400);
+    const created = await t.call('POST', '/api/v1/instances', { name: 'Trial', regionId: 'syd1', trial: true }, { 'idempotency-key': 't1' });
+    expect(created.status).toBe(202);
+    await t.settle();
+    const id = created.body.instanceId;
+    const inst = (await t.call('GET', `/api/v1/instances/${id}`)).body;
+    expect(inst).toMatchObject({ status: 'running', storageGb: 2, backupsEnabled: false, idleTimeoutS: 300, trial: { state: 'active', secondsLeft: 600 } });
+    // Once per user.
+    expect((await t.call('GET', '/api/v1/billing')).body.trial.eligible).toBe(false);
+    expect((await t.call('POST', '/api/v1/instances', { name: 'again', regionId: 'syd1', trial: true }, { 'idempotency-key': 't2' })).body.type).toBe('invalid_state');
+    // No paid extras during the trial.
+    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { backupsEnabled: true })).body.type).toBe('invalid_state');
+    expect((await t.call('GET', `/api/v1/instances/${id}/storage`)).body.blockedReason).toBe('trial');
+
+    // Metered at cost, charged nothing; after 10 minutes of running it goes to sleep.
+    const start = Date.now();
+    for (let m = 0; m <= 10; m += 5) await meterUsage(engineAt(start + m * 60_000));
+    await meterUsage(engineAt(start + 11 * 60_000));
+    const rows = t.d1.sqlite.prepare(`SELECT item, amount_micros AS a, cost_micros AS c FROM usage_records WHERE instance_id = ?`).all(id) as { item: string; a: number; c: number }[];
+    expect(rows.every((r) => r.a === 0)).toBe(true);
+    expect(rows.find((r) => r.item === 'compute')!.c).toBeGreaterThan(0);
+    expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ balanceMicros: 0, exhaustedAt: null });
+    await runOps();
+    const asleep = (await t.call('GET', `/api/v1/instances/${id}`)).body;
+    expect(asleep).toMatchObject({ status: 'sleeping', trial: { state: 'ended', secondsLeft: 0 } });
+    expect(Date.parse(asleep.trial.reclaimAt) - Date.now()).toBeGreaterThan(6.9 * 86_400_000);
+
+    // Waking needs credit now; without it the browser is reclaimed after 7 days.
+    const wake = await t.call('POST', `/api/v1/instances/${id}/start`, undefined, { 'idempotency-key': 'w1' });
+    expect(wake.body).toMatchObject({ type: 'insufficient_balance' });
+    expect(await reclaimTrials(engineAt(Date.now() + 6 * 86_400_000))).toBe(0);
+    expect(await reclaimTrials(engineAt(Date.now() + 8 * 86_400_000))).toBe(1);
+    await runOps();
+    expect((await t.call('GET', `/api/v1/instances/${id}`)).body.status).toBe('deleting');
+    const purgeAfter = t.d1.sqlite.prepare(`SELECT purge_after AS p FROM browser_instances WHERE id = ?`).get(id) as { p: number };
+    expect(purgeAfter.p).toBeLessThanOrEqual(Date.now()); // purged on the reaper's next run, not 7 more days later
+  });
+
+  it('keeps the same browser when the user pays before it is reclaimed, and charges it from then on', async () => {
+    prepaid();
+    syd();
+    const created = await t.call('POST', '/api/v1/instances', { name: 'Trial', regionId: 'syd1', trial: true }, { 'idempotency-key': 't1' });
+    await t.settle();
+    const id = created.body.instanceId;
+    const before = (await t.call('GET', `/api/v1/instances/${id}`)).body;
+    await t.call('POST', `/api/v1/instances/${id}/stop`, undefined, { 'idempotency-key': 's1' });
+    await t.settle();
+
+    const { id: checkout } = await topUp();
+    await webhook(event('checkout.completed', { id: checkout }));
+    const converted = (await t.call('GET', `/api/v1/instances/${id}`)).body;
+    expect(converted).toMatchObject({ trial: { state: 'converted', reclaimAt: null }, ipAddress: before.ipAddress, storageGb: 2 });
+    expect((await t.call('GET', `/api/v1/instances/${id}/storage`)).body.blockedReason).toBeNull();
+
+    expect((await t.call('POST', `/api/v1/instances/${id}/start`, undefined, { 'idempotency-key': 'w1' })).status).toBe(202);
+    await t.settle();
+    const start = Date.now();
+    await meterUsage(engineAt(start));
+    await meterUsage(engineAt(start + 5 * 60_000));
+    const compute = t.d1.sqlite.prepare(`SELECT amount_micros AS a FROM usage_records WHERE instance_id = ? AND item = 'compute' AND amount_micros > 0`).get(id) as { a: number };
+    expect(compute.a).toBe(10_000); // 5 minutes at $0.12/h
+    expect((await t.call('GET', '/api/v1/billing')).body.balanceMicros).toBeLessThan(10_000_000);
   });
 });

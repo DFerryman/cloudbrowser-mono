@@ -1,4 +1,4 @@
-import type { Instance, Operation } from '@cloudbrowser/contracts';
+import { TRIAL, type Instance, type Operation } from '@cloudbrowser/contracts';
 import { schema, type Db } from '@cloudbrowser/db';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 
@@ -66,6 +66,15 @@ export async function toInstances(db: Db, rows: InstanceRow[]): Promise<Instance
       purgeAfter: iso(r.purgeAfter),
       currentOperation: op
         ? { id: op.id, kind: op.kind as Operation['kind'], status: op.status as Operation['status'], step: op.step }
+        : null,
+      storageGb: r.storageGb,
+      backupsEnabled: r.backupsEnabled,
+      trial: r.trialState
+        ? {
+            state: r.trialState as NonNullable<Instance['trial']>['state'],
+            secondsLeft: r.trialState === 'active' ? Math.max(0, TRIAL.runningSeconds - r.trialUsedS) : 0,
+            reclaimAt: r.trialState === 'converted' ? null : iso(r.trialReclaimAt),
+          }
         : null,
     };
   });

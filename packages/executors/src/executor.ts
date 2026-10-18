@@ -8,8 +8,12 @@
  * create step journal calls one by one (allocate IP, network interface, volume, VM), so each step
  * has its own idempotency token and lookup.
  */
+import type { ProviderPriceSheet } from '@cloudbrowser/contracts';
 
-export type ExecutorKind = 'aws-ec2' | 'oci-compute' | 'fly-machines' | 'fake';
+export type { ProviderPriceSheet };
+
+/** AWS EC2 is the only provider; `fake` is the in-memory simulator for local runs and tests. */
+export type ExecutorKind = 'aws-ec2' | 'fake';
 
 /** Which credentials the process holds (page 10, "Credentials and guardrails"). */
 export type CredentialMode = 'runtime' | 'reaper' | 'readonly';
@@ -61,10 +65,6 @@ export interface Capabilities {
   nativeIdempotency: boolean;
   /** Whether a static IP can move to a replacement VM (needed by `recover`). */
   movableIp: boolean;
-  /** Ledger estimates in US cents per month for resources that bill while they exist. */
-  monthlyCostCents: Partial<Record<ResourceKind, number>>;
-  /** Estimated cost of one running VM hour, in US cents. */
-  vmHourCents: number;
 }
 
 export interface IpAllocation {
@@ -92,6 +92,12 @@ export interface VmSpec {
   /** Single-use agent bootstrap token; the only secret in user data. */
   bootstrapToken: string;
   gatewayUrl: string;
+}
+
+/** Where a volume size change stands: `ready` once the new size can be used (AWS: optimizing or completed). */
+export interface ResizeState {
+  state: 'pending' | 'ready';
+  sizeGb: number;
 }
 
 export interface SnapshotRef {
@@ -169,6 +175,11 @@ export interface Executor {
   snapshot(ctx: OpContext, region: string, volumeId: string): Promise<SnapshotRef>;
   /** A new encrypted volume from a snapshot, in `zone`. */
   ensureVolumeFromSnapshot(ctx: OpContext, region: string, zone: string, snapshotId: string, sizeGb: number): Promise<VolumeRef>;
+  /**
+   * Grows a volume to `sizeGb` (never shrinks). Safe to call repeatedly: it starts the change once
+   * and then reports its progress.
+   */
+  resizeVolume(ctx: OpContext, region: string, volumeId: string, sizeGb: number): Promise<ResizeState>;
   /** Detaches the current data volume of a stopped VM and attaches `volumeId` instead. */
   swapVolume(ctx: OpContext, p: Placement, volumeId: string): Promise<void>;
   describe(ctx: OpContext, p: Placement): Promise<ObservedState>;
@@ -180,4 +191,6 @@ export interface Executor {
   // Used by the reconciler and the checks before create/start.
   listManaged(ctx: OpContext, region: string): Promise<ObservedResource[]>;
   quotas(ctx: OpContext, region: string): Promise<QuotaSnapshot[]>;
+  /** What this region costs, from the provider's price list (never a built-in number). */
+  prices(ctx: OpContext, region: string): Promise<ProviderPriceSheet>;
 }

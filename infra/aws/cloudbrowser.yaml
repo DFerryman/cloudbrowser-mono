@@ -13,12 +13,12 @@ Parameters:
     Description: Create the IAM users and the budget (account-wide, so only in the first region's stack).
   AllowedRegions:
     Type: CommaDelimitedList
-    Default: ap-northeast-1,us-west-2
+    Default: ap-southeast-2,ap-northeast-1,us-west-2
     Description: Regions the IAM users may act in.
   AllowedInstanceTypes:
     Type: CommaDelimitedList
-    Default: m7i-flex.large,m6i.large,t3.large
-    Description: Instance types the runtime user may launch (the executor tries them in order).
+    Default: c7i-flex.large,c6i.large,c5.large
+    Description: Instance types the runtime user may launch (the executor tries them in order). 2 vCPU / 4 GB each.
   BudgetEmail:
     Type: String
     Default: ''
@@ -113,7 +113,7 @@ Resources:
     Condition: AccountResources
     Properties:
       ManagedPolicyName: cloudbrowser-runtime
-      Description: Engine worker - create, start and stop tagged browser resources; never delete.
+      Description: Engine worker - create, start, stop and grow tagged browser resources, read prices; never delete.
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -175,9 +175,13 @@ Resources:
             Condition:
               StringEquals:
                 'ec2:CreateAction': ['RunInstances', 'CreateVolume', 'CreateNetworkInterface', 'AllocateAddress', 'CreateSnapshot']
+          - Sid: ReadPrices
+            Effect: Allow
+            Action: ['pricing:GetProducts']
+            Resource: '*'
           - Sid: OperateOurResources
             Effect: Allow
-            Action: ['ec2:StartInstances', 'ec2:StopInstances', 'ec2:AttachVolume', 'ec2:DetachVolume', 'ec2:AssociateAddress']
+            Action: ['ec2:StartInstances', 'ec2:StopInstances', 'ec2:AttachVolume', 'ec2:DetachVolume', 'ec2:AssociateAddress', 'ec2:ModifyVolume']
             Resource:
               - !Sub 'arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*'
               - !Sub 'arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:volume/*'
@@ -253,7 +257,7 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Action: ['ec2:Describe*', 'servicequotas:GetServiceQuota', 'servicequotas:GetAWSDefaultServiceQuota']
+            Action: ['ec2:Describe*', 'servicequotas:GetServiceQuota', 'servicequotas:GetAWSDefaultServiceQuota', 'pricing:GetProducts']
             Resource: '*'
 
   RuntimeUser:

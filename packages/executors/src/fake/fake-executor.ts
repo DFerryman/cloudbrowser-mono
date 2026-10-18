@@ -11,7 +11,9 @@ import {
   type ObservedState,
   type OpContext,
   type Placement,
+  type ProviderPriceSheet,
   type QuotaSnapshot,
+  type ResizeState,
   type ResourceKind,
   type RunState,
   type SnapshotRef,
@@ -39,7 +41,13 @@ export interface FakeExecutorOptions {
   ipPrefix?: Record<string, string>;
   random?: () => number;
   quotaLimits?: Partial<Record<QuotaSnapshot['metric'], number>>;
+  /** What `prices` reports (simulated; there is no price list behind the fake). */
+  priceSheet?: Partial<FakePriceSheet>;
 }
+
+type FakePriceSheet = Pick<ProviderPriceSheet, 'vmHour' | 'volumeGbMonth' | 'snapshotGbMonth' | 'ipHour' | 'transferOutGb' | 'rootVolumeGb'>;
+
+const SIMULATED_PRICES: FakePriceSheet = { vmHour: 0.1, volumeGbMonth: 0.08, snapshotGbMonth: 0.05, ipHour: 0.005, transferOutGb: 0.09, rootVolumeGb: 16 };
 
 /** Documentation address ranges, keyed by provider region. */
 const DEFAULT_IP_PREFIX: Record<string, string> = {
@@ -51,6 +59,7 @@ const MUTATING: ReadonlySet<keyof Executor> = new Set([
   'snapshot',
   'ensureVolumeFromSnapshot',
   'swapVolume',
+  'resizeVolume',
   'allocateIp',
   'ensureNetworkInterface',
   'ensureVolume',
@@ -71,8 +80,6 @@ export class FakeExecutor implements Executor {
     zonalVolumes: true,
     nativeIdempotency: true,
     movableIp: true,
-    monthlyCostCents: { ip: 365, volume: 160, snapshot: 50 },
-    vmHourCents: 10,
   };
 
   private readonly store: FakeStore;
@@ -82,6 +89,7 @@ export class FakeExecutor implements Executor {
   private readonly ipPrefix: Record<string, string>;
   private readonly random: () => number;
   private readonly quotaLimits: Record<QuotaSnapshot['metric'], number>;
+  private readonly priceSheet: FakePriceSheet;
 
   constructor(opts: FakeExecutorOptions) {
     this.store = opts.store;
@@ -91,6 +99,7 @@ export class FakeExecutor implements Executor {
     this.ipPrefix = opts.ipPrefix ?? DEFAULT_IP_PREFIX;
     this.random = opts.random ?? Math.random;
     this.quotaLimits = { static_ips: 20, vcpus: 32, volumes: 50, ...opts.quotaLimits };
+    this.priceSheet = { ...SIMULATED_PRICES, ...opts.priceSheet };
   }
 
   // --- helpers -------------------------------------------------------------------------------
@@ -111,7 +120,7 @@ export class FakeExecutor implements Executor {
   }
 
   private authorize(method: keyof Executor) {
-    const readOnly: ReadonlySet<keyof Executor> = new Set(['describe', 'verifyEgress', 'listManaged', 'quotas']);
+    const readOnly: ReadonlySet<keyof Executor> = new Set(['describe', 'verifyEgress', 'listManaged', 'quotas', 'prices']);
     if (this.mode === 'readonly' && !readOnly.has(method)) {
       throw new ExecutorError('forbidden', `${method} is not allowed with read-only credentials`);
     }
@@ -234,6 +243,15 @@ export class FakeExecutor implements Executor {
       await this.mustGet(snapshotId, 'snapshot');
       const rec = await this.createOnce(ctx, 'volume', region, zone, 'available', { sizeGb, encrypted: true, fromSnapshot: snapshotId }, 'vol');
       return { volumeId: rec.id, zone: rec.zone!, sizeGb };
+    });
+  }
+
+  resizeVolume(ctx: OpContext, _region: string, volumeId: string, sizeGb: number): Promise<ResizeState> {
+    return this.call('resizeVolume', ctx, async () => {
+      const vol = await this.mustGet(volumeId, 'volume');
+      const size = Number(vol.attrs.sizeGb ?? 0);
+      if (size < sizeGb) await this.store.update(volumeId, { attrs: { ...vol.attrs, sizeGb } });
+      return { state: 'ready' as const, sizeGb: Math.max(size, sizeGb) };
     });
   }
 
@@ -366,6 +384,26 @@ export class FakeExecutor implements Executor {
         { metric: 'volumes', limit: this.quotaLimits.volumes, used: count('volume') },
       ];
     });
+  }
+
+  /**
+   * The simulator has no price list; it reports a plausible sheet, marked `simulated`, so the
+   * pricing, metering and billing paths run end to end in local development and tests.
+   */
+  prices(ctx: OpContext, _region: string): Promise<ProviderPriceSheet> {
+    return this.call('prices', ctx, async () => ({
+      source: 'simulated' as const,
+      instanceType: 'fake.large',
+      vmHour: this.priceSheet.vmHour,
+      instanceTypes: { 'fake.large': this.priceSheet.vmHour },
+      machine: { vcpu: 2, memoryGb: 4 },
+      volumeGbMonth: this.priceSheet.volumeGbMonth,
+      snapshotGbMonth: this.priceSheet.snapshotGbMonth,
+      ipHour: this.priceSheet.ipHour,
+      transferOutGb: this.priceSheet.transferOutGb,
+      rootVolumeGb: this.priceSheet.rootVolumeGb,
+      effectiveDate: null,
+    }));
   }
 
   // --- test hooks --------------------------------------------------------------------------------

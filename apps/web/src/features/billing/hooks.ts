@@ -1,19 +1,18 @@
-import type { BillingState, PlanKey } from '@cloudbrowser/contracts';
+import type { AccountUsage, BalanceTransaction, BillingState, RegionPricing } from '@cloudbrowser/contracts';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api.js';
-import { keys, queryClient } from '../../lib/query.js';
+import { keys } from '../../lib/query.js';
 
-export const useBilling = () => useQuery({ queryKey: keys.billing, queryFn: () => api<BillingState>('GET', '/billing') });
+export const useBilling = () => useQuery({ queryKey: keys.billing, queryFn: () => api<BillingState>('GET', '/billing'), refetchInterval: 60_000 });
+export const usePricing = () => useQuery({ queryKey: keys.pricing, queryFn: () => api<RegionPricing[]>('GET', '/pricing'), staleTime: 60_000 });
+export const useTransactions = () => useQuery({ queryKey: keys.transactions, queryFn: () => api<BalanceTransaction[]>('GET', '/billing/transactions') });
+export const useAccountUsage = (month: string) =>
+  useQuery({ queryKey: keys.usage(month), queryFn: () => api<AccountUsage>('GET', `/usage?month=${month}`) });
 
-const settle = () => {
-  void queryClient.invalidateQueries({ queryKey: keys.billing });
-  void queryClient.invalidateQueries({ queryKey: keys.me });
-};
-
-/** Checkout and the portal are Creem-hosted pages: the app only redirects to them. */
+/** Checkout and the receipts portal are Creem-hosted pages: the app only redirects to them. */
 export function useCheckout() {
   return useMutation({
-    mutationFn: (body: { plan: PlanKey; browsers: number }) => api<{ url: string }>('POST', '/billing/checkout', { body }),
+    mutationFn: (productId: string) => api<{ url: string }>('POST', '/billing/checkout', { body: { productId } }),
     onSuccess: ({ url }) => window.location.assign(url),
   });
 }
@@ -25,16 +24,11 @@ export function usePortal() {
   });
 }
 
-export function useChangeBrowsers() {
-  return useMutation({
-    mutationFn: (browsers: number) => api<BillingState>('POST', '/billing/browsers', { body: { browsers } }),
-    onSettled: settle,
-  });
+/** The current month (UTC), and the months a user can look back at. */
+export const currentMonth = () => new Date().toISOString().slice(0, 7);
+export function recentMonths(n = 6) {
+  const now = new Date();
+  return Array.from({ length: n }, (_, i) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1)).toISOString().slice(0, 7));
 }
-
-export function useChangePlan() {
-  return useMutation({
-    mutationFn: (body: { plan: PlanKey; browsers?: number }) => api<BillingState>('POST', '/billing/plan', { body }),
-    onSettled: settle,
-  });
-}
+export const monthLabel = (month: string, locale: string) =>
+  new Date(`${month}-01T00:00:00Z`).toLocaleDateString(locale, { year: 'numeric', month: 'long', timeZone: 'UTC' });

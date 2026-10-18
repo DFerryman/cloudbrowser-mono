@@ -19,6 +19,8 @@ import {
   type ObservedState,
   type OpContext,
   type Placement,
+  type ProviderPriceSheet,
+  type ResizeState,
   type QuotaSnapshot,
   type ResourceKind,
   type RunState,
@@ -27,7 +29,7 @@ import {
   type VmSpec,
   type VolumeRef,
 } from '../executor.js';
-import { Ec2Client, Ec2Error, isNotFound, type ClientOptions, type Params } from './client.js';
+import { Ec2Client, Ec2Error, isNotFound, type ClientOptions, type Params, type PriceListProduct } from './client.js';
 import { bootstrapScript } from './user-data.js';
 import { items, tags as tagsOf, text, type XmlNode } from './xml.js';
 
@@ -36,7 +38,7 @@ export interface AwsRegionConfig {
   /** Availability zone → outbound-only subnet. The first zone is the default for new browsers. */
   subnets: Record<string, string>;
   securityGroupId: string;
-  /** Tried in order on a capacity error. 2 vCPU / 8 GB by default. */
+  /** Tried in order on a capacity error. 2 vCPU / 4 GB by default (see DEFAULT_INSTANCE_TYPES). */
   instanceTypes?: string[];
   /** Pin an AMI; by default the latest Canonical Ubuntu 24.04 LTS (amd64) image. */
   ami?: string;
@@ -48,14 +50,24 @@ export interface AwsExecutorOptions extends ClientOptions {
   appUrl: string;
   agentImage: string;
   browserImage: string;
-  /** Root disk (OS, Docker images); user data lives on the separate data volume. */
+  /** Root disk (OS, Docker images); user data lives on the separate data volume. Billed as storage. */
   rootVolumeGb?: number;
   sleep?: (ms: number) => Promise<void>;
   /** Poll interval while waiting for state changes. */
   pollMs?: number;
 }
 
-export const DEFAULT_INSTANCE_TYPES = ['m7i-flex.large', 'm6i.large', 't3.large'];
+/**
+ * One small VM per browser: 2 vCPU / 4 GB is what Chrome plus neko's H.264 encoding at 1080p30
+ * need to stay smooth (about 2.5 GB in use with a handful of tabs; the encoder takes most of a
+ * vCPU while the screen moves). `c7i-flex` has the same CPU as the `m7i-flex` the first real
+ * browsers ran on, with half the memory. The fallbacks are 2 vCPU / 4 GB at the same price. No
+ * burstable `t3`: once its CPU credits run out it either throttles the video or bills surplus
+ * credits that the price list does not show.
+ */
+export const DEFAULT_INSTANCE_TYPES = ['c7i-flex.large', 'c6i.large', 'c5.large'];
+/** Ubuntu, Docker and the browser image take about 8 GB; the rest leaves room for an image update. */
+export const DEFAULT_ROOT_VOLUME_GB = 16;
 const DATA_DEVICE = '/dev/sdf';
 const UBUNTU_OWNER = '099720109477'; // Canonical
 const UBUNTU_NAME = 'ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*';
@@ -71,6 +83,7 @@ const MUTATING: ReadonlySet<keyof Executor> = new Set([
   'snapshot',
   'ensureVolumeFromSnapshot',
   'swapVolume',
+  'resizeVolume',
   'ensureDeleted',
 ]);
 
@@ -123,10 +136,6 @@ export class AwsExecutor implements Executor {
     zonalVolumes: true,
     nativeIdempotency: true,
     movableIp: true,
-    // Tokyo list prices (estimates for the ledger and spend guard): Elastic IP $0.005/h, gp3
-    // $0.096/GB-month for 20 GB plus a 16 GB root disk, snapshots about $1/month each.
-    monthlyCostCents: { ip: 365, volume: 192, vm: 154, snapshot: 100 },
-    vmHourCents: 12,
   };
 
   private readonly ec2: Ec2Client;
@@ -143,7 +152,7 @@ export class AwsExecutor implements Executor {
   // --- helpers -------------------------------------------------------------------------------
 
   private authorize(method: keyof Executor) {
-    const readOnly: ReadonlySet<keyof Executor> = new Set(['describe', 'verifyEgress', 'listManaged', 'quotas', 'zones']);
+    const readOnly: ReadonlySet<keyof Executor> = new Set(['describe', 'verifyEgress', 'listManaged', 'quotas', 'zones', 'prices']);
     if (this.opts.mode === 'readonly' && !readOnly.has(method)) throw new ExecutorError('forbidden', `${method} needs more than read-only credentials`);
     if (this.opts.mode === 'runtime' && method === 'ensureDeleted') throw new ExecutorError('forbidden', 'ensureDeleted requires the reaper credentials');
     if (this.opts.mode === 'reaper' && MUTATING.has(method) && method !== 'ensureDeleted' && method !== 'ensureStopped') {
@@ -376,7 +385,7 @@ export class AwsExecutor implements Executor {
             'NetworkInterface.1.DeviceIndex': 0,
             'NetworkInterface.1.NetworkInterfaceId': spec.nicId,
             'BlockDeviceMapping.1.DeviceName': '/dev/sda1',
-            'BlockDeviceMapping.1.Ebs.VolumeSize': this.opts.rootVolumeGb ?? 16,
+            'BlockDeviceMapping.1.Ebs.VolumeSize': this.opts.rootVolumeGb ?? DEFAULT_ROOT_VOLUME_GB,
             'BlockDeviceMapping.1.Ebs.VolumeType': 'gp3',
             'BlockDeviceMapping.1.Ebs.Encrypted': true,
             'BlockDeviceMapping.1.Ebs.DeleteOnTermination': true,
@@ -479,6 +488,30 @@ export class AwsExecutor implements Executor {
       });
     }
     return { volumeId: text(vol, 'volumeId')!, zone: text(vol, 'availabilityZone') ?? zone, sizeGb: Number(text(vol, 'size') ?? sizeGb) };
+  }
+
+  async resizeVolume(ctx: OpContext, region: string, volumeId: string, sizeGb: number): Promise<ResizeState> {
+    this.authorize('resizeVolume');
+    let mods: XmlNode[] = [];
+    try {
+      mods = await this.readAll(ctx, region, 'DescribeVolumesModifications', 'volumeModificationSet', { 'VolumeId.1': volumeId });
+    } catch (e) {
+      if (!isNotFound(e)) throw e; // never modified
+    }
+    const latest = mods.sort((a, b) => (text(b, 'startTime') ?? '').localeCompare(text(a, 'startTime') ?? ''))[0];
+    const target = Number(text(latest, 'targetSize') ?? 0);
+    if (latest && target >= sizeGb) {
+      const state = text(latest, 'modificationState');
+      if (state === 'failed') throw new ExecutorError('invalid', `resizing ${volumeId} failed: ${text(latest, 'statusMessage') ?? 'no reason given'}`);
+      // The new size is usable (and billed) from `optimizing` on.
+      return { state: state === 'modifying' ? 'pending' : 'ready', sizeGb: target };
+    }
+    const vol = await this.volume(ctx, region, volumeId);
+    if (!vol) throw new ExecutorError('invalid', `volume ${volumeId} does not exist`);
+    const size = Number(text(vol, 'size') ?? 0);
+    if (size >= sizeGb) return { state: 'ready', sizeGb: size };
+    await this.call(ctx, region, 'ModifyVolume', { VolumeId: volumeId, Size: sizeGb });
+    return { state: 'pending', sizeGb };
   }
 
   async swapVolume(ctx: OpContext, p: Placement, volumeId: string): Promise<void> {
@@ -632,6 +665,71 @@ export class AwsExecutor implements Executor {
     }
     return out;
   }
+
+  /**
+   * This region's prices from the AWS Price List API: on-demand Linux for every allowed instance
+   * type, gp3 storage, EBS snapshots, an in-use public IPv4 address and data transfer out to the
+   * internet (first paid tier). Throws if any of them is missing, so a partial sheet is never stored.
+   */
+  async prices(ctx: OpContext, region: string): Promise<ProviderPriceSheet> {
+    this.authorize('prices');
+    const cfg = this.region(region);
+    const types = cfg.instanceTypes?.length ? cfg.instanceTypes : DEFAULT_INSTANCE_TYPES;
+    const dates: string[] = [];
+    const price = (what: string, products: PriceListProduct[], match: (a: Record<string, string>) => boolean, unit: string): number => {
+      for (const p of products.filter((x) => match(x.attributes))) {
+        const d = p.onDemand.find((x) => x.unit === unit && Number(x.beginRange) === 0);
+        if (d) {
+          if (p.effectiveDate) dates.push(p.effectiveDate);
+          return d.usd;
+        }
+      }
+      throw new ExecutorError('invalid', `the AWS price list has no ${what} price for ${region}`);
+    };
+    const ends = (suffix: string) => (a: Record<string, string>) => (a.usagetype ?? '').endsWith(suffix);
+
+    const instanceTypes: Record<string, number> = {};
+    let machine: ProviderPriceSheet['machine'] = null;
+    for (const [i, type] of types.entries()) {
+      const products = await this.ec2.products(
+        'AmazonEC2',
+        { regionCode: region, instanceType: type, operatingSystem: 'Linux', tenancy: 'Shared', preInstalledSw: 'NA', capacitystatus: 'Used', licenseModel: 'No License required', operation: 'RunInstances' },
+        ctx.deadline,
+      );
+      try {
+        instanceTypes[type] = price(`${type} instance`, products, ends(`BoxUsage:${type}`), 'Hrs');
+        if (i === 0) machine = machineOf(products.find((p) => ends(`BoxUsage:${type}`)(p.attributes))?.attributes);
+      } catch (e) {
+        // A fallback type without a price here is skipped; the first type must have one.
+        if (i === 0) throw e;
+      }
+    }
+    const storage = await this.ec2.products('AmazonEC2', { regionCode: region, productFamily: 'Storage', volumeApiName: 'gp3' }, ctx.deadline);
+    const snapshots = await this.ec2.products('AmazonEC2', { regionCode: region, productFamily: 'Storage Snapshot', storageMedia: 'Amazon S3', locationType: 'AWS Region' }, ctx.deadline);
+    const ips = await this.ec2.products('AmazonVPC', { regionCode: region, group: 'VPCPublicIPv4Address' }, ctx.deadline);
+    const transfer = await this.ec2.products('AWSDataTransfer', { fromRegionCode: region, transferType: 'AWS Outbound', toLocation: 'External' }, ctx.deadline);
+    const instanceType = types[0]!;
+    return {
+      source: 'aws-price-list',
+      instanceType,
+      vmHour: instanceTypes[instanceType]!,
+      instanceTypes,
+      machine,
+      volumeGbMonth: price('gp3 storage', storage, ends('EBS:VolumeUsage.gp3'), 'GB-Mo'),
+      snapshotGbMonth: price('EBS snapshot', snapshots, ends('EBS:SnapshotUsage'), 'GB-Mo'),
+      ipHour: price('public IPv4', ips, ends('PublicIPv4:InUseAddress'), 'Hrs'),
+      transferOutGb: price('data transfer out', transfer, ends('DataTransfer-Out-Bytes'), 'GB'),
+      rootVolumeGb: this.opts.rootVolumeGb ?? DEFAULT_ROOT_VOLUME_GB,
+      effectiveDate: dates.sort().pop() ?? null,
+    };
+  }
 }
 
 export { Ec2Error };
+
+/** "2" and "4 GiB" from the price list's attributes. */
+function machineOf(a: Record<string, string> | undefined): ProviderPriceSheet['machine'] {
+  const vcpu = Number(a?.vcpu);
+  const memoryGb = Number.parseFloat(a?.memory ?? '');
+  return vcpu > 0 && memoryGb > 0 ? { vcpu, memoryGb } : null;
+}

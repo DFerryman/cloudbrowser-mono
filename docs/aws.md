@@ -6,12 +6,39 @@ check. Steps marked **(you)** need the account owner in person. An agent cannot 
 payment, MFA and changes to GitHub package visibility.
 
 **What you get:** browsers created in a region configured for AWS run on real EC2 VMs. Each has
-a dedicated Elastic IP, an encrypted 20 GB data volume and a 2 vCPU / 8 GB VM. The VM is stopped, never terminated, while
+a dedicated Elastic IP, an encrypted 10 GB data volume (users can grow it) and its own 2 vCPU / 4 GB VM (`c7i-flex.large`). The VM is stopped, never terminated, while
 the browser sleeps. Browsers created earlier on the simulator keep running there.
 
-**Cost (public list prices, estimates, not quotes):** about $0.11 per running hour
-(`m7i-flex.large` in Tokyo). A sleeping browser costs about $6 a month (Elastic IP $3.65, plus the
-20 GB data disk and the 16 GB system disk). Verify Sydney prices for the current deployment.
+**Cost:** the product reads AWS's own prices for each region from the Price List API
+(`pricing:GetProducts`), and users see them, times the markup, before every action; the console's
+*Pricing & margin* page shows the current sheet. For orientation, Sydney list prices in October
+2026: `c7i-flex.large` $0.1107 per running hour, gp3 storage $0.096 per GB-month, public IPv4
+$0.005 per hour ($3.65 a month), snapshots $0.055 per GB-month, data out $0.114 per GB. A sleeping
+browser with the default 10 GB data disk and 16 GB system disk costs about $6.15 a month at cost.
+
+**Why 2 vCPU / 4 GB.** Each browser gets its own small VM rather than sharing a large host: the
+VM is stopped while the browser sleeps, so it costs nothing to run then, and isolation, the
+dedicated IP (an Elastic IP on the VM's own interface) and persistence (its own volume) need no
+extra machinery. Chrome with a handful of tabs plus neko's 1080p30 H.264 stream uses about 2.5 GB
+and most of one vCPU while the screen moves, so 4 GB (plus a 1 GB swap file for spikes) and 2 vCPU
+are enough. `c7i-flex` has the CPU the first real browsers ran smoothly on (`m7i-flex.large`,
+8 GB) for 7.5% less; the fallbacks `c6i.large` and `c5.large` are 2 vCPU / 4 GB at the same price
+(customers always pay the region's price for the first type). Burstable `t3` types are not used:
+when their CPU credits run out they either throttle the video or bill surplus credits that the
+price list does not show.
+
+**Switching an existing deployment to 4 GB VMs.** Re-run the deploy command above with the new
+`AllowedInstanceTypes`, set `instanceTypes` in `AWS_REGIONS` as above (or remove it), and redeploy
+the engine. New browsers get the new type. Existing browsers keep their VM (`m7i-flex.large`):
+they still wake and sleep, are charged the region's new, lower price, and their real cost is
+about 8% above what the margin report shows until they are recreated.
+
+**Updating an existing stack for prices and storage growth.** This release adds
+`pricing:GetProducts` (runtime and read-only users) and `ec2:ModifyVolume` (runtime) to the
+template. Re-run the `aws cloudformation deploy` command below; until then prices show as
+unavailable and no new browsers can be created. Growing a volume also needs agent **0.2.0** in the
+browser image (step 4): rebuild and push the agent image. Browsers created with an older agent
+keep working, but their Storage tab does not offer more space.
 
 ## Current deployment: Sydney (new AWS experience)
 
@@ -37,15 +64,15 @@ aws cloudformation deploy \
   --stack-name cloudbrowser \
   --template-file infra/aws/cloudbrowser.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides AllowedRegions=ap-southeast-2 AllowedInstanceTypes=m7i-flex.large BudgetEmail=
+  --parameter-overrides AllowedRegions=ap-southeast-2 AllowedInstanceTypes=c7i-flex.large,c6i.large,c5.large BudgetEmail=
 ```
 
 `BudgetEmail=` skips the optional email budget. The project currently uses the Free plan; check
 service availability and the selected Region before provisioning. Check the quotas in step 2 in
 `ap-southeast-2`, without its Tokyo `export`. Retrieve the stack's `AwsRegions` output in Sydney;
 use that JSON for `AWS_REGIONS` on the engine, reaper and reconciler (step 6). Add
-`"instanceTypes":["m7i-flex.large"]` to the `ap-southeast-2` object so the runtime uses the same
-instance type allowed by the policy.
+`"instanceTypes":["c7i-flex.large","c6i.large","c5.large"]` to the `ap-southeast-2` object (or leave
+`instanceTypes` out for the same default) so the runtime uses the types the policy allows.
 
 The deployed configuration uses:
 

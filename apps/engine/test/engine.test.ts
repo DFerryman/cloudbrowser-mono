@@ -511,6 +511,9 @@ describe('backups, restore and recover', () => {
 
   it('takes one provider snapshot a day and restores it while the browser sleeps', async () => {
     const { dailySnapshots } = await import('../src/scheduler.js');
+    // Snapshots are billed, so they are off until the owner turns them on.
+    expect(await dailySnapshots(w.deps())).toBe(0);
+    await w.db.update(browserInstances).set({ backupsEnabled: true }).where(eq(browserInstances.id, 'inst1'));
     expect(await dailySnapshots(w.deps())).toBe(1);
     expect(await dailySnapshots(w.deps())).toBe(0); // not again within 23 h
     const [snap] = await w.db.select().from(backups);
@@ -628,68 +631,199 @@ describe('backups, restore and recover', () => {
 });
 
 
-describe('plans and active hours', () => {
+describe('metering and the prepaid balance', () => {
+  const { pricingSettings: settings, billingAccounts, usageRecords, controlFlags, instanceHealth } = schema;
   beforeEach(async () => {
+    const { refreshPrices } = await import('../src/prices.js');
+    await refreshPrices(w.deps());
     await w.settle(await w.newInstance());
   });
 
-  const setCaps = (limits: Record<string, number>) =>
-    w.db.insert(schema.caps).values(Object.entries(limits).map(([metric, limit]) => ({ scope: 'billing:u1', metric, limit })));
-  const usageRow = async () => (await w.db.select().from(schema.activeUsage))[0];
   const stopReasons = async () =>
     (await w.db.select().from(operations).where(eq(operations.kind, 'stop'))).map((o) => (o.params as { reason?: string }).reason);
+  const usage = async (item: string) => (await w.db.select().from(usageRecords).where(eq(usageRecords.item, item)))[0];
+  const balance = async () => (await w.db.select().from(billingAccounts).where(eq(billingAccounts.userId, 'u1')))[0];
+  const prepaid = () => w.db.insert(controlFlags).values({ key: 'billing_required', value: 'true', updatedAt: w.clock });
+  const meter = async () => (await import('../src/metering.js')).meterUsage(w.deps());
 
-  it('meters running time per user and month, and not while asleep', async () => {
-    const { meterAndEnforce } = await import('../src/entitlements.js');
-    await meterAndEnforce(w.deps()); // opens the window
-    w.advance(60_000);
-    await meterAndEnforce(w.deps());
-    w.advance(60_000);
-    await meterAndEnforce(w.deps());
-    expect((await usageRow())?.seconds).toBe(120);
-    expect((await usageRow())?.month).toBe('2026-10');
+  it('stores each region’s price sheet from the provider and prices the ledger with it', async () => {
+    const [row] = await w.db.select().from(schema.providerPrices).where(eq(schema.providerPrices.regionId, 'tyo1'));
+    expect(row?.sheet).toMatchObject({ source: 'simulated', vmHour: 0.1, ipHour: 0.005, volumeGbMonth: 0.08, rootVolumeGb: 16 });
+    const ledger = await w.openLedger();
+    expect(ledger.find((r) => r.kind === 'ip')?.monthlyCostEstimate).toBe(365); // 0.005 × 730 h
+    expect(ledger.find((r) => r.kind === 'volume')?.monthlyCostEstimate).toBe(80); // 10 GB × 0.08
+    // Fresh prices are not read again; a forced refresh is.
+    const { refreshPrices } = await import('../src/prices.js');
+    expect((await refreshPrices(w.deps())).refreshed).toEqual([]);
+    expect((await refreshPrices(w.deps(), { force: true })).refreshed).toContain('tyo1');
+  });
+
+  it('charges compute while running and the IP and storage always, at cost times the markup', async () => {
+    await meter(); // opens the window
+    w.advance(30 * 60_000); // capped at 5 minutes per run
+    await meter();
+    w.advance(5 * 60_000);
+    await meter();
+    // 10 minutes running at $0.10/h × 120% = 2,000 micro-dollars.
+    expect(await usage('compute')).toMatchObject({ unitPriceMicros: 120_000, unitCostMicros: 100_000, amountMicros: 20_000, costMicros: 16_667 });
+    expect((await usage('ip'))?.amountMicros).toBe(1_000); // $0.006/h for 10 minutes
+    // (10 GB data + 16 GB system) × $0.096/GB-month for 10 minutes.
+    expect((await usage('storage'))?.amountMicros).toBe(Math.round((26 * 96_000) / 730 / 6));
+    expect(await usage('snapshot')).toBeUndefined(); // off by default
 
     await w.settle(await w.enqueue('inst1', 'stop'));
-    w.advance(30 * 60_000);
-    await meterAndEnforce(w.deps());
-    expect((await usageRow())?.seconds).toBe(120); // asleep: not billed, window closed
+    w.advance(5 * 60_000);
+    await meter();
+    w.advance(5 * 60_000);
+    await meter();
+    expect((await usage('compute'))?.amountMicros).toBe(20_000); // asleep: no compute
+    expect((await usage('ip'))?.amountMicros).toBeGreaterThan(1_000); // the IP and disk still bill
+    expect(await balance()).toBeUndefined(); // the pilot is free: nothing taken from a balance
   });
 
-  it('warns when the hours run out and puts browsers to sleep 10 minutes later', async () => {
-    const { meterAndEnforce } = await import('../src/entitlements.js');
-    await setCaps({ instances: 1, running: 1, hours_per_month: 1 });
-    await w.db.insert(schema.activeUsage).values({ userId: 'u1', month: '2026-10', seconds: 3540 });
-    await meterAndEnforce(w.deps());
+  it('bills data sent to the internet from the agent’s counter, across a reboot', async () => {
+    await meter();
+    await w.db.update(instanceHealth).set({ netTxBytes: 1024 ** 3 }).where(eq(instanceHealth.instanceId, 'inst1'));
     w.advance(60_000);
-    await meterAndEnforce(w.deps()); // crosses 3600 s
-    expect((await usageRow())?.exhaustedAt).toBeTruthy();
+    await meter(); // first report: counted from here
+    await w.db.update(instanceHealth).set({ netTxBytes: 3 * 1024 ** 3 }).where(eq(instanceHealth.instanceId, 'inst1'));
+    w.advance(60_000);
+    await meter();
+    expect((await usage('transfer'))?.quantity).toBe(2);
+    await w.db.update(instanceHealth).set({ netTxBytes: 1024 ** 3 / 2 }).where(eq(instanceHealth.instanceId, 'inst1')); // rebooted
+    w.advance(60_000);
+    await meter();
+    expect((await usage('transfer'))?.quantity).toBe(2.5);
+    expect((await usage('transfer'))?.amountMicros).toBe(Math.round(2.5 * 108_000)); // $0.09/GB × 120%
+  });
+
+  it('follows the markup set by the operator', async () => {
+    await w.db.update(settings).set({ markupPercent: 150 }).where(eq(settings.id, 1));
+    await meter();
+    w.advance(60 * 60_000);
+    await meter();
+    expect(await usage('compute')).toMatchObject({ unitPriceMicros: 150_000, unitCostMicros: 100_000 });
+  });
+
+  it('takes usage from the balance, warns when it runs out and puts browsers to sleep 10 minutes later', async () => {
+    await prepaid();
+    await w.db.insert(billingAccounts).values({ userId: 'u1', balanceMicros: 15_000, updatedAt: w.clock });
+    await meter();
+    w.advance(5 * 60_000);
+    await meter(); // 10,000 compute + IP and storage
+    expect((await balance())!.balanceMicros).toBeLessThan(5_000);
+    expect((await balance())!.exhaustedAt).toBeNull();
+    w.advance(5 * 60_000);
+    await meter(); // runs out
+    expect((await balance())!.balanceMicros).toBeLessThan(0);
+    expect((await balance())!.exhaustedAt).toEqual(w.clock);
     expect(await stopReasons()).toEqual([]);
     w.advance(9 * 60_000);
-    await meterAndEnforce(w.deps());
+    await meter();
     expect(await stopReasons()).toEqual([]);
     w.advance(60_000);
-    await meterAndEnforce(w.deps());
-    expect(await stopReasons()).toEqual(['hours']);
+    await meter();
+    expect(await stopReasons()).toEqual(['balance']);
+
+    // A top-up clears the clock.
+    await w.db.update(billingAccounts).set({ balanceMicros: 5_000_000 }).where(eq(billingAccounts.userId, 'u1'));
+    await meter();
+    expect((await balance())!.exhaustedAt).toBeNull();
   });
 
-  it('puts browsers to sleep within a minute when the subscription ends', async () => {
-    const { meterAndEnforce } = await import('../src/entitlements.js');
-    await setCaps({ instances: 0, running: 0, hours_per_month: 0 });
-    await meterAndEnforce(w.deps());
-    expect(await stopReasons()).toEqual(['plan']); // the running cap acts at once; the hours grace does not apply
-    expect((await w.instance()).desiredState).toBe('stopped');
+  it('puts a frozen account’s browsers to sleep at once', async () => {
+    await w.db.insert(billingAccounts).values({ userId: 'u1', balanceMicros: 5_000_000, frozenAt: w.clock, frozenReason: 'dispute', updatedAt: w.clock });
+    await meter();
+    expect(await stopReasons()).toEqual(['frozen']);
   });
 
-  it('sizes new volumes by plan and keeps snapshots as long as the plan says', async () => {
+  it('charges snapshots only while they are on and exist, and deletes them when turned off', async () => {
+    const { dailySnapshots } = await import('../src/scheduler.js');
+    await w.db.update(browserInstances).set({ backupsEnabled: true }).where(eq(browserInstances.id, 'inst1'));
+    await meter();
+    w.advance(60 * 60_000);
+    await meter();
+    expect(await usage('snapshot')).toBeUndefined(); // on, but no snapshot yet
+    expect(await dailySnapshots(w.deps())).toBe(1);
+    w.advance(5 * 60_000);
+    await meter();
+    expect((await usage('snapshot'))?.amountMicros).toBe(Math.round((10 * 60_000) / 730 / 12)); // 10 GB × $0.06 for 5 minutes
+
+    await w.db.update(browserInstances).set({ backupsEnabled: false }).where(eq(browserInstances.id, 'inst1'));
+    await reaperTick(w.deps('reaper'));
+    expect((await w.db.select().from(backups).where(eq(backups.kind, 'snapshot')))[0]?.status).toBe('deleted');
+    await w.expectLedgerMatchesProvider();
+  });
+
+  it('starts new browsers at 10 GB and grows the volume on request, never shrinking it', async () => {
+    expect((await w.instance()).storageGb).toBe(10);
+    const op = operationRow({ instanceId: 'inst1', userId: 'u1', kind: 'resize_volume', params: { sizeGb: 25 }, now: w.clock });
+    await w.db.insert(operations).values(op);
+    expect(await w.settle(op.id)).toEqual({ state: 'succeeded' });
+    const p = (await w.placement())!;
+    expect(w.store.records.get(p.volumeId!)?.attrs.sizeGb).toBe(25);
+    expect((await w.instance()).storageGb).toBe(25);
+    expect((await w.instance()).status).toBe('running');
+    expect((await w.openLedger()).find((r) => r.providerId === p.volumeId)?.monthlyCostEstimate).toBe(200);
+
+    const shrink = operationRow({ instanceId: 'inst1', userId: 'u1', kind: 'resize_volume', params: { sizeGb: 20 }, now: w.clock });
+    await w.db.insert(operations).values(shrink);
+    expect((await w.settle(shrink.id)).state).toBe('failed');
+    expect((await w.instance()).status).toBe('running'); // a failed resize is not a problem with the browser
+  });
+
+  it('runs a free trial for 10 minutes at no charge, then keeps it 7 days and purges it', async () => {
+    await prepaid();
+    await w.db.update(browserInstances).set({ trialState: 'active', trialUsedS: 0 }).where(eq(browserInstances.id, 'inst1'));
+    await meter();
+    w.advance(5 * 60_000);
+    await meter();
+    expect((await w.instance()).trialState).toBe('active');
+    expect(await stopReasons()).toEqual([]);
+    w.advance(5 * 60_000);
+    await meter(); // the 10 minutes are used
+    expect((await w.instance()).trialState).toBe('ended');
+    expect(await stopReasons()).toEqual(['trial']);
+    // Metered at cost so operators see what trials cost, but charged nothing; an empty balance is not "run out".
+    expect(await usage('compute')).toMatchObject({ amountMicros: 0, costMicros: 16_667 });
+    expect((await balance())?.exhaustedAt ?? null).toBeNull();
+    expect((await balance())?.balanceMicros ?? 0).toBe(0);
+
+    const [stop] = await w.db.select().from(operations).where(eq(operations.kind, 'stop'));
+    await w.settle(stop!.id);
+    const asleep = await w.instance();
+    expect(asleep.status).toBe('sleeping');
+    expect(asleep.trialReclaimAt).toEqual(new Date(w.clock.getTime() + 7 * 86_400_000));
+
+    const { reclaimTrials } = await import('../src/metering.js');
+    w.advance(7 * 86_400_000 - 60_000);
+    expect(await reclaimTrials(w.deps())).toBe(0);
+    w.advance(60_000);
+    expect(await reclaimTrials(w.deps())).toBe(1);
+    const [del] = await w.db.select().from(operations).where(eq(operations.kind, 'delete'));
+    expect(del?.params).toMatchObject({ reason: 'trial_expired', purgeNow: true });
+    await w.settle(del!.id);
+    expect((await w.instance()).status).toBe('deleting');
+  });
+
+  it('charges a converted trial like any browser', async () => {
+    await prepaid();
+    await w.db.update(browserInstances).set({ trialState: 'converted', trialUsedS: 600 }).where(eq(browserInstances.id, 'inst1'));
+    await w.db.insert(billingAccounts).values({ userId: 'u1', balanceMicros: 5_000_000, updatedAt: w.clock });
+    await meter();
+    w.advance(5 * 60_000);
+    await meter();
+    expect((await usage('compute'))?.amountMicros).toBe(10_000);
+    expect(await stopReasons()).toEqual([]);
+  });
+
+  it('keeps snapshots for the retention cap, and none once snapshots are off', async () => {
     const { expiredBackups } = await import('../src/reaper.js');
-    await setCaps({ instances: 3, running: 3, storage_gb: 30 });
-    await w.settle(await w.newInstance('inst2'));
-    const p = (await w.placement('inst2'))!;
-    expect(w.store.records.get(p.volumeId!)?.attrs.sizeGb).toBe(30);
     const now = new Date('2026-10-30T00:00:00Z');
-    const snaps = [0, 10].map((d) => ({ id: `s${d}`, kind: 'snapshot', createdAt: new Date(now.getTime() - d * 86_400_000) }));
+    const snaps = [0, 10].map((d) => ({ id: `s${d}`, kind: 'snapshot', reason: 'daily', createdAt: new Date(now.getTime() - d * 86_400_000) }));
     expect(expiredBackups(snaps, now)).toEqual(['s10']);
     expect(expiredBackups(snaps, now, 14)).toEqual([]);
+    expect(expiredBackups(snaps, now, 7, false).sort()).toEqual(['s0', 's10']);
   });
 });
 

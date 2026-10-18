@@ -21,6 +21,8 @@ if ! blkid "$disk" >/dev/null 2>&1; then
 fi
 mkdir -p /data
 mountpoint -q /data || mount -o noatime "$disk" /data
+# The volume may have grown while the VM was stopped (the user bought more storage): use all of it.
+resize2fs "$disk" >/dev/null 2>&1 || echo "resize2fs $disk failed; the agent retries" >&2
 
 uid=$(cat /etc/cloudbrowser/browser-uid)
 install -d -o "$uid" -g "$uid" -m 0700 /data/browser /data/browser/profile /data/browser/downloads

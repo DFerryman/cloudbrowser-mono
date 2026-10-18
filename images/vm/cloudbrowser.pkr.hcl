@@ -1,7 +1,6 @@
 # Golden VM image (page 2, images/vm): Ubuntu 24.04 LTS with containerd, the agent, the nftables
 # baseline and the browser image pre-pulled. No user data. Built weekly in CI and only in CI.
-# This template targets the aws-ec2 executor; an oci-compute source is added if the trial picks
-# Oracle Cloud (page 9).
+# This template targets the aws-ec2 executor, the only provider.
 packer {
   required_plugins {
     amazon = {

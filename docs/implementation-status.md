@@ -37,19 +37,43 @@ Cloudflare deployment.
   interface and builds a new VM there; it runs automatically when a start has waited 30 minutes for
   capacity. The old VM, interface and volume are released 7 days later; the IP never is. Purge
   destroys the archive key first, so archives are unreadable before R2 deletes them.
-- **Billing with Creem** (page 6): plans Personal and Pro (seat-based, 2–50 browsers) with a pure
-  `planLimits` function; hosted checkout (`POST /v1/billing/checkout`), the Creem customer portal,
-  Personal → Pro upgrades and Pro browser counts with explicit proration, refusing to drop below
-  the browsers in use. Webhooks are HMAC-verified over the raw body, stored by event id and
-  processed from a queue; every event re-fetches the subscription from Creem, so duplicates and
-  order do not matter. Entitlements become caps under `billing:<user>`; access is never granted
-  from the checkout redirect. Grace of 7 days for failed payments, access until period end after
-  cancel, revocation on a full refund or dispute; when access ends the engine sleeps every browser
-  within a minute, data and IPs are kept 30 days (emails on day 1, 14, 28), then the browsers are
-  deleted. Active hours are metered per user and month; browsers sleep 10 minutes after they run
-  out (warning in the session view, banner at 80%). Volume size and snapshot retention follow the
-  plan. A nightly re-sync logs drift. Billing is off until Creem is configured, and the pilot keeps
-  its free plan until the `billing_required` flag is set.
+- **Prices from AWS** (page 6): the engine reads each region's prices from the AWS Price List
+  Query API (`pricing:GetProducts`) for its instance type: compute per hour, gp3 storage and
+  snapshots per GB-month, the public IPv4 address per hour and data sent to the internet per GB.
+  Sheets are stored in `provider_prices`, refreshed every 12 hours (or from the console), and a
+  region without a price takes no new browsers. Customer prices are cost times a markup kept in
+  `pricing_settings` and set in the console (default 120%). Every price the user is shown before
+  an action (create, more storage, snapshots, a new IP) carries a version; the API refuses the
+  action with `price_changed` if prices moved in between.
+- **Prepaid balance with Creem** (page 6): users buy one-time top-up products through Creem's
+  hosted checkout; the amount credited is the product's price read from Creem, never the webhook
+  body, and each order is credited once. Webhooks are HMAC-verified, stored by event id and
+  processed from a queue; refunds and disputes debit the balance and a dispute freezes the
+  account. The engine meters every browser per minute into `usage_records` (compute while
+  running; IP and storage always, because AWS bills them while the VM is stopped; snapshots while
+  on; data out from the agent's counter) and takes it from the balance. Below the minimum balance
+  nothing new starts; when the balance runs out, running browsers sleep 10 minutes later (warning
+  in the session view), sleeping browsers keep accruing IP and storage, users are emailed on day
+  1, 14 and 28, and browsers are deleted after 30 days. While `billing_required` is off (the
+  pilot), usage is metered at real prices but nothing is taken.
+- **Free trial** (page 6): each user may create one browser for free, once, in Sydney: 10 minutes
+  of running time, a 2 GB data volume, no snapshots, 5-minute auto-sleep. It is metered at cost
+  but charged nothing, sleeps when the 10 minutes are used, and is kept 7 days after it last went
+  to sleep, then deleted and purged. Adding credit before then converts it into a normal browser
+  with the same data and IP; from then on it is charged like any other.
+- **Right-sized VMs**: one dedicated VM per browser, 2 vCPU / 4 GB (`c7i-flex.large`, then
+  `c6i.large` and `c5.large` on a capacity error), with a 1 GB swap file, a 1 GB shared-memory cap
+  for the browser container and the agent protected from the out-of-memory killer. The VM is
+  stopped while the browser sleeps. The machine size comes from the price list and is shown with
+  the price.
+- **Storage** (page 6): new browsers get a 10 GB data volume (cap `storage_gb`); users can grow it
+  up to `storage_max_gb` (100 GB) from the Storage tab, which shows used and total space and the
+  monthly cost before confirming. The volume grows online (`ModifyVolume`) and agent 0.2.0 grows
+  the file system; at most once every 6 hours (an EBS limit). Daily snapshots are off by default
+  and their monthly cost is shown before they are turned on; turning them off deletes them.
+- **Usage pages**: the Billing & usage page shows the balance, top-ups, transactions, this month's
+  spend by item, by browser and by day, and the current price list. Each browser's Usage tab
+  shows its own spend and what it costs per hour now.
 - **Operator console** (page 10): `/admin` (code-split, English-only) on `/api/v1/admin/*`, behind
   the `admins` table, an IP allowlist (plus a recommended WAF rule) and a passkey step-up that lasts
   30 minutes per session. Overview (browsers by status, unfinished and failed operations, findings,
@@ -117,8 +141,8 @@ Cloudflare deployment.
 
 The plan put the control plane on AWS Tokyo. The deployment target is Cloudflare, and the rule
 applied is: **use a Cloudflare service wherever it meets the requirement**. The browser VMs, their
-static IPs and their volumes still come from the provider chosen by the trial (AWS EC2 / Oracle
-Cloud), because Cloudflare does not offer VMs with a dedicated static egress IP.
+static IPs and their volumes come from AWS EC2, the only provider (the decision is final), because
+Cloudflare does not offer VMs with a dedicated static egress IP.
 
 | Plan | Implemented | Why |
 |---|---|---|
@@ -139,9 +163,9 @@ Cloud), because Cloudflare does not offer VMs with a dedicated static egress IP.
 | `agent.v1` / `viewer.v1` protobuf with Buf | JSON text frames, zod in `packages/contracts/src/protocol.ts`, mirrored in Go | The payload the gateway relays most (neko v3 signaling) is JSON already; no codegen toolchain for two languages. |
 | Engine → gateway via `agent_commands` + `NOTIFY` | `agent_commands` + a `cloudbrowser-agent-commands` queue message | No binding from engine to gateway, so no deploy-order cycle; heartbeats are a delivery backstop. |
 | S3 archives with per-instance keys wrapped by KMS | **R2** (presigned PUT/GET via the S3 API) with per-instance keys wrapped by a Worker secret (`ARCHIVE_MASTER_KEY`, AES-256-GCM) | Same envelope scheme without a KMS: the plain key exists only in the gateway's frame to the agent, never in D1. Presigned URLs keep archive bytes off the Workers. |
-| pg-boss job for Creem webhooks; nightly reconciliation job | `cloudbrowser-billing` queue consumed by the api Worker; the api's 5-minute cron (lost events, period ends, notices, deletion after 30 days) and its 03:00 UTC run (re-sync from Creem) | Same asynchronous, idempotent processing with Cloudflare primitives. |
-| Entitlements written into the user's `caps` | Caps under a separate `billing:<user>` scope, between the pilot defaults and operator overrides | The pilot's defaults and per-user overrides keep working unchanged; billing never overwrites an operator's override. |
-| Running-hours cap enforced by the engine | The engine meters `running` time per user and month every minute (at most 5 minutes per tick if a run is missed) and sleeps browsers 10 minutes after the hours run out | The session view gets the deadline from the heartbeat and warns the user; starts are refused with `hours_exhausted`. |
+| Subscription plans (Personal, Pro) with an hours allowance | A prepaid balance topped up with Creem one-time products, charged per minute at AWS cost times a markup | Costs depend on the region and on what a browser keeps while asleep (IP, disks); a balance charges exactly that, with no plan maths, and the trial converts by adding credit. |
+| pg-boss job for Creem webhooks; nightly reconciliation job | `cloudbrowser-billing` queue consumed by the api Worker; the api's 5-minute cron (lost events, low-balance email, notices, deletion after 30 days) and a nightly backstop that credits paid orders a lost webhook missed | Same asynchronous, idempotent processing with Cloudflare primitives. |
+| Running-hours cap enforced by the engine | The engine meters usage every minute (at most 5 minutes per tick if a run is missed) and sleeps browsers 10 minutes after the balance runs out | The session view gets the deadline from the heartbeat and warns the user; starts are refused with `insufficient_balance`. |
 | `/admin` limited by source IP at the load balancer | Dedicated `admin.console.nevazu.com` behind Cloudflare Access email OTP; API verifies signed JWT and exact email allowlist | No IP restriction; main-site cookies, the legacy admin table, and preview URLs cannot grant admin access. |
 | Alerts through CloudWatch alarms | `alerts` table written by every Worker, delivered by the api cron to Email Service and a chat webhook, acknowledged in the console | One place to see and acknowledge alerts; no extra service. |
 | Golden VM image built with Packer | Stock Ubuntu 24.04 plus a first-boot script; the agent binary and VM files ship in a container image | Lets the first real browser run without an image build in the user's AWS account; the Packer template uses the same files and replaces the install later. |
@@ -160,8 +184,7 @@ Considered and **not** used:
 
 ## Not built yet (next phases)
 
-- **Real browsers**: the first run against a real AWS account; `oci-compute` executor (Phase 1,
-  page 11); a pre-built golden image and image signing.
+- **Real browsers**: a pre-built golden image and image signing.
 - **Live view extras**: file upload and download channels, quality modes (Auto / Sharp text /
   Smooth motion), pausing video after 60 s in a hidden tab, touch gestures, sending quality
   aggregates to `viewer_sessions`. The neko event names and data-channel opcodes follow neko v3 and
@@ -169,10 +192,10 @@ Considered and **not** used:
 - Agent: browser container supervision through containerd, neko credentials per wake.
 - Manual backups ("Back up now") and pre-upgrade snapshots; showing a `restore` in progress as its
   own browser state.
-- Landing and public pricing pages; hour packs and the *Always-on* add-on (after launch, page 6);
-  60 fps for Pro (applied once the browser image is built); growing existing volumes online after an
-  upgrade; verifying Creem's signed success-redirect parameters (not needed for access, which comes
-  only from webhooks); confirming every Creem payload against recorded test-mode fixtures.
+- Landing and public pricing pages; automatic top-up; taxes shown before checkout (Creem adds them
+  at checkout); growing the file system of browsers created before agent 0.2.0 (they need to be
+  recreated, or the agent updated, before the Storage tab allows growth); confirming every Creem
+  payload against recorded test-mode fixtures.
 - Passkey sign-in (passkeys are registered and used for the admin step-up; sign-in with them is a
   small UI addition), TOTP, OAuth; time-limited support share codes (page 4); dashboard
   thumbnails; dependency-cruiser and an OpenAPI diff in CI.

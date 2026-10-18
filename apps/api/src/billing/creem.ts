@@ -1,61 +1,70 @@
 /**
- * Thin client for the Creem API (page 6). Creem is the merchant of record and the source of truth
- * for billing. Paths and fields follow Creem's public docs; every response is parsed defensively
- * because nested objects may arrive expanded or as bare ids.
+ * Thin client for the Creem API (page 6). Creem is the merchant of record. Users top up a prepaid
+ * balance by buying one-time products; each product's name and price are read from Creem, so the
+ * amounts on offer are set in the Creem dashboard. Paths and fields follow Creem's public docs;
+ * every response is parsed defensively because nested objects may arrive expanded or as bare ids.
  */
-import { PlanKey, type PlanKey as PlanKeyT } from '@cloudbrowser/contracts';
 import type { Env } from '../env.js';
 
 export class BillingError extends Error {}
 
-export interface CreemSubscription {
+export interface CreemProduct {
   id: string;
-  customerId: string | null;
-  productId: string;
-  itemId: string | null;
-  units: number;
+  name: string;
+  /** Price in the smallest currency unit (cents). */
+  priceCents: number;
+  currency: string;
+  /** `onetime` for top-ups; recurring products are never offered. */
+  billingType: string;
+}
+
+/** A checkout as Creem reports it: the source of truth for what was paid. */
+export interface CreemCheckout {
+  id: string;
   status: string;
-  currentPeriodEnd: Date | null;
+  requestId: string | null;
+  productId: string | null;
+  customerId: string | null;
+  orderId: string | null;
+  orderStatus: string | null;
   metadata: Record<string, unknown>;
 }
 
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
-const idOf = (v: unknown): string | null => str(v) ?? (v && typeof v === 'object' ? str((v as { id?: unknown }).id) : null);
-const date = (v: unknown): Date | null => (typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? new Date(v) : null);
+const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' ? (v as Record<string, unknown>) : {});
+export const idOf = (v: unknown): string | null => str(v) ?? str(obj(v).id);
 
-/** Normalizes a Creem subscription object (from the API or a webhook body). */
-export function parseSubscription(o: Record<string, unknown>): CreemSubscription {
-  const items = Array.isArray(o.items) ? (o.items as Record<string, unknown>[]) : [];
-  const item = items[0];
-  const units = Number(item?.units ?? o.units ?? 1);
+export function parseProduct(o: Record<string, unknown>): CreemProduct {
   return {
     id: String(o.id),
-    customerId: idOf(o.customer),
-    productId: idOf(o.product) ?? str(item?.product_id) ?? '',
-    itemId: str(item?.id),
-    units: Number.isFinite(units) && units > 0 ? Math.floor(units) : 1,
-    status: String(o.status ?? 'unknown'),
-    currentPeriodEnd: date(o.current_period_end_date ?? o.current_period_end),
-    metadata: (o.metadata && typeof o.metadata === 'object' ? o.metadata : {}) as Record<string, unknown>,
+    name: str(o.name) ?? String(o.id),
+    priceCents: Math.round(Number(o.price ?? 0)),
+    currency: (str(o.currency) ?? 'USD').toUpperCase(),
+    billingType: str(o.billing_type) ?? 'onetime',
   };
 }
 
-export type UpdateBehavior = 'proration-charge-immediately' | 'proration-charge' | 'proration-none';
+/** Normalizes a checkout object (from the API or a `checkout.completed` webhook body). */
+export function parseCheckout(o: Record<string, unknown>): CreemCheckout {
+  const order = obj(o.order);
+  return {
+    id: String(o.id),
+    status: str(o.status) ?? 'unknown',
+    requestId: str(o.request_id),
+    productId: idOf(o.product),
+    customerId: idOf(o.customer),
+    orderId: idOf(o.order),
+    orderStatus: str(order.status),
+    metadata: obj(o.metadata),
+  };
+}
 
 export interface Creem {
-  products: Record<PlanKeyT, string>;
-  planForProduct(productId: string): PlanKeyT | null;
-  createCheckout(input: {
-    plan: PlanKeyT;
-    units?: number;
-    requestId: string;
-    successUrl: string;
-    email: string;
-    metadata: Record<string, string>;
-  }): Promise<{ id: string; url: string }>;
-  getSubscription(id: string): Promise<CreemSubscription>;
-  upgrade(id: string, plan: PlanKeyT, behavior: UpdateBehavior): Promise<void>;
-  setUnits(id: string, itemId: string, units: number, behavior: UpdateBehavior): Promise<void>;
+  /** The top-up products configured for this deployment (CREEM_TOPUP_PRODUCTS). */
+  topupProductIds: string[];
+  getProduct(id: string): Promise<CreemProduct>;
+  createCheckout(input: { productId: string; requestId: string; successUrl: string; email: string; metadata: Record<string, string> }): Promise<{ id: string; url: string }>;
+  getCheckout(id: string): Promise<CreemCheckout>;
   portalUrl(customerId: string): Promise<string>;
 }
 
@@ -63,14 +72,11 @@ export interface Creem {
 export function creemFrom(env: Env): Creem | null {
   const base = env.CREEM_API_BASE;
   const key = env.CREEM_API_KEY;
-  const products: Record<PlanKeyT, string | undefined> = {
-    personal_monthly: env.CREEM_PRODUCT_PERSONAL_MONTHLY,
-    personal_yearly: env.CREEM_PRODUCT_PERSONAL_YEARLY,
-    pro_monthly: env.CREEM_PRODUCT_PRO_MONTHLY,
-    pro_yearly: env.CREEM_PRODUCT_PRO_YEARLY,
-  };
-  if (!base || !key || !env.CREEM_WEBHOOK_SECRET || Object.values(products).some((p) => !p)) return null;
-  const ids = products as Record<PlanKeyT, string>;
+  const products = (env.CREEM_TOPUP_PRODUCTS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!base || !key || !env.CREEM_WEBHOOK_SECRET || products.length === 0) return null;
 
   async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await fetch(`${base!.replace(/\/$/, '')}${path}`, {
@@ -84,13 +90,14 @@ export function creemFrom(env: Env): Creem | null {
   }
 
   return {
-    products: ids,
-    planForProduct: (productId) => PlanKey.options.find((p) => ids[p] === productId) ?? null,
+    topupProductIds: products,
+    async getProduct(id) {
+      return parseProduct(await call<Record<string, unknown>>('GET', `/v1/products?product_id=${encodeURIComponent(id)}`));
+    },
     async createCheckout(input) {
       const out = await call<{ id?: string; checkout_url?: string }>('POST', '/v1/checkouts', {
-        product_id: ids[input.plan],
+        product_id: input.productId,
         request_id: input.requestId,
-        ...(input.units ? { units: input.units } : {}),
         success_url: input.successUrl,
         customer: { email: input.email },
         metadata: input.metadata,
@@ -98,14 +105,8 @@ export function creemFrom(env: Env): Creem | null {
       if (!out.checkout_url) throw new BillingError('Creem returned no checkout_url');
       return { id: out.id ?? '', url: out.checkout_url };
     },
-    async getSubscription(id) {
-      return parseSubscription(await call<Record<string, unknown>>('GET', `/v1/subscriptions?subscription_id=${encodeURIComponent(id)}`));
-    },
-    async upgrade(id, plan, behavior) {
-      await call('POST', `/v1/subscriptions/${encodeURIComponent(id)}/upgrade`, { product_id: ids[plan], update_behavior: behavior });
-    },
-    async setUnits(id, itemId, units, behavior) {
-      await call('POST', `/v1/subscriptions/${encodeURIComponent(id)}`, { items: [{ id: itemId, units }], update_behavior: behavior });
+    async getCheckout(id) {
+      return parseCheckout(await call<Record<string, unknown>>('GET', `/v1/checkouts?checkout_id=${encodeURIComponent(id)}`));
     },
     async portalUrl(customerId) {
       const out = await call<{ customer_portal_link?: string }>('POST', '/v1/customers/billing', { customer_id: customerId });

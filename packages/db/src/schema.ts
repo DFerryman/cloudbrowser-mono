@@ -6,7 +6,7 @@
  * enforced by code review and by each Worker only importing the repository functions it owns.
  */
 import { sql } from 'drizzle-orm';
-import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 const ts = (name: string) => integer(name, { mode: 'timestamp_ms' });
 const json = <T>(name: string) => text(name, { mode: 'json' }).$type<T>();
@@ -119,7 +119,7 @@ export const regions = sqliteTable('regions', {
   city: text('city').notNull(),
   timezone: text('timezone').notNull(),
   enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
-  executor: text('executor').notNull(), // fake | aws-ec2 | oci-compute | fly-machines
+  executor: text('executor').notNull(), // aws-ec2 | fake (the simulator)
   providerRegion: text('provider_region').notNull(),
   probeUrl: text('probe_url'),
 });
@@ -161,6 +161,16 @@ export const browserInstances = sqliteTable(
     /** Operator kill switch (abuse, page 10): the browser sleeps and cannot start. Owner: api (admin). */
     suspendedAt: ts('suspended_at'),
     suspendedReason: text('suspended_reason'),
+    /** Data volume size in GB. Owner: engine (set by create and resize_volume). */
+    storageGb: integer('storage_gb').notNull().default(10),
+    /** Daily snapshots of the data volume (billed). Owner: api; off for new browsers. */
+    backupsEnabled: integer('backups_enabled', { mode: 'boolean' }).notNull().default(false),
+    /** Free trial (page 6): active | ended | converted; null for every other browser. Owner: api and engine. */
+    trialState: text('trial_state'),
+    /** Running seconds used by the trial (metered by the engine). */
+    trialUsedS: integer('trial_used_s').notNull().default(0),
+    /** An unconverted trial browser is deleted and purged at this time (7 days after it last slept). */
+    trialReclaimAt: ts('trial_reclaim_at'),
   },
   (t) => [index('instances_user_idx').on(t.userId), index('instances_status_idx').on(t.status)],
 );
@@ -376,8 +386,19 @@ export const instanceHealth = sqliteTable('instance_health', {
   agentReadyAt: ts('agent_ready_at'),
   /** Highest Chrome major version that opened this profile (never downgrade, page 4). */
   chromeMajor: integer('chrome_major'),
-  /** Last time the engine counted this browser's running minutes (page 6, active hours). */
+  /** Last time the engine billed this browser's running minutes (page 6). Null while not running. */
   meteredAt: ts('metered_at'),
+  /** Last time the engine billed what the browser holds while it exists (IP, storage, snapshots). */
+  baseMeteredAt: ts('base_metered_at'),
+  /** Data volume usage reported by the agent's heartbeat. */
+  diskUsedBytes: integer('disk_used_bytes'),
+  diskTotalBytes: integer('disk_total_bytes'),
+  diskReportedAt: ts('disk_reported_at'),
+  /** The VM's bytes sent since boot (agent heartbeat), and the counter value already billed. */
+  netTxBytes: integer('net_tx_bytes'),
+  netTxBilledBytes: integer('net_tx_billed_bytes'),
+  /** Version of the agent that last reported `ready` (features such as growing storage need a minimum). */
+  agentVersion: text('agent_version'),
 });
 
 /**
@@ -538,11 +559,108 @@ export const archiveKeys = sqliteTable('archive_keys', {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Billing (page 6). Creem is the source of truth; these are mirrors re-synced on every webhook.
-// Owner: api.
+// Prices and billing (page 6). Provider prices come from the provider's price list; customers pay
+// them times the markup from a prepaid balance topped up through Creem. Owner: api, except
+// `provider_prices` and `usage_records` (engine).
 // ---------------------------------------------------------------------------------------------
 
-/** The Creem customer of each user, linked on `checkout.completed`. */
+/** What each region costs us, read from the provider's price list (AWS Price List API). Owner: engine. */
+export const providerPrices = sqliteTable('provider_prices', {
+  regionId: text('region_id')
+    .primaryKey()
+    .references(() => regions.id),
+  executor: text('executor').notNull(),
+  providerRegion: text('provider_region').notNull(),
+  /** ProviderPriceSheet (packages/contracts/src/pricing.ts), USD. */
+  sheet: json<Record<string, unknown>>('sheet'),
+  fetchedAt: ts('fetched_at'),
+  lastError: text('last_error'),
+  lastErrorAt: ts('last_error_at'),
+});
+
+/** One row (id 1): markup and balance thresholds, edited in the operator console. Owner: api (admin). */
+export const pricingSettings = sqliteTable('pricing_settings', {
+  id: integer('id').primaryKey(),
+  markupPercent: integer('markup_percent').notNull(),
+  minBalanceMicros: integer('min_balance_micros').notNull(),
+  lowBalanceMicros: integer('low_balance_micros').notNull(),
+  paymentFeeBps: integer('payment_fee_bps').notNull().default(0),
+  paymentFeeFixedCents: integer('payment_fee_fixed_cents').notNull().default(0),
+  updatedAt: ts('updated_at').notNull(),
+  updatedBy: text('updated_by'),
+});
+
+/** Each user's prepaid balance in micro-dollars. The engine debits usage; the api credits top-ups. */
+export const billingAccounts = sqliteTable('billing_accounts', {
+  userId: text('user_id')
+    .primaryKey()
+    .references(() => user.id),
+  balanceMicros: integer('balance_micros').notNull().default(0),
+  /** When the balance reached zero: running browsers sleep 10 minutes later; deleted after 30 days. */
+  exhaustedAt: ts('exhausted_at'),
+  /** Set after a dispute: nothing runs until support clears it. */
+  frozenAt: ts('frozen_at'),
+  frozenReason: text('frozen_reason'),
+  /** Last low-balance email, so it is sent once per dip. */
+  lowNotifiedAt: ts('low_notified_at'),
+  /** When the user started their one free trial. */
+  trialUsedAt: ts('trial_used_at'),
+  updatedAt: ts('updated_at').notNull(),
+});
+
+/**
+ * Credits and other non-usage changes to a balance. `reference` makes each one idempotent, e.g.
+ * `order:<creem order id>`, `refund:<creem refund id>`. Owner: api.
+ */
+export const balanceTransactions = sqliteTable(
+  'balance_transactions',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id),
+    kind: text('kind').notNull(), // topup | refund | dispute | adjustment
+    amountMicros: integer('amount_micros').notNull(),
+    reference: text('reference').notNull().unique(),
+    productId: text('product_id'),
+    description: text('description'),
+    actor: text('actor').notNull(),
+    createdAt: ts('created_at').notNull(),
+    /** Set in the same D1 batch that adds the amount to the balance, so a retry never adds it twice. */
+    appliedAt: ts('applied_at'),
+  },
+  (t) => [index('balance_tx_user_idx').on(t.userId, t.createdAt)],
+);
+
+/**
+ * Metered usage per browser, item, UTC day and price. The engine adds to `quantity` every minute
+ * and keeps `amount_micros` = round(quantity × unit price); a price change starts a new row.
+ * Owner: engine.
+ */
+export const usageRecords = sqliteTable(
+  'usage_records',
+  {
+    instanceId: text('instance_id')
+      .notNull()
+      .references(() => browserInstances.id),
+    userId: text('user_id').notNull(),
+    regionId: text('region_id').notNull(),
+    item: text('item').notNull(), // compute | ip | storage | snapshot | transfer
+    day: text('day').notNull(), // YYYY-MM-DD (UTC)
+    unitPriceMicros: integer('unit_price_micros').notNull(),
+    unitCostMicros: integer('unit_cost_micros').notNull(),
+    quantity: real('quantity').notNull(),
+    amountMicros: integer('amount_micros').notNull(),
+    costMicros: integer('cost_micros').notNull(),
+    updatedAt: ts('updated_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.instanceId, t.item, t.day, t.unitPriceMicros, t.unitCostMicros] }),
+    index('usage_user_day_idx').on(t.userId, t.day),
+  ],
+);
+
+/** The Creem customer of each user, linked on the first `checkout.completed`. */
 export const billingCustomers = sqliteTable('billing_customers', {
   userId: text('user_id')
     .primaryKey()
@@ -551,33 +669,27 @@ export const billingCustomers = sqliteTable('billing_customers', {
   createdAt: ts('created_at').notNull(),
 });
 
-/** Mirror of a Creem subscription, refreshed from the Creem API (never from a webhook body alone). */
-export const subscriptions = sqliteTable(
-  'subscriptions',
-  {
-    id: text('id').primaryKey(), // Creem subscription id
-    userId: text('user_id')
-      .notNull()
-      .references(() => user.id),
-    plan: text('plan').notNull(), // PlanKey
-    productId: text('product_id').notNull(),
-    /** The subscription item carrying the units (browsers) of a seat-based product. */
-    itemId: text('item_id'),
-    units: integer('units').notNull().default(1),
-    status: text('status').notNull(),
-    currentPeriodEnd: ts('current_period_end'),
-    /** First time we saw `past_due`/`unpaid`; the 7-day grace period runs from here. */
-    pastDueSince: ts('past_due_since'),
-    /** When access ended (expired, paused, refunded, or period end after cancel). Data is kept 30 days. */
-    accessEndedAt: ts('access_ended_at'),
-    /** Set by us on a full refund or a dispute: no access whatever Creem's status says. */
-    revokedAt: ts('revoked_at'),
-    revokedReason: text('revoked_reason'),
-    syncedAt: ts('synced_at').notNull(),
-    createdAt: ts('created_at').notNull(),
-  },
-  (t) => [index('subscriptions_user_idx').on(t.userId)],
-);
+/** Top-up products configured in Creem (CREEM_TOPUP_PRODUCTS); name and price are read from Creem. */
+export const topupPacks = sqliteTable('topup_packs', {
+  productId: text('product_id').primaryKey(),
+  name: text('name').notNull(),
+  amountCents: integer('amount_cents').notNull(),
+  currency: text('currency').notNull(),
+  active: integer('active', { mode: 'boolean' }).notNull().default(true),
+  fetchedAt: ts('fetched_at').notNull(),
+});
+
+/** One row per top-up checkout we start; its id is Creem's `request_id`, echoed back for correlation. */
+export const topupCheckouts = sqliteTable('topup_checkouts', {
+  id: text('id').primaryKey(),
+  userId: text('user_id')
+    .notNull()
+    .references(() => user.id),
+  productId: text('product_id').notNull(),
+  checkoutId: text('checkout_id'),
+  creditedAt: ts('credited_at'),
+  createdAt: ts('created_at').notNull(),
+});
 
 /** Every Creem webhook, keyed by its event id: duplicates are ignored (page 6). */
 export const webhookEvents = sqliteTable('webhook_events', {
@@ -589,34 +701,6 @@ export const webhookEvents = sqliteTable('webhook_events', {
   attempts: integer('attempts').notNull().default(0),
   error: text('error'),
 });
-
-/** One row per checkout we start; its id is Creem's `request_id`, echoed back for correlation. */
-export const checkoutAttempts = sqliteTable('checkout_attempts', {
-  id: text('id').primaryKey(),
-  userId: text('user_id')
-    .notNull()
-    .references(() => user.id),
-  plan: text('plan').notNull(),
-  browsers: integer('browsers').notNull(),
-  checkoutId: text('checkout_id'),
-  createdAt: ts('created_at').notNull(),
-});
-
-/**
- * Active (running) time per user and calendar month (UTC), metered by the engine every minute.
- * `exhaustedAt` is set when the plan's hours run out: running browsers sleep 10 minutes later.
- * Owner: engine.
- */
-export const activeUsage = sqliteTable(
-  'active_usage',
-  {
-    userId: text('user_id').notNull(),
-    month: text('month').notNull(), // YYYY-MM
-    seconds: integer('seconds').notNull().default(0),
-    exhaustedAt: ts('exhausted_at'),
-  },
-  (t) => [primaryKey({ columns: [t.userId, t.month] })],
-);
 
 // ---------------------------------------------------------------------------------------------
 // Operator console (page 10). Owner: api (admin endpoints); alerts are raised by every Worker.

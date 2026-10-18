@@ -97,6 +97,7 @@ export function ReasonDialog({
   busy,
   onClose,
   onConfirm,
+  children,
 }: {
   open: boolean;
   title: string;
@@ -106,6 +107,8 @@ export function ReasonDialog({
   busy?: boolean;
   onClose: () => void;
   onConfirm: (reason: string) => void;
+  /** Extra fields shown above the reason. */
+  children?: ReactNode;
 }) {
   const [reason, setReason] = useState('');
   return (
@@ -116,6 +119,7 @@ export function ReasonDialog({
           onConfirm(reason.trim());
         }}
       >
+        {children}
         <Label htmlFor="reason">Reason (kept in the audit log)</Label>
         <Input id="reason" autoFocus value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. abuse report #123, incident 7" />
         <div className="mt-4 flex justify-end gap-2">

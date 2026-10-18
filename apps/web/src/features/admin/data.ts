@@ -148,9 +148,50 @@ export type UserRow = {
   createdAt: string;
   browsers: number;
   suspended: number;
-  subscription: { plan: string; status: string; units: number; revoked: boolean } | null;
+  balanceMicros: number;
+  exhaustedAt: string | null;
+  frozenAt: string | null;
   admin: boolean;
+};
+
+type RatesRow = { compute: number; ip: number; storage: number; snapshot: number; transfer: number };
+
+export type PricingOverview = {
+  settings: { markupPercent: number; minBalanceMicros: number; lowBalanceMicros: number; paymentFeeBps: number; paymentFeeFixedCents: number };
+  regions: {
+    regionId: string;
+    name: string;
+    enabled: boolean;
+    executor: string;
+    providerRegion: string;
+    sheet: { source: string; instanceType: string; instanceTypes: Record<string, number>; rootVolumeGb: number; effectiveDate: string | null } | null;
+    fetchedAt: string | null;
+    lastError: string | null;
+    lastErrorAt: string | null;
+    cost: RatesRow | null;
+    price: RatesRow | null;
+  }[];
+  month: {
+    month: string;
+    revenueMicros: number;
+    costMicros: number;
+    grossMarginMicros: number;
+    byItem: Record<string, { revenueMicros: number; costMicros: number }>;
+    topupMicros: number;
+    topups: number;
+    refundMicros: number;
+    creditMicros: number;
+    estimatedFeesMicros: number;
+    projectedAwsCents: number | null;
+  };
+  balances: { totalMicros: number; negativeMicros: number };
 };
 
 export const when = (iso: unknown) => (typeof iso === 'string' && iso ? new Date(iso).toLocaleString() : '—');
 export const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
+/** Micro-dollars, with enough digits for per-unit rates. */
+export const usd = (micros: number) => {
+  const v = micros / 1_000_000;
+  const digits = Math.abs(v) >= 1 || v === 0 ? 2 : Math.abs(v) >= 0.1 ? 3 : 4;
+  return `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(digits)}`;
+};

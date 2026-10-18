@@ -1,7 +1,9 @@
 import { cn, Menu, MenuItem, MenuSeparator, Skeleton } from '@cloudbrowser/ui';
-import { Globe, LayoutGrid, LogOut, Settings } from 'lucide-react';
+import { Globe, LayoutGrid, LogOut, UserRound, Wallet } from 'lucide-react';
 import { NavLink, Navigate, Outlet, useLocation } from 'react-router';
 import { BillingBanner } from '../features/billing/BillingBanner.js';
+import { useBilling } from '../features/billing/hooks.js';
+import { money } from '../lib/money.js';
 import { useMe } from '../features/instances/hooks.js';
 import { api, isUnauthenticated } from '../lib/api.js';
 import { useLiveEvents } from '../lib/events.js';
@@ -28,6 +30,7 @@ export async function signOut() {
 export function AppShell() {
   const { t, locale, setLocale } = useI18n();
   const me = useMe();
+  const billing = useBilling();
   const location = useLocation();
   useLiveEvents(me.isSuccess);
 
@@ -37,7 +40,8 @@ export function AppShell() {
 
   const nav = [
     { to: '/browsers', label: t('nav.browsers'), icon: LayoutGrid },
-    { to: '/settings', label: t('nav.settings'), icon: Settings },
+    { to: '/billing', label: t('nav.billing'), icon: Wallet },
+    { to: '/account', label: t('nav.account'), icon: UserRound },
   ];
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     cn(
@@ -83,9 +87,14 @@ export function AppShell() {
         </nav>
         <div className="mt-auto flex flex-col gap-2">
           {me.data ? (
-            <p className="hidden px-2.5 text-xs text-muted lg:block">
-              {t('nav.usage', { used: me.data.usage.browsers, max: me.data.entitlements.maxBrowsers })}
-            </p>
+            <div className="hidden space-y-0.5 px-2.5 text-xs text-muted lg:block">
+              {billing.data ? (
+                <p className={billing.data.mode === 'prepaid' && billing.data.balanceMicros <= billing.data.lowBalanceMicros ? 'font-medium text-error' : ''}>
+                  {billing.data.mode === 'pilot' ? t('nav.pilot') : t('nav.balance', { amount: money(billing.data.balanceMicros, locale) })}
+                </p>
+              ) : null}
+              <p>{t('nav.usage', { used: me.data.usage.browsers, max: me.data.entitlements.maxBrowsers })}</p>
+            </div>
           ) : (
             <Skeleton className="mx-2.5 hidden h-4 lg:block" />
           )}

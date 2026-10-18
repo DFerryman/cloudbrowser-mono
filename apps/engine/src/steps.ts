@@ -1,4 +1,5 @@
-import { eventRow, newArchiveKey, newId, schema, sha256Hex, userCaps } from '@cloudbrowser/db';
+import { ProviderPriceSheet, TRIAL, resourceMonthlyCostCents } from '@cloudbrowser/contracts';
+import { eventRow, newArchiveKey, newId, schema, sha256Hex, userCaps, type Db } from '@cloudbrowser/db';
 import type { ResourceKind } from '@cloudbrowser/executors';
 import { and, eq, inArray, ne } from 'drizzle-orm';
 import {
@@ -12,15 +13,31 @@ import {
 import { bootstrapToken, type CommandReply } from './agent.js';
 import { archiveObjectKey } from './archives.js';
 
-const { browserInstances, instanceHealth, ipAddresses, placements, resources, auditLog, events, agentCredentials, backups, archiveKeys } = schema;
+const { browserInstances, instanceHealth, ipAddresses, placements, resources, auditLog, events, agentCredentials, backups, archiveKeys, providerPrices } = schema;
 
-/** Default data volume size; plans set it later (page 6). */
-const VOLUME_GB = 20;
+/**
+ * A new browser's data volume. The profile without caches is typically well under 2 GB, Chrome's
+ * disk cache is bounded, and users can grow the volume at any time (page 4), so 10 GB is enough
+ * to start without paying for unused space. Operators set it with the `storage_gb` cap.
+ */
+const VOLUME_GB = 10;
 
-/** Volume size from the owner's plan (20 GB Personal and pilot, 30 GB Pro; page 6). Never shrinks. */
-async function volumeGb(env: StepEnv, atLeast = 0): Promise<number> {
-  const planned = (await userCaps(env.deps.db, env.instance.userId)).get('storage_gb') ?? VOLUME_GB;
-  return Math.max(planned, atLeast);
+async function newVolumeGb(env: StepEnv): Promise<number> {
+  // The free trial runs on the smallest practical volume (page 6); it can grow after conversion.
+  if (env.instance.trialState) return TRIAL.storageGb;
+  return (await userCaps(env.deps.db, env.instance.userId)).get('storage_gb') ?? VOLUME_GB;
+}
+
+/** The region's last price sheet from the provider, for ledger estimates; null before the first refresh. */
+export async function sheetFor(db: Db, executor: string, providerRegion: string): Promise<ProviderPriceSheet | null> {
+  const rows = await db.select({ sheet: providerPrices.sheet, executor: providerPrices.executor }).from(providerPrices).where(eq(providerPrices.providerRegion, providerRegion));
+  const parsed = ProviderPriceSheet.safeParse(rows.find((r) => r.executor === executor)?.sheet);
+  return parsed.success ? parsed.data : null;
+}
+
+async function estimateCents(env: Pick<StepEnv, 'deps' | 'executor'>, providerRegion: string, kind: ResourceKind, sizeGb = 0) {
+  const sheet = await sheetFor(env.deps.db, env.executor.kind, providerRegion);
+  return sheet ? resourceMonthlyCostCents(sheet, kind, sizeGb) : 0;
 }
 const MAX_IP_ROUNDS = 3;
 const OLD_IP_KEEP_DAYS = 30;
@@ -28,8 +45,9 @@ const OLD_IP_KEEP_DAYS = 30;
 // --- ledger ------------------------------------------------------------------------------------
 
 /** Intent first: the ledger row exists before the provider call (page 10, rule 1). */
-async function ledgerPending(env: StepEnv, kind: ResourceKind, token: string, generation: number, zone: string | null) {
+async function ledgerPending(env: StepEnv, kind: ResourceKind, token: string, generation: number, zone: string | null, sizeGb = 0) {
   const { deps, op, instance, region, executor } = env;
+  const monthlyCostEstimate = await estimateCents(env, region.providerRegion, kind, sizeGb);
   await deps.db
     .insert(resources)
     .values({
@@ -44,7 +62,7 @@ async function ledgerPending(env: StepEnv, kind: ResourceKind, token: string, ge
       requestToken: token,
       state: 'pending',
       tags: env.tags(kind, generation),
-      monthlyCostEstimate: executor.capabilities.monthlyCostCents[kind] ?? 0,
+      monthlyCostEstimate,
       firstSeenAt: deps.now(),
     })
     .onConflictDoNothing();
@@ -287,10 +305,12 @@ async function createNic(env: StepEnv): Promise<StepOutcome> {
 async function createVolume(env: StepEnv): Promise<StepOutcome> {
   const { zone } = result<{ zone: string }>(env, 'create_nic');
   const ctx = env.ctx('create_volume');
-  await ledgerPending(env, 'volume', ctx.token, 1, zone);
-  const vol = await env.executor.ensureVolume(ctx, env.region.providerRegion, zone, await volumeGb(env));
+  const sizeGb = await newVolumeGb(env);
+  await ledgerPending(env, 'volume', ctx.token, 1, zone, sizeGb);
+  const vol = await env.executor.ensureVolume(ctx, env.region.providerRegion, zone, sizeGb);
   await ledgerActive(env, ctx.token, vol.volumeId, vol.zone);
-  return { result: { volumeId: vol.volumeId } };
+  await env.deps.db.update(browserInstances).set({ storageGb: vol.sizeGb }).where(eq(browserInstances.id, env.instance.id));
+  return { result: { volumeId: vol.volumeId, sizeGb: vol.sizeGb } };
 }
 
 /**
@@ -566,15 +586,16 @@ export async function snapshotVolume(
       requestToken: token,
       state: 'pending',
       tags: env.tags('snapshot', p.generation),
-      monthlyCostEstimate: env.executor.capabilities.monthlyCostCents.snapshot ?? 0,
+      monthlyCostEstimate: 0,
       firstSeenAt: now(),
     })
     .onConflictDoNothing();
   const ctx = { operationId: env.op?.id ?? 'scheduler', step: 'snapshot', token, tags: env.tags('snapshot', p.generation), deadline: Date.now() + 120_000 };
   const snap = await env.executor.snapshot(ctx, p.providerRegion, p.volumeId ?? '');
   const at = now();
+  const monthlyCostEstimate = await estimateCents(env, p.providerRegion, 'snapshot', snap.sizeGb);
   await db.batch([
-    db.update(resources).set({ providerId: snap.snapshotId, state: 'active', lastSeenAt: at }).where(eq(resources.requestToken, token)),
+    db.update(resources).set({ providerId: snap.snapshotId, state: 'active', lastSeenAt: at, monthlyCostEstimate }).where(eq(resources.requestToken, token)),
     db
       .insert(backups)
       .values({
@@ -610,8 +631,9 @@ async function restoreVolume(env: StepEnv): Promise<StepOutcome> {
   if (b.kind !== 'snapshot') return { result: { skipped: true } };
   const p = await loadPlacement(env);
   const ctx = env.ctx('restore_volume');
-  await ledgerPending(env, 'volume', ctx.token, p.generation, p.zone);
-  const size = await volumeGb(env, Math.ceil((b.sizeBytes ?? 0) / 1024 ** 3));
+  // The restored volume keeps the browser's current size (bought storage is never lost).
+  const size = Math.max(env.instance.storageGb, Math.ceil((b.sizeBytes ?? 0) / 1024 ** 3));
+  await ledgerPending(env, 'volume', ctx.token, p.generation, p.zone, size);
   const vol = await env.executor.ensureVolumeFromSnapshot(ctx, p.providerRegion, p.zone ?? '', b.location ?? '', size);
   await ledgerActive(env, ctx.token, vol.volumeId, vol.zone);
   return { result: { volumeId: vol.volumeId } };
@@ -682,7 +704,7 @@ function recoverPlan(env: StepEnv) {
 async function recoverVolume(env: StepEnv): Promise<StepOutcome> {
   const plan = recoverPlan(env);
   const ctx = env.ctx('restore_volume');
-  await ledgerPending(env, 'volume', ctx.token, plan.generation, plan.zone);
+  await ledgerPending(env, 'volume', ctx.token, plan.generation, plan.zone, plan.sizeGb);
   const vol = await env.executor.ensureVolumeFromSnapshot(ctx, env.region.providerRegion, plan.zone, plan.snapshotId, plan.sizeGb);
   await ledgerActive(env, ctx.token, vol.volumeId, vol.zone);
   return { result: { volumeId: vol.volumeId } };
@@ -771,6 +793,52 @@ async function finishRecover(env: StepEnv): Promise<StepOutcome> {
   return finishWithStatus(env, 'running', { lastActiveAt: now() });
 }
 
+// --- resize_volume (page 4: more storage) --------------------------------------------------------
+
+/** How long to wait between checks of a volume modification. */
+const RESIZE_POLL_MS = 5_000;
+
+/** Grows the data volume (ModifyVolume) and waits until the new size is usable. */
+async function resizeVolume(env: StepEnv): Promise<StepOutcome> {
+  const p = await loadPlacement(env);
+  const target = Number((env.op.params as { sizeGb?: unknown } | null)?.sizeGb);
+  if (!Number.isInteger(target) || target <= env.instance.storageGb) throw new StepFailed('The new size must be larger than the current one.');
+  const r = await env.executor.resizeVolume(env.ctx('resize_volume'), p.providerRegion, p.volumeId ?? '', target);
+  if (r.state === 'pending') return { wait: RESIZE_POLL_MS, reason: 'growing the volume' };
+  return { result: { sizeGb: r.sizeGb } };
+}
+
+/**
+ * A running browser's agent grows the file system online (resize2fs); a sleeping one grows it at its
+ * next start. Either way the space is billed from now, so a failure here does not undo the resize.
+ */
+async function growFilesystem(env: StepEnv): Promise<StepOutcome> {
+  if (env.instance.status !== 'running') return { result: { grown: false, when: 'next start' } };
+  const { reply, timedOut } = await command(env, 'grow_filesystem', 'grow_filesystem', {});
+  if (reply.status === 'pending' && !timedOut) return { wait: COMMAND_POLL_MS, reason: 'growing the file system' };
+  return { result: { grown: reply.status === 'succeeded', ...(reply.error ? { error: reply.error } : {}) } };
+}
+
+async function finishResize(env: StepEnv): Promise<StepOutcome> {
+  const { sizeGb } = result<{ sizeGb: number }>(env, 'resize_volume');
+  const p = await loadPlacement(env);
+  const { db, now } = env.deps;
+  await db.batch([
+    db
+      .update(resources)
+      .set({ monthlyCostEstimate: await estimateCents(env, p.providerRegion, 'volume', sizeGb) })
+      .where(and(eq(resources.instanceId, env.instance.id), eq(resources.providerId, p.volumeId ?? ''))),
+    db.insert(auditLog).values({
+      actor: env.op.userId ? `user:${env.op.userId}` : 'engine',
+      action: 'storage.resized',
+      target: `instance:${env.instance.id}`,
+      detail: { from: env.instance.storageGb, to: sizeGb, filesystem: env.results.grow_filesystem ?? null },
+      createdAt: now(),
+    }),
+  ]);
+  return finishWithStatus(env, env.instance.status, { storageGb: sizeGb });
+}
+
 // --- table -------------------------------------------------------------------------------------
 
 type Handler = (env: StepEnv) => Promise<StepOutcome>;
@@ -799,7 +867,15 @@ export const HANDLERS: Record<string, Record<string, Handler>> = {
     prepare_shutdown: prepareShutdown,
     ensure_stopped: ensureStopped,
     verify_binding: verifyBinding,
-    finish: (env) => finishWithStatus(env, 'sleeping'),
+    // An unconverted trial browser is kept 7 days after each sleep, then reclaimed (page 6).
+    finish: (env) =>
+      finishWithStatus(
+        env,
+        'sleeping',
+        env.instance.trialState === 'active' || env.instance.trialState === 'ended'
+          ? { trialReclaimAt: new Date(env.deps.now().getTime() + TRIAL.keptDays * 86_400_000) }
+          : {},
+      ),
   },
   change_ip: {
     allocate_ip: allocateIp,
@@ -814,9 +890,11 @@ export const HANDLERS: Record<string, Record<string, Handler>> = {
     ensure_stopped: ensureStopped,
     finish: (env) => {
       const at = env.deps.now();
+      // A reclaimed trial browser is purged at once; a deleted browser is restorable for 7 days.
+      const purgeNow = (env.op.params as { purgeNow?: boolean } | null)?.purgeNow === true;
       return finishWithStatus(env, 'deleting', {
         deletedAt: at,
-        purgeAfter: new Date(at.getTime() + 7 * 86_400_000),
+        purgeAfter: purgeNow ? at : new Date(at.getTime() + 7 * 86_400_000),
       });
     },
   },
@@ -850,5 +928,10 @@ export const HANDLERS: Record<string, Record<string, Handler>> = {
   purge: {
     delete_resources: purgeResources,
     finish: (env) => finishWithStatus(env, 'purged'),
+  },
+  resize_volume: {
+    resize_volume: resizeVolume,
+    grow_filesystem: growFilesystem,
+    finish: finishResize,
   },
 };

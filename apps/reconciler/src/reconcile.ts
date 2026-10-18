@@ -1,4 +1,4 @@
-import { newId, raiseAlert, schema, type Db } from '@cloudbrowser/db';
+import { newId, priceSheets, raiseAlert, schema, type Db } from '@cloudbrowser/db';
 import type { Executor, ExecutorKind, OpContext } from '@cloudbrowser/executors';
 import { and, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 
@@ -199,10 +199,11 @@ export async function snapshotQuotasAndSpend(deps: ReconcilerDeps) {
     .selectDistinct({ executor: regions.executor, providerRegion: regions.providerRegion })
     .from(regions)
     .where(eq(regions.enabled, true));
+  // The hourly VM price comes from the providers' price lists (refreshed by the engine), never a constant.
   let vmHourCents = 0;
+  for (const s of (await priceSheets(db)).values()) vmHourCents = Math.max(vmHourCents, s.sheet.vmHour * 100);
   for (const t of targets) {
     const executor = deps.executor(t.executor as ExecutorKind);
-    vmHourCents = Math.max(vmHourCents, executor.capabilities.vmHourCents);
     const qs = await executor.quotas(ctx(deps, 'quotas'), t.providerRegion);
     if (qs.length) {
       await db.insert(quotaSnapshots).values(

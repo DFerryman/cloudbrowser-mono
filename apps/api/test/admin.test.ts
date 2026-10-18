@@ -1,5 +1,5 @@
 import { createDb, raiseAlert } from '@cloudbrowser/db';
-import { meterAndEnforce } from '@cloudbrowser/engine';
+import { meterUsage } from '@cloudbrowser/engine';
 import { SignJWT } from 'jose';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deliverAlerts } from '../src/admin/alerts.js';
@@ -167,7 +167,7 @@ describe('admin console', () => {
   it('suspends a browser: it sleeps within a minute and cannot start until released', async () => {
     const r = await callAdmin('POST', `/api/v1/admin/instances/${browser}/actions`, { action: 'suspend', reason: 'abuse report #12' }, IP);
     expect(r.status).toBe(200);
-    expect((await meterAndEnforce({ db: createDb(t.d1 as never), now: () => new Date(), notify: () => {} } as never)).stopped).toBe(1);
+    expect((await meterUsage({ db: createDb(t.d1 as never), now: () => new Date(), notify: () => {} } as never)).stopped).toBe(1);
     const stop = t.d1.sqlite.prepare(`SELECT id, params FROM operations WHERE kind = 'stop'`).get() as { id: string; params: string };
     expect(JSON.parse(stop.params).reason).toBe('suspended');
     await t.env.OPERATIONS.send({ operationId: stop.id });
@@ -218,9 +218,29 @@ describe('admin console', () => {
     await signIn(t, ADMIN_EMAIL);
     const users = (await callAdmin('GET', '/api/v1/admin/users', undefined, IP)).body;
     expect(users.find((u: { email: string }) => u.email === ADMIN_EMAIL).admin).toBe(true);
-    expect(users.find((u: { email: string }) => u.email === 'user@example.com')).toMatchObject({ browsers: 1, suspended: 0, subscription: null });
+    expect(users.find((u: { email: string }) => u.email === 'user@example.com')).toMatchObject({ browsers: 1, suspended: 0, balanceMicros: 0, frozenAt: null });
     await callAdmin('POST', `/api/v1/admin/users/${owner}/actions`, { action: 'suspend', reason: 'chargeback' }, IP);
     expect((await callAdmin('GET', '/api/v1/admin/users?q=user@', undefined, IP)).body[0].suspended).toBe(1);
+  });
+
+  it('sets the markup, shows cost against price per region, and credits a user', async () => {
+    const pricing = (await callAdmin('GET', '/api/v1/admin/pricing', undefined, IP)).body;
+    const tyo = pricing.regions.find((r: { regionId: string }) => r.regionId === 'tyo1');
+    expect(pricing.settings.markupPercent).toBe(120);
+    expect(tyo.cost).toMatchObject({ compute: 100_000, ip: 5_000 });
+    expect(tyo.price).toMatchObject({ compute: 120_000, ip: 6_000 });
+
+    expect((await callAdmin('PUT', '/api/v1/admin/pricing/settings', { ...pricing.settings, markupPercent: 90, reason: 'below cost' }, IP)).status).toBe(400);
+    await callAdmin('PUT', '/api/v1/admin/pricing/settings', { ...pricing.settings, markupPercent: 135, reason: 'margin review' }, IP);
+    await signIn(t, 'user@example.com');
+    const prices = (await t.call('GET', '/api/v1/pricing')).body;
+    expect(prices.find((r: { regionId: string }) => r.regionId === 'tyo1').rates).toMatchObject({ compute: 135_000, ip: 6_750 });
+
+    await callAdmin('POST', `/api/v1/admin/users/${owner}/credit`, { amountMicros: 5_000_000, reason: 'pilot credit' }, IP);
+    expect((await t.call('GET', '/api/v1/billing')).body.balanceMicros).toBe(5_000_000);
+    expect((await t.call('GET', '/api/v1/billing/transactions')).body[0]).toMatchObject({ kind: 'adjustment', amountMicros: 5_000_000, description: 'pilot credit' });
+    const audit = (await callAdmin('GET', '/api/v1/admin/audit', undefined, IP)).body.map((a: { action: string }) => a.action);
+    expect(audit).toEqual(expect.arrayContaining(['pricing.settings', 'user.credit']));
   });
 
   it('raises alerts once, delivers them to email and the chat webhook, and acknowledges them', async () => {

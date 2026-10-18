@@ -1,5 +1,6 @@
 /**
- * Signed calls to the EC2 Query API and the Service Quotas JSON API (SigV4 through aws4fetch).
+ * Signed calls to the EC2 Query API, the Service Quotas JSON API and the Price List Query API
+ * (SigV4 through aws4fetch).
  * Every failure leaves here as an ExecutorError with its class (page 10, "Executor interface").
  */
 import { AwsClient } from 'aws4fetch';
@@ -55,6 +56,7 @@ const RETRYABLE = new Set([
   'InvalidNetworkInterface.InUse',
   'DependencyViolation',
   'InvalidIPAddress.InUse',
+  'IncorrectModificationState', // a volume modification is still in progress
 ]);
 
 export function classify(code: string, status: number): ErrorClass {
@@ -78,11 +80,20 @@ export class Ec2Error extends ExecutorError {
 
 export const isNotFound = (e: unknown) => e instanceof Ec2Error && /NotFound$|\.Malformed$/.test(e.code);
 
+type Service = 'ec2' | 'servicequotas' | 'pricing';
+
+/** One product from the Price List API: its attributes and on-demand price dimensions. */
+export interface PriceListProduct {
+  attributes: Record<string, string>;
+  onDemand: { unit: string; usd: number; beginRange: string; description: string }[];
+  effectiveDate: string | null;
+}
+
 export interface ClientOptions {
   accessKeyId: string;
   secretAccessKey: string;
   /** Tests point this at a fake EC2. */
-  endpoint?: (service: 'ec2' | 'servicequotas', region: string) => string;
+  endpoint?: (service: Service, region: string) => string;
   fetch?: typeof fetch;
 }
 
@@ -101,8 +112,10 @@ export class Ec2Client {
     return s;
   }
 
-  private url(service: 'ec2' | 'servicequotas', region: string) {
-    return this.opts.endpoint?.(service, region) ?? `https://${service}.${region}.amazonaws.com/`;
+  private url(service: Service, region: string) {
+    if (this.opts.endpoint) return this.opts.endpoint(service, region);
+    // The Price List Query API lives in a few regions only; us-east-1 serves every region's prices.
+    return service === 'pricing' ? 'https://api.pricing.us-east-1.amazonaws.com/' : `https://${service}.${region}.amazonaws.com/`;
   }
 
   /**
@@ -156,4 +169,65 @@ export class Ec2Client {
       return null;
     }
   }
+
+  /**
+   * Price List Query API `GetProducts` (JSON 1.1, all pages). Each price list item is a JSON string
+   * with the product's attributes and its terms; only on-demand prices are kept. Errors are
+   * `retryable`: the engine keeps the last good prices and tries again later.
+   */
+  async products(serviceCode: string, filters: Record<string, string>, deadline: number): Promise<PriceListProduct[]> {
+    const signer = this.signer('pricing', 'us-east-1');
+    const out: PriceListProduct[] = [];
+    let next: string | undefined;
+    do {
+      const body = {
+        ServiceCode: serviceCode,
+        FormatVersion: 'aws_v1',
+        MaxResults: 100,
+        Filters: Object.entries(filters).map(([Field, Value]) => ({ Type: 'TERM_MATCH', Field, Value })),
+        ...(next ? { NextToken: next } : {}),
+      };
+      let res: Response;
+      try {
+        const req = await signer.sign(this.url('pricing', 'us-east-1'), {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-amz-json-1.1', 'x-amz-target': 'AWSPriceListService.GetProducts' },
+          body: JSON.stringify(body),
+        });
+        res = await (this.opts.fetch ?? fetch)(req, { signal: AbortSignal.timeout(Math.max(1, Math.min(deadline - Date.now(), 20_000))) });
+      } catch (e) {
+        throw new ExecutorError('retryable', `GetProducts ${serviceCode}: ${(e as Error).message}`);
+      }
+      const text = await res.text();
+      if (!res.ok) {
+        const code = (() => {
+          try {
+            return String((JSON.parse(text) as { __type?: string }).__type ?? '').split('#').pop() ?? '';
+          } catch {
+            return '';
+          }
+        })();
+        throw new ExecutorError(classify(code, res.status) === 'forbidden' ? 'forbidden' : 'retryable', `GetProducts ${serviceCode}: HTTP ${res.status} ${text.slice(0, 200)}`);
+      }
+      const page = JSON.parse(text) as { PriceList?: unknown[]; NextToken?: string };
+      for (const raw of page.PriceList ?? []) out.push(parsePriceListItem(typeof raw === 'string' ? JSON.parse(raw) : raw));
+      next = page.NextToken || undefined;
+    } while (next);
+    return out;
+  }
+}
+
+/** Normalizes one Price List item (`{ product: { attributes }, terms: { OnDemand } }`). */
+export function parsePriceListItem(item: unknown): PriceListProduct {
+  const o = (item ?? {}) as { product?: { attributes?: Record<string, string> }; terms?: { OnDemand?: Record<string, unknown> }; publicationDate?: string };
+  const onDemand: PriceListProduct['onDemand'] = [];
+  let effectiveDate: string | null = null;
+  for (const term of Object.values(o.terms?.OnDemand ?? {}) as { effectiveDate?: string; priceDimensions?: Record<string, unknown> }[]) {
+    effectiveDate ??= term.effectiveDate ?? null;
+    for (const d of Object.values(term.priceDimensions ?? {}) as { unit?: string; pricePerUnit?: { USD?: string }; beginRange?: string; description?: string }[]) {
+      const usd = Number(d.pricePerUnit?.USD);
+      if (Number.isFinite(usd)) onDemand.push({ unit: d.unit ?? '', usd, beginRange: d.beginRange ?? '0', description: d.description ?? '' });
+    }
+  }
+  return { attributes: o.product?.attributes ?? {}, onDemand, effectiveDate: effectiveDate ?? o.publicationDate ?? null };
 }

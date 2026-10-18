@@ -32,7 +32,7 @@ import { regionInfo, STATUS_TONE, statusKey } from '../instances/status.js';
 const HEARTBEAT_MS = 15_000;
 const IDLE_WARNING_MS = 60_000;
 
-type HeartbeatResult = { sleepAt: string | null; reason?: 'idle' | 'hours' };
+type HeartbeatResult = { sleepAt: string | null; reason?: 'idle' | 'balance' | 'trial' };
 
 /**
  * Live session (`/b/:id`, page 1 and page 5). The dark frame keeps attention on the remote page.
@@ -53,8 +53,8 @@ export function SessionPage() {
   const [openError, setOpenError] = useState<unknown>(null);
   const [takenOver, setTakenOver] = useState(false);
   const [sleepAt, setSleepAt] = useState<number | null>(null);
-  /** `hours`: the month's active hours ran out; input does not keep the browser awake. */
-  const [sleepReason, setSleepReason] = useState<'idle' | 'hours'>('idle');
+  /** `balance`: the prepaid balance ran out; input does not keep the browser awake. */
+  const [sleepReason, setSleepReason] = useState<'idle' | 'balance' | 'trial'>('idle');
   const [now, setNow] = useState(Date.now());
   const [fullscreen, setFullscreen] = useState(false);
   const viewerRef = useRef<RemoteBrowserHandle>(null);
@@ -112,10 +112,12 @@ export function SessionPage() {
     return () => clearInterval(h);
   }, [session, takenOver, status]);
 
-  // Out of active hours: say so once, while there is still time to finish up (page 6).
+  // Out of credit, or the free trial ending: say so once, while there is still time to finish up (page 6).
   const toast = useToast();
   useEffect(() => {
-    if (sleepReason === 'hours' && sleepAt) toast(t('session.hoursOut', { minutes: Math.max(1, Math.round((sleepAt - Date.now()) / 60_000)) }), 'error');
+    if (sleepReason === 'idle' || !sleepAt) return;
+    const minutes = Math.max(1, Math.round((sleepAt - Date.now()) / 60_000));
+    toast(t(sleepReason === 'balance' ? 'session.balanceOut' : 'session.trialOut', { minutes }), 'error');
   }, [sleepReason]);
 
   useEffect(() => {
@@ -250,8 +252,9 @@ export function SessionPage() {
           );
         } else if (connect.data?.mode === 'webrtc' && (viewer.state === 'connecting' || viewer.state === 'agent-offline')) {
           overlay = <Overlay message={t('overlay.connecting')} busy />;
-        } else if (sleepReason === 'hours' && idleLeft < IDLE_WARNING_MS) {
-          overlay = <Overlay message={t('overlay.hoursEnding', { seconds: Math.max(0, Math.ceil(idleLeft / 1000)) })} />;
+        } else if (sleepReason !== 'idle' && idleLeft < IDLE_WARNING_MS) {
+          const seconds = Math.max(0, Math.ceil(idleLeft / 1000));
+          overlay = <Overlay message={t(sleepReason === 'balance' ? 'overlay.balanceEnding' : 'overlay.trialEnding', { seconds })} />;
         } else if (idleLeft < IDLE_WARNING_MS) {
           overlay = (
             <Overlay

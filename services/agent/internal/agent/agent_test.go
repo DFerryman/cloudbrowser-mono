@@ -283,3 +283,53 @@ func TestArchivesOnShutdownAndRestores(t *testing.T) {
 		t.Fatalf("keyless shutdown %v", r)
 	}
 }
+
+type fakeHost struct {
+	mu    sync.Mutex
+	grown []string
+}
+
+func (h *fakeHost) DiskUsage(string) (uint64, uint64, error) { return 3 << 30, 10 << 30, nil }
+func (h *fakeHost) NetTxBytes() (uint64, error)            { return 123456, nil }
+func (h *fakeHost) GrowFilesystem(_ context.Context, path string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.grown = append(h.grown, path)
+	return nil
+}
+
+func TestAgentReportsHostAndGrowsTheDataFileSystem(t *testing.T) {
+	g, srv := newGateway(t)
+	h := &fakeHost{}
+	a := New(Config{
+		InstanceID: "inst1", GatewayURL: "ws" + srv.URL[len("http"):], BootstrapToken: "boot",
+		StateDir: t.TempDir(), DataDir: "/data", Host: h, EchoURLs: []string{"https://echo.test"}, Generation: 1,
+		Heartbeat: 50 * time.Millisecond,
+	}, &fakeBrowser{ip: "203.0.113.7"}, nil, &fakeFirewall{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = a.Run(ctx) }()
+	<-g.auths
+	c := <-g.conns
+
+	ready := readUntil(t, c, func(m map[string]any) bool { return m["kind"] == "ready" })
+	if ready["data"].(map[string]any)["agentVersion"] != Version {
+		t.Fatalf("ready %v", ready)
+	}
+	hb := readUntil(t, c, func(m map[string]any) bool { return m["kind"] == "heartbeat" })["data"].(map[string]any)
+	disk := hb["disk"].(map[string]any)
+	if disk["usedBytes"].(float64) != 3<<30 || disk["totalBytes"].(float64) != 10<<30 || hb["netTxBytes"].(float64) != 123456 {
+		t.Fatalf("heartbeat %v", hb)
+	}
+	send(t, c, map[string]any{"t": "command", "id": "g1", "kind": "grow_filesystem", "payload": map[string]any{}})
+	r := readUntil(t, c, func(m map[string]any) bool { return m["t"] == "reply" })
+	if r["ok"] != true || r["result"].(map[string]any)["totalBytes"].(float64) != 10<<30 {
+		t.Fatalf("grow reply %v", r)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// Once at start (the volume may have grown while asleep), once on the command.
+	if len(h.grown) != 2 || h.grown[0] != "/data" {
+		t.Fatalf("grown %v", h.grown)
+	}
+}

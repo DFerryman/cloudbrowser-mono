@@ -1,11 +1,12 @@
 import type { Instance } from '@cloudbrowser/contracts';
 import { Button, Card, Menu, MenuItem, MenuSeparator, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
-import { Moon, MoreHorizontal, Pencil, Settings, Trash2 } from 'lucide-react';
+import { BarChart3, Moon, MoreHorizontal, Pencil, Settings, Trash2 } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { useI18n, useRelativeTime } from '../../lib/i18n.js';
 import { CreateProgress } from './CreateProgress.js';
 import { useCreateInstance, useLifecycle, useUpdateInstance } from './hooks.js';
 import { regionInfo, STATUS_TONE, statusKey } from './status.js';
+import { TrialBadge } from './Trial.js';
 
 export function BrowserCard({ instance: i }: { instance: Instance }) {
   const { t, locale, errorMessage } = useI18n();
@@ -62,6 +63,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
         </h2>
       </div>
       <StatusBadge className="mt-1" tone={STATUS_TONE[i.status]} label={t(statusKey(i.status))} />
+      <TrialBadge className="mt-1" trial={i.trial} />
       <RegionIpChip
         className="mt-3"
         country={region.country}
@@ -108,6 +110,9 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
           </MenuItem>
           <MenuItem disabled={deleted || failed} onSelect={() => navigate(`/browsers/${i.id}/settings`)}>
             <Settings /> {t('browsers.settings')}
+          </MenuItem>
+          <MenuItem disabled={failed} onSelect={() => navigate(`/browsers/${i.id}/usage`)}>
+            <BarChart3 /> {t('manage.usage')}
           </MenuItem>
           <MenuItem disabled={i.status !== 'running'} onSelect={() => void run(lifecycle.mutateAsync({ id: i.id, action: 'stop' }))}>
             <Moon /> {t('browsers.sleepNow')}

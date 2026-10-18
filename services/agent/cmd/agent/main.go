@@ -19,6 +19,7 @@ import (
 	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/agent"
 	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/chrome"
 	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/firewall"
+	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/host"
 	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/neko"
 )
 
@@ -35,6 +36,7 @@ func main() {
 		userDataPath = flag.String("user-data", "/var/lib/cloud/instance/user-data.txt", "JSON user data written by the engine")
 		stateDir     = flag.String("state-dir", "/data/agent", "where the long-lived credential is kept")
 		profileDir   = flag.String("profile-dir", "/data/profile", "Chrome's user data dir; archived at each sleep")
+		dataDir      = flag.String("data-dir", "/data", "mount point of the data volume (disk usage reports, growing the file system); empty disables")
 		cdp          = flag.String("cdp", "http://127.0.0.1:9222", "Chrome DevTools endpoint (loopback only)")
 		nekoWS       = flag.String("neko-ws", "", "development: neko WebSocket URL with a fixed token (loopback only)")
 		nekoURL      = flag.String("neko-url", "", "neko on the loopback interface, e.g. http://127.0.0.1:8080; viewers sign in with --neko-password-file")
@@ -98,6 +100,8 @@ func main() {
 		Generation:     ud.Generation,
 		StateDir:       *stateDir,
 		ProfileDir:     *profileDir,
+		DataDir:        *dataDir,
+		Host:           hostFor(*fakeEgressIP),
 		EchoURLs:       strings.Split(*echo, ","),
 		ExpectedIP:     *expectedIP,
 	}, browser, nk, fw, log)
@@ -163,3 +167,11 @@ func (f fakeBrowser) ObservedIPs(context.Context, []string) ([]string, error) {
 	return []string{f.ip}, nil
 }
 func (f fakeBrowser) InsertText(context.Context, string) error { return nil }
+
+// hostFor is the VM itself, except in local development runs (no data volume to grow).
+func hostFor(fakeEgressIP string) agent.Host {
+	if fakeEgressIP != "" {
+		return nil
+	}
+	return host.Linux{}
+}

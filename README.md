@@ -34,7 +34,7 @@ infra/
 packages/
   contracts/    zod schemas shared by api and web (OpenAPI is generated from them)
   db/           Drizzle schema + D1 migrations (single schema authority)
-  executors/    Executor interface, `aws-ec2` and the `fake` executor (oci-compute later)
+  executors/    Executor interface, `aws-ec2` (the only provider) and the `fake` simulator
   viewer/       Live-view client: neko v3 over the gateway, WebRTC, input, IME, clipboard, stats
   ui/           Design tokens and components
 ```
@@ -63,10 +63,14 @@ also run `pnpm --filter @cloudbrowser/web dev` (Vite on :5173 proxies `/api` to 
 Backups: the daily snapshot runs when the engine's 1-minute cron fires at minute 7 of an hour. Profile archives need real R2 credentials (see
 `docs/deploy-cloudflare.md`); without them they are skipped locally.
 
-Billing: without Creem settings the app runs on the free pilot plan. To try Creem test mode
-locally, put `CREEM_API_BASE=https://test-api.creem.io`, `CREEM_API_KEY`, `CREEM_WEBHOOK_SECRET` and
-the four `CREEM_PRODUCT_*` ids in `apps/api/.dev.vars`, and expose the webhook with
-`cloudflared tunnel --url http://localhost:8787` (webhook URL: `<tunnel>/api/webhooks/creem`).
+Billing: browsers draw per minute from a prepaid balance, at the AWS list price for their region
+(read from the AWS Price List API) times the markup set in the operator console. Locally the
+simulator's price sheet is used. Without Creem settings, or while the `billing_required` flag is
+off, usage is metered and shown but nothing is charged. To try Creem test mode locally, put
+`CREEM_API_BASE=https://test-api.creem.io`, `CREEM_API_KEY`, `CREEM_WEBHOOK_SECRET` and
+`CREEM_TOPUP_PRODUCTS` (one-time product ids, comma-separated) in `apps/api/.dev.vars`, and expose
+the webhook with `cloudflared tunnel --url http://localhost:8787` (webhook URL:
+`<tunnel>/api/webhooks/creem`).
 
 Operator console: [admin.console.nevazu.com](https://admin.console.nevazu.com) uses Cloudflare
 Access email OTP and a separate administrator identity. Local development has no authentication

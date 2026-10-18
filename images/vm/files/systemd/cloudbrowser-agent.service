@@ -18,6 +18,8 @@ ExecStart=/usr/local/bin/cloudbrowser-agent \
   --browser-stop "systemctl stop cloudbrowser-browser"
 Restart=always
 RestartSec=2
+# Under memory pressure the kernel ends a Chrome tab, never the agent that keeps the browser reachable.
+OOMScoreAdjust=-900
 
 [Install]
 WantedBy=multi-user.target

@@ -4,14 +4,14 @@
  * written to `audit_log` with the admin's stable Access subject and email. Internal:
  * not part of the public OpenAPI document.
  */
-import { OPERATION_STEPS, type OperationKind } from '@cloudbrowser/contracts';
-import { schema, type Db } from '@cloudbrowser/db';
+import { OPERATION_STEPS, PricingSettings, UsageItem, costRates, customerRates, type OperationKind } from '@cloudbrowser/contracts';
+import { newId, priceSheets, pricingSettings, schema, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, isNotNull, isNull, like, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import { isAdminEmail } from '../admin/access.js';
 import { acknowledgeAlert } from '../admin/alerts.js';
-import { notifyHub } from '../billing/sync.js';
+import { applyBalance, notifyHub } from '../billing/ledger.js';
 import type { AppEnv } from '../env.js';
 import { systemOperation } from '../ops.js';
 import { problem } from '../problem.js';
@@ -34,7 +34,12 @@ const {
   quotaSnapshots,
   alerts,
   webhookEvents,
-  subscriptions,
+  billingAccounts,
+  balanceTransactions,
+  usageRecords,
+  providerPrices,
+  regions,
+  pricingSettings: pricingSettingsTable,
 } = schema;
 
 export const adminRoute = new Hono<AppEnv>();
@@ -402,16 +407,18 @@ adminRoute.get('/users', async (c) => {
     .from(browserInstances)
     .where(and(inArray(browserInstances.userId, ids), sql`${browserInstances.status} <> 'purged'`))
     .groupBy(browserInstances.userId);
-  const subs = await db.select().from(subscriptions).where(inArray(subscriptions.userId, ids));
+  const accounts = await db.select().from(billingAccounts).where(inArray(billingAccounts.userId, ids));
   return c.json(
     rows.map((r) => {
       const n = counts.find((x) => x.userId === r.id);
-      const s = subs.filter((x) => x.userId === r.id).sort((a, b) => b.syncedAt.getTime() - a.syncedAt.getTime())[0];
+      const a = accounts.find((x) => x.userId === r.id);
       return {
         ...r,
         browsers: Number(n?.n ?? 0),
         suspended: Number(n?.suspended ?? 0),
-        subscription: s ? { plan: s.plan, status: s.status, units: s.units, revoked: !!s.revokedAt } : null,
+        balanceMicros: a?.balanceMicros ?? 0,
+        exhaustedAt: a?.exhaustedAt ?? null,
+        frozenAt: a?.frozenAt ?? null,
         admin: isAdminEmail(c.env, r.email),
       };
     }),
@@ -432,6 +439,129 @@ adminRoute.post('/users/:id/actions', async (c) => {
   c.executionCtx.waitUntil(notifyHub(c.env, id));
   await audit(db, c, `user.${action}`, `user:${id}`, { reason });
   return c.json({ ok: true });
+});
+
+/** Operator credit or debit on a user's balance (goodwill, pilot credit, correction). */
+adminRoute.post('/users/:id/credit', async (c) => {
+  const db = c.get('db');
+  const id = c.req.param('id');
+  const { amountMicros, reason } = await body(
+    c,
+    z.object({ amountMicros: z.number().int().min(-1_000_000_000).max(1_000_000_000).refine((v) => v !== 0, 'must not be 0'), reason: z.string().trim().min(3).max(500) }),
+  );
+  const [u] = await db.select({ id: user.id }).from(user).where(eq(user.id, id));
+  if (!u) throw problem(404, 'not_found');
+  const now = new Date();
+  await applyBalance(db, { userId: id, kind: 'adjustment', amountMicros, reference: `adjustment:${newId(now.getTime())}`, description: reason, actor: actor(c) }, now);
+  await audit(db, c, 'user.credit', `user:${id}`, { amountMicros, reason });
+  c.executionCtx.waitUntil(notifyHub(c.env, id));
+  return c.json({ ok: true });
+});
+
+/** Lifts the hold placed on an account by a payment dispute. */
+adminRoute.post('/users/:id/unfreeze', async (c) => {
+  const db = c.get('db');
+  const id = c.req.param('id');
+  const { reason } = await body(c, z.object({ reason: z.string().trim().min(3).max(500) }));
+  await db.update(billingAccounts).set({ frozenAt: null, frozenReason: null, updatedAt: new Date() }).where(eq(billingAccounts.userId, id));
+  await audit(db, c, 'user.unfreeze', `user:${id}`, { reason });
+  c.executionCtx.waitUntil(notifyHub(c.env, id));
+  return c.json({ ok: true });
+});
+
+// --- pricing and margin (page 6) ---------------------------------------------------------------
+
+/** Prices per region (AWS cost and customer price), the markup settings and this month's margin. */
+adminRoute.get('/pricing', async (c) => {
+  const db = c.get('db');
+  const settings = await pricingSettings(db);
+  const sheets = await priceSheets(db);
+  const stored = await db.select().from(providerPrices);
+  const regionRows = await db.select().from(regions);
+  const now = new Date();
+  const month = now.toISOString().slice(0, 7);
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const usageRows = await db
+    .select({ item: usageRecords.item, amount: sql<number>`sum(${usageRecords.amountMicros})`, cost: sql<number>`sum(${usageRecords.costMicros})` })
+    .from(usageRecords)
+    .where(like(usageRecords.day, `${month}-%`))
+    .groupBy(usageRecords.item);
+  const tx = await db
+    .select({ kind: balanceTransactions.kind, n: sql<number>`count(*)`, amount: sql<number>`sum(${balanceTransactions.amountMicros})` })
+    .from(balanceTransactions)
+    .where(gte(balanceTransactions.createdAt, monthStart))
+    .groupBy(balanceTransactions.kind);
+  const [balances] = await db
+    .select({ total: sql<number>`coalesce(sum(${billingAccounts.balanceMicros}), 0)`, negative: sql<number>`coalesce(sum(min(${billingAccounts.balanceMicros}, 0)), 0)` })
+    .from(billingAccounts);
+  const [spend] = await db.select().from(spendSnapshots).orderBy(desc(spendSnapshots.takenAt)).limit(1);
+  const byItem = Object.fromEntries(
+    UsageItem.options.map((i) => {
+      const r = usageRows.find((x) => x.item === i);
+      return [i, { revenueMicros: Number(r?.amount ?? 0), costMicros: Number(r?.cost ?? 0) }];
+    }),
+  );
+  const revenueMicros = usageRows.reduce((a, r) => a + Number(r.amount ?? 0), 0);
+  const costMicros = usageRows.reduce((a, r) => a + Number(r.cost ?? 0), 0);
+  const topups = tx.find((t) => t.kind === 'topup');
+  const topupMicros = Number(topups?.amount ?? 0);
+  const feesMicros = Math.round((topupMicros * settings.paymentFeeBps) / 10_000) + Number(topups?.n ?? 0) * settings.paymentFeeFixedCents * 10_000;
+  return c.json({
+    settings,
+    regions: regionRows.map((r) => {
+      const s = sheets.get(r.id);
+      const row = stored.find((x) => x.regionId === r.id);
+      return {
+        regionId: r.id,
+        name: r.name,
+        enabled: r.enabled,
+        executor: r.executor,
+        providerRegion: r.providerRegion,
+        sheet: s?.sheet ?? null,
+        fetchedAt: row?.fetchedAt ?? null,
+        lastError: row?.lastError ?? null,
+        lastErrorAt: row?.lastErrorAt ?? null,
+        cost: s ? costRates(s.sheet) : null,
+        price: s ? customerRates(s.sheet, settings.markupPercent) : null,
+      };
+    }),
+    month: {
+      month,
+      revenueMicros,
+      costMicros,
+      grossMarginMicros: revenueMicros - costMicros,
+      byItem,
+      topupMicros,
+      topups: Number(topups?.n ?? 0),
+      refundMicros: -Number(tx.find((t) => t.kind === 'refund')?.amount ?? 0) - Number(tx.find((t) => t.kind === 'dispute')?.amount ?? 0),
+      creditMicros: Number(tx.find((t) => t.kind === 'adjustment')?.amount ?? 0),
+      estimatedFeesMicros: feesMicros,
+      // AWS's own view of the month (ledger + running VMs, by the reconciler): includes what is not
+      // billed to anyone (creating, deleted and failed browsers, old IPs, recover snapshots).
+      projectedAwsCents: spend?.month === month ? spend.projectedCents : null,
+    },
+    balances: { totalMicros: Number(balances?.total ?? 0), negativeMicros: Number(balances?.negative ?? 0) },
+  });
+});
+
+adminRoute.put('/pricing/settings', async (c) => {
+  const db = c.get('db');
+  const { reason, ...next } = await body(c, PricingSettings.extend({ reason: z.string().trim().min(3).max(500) }));
+  const before = await pricingSettings(db);
+  const now = new Date();
+  const values = { ...next, updatedAt: now, updatedBy: c.get('user').email };
+  await db.insert(pricingSettingsTable).values({ id: 1, ...values }).onConflictDoUpdate({ target: pricingSettingsTable.id, set: values });
+  await audit(db, c, 'pricing.settings', 'global', { before, after: next, reason });
+  return c.json({ ok: true });
+});
+
+/** Reads every region's prices from AWS now (the engine otherwise refreshes them every 12 hours). */
+adminRoute.post('/pricing/refresh', async (c) => {
+  const res = await c.env.ENGINE.fetch('https://engine/prices/refresh', { method: 'POST' });
+  if (!res.ok) throw problem(503, 'internal', 'The engine could not refresh prices.');
+  const out = await res.json();
+  await audit(c.get('db'), c, 'pricing.refresh', 'global', { result: out as Record<string, unknown> });
+  return c.json(out);
 });
 
 // --- audit -------------------------------------------------------------------------------------

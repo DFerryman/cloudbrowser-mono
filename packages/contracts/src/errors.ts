@@ -27,6 +27,10 @@ export const ErrorType = z.enum([
   'too_many_browsers',
   'suspended',
   'step_up_required',
+  'insufficient_balance',
+  'price_unavailable',
+  'price_changed',
+  'account_frozen',
   'internal',
 ]);
 export type ErrorType = z.infer<typeof ErrorType>;

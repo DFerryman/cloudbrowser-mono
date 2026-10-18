@@ -6,8 +6,28 @@ import app from '../src/index.js';
 
 export const ORIGIN = 'http://app.test';
 
-export function setup() {
+/** What the fake executor's `prices` reports; the engine stores it per region (seeded here). */
+export const SIMULATED_SHEET = {
+  source: 'simulated',
+  instanceType: 'fake.large',
+  vmHour: 0.1,
+  instanceTypes: { 'fake.large': 0.1 },
+  volumeGbMonth: 0.08,
+  snapshotGbMonth: 0.05,
+  ipHour: 0.005,
+  transferOutGb: 0.09,
+  rootVolumeGb: 16,
+  effectiveDate: null,
+};
+
+export function setup(opts: { prices?: boolean } = {}) {
   const d1 = createTestD1();
+  if (opts.prices !== false) {
+    d1.sqlite.exec(
+      `INSERT INTO provider_prices (region_id, executor, provider_region, sheet, fetched_at)
+       SELECT id, executor, provider_region, '${JSON.stringify(SIMULATED_SHEET)}', ${Date.now()} FROM regions`,
+    );
+  }
   const pending: Promise<unknown>[] = [];
   const ctx = {
     waitUntil: (p: Promise<unknown>) => void pending.push(p),

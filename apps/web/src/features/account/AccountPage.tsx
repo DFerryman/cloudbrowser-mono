@@ -1,22 +1,23 @@
 import { Button, Section, Select } from '@cloudbrowser/ui';
+import { Link } from 'react-router';
 import { PageHeader, signOut } from '../../app/AppShell.js';
 import { api } from '../../lib/api.js';
 import { useI18n, type Locale } from '../../lib/i18n.js';
-import { BillingSection } from '../billing/BillingSection.js';
 import { Passkeys } from './Passkeys.js';
 import { useMe } from '../instances/hooks.js';
 
+/** The account: who you are and how you sign in. Money is on Billing & usage. */
 export function AccountPage() {
   const { t, locale, setLocale } = useI18n();
   const me = useMe();
   return (
-    <div className="max-w-[720px]">
+    <>
       <PageHeader title={t('account.title')} />
-      <div className="space-y-4">
+      <div className="grid gap-4 lg:grid-cols-2">
         <Section title={t('account.profile')}>
           <p className="text-sm">
             <span className="text-muted">{t('account.email')}: </span>
-            {me.data?.user.email ?? '…'}
+            <span className="break-all">{me.data?.user.email ?? '…'}</span>
           </p>
           <div className="mt-4 max-w-xs">
             <label htmlFor="ui-locale" className="mb-1.5 block text-sm font-medium">
@@ -28,8 +29,12 @@ export function AccountPage() {
             </Select>
           </div>
         </Section>
-        <BillingSection />
-        <Section title={t('account.security')} description={t('account.securityBody')}>
+        <Section title={t('account.billingTitle')} description={t('account.billingBody')}>
+          <Link to="/billing">
+            <Button>{t('nav.billing')}</Button>
+          </Link>
+        </Section>
+        <Section title={t('account.security')} description={t('account.securityBody')} className="lg:col-span-2">
           <Passkeys />
           <div className="flex flex-wrap gap-2">
             <Button
@@ -46,6 +51,6 @@ export function AccountPage() {
           </div>
         </Section>
       </div>
-    </div>
+    </>
   );
 }

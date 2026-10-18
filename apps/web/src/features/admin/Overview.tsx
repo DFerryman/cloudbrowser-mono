@@ -74,7 +74,7 @@ export function OverviewPage() {
 
 const SWITCHES = [
   { key: 'creation_freeze', label: 'Freeze new browsers', help: 'Creates are refused. The circuit breaker sets this on its own.' },
-  { key: 'billing_required', label: 'Require a paid plan', help: 'Users without a subscription get no browsers. Off during the invite-only pilot.' },
+  { key: 'billing_required', label: 'Charge usage to prepaid balances', help: 'On: usage is taken from each user’s balance, and creating or waking needs the minimum balance. Off: the free invite-only pilot (usage is still metered).' },
 ] as const;
 
 export function Switches({ flags }: { flags: Overview['flags'] }) {

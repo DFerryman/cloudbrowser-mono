@@ -6,6 +6,7 @@ import { AlertsPage, AuditPage, FindingsPage, LedgerPage, OperationsPage, UsersP
 import { BrowserDetailPage, BrowsersPage } from './Browsers.js';
 import { LimitsPage } from './Limits.js';
 import { OverviewPage } from './Overview.js';
+import { PricingPage } from './Pricing.js';
 import { useAdmin, type AdminSession } from './data.js';
 import { ACCESS_LOGIN_URL, ACCESS_LOGOUT_URL, APP_URL } from './location.js';
 
@@ -53,6 +54,7 @@ const NAV = [
   ['operations', 'Operations'],
   ['browsers', 'Browsers'],
   ['users', 'Users'],
+  ['pricing', 'Pricing & margin'],
   ['ledger', 'Ledger'],
   ['findings', 'Findings'],
   ['limits', 'Limits & switches'],
@@ -98,6 +100,7 @@ function Console({ session }: { session: AdminSession }) {
           <Route path="browsers" element={<BrowsersPage />} />
           <Route path="browsers/:id" element={<BrowserDetailPage />} />
           <Route path="users" element={<UsersPage />} />
+          <Route path="pricing" element={<PricingPage />} />
           <Route path="ledger" element={<LedgerPage />} />
           <Route path="findings" element={<FindingsPage />} />
           <Route path="limits" element={<LimitsPage />} />

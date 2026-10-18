@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { RegionId } from './regions.js';
 import { OperationSummary } from './operations.js';
+import { TrialState } from './billing.js';
 
 /**
  * Engine-owned lifecycle status (page 2, "Instance lifecycle").
@@ -74,14 +75,33 @@ export const Instance = z.object({
   deletedAt: z.string().nullable(),
   purgeAfter: z.string().nullable(),
   currentOperation: OperationSummary.nullable(),
+  /** Size of the data volume in GB (the system disk is extra, see pricing). */
+  storageGb: z.number().int(),
+  /** Daily provider snapshots of the data volume, billed per GB-month. Off by default. */
+  backupsEnabled: z.boolean(),
+  /** Set for the free trial browser: free until converted by adding credit (see TRIAL). */
+  trial: z
+    .object({
+      state: TrialState,
+      secondsLeft: z.number().int(),
+      /** A trial browser is deleted at this time unless the user adds credit first. */
+      reclaimAt: z.string().nullable(),
+    })
+    .nullable(),
 });
 export type Instance = z.infer<typeof Instance>;
+
+/** The price version (`priceVersion` in pricing.ts) the user saw; refused with `price_changed` if stale. */
+export const PriceVersion = z.string().max(200);
 
 export const CreateInstanceBody = z.object({
   name: InstanceName,
   regionId: RegionId,
   locale: BrowserLocale.optional(),
   screen: ScreenSize.optional(),
+  priceVersion: PriceVersion.optional(),
+  /** Use the one free trial (TRIAL): only in its region, once per user. */
+  trial: z.boolean().optional(),
 });
 export type CreateInstanceBody = z.infer<typeof CreateInstanceBody>;
 
@@ -92,6 +112,9 @@ export const UpdateInstanceBody = z
     idleTimeoutS: z.number().int().min(60).max(3600).optional(),
     screen: ScreenSize.optional(),
     locale: BrowserLocale.optional(),
+    /** Turning snapshots on starts a monthly charge; turning them off deletes the snapshots. */
+    backupsEnabled: z.boolean().optional(),
+    priceVersion: PriceVersion.optional(),
   })
   .strict();
 export type UpdateInstanceBody = z.infer<typeof UpdateInstanceBody>;
@@ -100,3 +123,25 @@ export const IpChangeRequestBody = z.object({
   /** Must be true: a new IP is only ever issued on a confirmed user request. */
   confirm: z.literal(true),
 });
+
+/** Grow the data volume (never shrink). AWS allows one change every 6 hours. */
+export const ResizeStorageBody = z.object({
+  sizeGb: z.number().int().min(1).max(16_384),
+  priceVersion: PriceVersion.optional(),
+});
+
+export const InstanceStorage = z.object({
+  sizeGb: z.number().int(),
+  rootVolumeGb: z.number().int(),
+  maxGb: z.number().int(),
+  /** Reported by the browser's agent while it runs; null until the first report. */
+  usedBytes: z.number().int().nullable(),
+  totalBytes: z.number().int().nullable(),
+  reportedAt: z.string().nullable(),
+  resizable: z.boolean(),
+  /** Why it cannot grow now: `state` (not running or sleeping), `cooldown` (6 hours between changes), `agent` (browser created before storage could grow), `max`. */
+  blockedReason: z.enum(['state', 'cooldown', 'agent', 'max', 'busy', 'trial']).nullable(),
+  nextResizeAt: z.string().nullable(),
+  snapshots: z.object({ count: z.number().int(), retentionDays: z.number().int() }),
+});
+export type InstanceStorage = z.infer<typeof InstanceStorage>;

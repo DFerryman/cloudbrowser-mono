@@ -21,6 +21,11 @@ export class FakeEc2 {
   fail: (action: string, p: Record<string, string>) => { code: string; status?: number } | null = () => null;
   subnetAz: Record<string, string> = { 'subnet-a': 'ap-northeast-1a', 'subnet-c': 'ap-northeast-1c' };
   quotas: Record<string, number> = { 'L-0263D0A3': 5, 'L-1216C47A': 16 };
+  /** Volume modifications, newest last; each one reports `modifying` once, then `optimizing`. */
+  modifications: { volume: string; target: number; state: string; describes: number; start: string }[] = [];
+  /** Price List items in the API's format (each one is sent as a JSON string), by service code. */
+  priceList: Record<string, Record<string, unknown>[]> = {};
+  pricingCalls: { ServiceCode: string; Filters: { Field: string; Value: string }[] }[] = [];
   private n = 0;
 
   private id(prefix: string) {
@@ -30,6 +35,15 @@ export class FakeEc2 {
   fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const req = input instanceof Request ? input : new Request(String(input), init);
     if (!req.headers.get('authorization')?.startsWith('AWS4-HMAC-SHA256')) return new Response('unsigned', { status: 403 });
+    if (req.headers.get('x-amz-target') === 'AWSPriceListService.GetProducts') {
+      const body = (await req.json()) as { ServiceCode: string; Filters: { Field: string; Value: string }[] };
+      this.pricingCalls.push(body);
+      const items = (this.priceList[body.ServiceCode] ?? []).filter((item) => {
+        const attrs = (item.product as { attributes: Record<string, string> }).attributes;
+        return body.Filters.every((f) => attrs[f.Field] === f.Value);
+      });
+      return Response.json({ FormatVersion: 'aws_v1', PriceList: items.map((i) => JSON.stringify(i)) });
+    }
     if (req.headers.get('x-amz-target')?.includes('GetServiceQuota')) {
       const body = (await req.json()) as { QuotaCode: string };
       return Response.json({ Quota: { Value: this.quotas[body.QuotaCode] } });
@@ -171,6 +185,22 @@ export class FakeEc2 {
               `<item><volumeId>${v.id}</volumeId><size>${v.size}</size><availabilityZone>${v.az}</availabilityZone><status>${v.status}</status>${v.snapshot ? `<snapshotId>${v.snapshot}</snapshotId>` : ''}<attachmentSet>${v.instance ? `<item><instanceId>${v.instance}</instanceId><device>${v.device}</device><status>attached</status></item>` : ''}</attachmentSet>${tagXml(v.tags)}</item>`,
           )
           .join('')}</volumeSet>`;
+      }
+      case 'ModifyVolume': {
+        const v = this.need(this.volumes, p.VolumeId, 'InvalidVolume.NotFound');
+        if (this.modifications.some((m) => m.volume === v.id && m.state === 'modifying')) throw new Error('IncorrectModificationState|400');
+        v.size = Number(p.Size);
+        this.modifications.push({ volume: v.id, target: v.size, state: 'modifying', describes: 1, start: new Date(Date.now() + this.modifications.length).toISOString() });
+        return `<volumeModification><volumeId>${v.id}</volumeId><modificationState>modifying</modificationState><targetSize>${v.size}</targetSize></volumeModification>`;
+      }
+      case 'DescribeVolumesModifications': {
+        const ids = this.list(p, 'VolumeId');
+        const rows = this.modifications.filter((m) => ids.includes(m.volume));
+        if (!rows.length) throw new Error('InvalidVolumeModification.NotFound|400');
+        for (const m of rows) if (m.state === 'modifying' && m.describes-- <= 0) m.state = 'optimizing';
+        return `<volumeModificationSet>${rows
+          .map((m) => `<item><volumeId>${m.volume}</volumeId><modificationState>${m.state}</modificationState><targetSize>${m.target}</targetSize><startTime>${m.start}</startTime></item>`)
+          .join('')}</volumeModificationSet>`;
       }
       case 'AttachVolume': {
         const v = this.need(this.volumes, p.VolumeId, 'InvalidVolume.NotFound');

@@ -372,7 +372,8 @@ async function fail(
   let instanceStatus: string | null = null;
   if (env) {
     if (op.kind === 'create') instanceStatus = 'failed';
-    else if (op.kind === 'change_ip' || op.kind === 'purge') instanceStatus = null;
+    // A failed resize leaves the browser as it was (the volume keeps its size); it is reported, not shown as a problem.
+    else if (op.kind === 'change_ip' || op.kind === 'purge' || op.kind === 'resize_volume') instanceStatus = null;
     else instanceStatus = 'needs_attention';
   }
   const stmts = [

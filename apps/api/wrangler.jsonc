@@ -21,13 +21,11 @@
     "EMAIL_FROM": "no-reply@auth.nevazu.com",
     // Public URL of the session gateway Worker (apps/gateway), e.g. wss://connect.example.com.
     "GATEWAY_URL": "wss://connect.nevazu.com",
-    // Billing with Creem (page 6). Off until the API base, the four product ids and the secrets
-    // CREEM_API_KEY and CREEM_WEBHOOK_SECRET are all set. Test mode: https://test-api.creem.io
+    // Prepaid top-ups with Creem (page 6). Off until the API base, the top-up product ids and the
+    // secrets CREEM_API_KEY and CREEM_WEBHOOK_SECRET are all set. Test mode: https://test-api.creem.io
     "CREEM_API_BASE": "",
-    "CREEM_PRODUCT_PERSONAL_MONTHLY": "",
-    "CREEM_PRODUCT_PERSONAL_YEARLY": "",
-    "CREEM_PRODUCT_PRO_MONTHLY": "",
-    "CREEM_PRODUCT_PRO_YEARLY": "",
+    // Comma-separated ids of one-time USD products, one per top-up amount (e.g. $10, $25, $50).
+    "CREEM_TOPUP_PRODUCTS": "",
     // Independent operator origin, protected by Cloudflare Access email OTP.
     // Keep the Access policy and server-side email allowlist in sync. No IP restriction.
     "ADMIN_URL": "https://admin.console.nevazu.com",

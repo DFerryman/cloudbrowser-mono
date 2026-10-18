@@ -10,6 +10,7 @@ export const OperationKind = z.enum([
   'delete',
   'undelete',
   'purge',
+  'resize_volume',
 ]);
 export type OperationKind = z.infer<typeof OperationKind>;
 
@@ -52,6 +53,8 @@ export const OPERATION_STEPS = {
   ],
   // From a provider snapshot (swapped in while asleep) or an archive (unpacked by the agent while running).
   restore: ['restore_volume', 'swap_volume', 'restore_archive', 'finish'],
+  // Grows the data volume online (ModifyVolume), then the file system: by the agent while running, at the next boot otherwise.
+  resize_volume: ['resize_volume', 'grow_filesystem', 'finish'],
 } as const satisfies Record<OperationKind, readonly string[]>;
 
 export type OperationStep<K extends OperationKind = OperationKind> = (typeof OPERATION_STEPS)[K][number];

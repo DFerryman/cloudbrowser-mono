@@ -74,9 +74,7 @@ export function createExecutor(kind: ExecutorKind, mode: CredentialMode, env: Ex
         browserImage: env.BROWSER_IMAGE || DEFAULT_BROWSER_IMAGE,
       });
     }
-    case 'oci-compute':
-    case 'fly-machines':
-      // Built in Phase 1, after the provider trial (page 8).
-      throw new ExecutorError('invalid', `executor ${kind} is not implemented yet`);
+    default:
+      throw new ExecutorError('invalid', `unknown executor ${String(kind)}`);
   }
 }

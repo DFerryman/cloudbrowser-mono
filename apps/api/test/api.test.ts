@@ -163,6 +163,13 @@ describe('browsers', () => {
     await t.settle();
     const id = created.body.instanceId;
     expect((await t.call('GET', `/api/v1/instances/${id}/backups`)).body).toEqual([]);
+    expect((await t.call('GET', `/api/v1/instances/${id}`)).body.backupsEnabled).toBe(false);
+
+    // Snapshots are billed: turning them on needs the price the user was shown.
+    const prices = (await t.call('GET', '/api/v1/pricing')).body as { regionId: string; version: string }[];
+    const version = prices.find((p) => p.regionId === 'tyo1')!.version;
+    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { backupsEnabled: true, priceVersion: 'stale' })).body.type).toBe('price_changed');
+    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { backupsEnabled: true, priceVersion: version })).body.backupsEnabled).toBe(true);
 
     // The engine's daily snapshot runs at minute 7 of its 1-minute cron.
     await engine.scheduled!({ scheduledTime: Date.UTC(2026, 9, 1, 3, 7), cron: '* * * * *', noRetry() {} } as never, t.engineEnv as never, t.ctx);

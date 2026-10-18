@@ -15,10 +15,15 @@ export const queryClient = new QueryClient({
 export const keys = {
   me: ['me'] as const,
   billing: ['billing'] as const,
+  pricing: ['pricing'] as const,
+  transactions: ['billing', 'transactions'] as const,
+  usage: (month: string) => ['billing', 'usage', month] as const,
   regions: ['regions'] as const,
   instances: ['instances'] as const,
   instance: (id: string) => ['instance', id] as const,
   sessions: (id: string) => ['instance', id, 'sessions'] as const,
   backups: (id: string) => ['instance', id, 'backups'] as const,
+  storage: (id: string) => ['instance', id, 'storage'] as const,
+  instanceUsage: (id: string, month: string) => ['instance', id, 'usage', month] as const,
   operation: (id: string) => ['operation', id] as const,
 };

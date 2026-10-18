@@ -1,116 +1,27 @@
-import { IDLE_TIMEOUT_OPTIONS_S, SCREEN_SIZES, type Backup, type BrowserLocale, type Instance } from '@cloudbrowser/contracts';
-import { Button, Dialog, Input, Label, RegionIpChip, Section, Select, Skeleton, StatusBadge, useToast } from '@cloudbrowser/ui';
-import { ShieldCheck, ShieldAlert } from 'lucide-react';
+import { HOURS_PER_MONTH, IDLE_TIMEOUT_OPTIONS_S, SCREEN_SIZES, type BrowserLocale, type Instance } from '@cloudbrowser/contracts';
+import { Button, Dialog, Input, Label, Section, Select, useToast } from '@cloudbrowser/ui';
+import { ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
-import { Link, useNavigate, useParams } from 'react-router';
-import { PageHeader } from '../../app/AppShell.js';
+import { useNavigate } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
-import { useBackups, useInstance, useLifecycle, useMe, useRecentSessions, useRestoreBackup, useUpdateInstance, useVerifyIp } from './hooks.js';
-import { regionInfo, STATUS_TONE, statusKey } from './status.js';
+import { money } from '../../lib/money.js';
+import { usePricing } from '../billing/hooks.js';
+import { useManagedInstance } from './BrowserLayout.js';
+import { useLifecycle, useMe, useRecentSessions, useUpdateInstance, useVerifyIp } from './hooks.js';
+import { regionInfo } from './status.js';
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="grid gap-1 border-b border-border py-2.5 last:border-0 sm:grid-cols-[180px_1fr] sm:gap-4">
+    <div className="grid gap-1 border-b border-border py-2.5 last:border-0 sm:grid-cols-[160px_1fr] sm:gap-4">
       <dt className="text-sm text-muted">{label}</dt>
       <dd className="min-w-0 text-sm">{children}</dd>
     </div>
   );
 }
 
-/** One column, sections in order of importance (page 1, "Screen: browser settings"). */
+/** The Settings tab: identity and IP, behavior, activity and deletion (page 1, "Screen: browser settings"). */
 export function SettingsPage() {
-  const { id = '' } = useParams();
-  const { t } = useI18n();
-  const instance = useInstance(id);
-  if (instance.isPending) return <Skeleton className="h-96 max-w-[720px]" />;
-  if (instance.isError) return <p className="text-sm text-error">{t('error.not_found')}</p>;
-  return <Settings instance={instance.data} />;
-}
-
-function size(bytes: number | null) {
-  if (bytes == null) return '';
-  if (bytes < 1 << 20) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  if (bytes < 1 << 30) return `${(bytes / (1 << 20)).toFixed(1)} MB`;
-  return `${(bytes / (1 << 30)).toFixed(1)} GB`;
-}
-
-/** Snapshots restore while the browser sleeps, archives while it runs (page 4). */
-function Backups({ instance: i, fmt }: { instance: Instance; fmt: (iso: string | null) => string }) {
-  const { t, errorMessage } = useI18n();
-  const toast = useToast();
-  const backups = useBackups(i.id);
-  const restore = useRestoreBackup();
-  const [pick, setPick] = useState<Backup | null>(null);
-  const list = (backups.data ?? []).filter((b) => b.status !== 'pending');
-
-  return (
-    <div className="mt-4">
-      <h3 className="mb-1 text-sm font-medium">{t('backups.title')}</h3>
-      {backups.isPending ? (
-        <Skeleton className="h-16" />
-      ) : list.length ? (
-        <ul className="divide-y divide-border text-sm">
-          {list.map((b) => (
-            <li key={b.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
-              <span className="min-w-0">
-                {fmt(b.createdAt)} · {t(`backups.kind.${b.kind}`)}
-                <span className="text-muted">
-                  {' '}
-                  · {t(`backups.reason.${b.reason}`)}
-                  {b.sizeBytes ? ` · ${size(b.sizeBytes)}` : ''}
-                </span>
-                {b.status === 'failed' ? <span className="text-error"> · {t('backups.failed')}</span> : null}
-              </span>
-              {b.status === 'complete' ? (
-                <Button
-                  disabled={i.status !== b.restorableWhen || restore.isPending}
-                  title={i.status !== b.restorableWhen ? t(`backups.when.${b.restorableWhen}`) : undefined}
-                  onClick={() => setPick(b)}
-                >
-                  {t('backups.restore')}
-                </Button>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="text-sm text-muted">{t('backups.none')}</p>
-      )}
-      <Dialog
-        open={pick !== null}
-        onOpenChange={(o) => !o && setPick(null)}
-        title={t('backups.confirmTitle')}
-        description={pick ? t('backups.confirmBody', { time: fmt(pick.createdAt) }) : ''}
-        closeLabel={t('common.cancel')}
-      >
-        <div className="flex justify-end gap-2">
-          <Button onClick={() => setPick(null)}>{t('common.cancel')}</Button>
-          <Button
-            variant="danger"
-            disabled={restore.isPending}
-            onClick={() =>
-              pick &&
-              restore.mutate(
-                { id: i.id, backupId: pick.id },
-                {
-                  onSuccess: () => {
-                    setPick(null);
-                    toast(t('backups.started'));
-                  },
-                  onError: (e) => toast(errorMessage(e), 'error'),
-                },
-              )
-            }
-          >
-            {t('backups.restore')}
-          </Button>
-        </div>
-      </Dialog>
-    </div>
-  );
-}
-
-function Settings({ instance: i }: { instance: Instance }) {
+  const i = useManagedInstance();
   const { t, locale, errorMessage } = useI18n();
   const toast = useToast();
   const navigate = useNavigate();
@@ -119,6 +30,7 @@ function Settings({ instance: i }: { instance: Instance }) {
   const lifecycle = useLifecycle();
   const update = useUpdateInstance();
   const sessions = useRecentSessions(i.id);
+  const pricing = usePricing();
   const region = regionInfo(i.regionId);
   const [name, setName] = useState(i.name);
   const [confirmIp, setConfirmIp] = useState(false);
@@ -129,73 +41,60 @@ function Settings({ instance: i }: { instance: Instance }) {
   const save = (patch: Parameters<typeof update.mutate>[0]['patch']) =>
     update.mutate({ id: i.id, patch }, { onSuccess: () => toast(t('settings.saved')), onError: (e) => toast(errorMessage(e), 'error') });
   const maxIdle = me.data?.entitlements.idleTimeoutMaxS ?? 1800;
+  // A free trial browser keeps its IP until the user adds credit (page 6).
+  const onTrial = i.trial !== null && i.trial.state !== 'converted';
   const check = i.lastIpCheck;
+  const ipRate = pricing.data?.find((p) => p.regionId === i.regionId)?.rates?.ip;
 
   return (
-    <div className="max-w-[720px]">
-      <PageHeader
-        title={t('settings.title', { name: i.name })}
-        action={
-          <Button variant="primary" onClick={() => navigate(`/b/${i.id}`)} disabled={i.status === 'deleting' || i.status === 'failed'}>
-            {i.status === 'sleeping' ? t('browsers.wakeOpen') : t('browsers.open')}
-          </Button>
-        }
-      />
-      <div className="space-y-4">
-        <Section title={t('settings.identity')}>
-          <dl>
-            <Row label={t('settings.region')}>
-              {t(`create.region.${i.regionId}`)} <span className="text-muted">· {t('settings.regionPermanent')}</span>
-            </Row>
-            <Row label={t('settings.ip')}>
-              <RegionIpChip
-                country={region.country}
-                city={region.city}
-                ip={i.ipAddress}
-                dedicatedLabel={t('browsers.dedicated')}
-                copyLabel={t('browsers.copyIp')}
-                pendingLabel={t('browsers.reservingIp')}
-              />
-            </Row>
-            <Row label={t('settings.location')}>
-              {{ AU: 'Australia', JP: 'Japan', US: 'United States' }[region.country]} · {region.city}
-            </Row>
-            <Row label={t('settings.dedicatedSince')}>{fmt(i.dedicatedSince)}</Row>
-            <Row label={t('settings.timezone')}>{region.timezone}</Row>
-            <Row label={t('settings.lastCheck')}>
-              {check ? (
-                <span className="inline-flex items-start gap-1.5">
-                  {check.ok ? <ShieldCheck className="mt-0.5 size-4 shrink-0 text-running" /> : <ShieldAlert className="mt-0.5 size-4 shrink-0 text-error" />}
-                  <span>
-                    {check.ok
-                      ? t('settings.checkOk', { time: fmt(check.checkedAt), ip: check.observed.join(', ') })
-                      : t('settings.checkFailed', { time: fmt(check.checkedAt), observed: check.observed.join(', ') || '—' })}
-                  </span>
+    <div className="grid gap-4 lg:grid-cols-2">
+      <Section title={t('settings.identity')}>
+        <dl>
+          <Row label={t('settings.region')}>
+            {t(`create.region.${i.regionId}`)} <span className="text-muted">· {t('settings.regionPermanent')}</span>
+          </Row>
+          <Row label={t('settings.ip')}>
+            <span className="font-mono">{i.ipAddress ?? t('browsers.reservingIp')}</span>
+          </Row>
+          <Row label={t('settings.location')}>
+            {{ AU: 'Australia', JP: 'Japan', US: 'United States' }[region.country]} · {region.city}
+          </Row>
+          <Row label={t('settings.dedicatedSince')}>{fmt(i.dedicatedSince)}</Row>
+          <Row label={t('settings.timezone')}>{region.timezone}</Row>
+          <Row label={t('settings.lastCheck')}>
+            {check ? (
+              <span className="inline-flex items-start gap-1.5">
+                {check.ok ? <ShieldCheck className="mt-0.5 size-4 shrink-0 text-running" /> : <ShieldAlert className="mt-0.5 size-4 shrink-0 text-error" />}
+                <span>
+                  {check.ok
+                    ? t('settings.checkOk', { time: fmt(check.checkedAt), ip: check.observed.join(', ') })
+                    : t('settings.checkFailed', { time: fmt(check.checkedAt), observed: check.observed.join(', ') || '—' })}
                 </span>
-              ) : (
-                <span className="text-muted">{t('settings.noCheck')}</span>
-              )}
-            </Row>
-          </dl>
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <Button
-              disabled={verify.isPending || (i.status !== 'running' && i.status !== 'needs_attention')}
-              onClick={() => verify.mutate(i.id, { onError: (e) => toast(errorMessage(e), 'error') })}
-            >
-              {t('settings.verify')}
-            </Button>
-            <Button disabled={!['running', 'sleeping'].includes(i.status)} onClick={() => setConfirmIp(true)}>
-              {t('settings.requestIp')}
-            </Button>
-            {i.status !== 'running' ? <span className="text-xs text-muted">{t('settings.verifyRunningOnly')}</span> : null}
-          </div>
-        </Section>
+              </span>
+            ) : (
+              <span className="text-muted">{t('settings.noCheck')}</span>
+            )}
+          </Row>
+        </dl>
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <Button
+            disabled={verify.isPending || (i.status !== 'running' && i.status !== 'needs_attention')}
+            onClick={() => verify.mutate(i.id, { onError: (e) => toast(errorMessage(e), 'error') })}
+          >
+            {t('settings.verify')}
+          </Button>
+          <Button disabled={!['running', 'sleeping'].includes(i.status) || onTrial} onClick={() => setConfirmIp(true)}>
+            {t('settings.requestIp')}
+          </Button>
+          {onTrial ? (
+            <span className="text-xs text-muted">{t('settings.ipTrial')}</span>
+          ) : i.status !== 'running' ? (
+            <span className="text-xs text-muted">{t('settings.verifyRunningOnly')}</span>
+          ) : null}
+        </div>
+      </Section>
 
-        <Section title={t('settings.persistence')} description={t('settings.persistenceBody')}>
-          <StatusBadge tone={STATUS_TONE[i.status]} label={t(statusKey(i.status))} />
-          <Backups instance={i} fmt={fmt} />
-        </Section>
-
+      <div className="space-y-4">
         <Section title={t('settings.behavior')}>
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="sm:col-span-2">
@@ -241,7 +140,7 @@ function Settings({ instance: i }: { instance: Instance }) {
         <Section title={t('settings.activity')}>
           {sessions.data?.length ? (
             <ul className="divide-y divide-border text-sm">
-              {sessions.data.map((s) => (
+              {sessions.data.slice(0, 8).map((s) => (
                 <li key={s.id} className="flex flex-wrap justify-between gap-2 py-2">
                   <span>{fmt(s.startedAt)}</span>
                   <span className="text-muted">
@@ -255,34 +154,30 @@ function Settings({ instance: i }: { instance: Instance }) {
             <p className="text-sm text-muted">{t('settings.noActivity')}</p>
           )}
         </Section>
-
-        <Section title={t('settings.danger')} description={t('settings.deleteBody')} className="border-error/40">
-          <Label htmlFor="confirm-delete">{t('settings.deleteType', { name: i.name })}</Label>
-          <div className="flex gap-2">
-            <Input id="confirm-delete" value={deleteText} onChange={(e) => setDeleteText(e.target.value)} autoComplete="off" />
-            <Button
-              variant="danger"
-              disabled={deleteText !== i.name || lifecycle.isPending || i.status === 'deleting'}
-              onClick={() =>
-                lifecycle.mutate(
-                  { id: i.id, action: 'delete' },
-                  { onSuccess: () => navigate('/browsers'), onError: (e) => toast(errorMessage(e), 'error') },
-                )
-              }
-            >
-              {t('settings.delete')}
-            </Button>
-          </div>
-        </Section>
-
-        <p className="text-sm">
-          <Link to="/browsers" className="text-accent hover:underline">
-            ← {t('session.back')}
-          </Link>
-        </p>
       </div>
 
+      <Section title={t('settings.danger')} description={t('settings.deleteBody')} className="border-error/40 lg:col-span-2">
+        <Label htmlFor="confirm-delete">{t('settings.deleteType', { name: i.name })}</Label>
+        <div className="flex max-w-xl gap-2">
+          <Input id="confirm-delete" value={deleteText} onChange={(e) => setDeleteText(e.target.value)} autoComplete="off" />
+          <Button
+            variant="danger"
+            disabled={deleteText !== i.name || lifecycle.isPending || i.status === 'deleting'}
+            onClick={() =>
+              lifecycle.mutate({ id: i.id, action: 'delete' }, { onSuccess: () => navigate('/browsers'), onError: (e) => toast(errorMessage(e), 'error') })
+            }
+          >
+            {t('settings.delete')}
+          </Button>
+        </div>
+      </Section>
+
       <Dialog open={confirmIp} onOpenChange={setConfirmIp} title={t('settings.requestIpTitle')} description={t('settings.requestIpBody')} closeLabel={t('common.cancel')}>
+        {ipRate !== undefined ? (
+          <p className="mb-4 rounded-[var(--radius-control)] bg-surface-2 px-3 py-2 text-sm">
+            {t('settings.requestIpCost', { amount: money(ipRate * HOURS_PER_MONTH, locale) })}
+          </p>
+        ) : null}
         <div className="flex justify-end gap-2">
           <Button onClick={() => setConfirmIp(false)}>{t('common.cancel')}</Button>
           <Button

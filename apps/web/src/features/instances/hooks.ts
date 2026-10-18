@@ -1,4 +1,4 @@
-import type { Accepted, Backup, Instance, IpCheck, Me, Region } from '@cloudbrowser/contracts';
+import type { Accepted, Backup, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, Region } from '@cloudbrowser/contracts';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api.js';
 import { keys, queryClient } from '../../lib/query.js';
@@ -16,9 +16,17 @@ export const useRecentSessions = (id: string) =>
 export const useBackups = (id: string) =>
   useQuery({ queryKey: keys.backups(id), queryFn: () => api<Backup[]>('GET', `/instances/${id}/backups`) });
 
+export const useStorage = (id: string) =>
+  useQuery({ queryKey: keys.storage(id), queryFn: () => api<InstanceStorage>('GET', `/instances/${id}/storage`), refetchInterval: 30_000 });
+
+export const useInstanceUsage = (id: string, month: string) =>
+  useQuery({ queryKey: keys.instanceUsage(id, month), queryFn: () => api<InstanceUsage>('GET', `/instances/${id}/usage?month=${month}`), refetchInterval: 60_000 });
+
 const refresh = (instanceId?: string) => {
   void queryClient.invalidateQueries({ queryKey: keys.instances });
   void queryClient.invalidateQueries({ queryKey: keys.me });
+  void queryClient.invalidateQueries({ queryKey: keys.billing });
+  // keys.instance(id) is the prefix of the browser's storage, backups and usage queries too.
   if (instanceId) void queryClient.invalidateQueries({ queryKey: keys.instance(instanceId) });
 };
 
@@ -39,7 +47,7 @@ export function useLifecycle() {
 
 export function useCreateInstance() {
   return useMutation({
-    mutationFn: (body: { name: string; regionId: Instance['regionId']; locale?: Instance['locale']; screen?: Instance['screen'] }) =>
+    mutationFn: (body: { name: string; regionId: Instance['regionId']; locale?: Instance['locale']; screen?: Instance['screen']; priceVersion?: string }) =>
       api<Accepted>('POST', '/instances', { idempotent: true, body }),
     onSettled: () => refresh(),
   });
@@ -48,12 +56,13 @@ export function useCreateInstance() {
 /** Rename and settings edits are reversible, so they update the cache optimistically. */
 export function useUpdateInstance() {
   return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: Partial<Pick<Instance, 'name' | 'idleTimeoutS' | 'screen' | 'locale'>> }) =>
+    mutationFn: ({ id, patch }: { id: string; patch: Partial<Pick<Instance, 'name' | 'idleTimeoutS' | 'screen' | 'locale' | 'backupsEnabled'>> & { priceVersion?: string } }) =>
       api<Instance>('PATCH', `/instances/${id}`, { body: patch }),
     onMutate: async ({ id, patch }) => {
       await queryClient.cancelQueries({ queryKey: keys.instances });
       const prev = queryClient.getQueryData<Instance[]>(keys.instances);
-      queryClient.setQueryData<Instance[]>(keys.instances, (list) => list?.map((i) => (i.id === id ? { ...i, ...patch } : i)));
+      const { priceVersion: _shown, ...fields } = patch;
+      queryClient.setQueryData<Instance[]>(keys.instances, (list) => list?.map((i) => (i.id === id ? { ...i, ...fields } : i)));
       return { prev };
     },
     onError: (_e, _v, ctx) => ctx?.prev && queryClient.setQueryData(keys.instances, ctx.prev),
@@ -73,6 +82,15 @@ export function useRestoreBackup() {
   return useMutation({
     mutationFn: ({ id, backupId }: { id: string; backupId: string }) =>
       api<Accepted>('POST', `/instances/${id}/backups/${backupId}/restore`, { idempotent: true }),
+    onSettled: (_d, _e, v) => refresh(v.id),
+  });
+}
+
+/** Grows the data volume; the price version is the one the user confirmed. */
+export function useResizeStorage() {
+  return useMutation({
+    mutationFn: ({ id, sizeGb, priceVersion }: { id: string; sizeGb: number; priceVersion: string | null }) =>
+      api<Accepted>('POST', `/instances/${id}/storage`, { idempotent: true, body: { sizeGb, ...(priceVersion ? { priceVersion } : {}) } }),
     onSettled: (_d, _e, v) => refresh(v.id),
   });
 }

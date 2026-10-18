@@ -14,6 +14,7 @@ export function useLiveEvents(enabled: boolean) {
       void queryClient.invalidateQueries({ queryKey: keys.instances });
       if (instanceId) void queryClient.invalidateQueries({ queryKey: keys.instance(instanceId) });
       void queryClient.invalidateQueries({ queryKey: keys.me });
+      void queryClient.invalidateQueries({ queryKey: keys.billing });
     };
     const onOperation = (e: MessageEvent) => {
       const { operationId, instanceId } = JSON.parse(e.data) as { operationId?: string; instanceId?: string };

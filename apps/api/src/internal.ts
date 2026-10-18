@@ -92,15 +92,25 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
           agentReadyAt: now,
           lastHeartbeatAt: now,
           chromeMajor: Math.max(h?.chromeMajor ?? 0, chromeMajor ?? 0) || null,
+          // Agents before 0.2.0 do not send their version (and cannot grow storage).
+          agentVersion: typeof d.agentVersion === 'string' ? d.agentVersion.slice(0, 32) : null,
         };
         await db.insert(instanceHealth).values({ instanceId, ...set }).onConflictDoUpdate({ target: instanceHealth.instanceId, set });
         await kickOperation(env, db, instanceId);
       } else if (frame.kind === 'heartbeat') {
         const lastInputAt = typeof d.lastInputAt === 'string' && !Number.isNaN(Date.parse(d.lastInputAt)) ? new Date(d.lastInputAt) : null;
+        const count = (v: unknown) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null);
+        const disk = d.disk && typeof d.disk === 'object' ? (d.disk as Record<string, unknown>) : null;
+        const used = count(disk?.usedBytes);
+        const total = count(disk?.totalBytes);
+        const tx = count(d.netTxBytes);
         const set = {
           lastHeartbeatAt: now,
           viewers: typeof d.viewers === 'number' ? d.viewers : 0,
           ...(lastInputAt ? { lastInputAt } : {}),
+          // Storage page (used / total) and data-transfer metering (page 6).
+          ...(used !== null && total !== null ? { diskUsedBytes: used, diskTotalBytes: total, diskReportedAt: now } : {}),
+          ...(tx !== null ? { netTxBytes: tx } : {}),
         };
         await db.insert(instanceHealth).values({ instanceId, ...set }).onConflictDoUpdate({ target: instanceHealth.instanceId, set });
       } else if (frame.kind === 'ip_check') {

@@ -116,8 +116,19 @@ const ARCHIVE_KEEP_LAST = 10;
 const ARCHIVE_DAILY_DAYS = 14;
 
 /** Which of one instance's complete backups are past retention. Pure, so it is unit-tested. */
-export function expiredBackups(list: { id: string; kind: string; createdAt: Date }[], now: Date, snapshotDays = SNAPSHOT_KEEP_DAYS): string[] {
+export function expiredBackups(
+  list: { id: string; kind: string; reason?: string; createdAt: Date }[],
+  now: Date,
+  snapshotDays = SNAPSHOT_KEEP_DAYS,
+  snapshotsEnabled = true,
+): string[] {
   const out: string[] = [];
+  if (!snapshotsEnabled) {
+    // Snapshots were turned off: every daily or manual one goes, so they stop being billed.
+    // Snapshots taken by `recover` are ours and follow the normal rule.
+    out.push(...list.filter((b) => b.kind === 'snapshot' && b.reason !== 'recover').map((b) => b.id));
+    list = list.filter((b) => !out.includes(b.id));
+  }
   const byNewest = [...list].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   const snaps = byNewest.filter((b) => b.kind === 'snapshot');
   for (const s of snaps.slice(1)) {
@@ -147,10 +158,13 @@ async function expireBackups(deps: EngineDeps, env: (kind: ExecutorKind) => Para
   for (const b of all) byInstance.set(b.instanceId, [...(byInstance.get(b.instanceId) ?? []), b]);
   let expired = 0;
   for (const [instanceId, list] of byInstance) {
-    // Snapshot retention follows the owner's plan: 7 days, 14 on Pro (page 6).
-    const [owner] = await db.select({ userId: browserInstances.userId }).from(browserInstances).where(eq(browserInstances.id, instanceId));
+    // Retention: the `snapshot_retention_days` cap (7 days by default). Turning snapshots off deletes them.
+    const [owner] = await db
+      .select({ userId: browserInstances.userId, backupsEnabled: browserInstances.backupsEnabled })
+      .from(browserInstances)
+      .where(eq(browserInstances.id, instanceId));
     const days = owner ? ((await userCaps(db, owner.userId)).get('snapshot_retention_days') ?? SNAPSHOT_KEEP_DAYS) : SNAPSHOT_KEEP_DAYS;
-    for (const id of expiredBackups(list, now, days)) {
+    for (const id of expiredBackups(list, now, days, owner?.backupsEnabled ?? true)) {
       const b = list.find((x) => x.id === id)!;
       if (b.kind === 'snapshot') {
         const [r] = await db.select().from(resources).where(and(eq(resources.instanceId, instanceId), eq(resources.providerId, b.location ?? '')));

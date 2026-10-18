@@ -10,7 +10,8 @@ import type { OperationMessage } from '@cloudbrowser/db';
 import { makeDeps, type Env } from './deps.js';
 import { reaperTick } from './reaper.js';
 import { runOperation } from './runner.js';
-import { meterAndEnforce } from './entitlements.js';
+import { meterUsage, reclaimTrials } from './metering.js';
+import { refreshPrices } from './prices.js';
 import { checkInstanceIp, dailySnapshots, idleStops, periodicIpChecks, runPending } from './scheduler.js';
 
 export type { Env } from './deps.js';
@@ -18,7 +19,8 @@ export { EventHub } from './event-hub.js';
 export { runOperation } from './runner.js';
 export { reaperTick } from './reaper.js';
 export { runPending, idleStops, checkInstanceIp, dailySnapshots } from './scheduler.js';
-export { meterAndEnforce } from './entitlements.js';
+export { meterUsage, reclaimTrials } from './metering.js';
+export { refreshPrices } from './prices.js';
 export type { EngineDeps } from './context.js';
 
 /** Queues accept delays up to 12 hours; longer waits are picked up by the cron sweep. */
@@ -28,7 +30,7 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 export default {
-  /** Service binding from the api: synchronous IP checks only. */
+  /** Service binding from the api: synchronous IP checks, and a price refresh from the operator console. */
   async fetch(req, env, ctx) {
     const deps = makeDeps(env, (p) => ctx.waitUntil(p));
     const url = new URL(req.url);
@@ -38,6 +40,7 @@ export default {
       const result = await checkInstanceIp(deps, ipCheck[1]!);
       return result ? json(result) : json({ error: 'not running' }, 409);
     }
+    if (req.method === 'POST' && url.pathname === '/prices/refresh') return json(await refreshPrices(deps, { force: true }));
     return json({ error: 'not found' }, 404);
   },
 
@@ -68,10 +71,13 @@ export default {
       return;
     }
     await idleStops(deps);
-    await meterAndEnforce(deps);
+    await meterUsage(deps);
+    await reclaimTrials(deps);
     await runPending(deps);
     const minute = new Date(controller.scheduledTime).getUTCMinutes();
     if (minute % 5 === 0) await periodicIpChecks(deps);
     if (minute === 7) await dailySnapshots(deps);
+    // Cheap when prices are fresh: only stale regions (older than 12 hours) are read from the provider.
+    await refreshPrices(deps).catch((e) => console.error('price refresh failed', e));
   },
 } satisfies ExportedHandler<Env, OperationMessage>;

@@ -1,106 +1,117 @@
 import { z } from 'zod';
+import { RegionId } from './regions.js';
+import { UsageItem } from './pricing.js';
 
 /**
- * Plans (page 6). 1 billing unit = 1 browser = 1 dedicated IP. Personal is a fixed-price product;
- * Pro is seat-based (units = browsers, minimum 2). Prices live in Creem; these are the entitlements.
+ * Prepaid, usage-based billing (page 6). Users top up a balance through Creem (one-time payments of
+ * the top-up products configured in Creem); browsers draw from it per minute at the prices in
+ * `pricing.ts`. When the balance runs out, running browsers sleep 10 minutes later; a sleeping
+ * browser's IP and storage keep being charged (the balance can go below zero) for up to 30 days,
+ * then the browsers are deleted. Topping up clears the debt and lets them wake again.
+ *
+ * `pilot`: the invite-only pilot (control flag `billing_required` off). Usage is metered and shown
+ * at the real prices, but nothing is taken from a balance.
  */
-export const PlanKey = z.enum(['personal_monthly', 'personal_yearly', 'pro_monthly', 'pro_yearly']);
-export type PlanKey = z.infer<typeof PlanKey>;
+export const BillingMode = z.enum(['pilot', 'prepaid']);
+export type BillingMode = z.infer<typeof BillingMode>;
 
-export type PlanFamily = 'personal' | 'pro';
-export const planFamily = (p: PlanKey): PlanFamily => (p.startsWith('pro') ? 'pro' : 'personal');
-
-export const PRO_MIN_BROWSERS = 2;
-export const PRO_MAX_BROWSERS = 50;
-
-/** Working prices in USD cents (page 6); the charged amount is whatever the Creem product says. */
-export const PLAN_PRICES: Record<PlanKey, { cents: number; per: 'month' | 'year'; perBrowser: boolean }> = {
-  personal_monthly: { cents: 2900, per: 'month', perBrowser: false },
-  personal_yearly: { cents: 29000, per: 'year', perBrowser: false },
-  pro_monthly: { cents: 2500, per: 'month', perBrowser: true },
-  pro_yearly: { cents: 25000, per: 'year', perBrowser: true },
-};
-
-export interface PlanLimits {
-  maxBrowsers: number;
-  maxRunning: number;
-  hoursPerMonth: number;
-  idleTimeoutMaxS: number;
-  storageGb: number;
-  fpsMax: number;
-  snapshotRetentionDays: number;
-  ipChangesPerMonth: number;
-}
-
-/** Pure: what a plan with `browsers` units allows. Unit-tested for every plan. */
-export function planLimits(plan: PlanKey, browsers = 1): PlanLimits {
-  if (planFamily(plan) === 'personal') {
-    return { maxBrowsers: 1, maxRunning: 1, hoursPerMonth: 60, idleTimeoutMaxS: 1800, storageGb: 20, fpsMax: 30, snapshotRetentionDays: 7, ipChangesPerMonth: 1 };
-  }
-  const n = Math.min(PRO_MAX_BROWSERS, Math.max(PRO_MIN_BROWSERS, Math.floor(browsers)));
-  return { maxBrowsers: n, maxRunning: n, hoursPerMonth: 60 * n, idleTimeoutMaxS: 3600, storageGb: 30, fpsMax: 60, snapshotRetentionDays: 14, ipChangesPerMonth: n };
-}
+/** Running browsers sleep this long after the balance runs out (the session view warns). */
+export const BALANCE_GRACE_MS = 10 * 60_000;
+/** After the balance ran out, browsers are kept this long, then deleted. */
+export const DATA_KEPT_DAYS = 30;
 
 /**
- * Creem subscription statuses as mirrored. Unknown values are kept as-is and grant nothing.
- * `scheduled_cancel` and `canceled` keep access until the period ends; `past_due`/`unpaid` get a
- * 7-day grace period.
+ * The free trial (page 6): each user may create one browser for free, once. It runs in one region
+ * on the smallest practical setup (a 2 GB data volume, no snapshots, 5-minute auto-sleep) and for
+ * 10 minutes of running time in all; then it sleeps. A trial browser is kept 7 days after it last
+ * went to sleep, then deleted and purged (its IP released). Adding credit before that turns it
+ * into a normal browser with the same data and IP, charged like any other from then on: running
+ * time, plus its dedicated IP and storage for as long as it exists (AWS bills both even while the
+ * VM is stopped). The trial itself is never charged.
  */
-export type SubscriptionStatus = 'active' | 'trialing' | 'past_due' | 'unpaid' | 'scheduled_cancel' | 'canceled' | 'paused' | 'expired' | string;
+export const TRIAL = {
+  regionId: 'syd1',
+  runningSeconds: 10 * 60,
+  storageGb: 2,
+  idleTimeoutS: 300,
+  keptDays: 7,
+} as const;
 
-export const GRACE_DAYS = 7;
+export const TrialState = z.enum(['active', 'ended', 'converted']);
+export type TrialState = z.infer<typeof TrialState>;
 
-export type Access = 'active' | 'ending' | 'grace' | 'none';
-
-/** Pure: whether a subscription grants access now. */
-export function subscriptionAccess(
-  sub: { status: SubscriptionStatus; currentPeriodEnd: Date | null; pastDueSince: Date | null },
-  now: Date,
-): Access {
-  const periodLeft = sub.currentPeriodEnd ? sub.currentPeriodEnd.getTime() > now.getTime() : false;
-  switch (sub.status) {
-    case 'active':
-    case 'trialing':
-      return 'active';
-    case 'scheduled_cancel':
-    case 'canceled':
-      return periodLeft ? 'ending' : 'none';
-    case 'past_due':
-    case 'unpaid': {
-      const since = sub.pastDueSince ?? now;
-      return now.getTime() - since.getTime() < GRACE_DAYS * 86_400_000 ? 'grace' : 'none';
-    }
-    default:
-      return 'none';
-  }
-}
-
-export const Plan = z.enum(['pilot', 'personal', 'pro', 'none']);
-export type Plan = z.infer<typeof Plan>;
-
-export const BillingSubscription = z.object({
-  plan: PlanKey,
-  browsers: z.number().int(),
-  status: z.string(),
-  access: z.enum(['active', 'ending', 'grace', 'none']),
-  currentPeriodEnd: z.string().nullable(),
+export const TopUpPack = z.object({
+  productId: z.string(),
+  name: z.string(),
+  /** What the user pays (before tax) and what is added to the balance, in cents. */
+  amountCents: z.number().int(),
+  currency: z.string(),
 });
-export type BillingSubscription = z.infer<typeof BillingSubscription>;
+export type TopUpPack = z.infer<typeof TopUpPack>;
+
+export const UsageTotals = z.object({
+  totalMicros: z.number().int(),
+  byItem: z.record(UsageItem, z.number().int()),
+});
+export type UsageTotals = z.infer<typeof UsageTotals>;
 
 export const BillingState = z.object({
-  /** False when Creem is not configured on this deployment (the pilot runs without payments). */
+  mode: BillingMode,
+  /** False when Creem is not configured on this deployment: no top-ups. */
   enabled: z.boolean(),
-  subscription: BillingSubscription.nullable(),
-  hours: z.object({ used: z.number(), included: z.number().nullable() }),
-  /** Browsers' data is kept until this date after access ended, then they are deleted. */
+  balanceMicros: z.number().int(),
+  /** When the balance reached zero; running browsers sleep 10 minutes later. */
+  exhaustedAt: z.string().nullable(),
+  /** After the balance ran out, browsers are kept until this date, then deleted. */
   dataKeptUntil: z.string().nullable(),
+  /** Frozen after a dispute: nothing can run until support resolves it. */
+  frozen: z.boolean(),
+  minBalanceMicros: z.number().int(),
+  lowBalanceMicros: z.number().int(),
+  /** What all of the user's browsers cost per hour right now (running ones plus everything kept). */
+  burnHourMicros: z.number().int(),
+  topUps: z.array(TopUpPack),
+  /** This calendar month (UTC). */
+  month: UsageTotals.extend({ month: z.string() }),
+  /** Whether the user can still start their one free trial, and where. */
+  trial: z.object({ eligible: z.boolean(), regionId: RegionId, minutes: z.number().int(), storageGb: z.number().int(), keptDays: z.number().int() }),
 });
 export type BillingState = z.infer<typeof BillingState>;
 
-export const CheckoutBody = z.object({
-  plan: PlanKey,
-  browsers: z.number().int().min(1).max(PRO_MAX_BROWSERS).default(1),
+export const BalanceTransaction = z.object({
+  id: z.string(),
+  kind: z.enum(['topup', 'refund', 'dispute', 'adjustment']),
+  amountMicros: z.number().int(),
+  description: z.string().nullable(),
+  createdAt: z.string(),
 });
-export const ChangeBrowsersBody = z.object({ browsers: z.number().int().min(PRO_MIN_BROWSERS).max(PRO_MAX_BROWSERS) });
-export const ChangePlanBody = z.object({ plan: PlanKey, browsers: z.number().int().min(1).max(PRO_MAX_BROWSERS).optional() });
+export type BalanceTransaction = z.infer<typeof BalanceTransaction>;
+
+export const CheckoutBody = z.object({ productId: z.string().min(1).max(128) });
 export const RedirectResult = z.object({ url: z.string().url() });
+
+/** Account-level usage for a month: every browser, including deleted ones. */
+export const AccountUsage = UsageTotals.extend({
+  month: z.string(),
+  byBrowser: z.array(
+    UsageTotals.extend({
+      instanceId: z.string(),
+      name: z.string(),
+      regionId: RegionId,
+      deleted: z.boolean(),
+    }),
+  ),
+  byDay: z.array(z.object({ day: z.string(), totalMicros: z.number().int() })),
+});
+export type AccountUsage = z.infer<typeof AccountUsage>;
+
+/** One browser's usage for a month, per item with quantities, and per day. */
+export const InstanceUsage = z.object({
+  month: z.string(),
+  totalMicros: z.number().int(),
+  items: z.array(z.object({ item: UsageItem, quantity: z.number(), amountMicros: z.number().int() })),
+  byDay: z.array(z.object({ day: z.string(), totalMicros: z.number().int(), byItem: z.record(UsageItem, z.number().int()) })),
+  /** What this browser costs per hour right now, and per month while it is kept. */
+  now: z.object({ hourMicros: z.number().int(), runningHourMicros: z.number().int(), alwaysOnMonthMicros: z.number().int() }),
+});
+export type InstanceUsage = z.infer<typeof InstanceUsage>;

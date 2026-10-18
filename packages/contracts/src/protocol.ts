@@ -12,7 +12,7 @@ import { z } from 'zod';
 export const AGENT_PROTOCOL_VERSION = 1;
 
 /** Commands the engine sends to an agent (stored in `agent_commands`). */
-export const AgentCommandKind = z.enum(['prepare_shutdown', 'ip_check', 'restart_chrome', 'set_firewall', 'restore_archive']);
+export const AgentCommandKind = z.enum(['prepare_shutdown', 'ip_check', 'restart_chrome', 'set_firewall', 'restore_archive', 'grow_filesystem']);
 export type AgentCommandKind = z.infer<typeof AgentCommandKind>;
 
 /** Events an agent reports (stored by the api in `instance_health` and `audit_log`). */
@@ -44,7 +44,7 @@ export const AgentHello = z.object({
 export const AgentEvent = z.object({
   t: z.literal('event'),
   kind: AgentEventKind,
-  /** ready: { chromeMajor }, heartbeat: { viewers, lastInputAt }, ip_check: IpCheckResult */
+  /** ready: { chromeMajor, agentVersion }, heartbeat: { viewers, lastInputAt, disk: { usedBytes, totalBytes }, netTxBytes }, ip_check: IpCheckResult */
   data: z.record(z.string(), z.unknown()).default({}),
 });
 export const AgentReply = z.object({

@@ -23,6 +23,10 @@ const TITLES: Record<ErrorType, string> = {
   too_many_browsers: 'Delete browsers first',
   suspended: 'Suspended',
   step_up_required: 'Confirm with your passkey',
+  insufficient_balance: 'Add credit first',
+  price_unavailable: 'Prices are being updated',
+  price_changed: 'Prices changed',
+  account_frozen: 'Account on hold',
   internal: 'Something went wrong',
 };
 

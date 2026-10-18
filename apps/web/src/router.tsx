@@ -2,6 +2,7 @@ import { createBrowserRouter, Navigate, Outlet, useLocation } from 'react-router
 import { useEffect } from 'react';
 import { AppShell } from './app/AppShell.js';
 import { AccountPage } from './features/account/AccountPage.js';
+import { BillingPage } from './features/billing/BillingPage.js';
 import { BillingSuccessPage } from './features/billing/BillingSuccessPage.js';
 import { SignInPage } from './features/auth/SignInPage.js';
 import { BrowsersPage } from './features/instances/BrowsersPage.js';
@@ -32,11 +33,20 @@ export const router = createBrowserRouter(isAdminHost() ? [
     children: [
       { path: '/browsers', element: <BrowsersPage /> },
       { path: '/browsers/new', element: <BrowsersPage /> },
+      // The browser management area: one header, three tabs (page 1).
       {
-        path: '/browsers/:id/settings',
-        lazy: async () => ({ Component: (await import('./features/instances/SettingsPage.js')).SettingsPage }),
+        path: '/browsers/:id',
+        lazy: async () => ({ Component: (await import('./features/instances/BrowserLayout.js')).BrowserLayout }),
+        children: [
+          { index: true, element: <Navigate to="settings" replace /> },
+          { path: 'settings', lazy: async () => ({ Component: (await import('./features/instances/SettingsPage.js')).SettingsPage }) },
+          { path: 'storage', lazy: async () => ({ Component: (await import('./features/instances/StoragePage.js')).StoragePage }) },
+          { path: 'usage', lazy: async () => ({ Component: (await import('./features/instances/UsagePage.js')).UsagePage }) },
+        ],
       },
-      { path: '/settings', element: <AccountPage /> },
+      { path: '/account', element: <AccountPage /> },
+      { path: '/settings', element: <Navigate to="/account" replace /> },
+      { path: '/billing', element: <BillingPage /> },
       { path: '/billing/success', element: <BillingSuccessPage /> },
     ],
   },

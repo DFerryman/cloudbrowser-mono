@@ -221,6 +221,9 @@ importers:
 
   packages/db:
     dependencies:
+      '@cloudbrowser/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       drizzle-orm:
         specifier: ^0.45.4
         version: 0.45.4(@cloudflare/workers-types@4.20260702.1)(kysely@0.29.6)
@@ -240,6 +243,9 @@ importers:
 
   packages/executors:
     dependencies:
+      '@cloudbrowser/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       aws4fetch:
         specifier: ^1.0.20
         version: 1.0.20

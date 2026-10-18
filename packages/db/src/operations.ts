@@ -11,6 +11,7 @@ export const OPERATION_DEADLINE_MIN: Record<string, number> = {
   delete: 5,
   undelete: 5,
   purge: 60,
+  resize_volume: 30,
 };
 
 /** Values for a new `operations` row. The api inserts user operations; the engine inserts idle stops. */

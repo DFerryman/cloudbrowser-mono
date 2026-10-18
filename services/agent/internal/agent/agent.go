@@ -23,7 +23,8 @@ import (
 	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/protocol"
 )
 
-const Version = "0.1.0"
+// Version is reported in `ready`. 0.2.0 reports disk usage and bytes sent, and grows the data file system.
+const Version = "0.2.0"
 
 // Browser is Chrome as the agent controls it through CDP.
 type Browser interface {
@@ -52,12 +53,21 @@ type Firewall interface {
 	SetMode(mode string) error
 }
 
+// Host is what the agent reads from and does to the VM itself (package host).
+type Host interface {
+	DiskUsage(path string) (used, total uint64, err error)
+	NetTxBytes() (uint64, error)
+	GrowFilesystem(ctx context.Context, path string) error
+}
+
 type Config struct {
 	InstanceID     string
 	GatewayURL     string // wss://connect.example.com
 	BootstrapToken string // from user data; single use
 	StateDir       string // /data/agent: the long-lived credential lives here (mode 0600)
 	ProfileDir     string // /data/profile: Chrome's user data dir, archived at each sleep (page 4)
+	DataDir        string // /data: the data volume's mount point (disk usage, file system growth)
+	Host           Host   // optional: disk and network reports, file system growth
 	EchoURLs       []string
 	ExpectedIP     string // optional; reported with checks
 	Generation     int    // placement generation, from user data
@@ -102,6 +112,14 @@ func (a *Agent) authHeader() (string, error) {
 
 // Run keeps the tunnel up until ctx ends, reconnecting with backoff (0.5 s doubling to 30 s).
 func (a *Agent) Run(ctx context.Context) error {
+	// The volume may have grown while the VM was stopped: use the new space from this boot on.
+	if a.cfg.Host != nil && a.cfg.DataDir != "" {
+		gctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		if err := a.cfg.Host.GrowFilesystem(gctx, a.cfg.DataDir); err != nil {
+			a.log.Warn("grow data file system", "err", err)
+		}
+		cancel()
+	}
 	chromeMajor, err := a.browser.Start(ctx)
 	if err != nil {
 		return fmt.Errorf("start chrome: %w", err)
@@ -158,7 +176,7 @@ func (a *Agent) session(ctx context.Context, chromeMajor int) error {
 	if err := a.write(sctx, protocol.TurnRequest{T: "turn_request"}); err != nil {
 		return err
 	}
-	if err := a.event(sctx, "ready", map[string]any{"chromeMajor": chromeMajor}); err != nil {
+	if err := a.event(sctx, "ready", map[string]any{"chromeMajor": chromeMajor, "agentVersion": Version}); err != nil {
 		return err
 	}
 	go a.loops(sctx)
@@ -195,10 +213,27 @@ func (a *Agent) loops(ctx context.Context) {
 			if !last.IsZero() {
 				data["lastInputAt"] = last.UTC().Format(time.RFC3339)
 			}
+			a.hostReport(data)
 			_ = a.event(ctx, "heartbeat", data)
 		case <-ip.C:
 			a.selfCheck(ctx)
 		}
+	}
+}
+
+// hostReport adds the data volume's usage (storage page) and the bytes sent since boot (metered
+// as data transfer, page 6) to a heartbeat.
+func (a *Agent) hostReport(data map[string]any) {
+	if a.cfg.Host == nil {
+		return
+	}
+	if a.cfg.DataDir != "" {
+		if used, total, err := a.cfg.Host.DiskUsage(a.cfg.DataDir); err == nil {
+			data["disk"] = map[string]any{"usedBytes": used, "totalBytes": total}
+		}
+	}
+	if tx, err := a.cfg.Host.NetTxBytes(); err == nil {
+		data["netTxBytes"] = tx
 	}
 }
 
@@ -281,6 +316,21 @@ func (a *Agent) command(ctx context.Context, in protocol.Incoming) {
 		cancel()
 		if err != nil {
 			reply.OK, reply.Error = false, err.Error()
+		}
+	case protocol.CmdGrowFilesystem:
+		if a.cfg.Host == nil || a.cfg.DataDir == "" {
+			reply.OK, reply.Error = false, "no data volume"
+			break
+		}
+		cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		err := a.cfg.Host.GrowFilesystem(cctx, a.cfg.DataDir)
+		cancel()
+		if err != nil {
+			reply.OK, reply.Error = false, err.Error()
+			break
+		}
+		if used, total, err := a.cfg.Host.DiskUsage(a.cfg.DataDir); err == nil {
+			reply.Result = map[string]any{"usedBytes": used, "totalBytes": total}
 		}
 	case protocol.CmdSetFirewall:
 		mode, _ := in.Payload["mode"].(string)

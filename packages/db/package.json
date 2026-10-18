@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@cloudbrowser/contracts": "workspace:*",
     "drizzle-orm": "^0.45.4"
   },
   "devDependencies": {

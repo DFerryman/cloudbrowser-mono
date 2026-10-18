@@ -5,6 +5,11 @@
 set -euxo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+# The VM has 4 GB, enough for the browser; a small swap file absorbs the odd spike so the kernel
+# does not have to kill Chrome. Swappiness 10: only used under memory pressure.
+if [ ! -f /swapfile ]; then fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && echo '/swapfile none swap sw 0 0' >>/etc/fstab; fi
+swapon /swapfile 2>/dev/null || true
+echo 'vm.swappiness=10' >/etc/sysctl.d/90-cloudbrowser.conf && sysctl -q -p /etc/sysctl.d/90-cloudbrowser.conf
 apt-get update
 apt-get install -y --no-install-recommends docker.io nftables ca-certificates curl
 apt-get purge -y snapd || true

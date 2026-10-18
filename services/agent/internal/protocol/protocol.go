@@ -68,4 +68,5 @@ const (
 	CmdRestartChrome   = "restart_chrome"
 	CmdSetFirewall     = "set_firewall"
 	CmdRestoreArchive  = "restore_archive"
+	CmdGrowFilesystem  = "grow_filesystem"
 )

@@ -55,7 +55,7 @@ describe('aws-ec2 executor', () => {
     const { vm, vol, p } = await create(ex);
     const inst = ec2.instances.get(vm.vmId)!;
     expect(inst.state).toBe('running');
-    expect(inst.type).toBe('m7i-flex.large');
+    expect(inst.type).toBe('c7i-flex.large');
     expect(inst.protected).toBe(true);
     expect(inst.tags).toMatchObject({ 'cb:managed': 'true', 'cb:instance': 'inst1', 'cb:kind': 'vm', 'cb:token': 'op1:create_vm:1' });
     expect(inst.userData).toContain('"bootstrapToken":"boot-token"');
@@ -87,9 +87,9 @@ describe('aws-ec2 executor', () => {
 
   it('tries the next instance type when one has no capacity', async () => {
     const { ex, ec2 } = setup();
-    ec2.fail = (a, p) => (a === 'RunInstances' && p.InstanceType === 'm7i-flex.large' ? { code: 'InsufficientInstanceCapacity', status: 500 } : null);
+    ec2.fail = (a, p) => (a === 'RunInstances' && p.InstanceType === 'c7i-flex.large' ? { code: 'InsufficientInstanceCapacity', status: 500 } : null);
     const { vm } = await create(ex);
-    expect(ec2.instances.get(vm.vmId)?.type).toBe('m6i.large');
+    expect(ec2.instances.get(vm.vmId)?.type).toBe('c6i.large');
     ec2.fail = (a) => (a === 'RunInstances' ? { code: 'InsufficientInstanceCapacity', status: 500 } : null);
     await expect(ex.ensureVm(ctx('create_vm', 'op2:create_vm:1'), REGION, {
       instanceId: 'inst2', zone: 'ap-northeast-1a', nicId: [...ec2.enis.keys()][0]!, volumeId: 'vol-x', bootstrapToken: 't', gatewayUrl: 'wss://g',
@@ -258,5 +258,103 @@ describe('browser image policies', () => {
       ProxySettings: { ProxyMode: 'direct' },
       WebRtcIPHandlingPolicy: 'default_public_interface_only',
     });
+  });
+});
+
+/** A Price List item in the API's format (the shapes are copied from AWS's published price list). */
+function priceItem(serviceCode: string, attributes: Record<string, string>, dims: { usd: string; unit: string; begin?: string }[]) {
+  const sku = `SKU${Math.random().toString(36).slice(2, 10)}`;
+  return {
+    product: { productFamily: attributes.productFamily ?? null, attributes: { servicecode: serviceCode, ...attributes }, sku },
+    serviceCode,
+    terms: {
+      OnDemand: {
+        [`${sku}.JRTCKXETXF`]: {
+          offerTermCode: 'JRTCKXETXF',
+          sku,
+          effectiveDate: '2026-10-01T00:00:00Z',
+          priceDimensions: Object.fromEntries(
+            dims.map((d, i) => [`${sku}.JRTCKXETXF.${i}`, { unit: d.unit, beginRange: d.begin ?? '0', endRange: 'Inf', description: '', pricePerUnit: { USD: d.usd } }]),
+          ),
+        },
+      },
+    },
+    version: '20261001',
+    publicationDate: '2026-10-01T00:00:00Z',
+  };
+}
+
+const linux = { regionCode: REGION, operatingSystem: 'Linux', tenancy: 'Shared', preInstalledSw: 'NA', capacitystatus: 'Used', licenseModel: 'No License required', operation: 'RunInstances' };
+
+function tokyoPriceList(ec2: FakeEc2) {
+  ec2.priceList = {
+    AmazonEC2: [
+      priceItem('AmazonEC2', { ...linux, instanceType: 'c7i-flex.large', vcpu: '2', memory: '4 GiB', usagetype: 'APN1-BoxUsage:c7i-flex.large' }, [{ usd: '0.1065000000', unit: 'Hrs' }]),
+      priceItem('AmazonEC2', { ...linux, instanceType: 'c6i.large', vcpu: '2', memory: '4 GiB', usagetype: 'APN1-BoxUsage:c6i.large' }, [{ usd: '0.1070000000', unit: 'Hrs' }]),
+      priceItem('AmazonEC2', { ...linux, instanceType: 'c5.large', vcpu: '2', memory: '4 GiB', usagetype: 'APN1-BoxUsage:c5.large' }, [{ usd: '0.1070000000', unit: 'Hrs' }]),
+      // Not ours: Windows, and a dedicated host.
+      priceItem('AmazonEC2', { ...linux, operatingSystem: 'Windows', instanceType: 'c7i-flex.large', usagetype: 'APN1-BoxUsage:c7i-flex.large' }, [{ usd: '0.1990000000', unit: 'Hrs' }]),
+      priceItem('AmazonEC2', { regionCode: REGION, productFamily: 'Storage', volumeApiName: 'gp3', usagetype: 'APN1-EBS:VolumeUsage.gp3' }, [{ usd: '0.0960000000', unit: 'GB-Mo' }]),
+      priceItem('AmazonEC2', { regionCode: REGION, productFamily: 'Storage Snapshot', storageMedia: 'Amazon S3', locationType: 'AWS Region', usagetype: 'APN1-EBS:SnapshotArchiveStorage' }, [{ usd: '0.0137500000', unit: 'GB-Mo' }]),
+      priceItem('AmazonEC2', { regionCode: REGION, productFamily: 'Storage Snapshot', storageMedia: 'Amazon S3', locationType: 'AWS Region', usagetype: 'APN1-EBS:SnapshotUsage' }, [{ usd: '0.0500000000', unit: 'GB-Mo' }]),
+    ],
+    AmazonVPC: [
+      priceItem('AmazonVPC', { regionCode: REGION, group: 'VPCPublicIPv4Address', usagetype: 'APN1-PublicIPv4:IdleAddress' }, [{ usd: '0.0050000000', unit: 'Hrs' }]),
+      priceItem('AmazonVPC', { regionCode: REGION, group: 'VPCPublicIPv4Address', usagetype: 'APN1-PublicIPv4:InUseAddress' }, [{ usd: '0.0050000000', unit: 'Hrs' }]),
+    ],
+    AWSDataTransfer: [
+      priceItem('AWSDataTransfer', { fromRegionCode: REGION, transferType: 'AWS Outbound', toLocation: 'External', usagetype: 'APN1-DataTransfer-Out-Bytes' }, [
+        { usd: '0.0980000000', unit: 'GB', begin: '10240' },
+        { usd: '0.1140000000', unit: 'GB', begin: '0' },
+      ]),
+    ],
+  };
+}
+
+describe('aws-ec2 prices', () => {
+  it('reads every price of the region from the AWS Price List API, signed, with read-only credentials', async () => {
+    const { ex, ec2 } = setup('readonly');
+    tokyoPriceList(ec2);
+    const sheet = await ex.prices(ctx('prices'), REGION);
+    expect(sheet).toEqual({
+      source: 'aws-price-list',
+      instanceType: 'c7i-flex.large',
+      vmHour: 0.1065,
+      instanceTypes: { 'c7i-flex.large': 0.1065, 'c6i.large': 0.107, 'c5.large': 0.107 },
+      machine: { vcpu: 2, memoryGb: 4 },
+      volumeGbMonth: 0.096,
+      snapshotGbMonth: 0.05,
+      ipHour: 0.005,
+      transferOutGb: 0.114,
+      rootVolumeGb: 16,
+      effectiveDate: '2026-10-01T00:00:00Z',
+    });
+    expect(ec2.pricingCalls.find((c) => c.ServiceCode === 'AmazonEC2' && c.Filters.some((f) => f.Field === 'instanceType'))?.Filters).toContainEqual({
+      Type: 'TERM_MATCH',
+      Field: 'regionCode',
+      Value: REGION,
+    });
+  });
+
+  it('refuses a sheet with a missing price instead of guessing one', async () => {
+    const { ex, ec2 } = setup('readonly');
+    tokyoPriceList(ec2);
+    ec2.priceList.AmazonVPC = [];
+    await expect(ex.prices(ctx('prices'), REGION)).rejects.toThrow(/public IPv4/);
+  });
+});
+
+describe('aws-ec2 storage growth', () => {
+  it('grows a volume once and reports progress until the new size is usable', async () => {
+    const { ex, ec2 } = setup();
+    const { vol } = await create(ex);
+    expect(await ex.resizeVolume(ctx('resize'), REGION, vol.volumeId, 40)).toEqual({ state: 'pending', sizeGb: 40 });
+    expect(await ex.resizeVolume(ctx('resize'), REGION, vol.volumeId, 40)).toEqual({ state: 'pending', sizeGb: 40 });
+    expect(await ex.resizeVolume(ctx('resize'), REGION, vol.volumeId, 40)).toEqual({ state: 'ready', sizeGb: 40 });
+    expect(ec2.calls.filter((c) => c.action === 'ModifyVolume')).toHaveLength(1);
+    expect(ec2.volumes.get(vol.volumeId)?.size).toBe(40);
+    // Never shrinks.
+    expect(await ex.resizeVolume(ctx('resize'), REGION, vol.volumeId, 30)).toEqual({ state: 'ready', sizeGb: 40 });
+    expect(ec2.calls.filter((c) => c.action === 'ModifyVolume')).toHaveLength(1);
   });
 });
