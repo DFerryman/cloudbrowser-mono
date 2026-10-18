@@ -2,6 +2,7 @@ import { verifyViewerToken } from '@cloudbrowser/contracts';
 import { newArchiveKey } from '@cloudbrowser/db';
 import { beforeEach, describe, expect, it } from 'vitest';
 import engine from '@cloudbrowser/engine';
+import app from '../src/index.js';
 import { internalApi } from '../src/internal.js';
 import { setup, signIn } from './helpers.js';
 
@@ -32,8 +33,15 @@ describe('auth', () => {
   });
 
   it('echoes the caller IP for the agent IP check', async () => {
-    const res = await t.call('GET', '/api/echo/ip', undefined, { 'cf-connecting-ip': '203.0.113.9' });
-    expect(res.body).toBe('203.0.113.9');
+    const res = await app.fetch(
+      new Request('http://app.test/api/echo/ip', { headers: { origin: 'null', 'cf-connecting-ip': '203.0.113.9' } }),
+      t.env as never,
+      t.ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.text()).toBe('203.0.113.9');
   });
 
   it('never sends a code to an address that was not invited', async () => {
@@ -51,6 +59,24 @@ describe('browsers', () => {
   it('refuses cross-origin writes', async () => {
     const res = await t.call('POST', '/api/v1/instances', { name: 'x', regionId: 'tyo1' }, { origin: 'https://evil.test', 'idempotency-key': 'k' });
     expect(res.status).toBe(403);
+  });
+
+  it('keeps Sydney unavailable until configured and uses its own region and timezone', async () => {
+    const regions = await t.call('GET', '/api/v1/regions');
+    expect(regions.body.find((r: { id: string }) => r.id === 'syd1')).toMatchObject({
+      country: 'AU', city: 'Sydney', timezone: 'Australia/Sydney', acceptingNew: false,
+    });
+    const body = { name: 'Sydney', regionId: 'syd1' };
+    const blocked = await t.call('POST', '/api/v1/instances', body, { 'idempotency-key': 'syd-blocked' });
+    expect(blocked.body.type).toBe('region_unavailable');
+    t.d1.sqlite.exec("UPDATE regions SET enabled = 1, executor = 'fake' WHERE id = 'syd1'");
+    const created = await t.call('POST', '/api/v1/instances', body, { 'idempotency-key': 'syd-ready' });
+    expect(created.status).toBe(202);
+    await t.settle();
+    const list = await t.call('GET', '/api/v1/instances');
+    expect(list.body[0]).toMatchObject({ regionId: 'syd1', status: 'running' });
+    const row = t.d1.sqlite.prepare('SELECT fingerprint FROM browser_instances WHERE id = ?').get(created.body.instanceId) as { fingerprint: string };
+    expect(JSON.parse(row.fingerprint).timezone).toBe('Australia/Sydney');
   });
 
   it('creates exactly one browser per Idempotency-Key and runs it', async () => {

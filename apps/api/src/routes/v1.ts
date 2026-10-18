@@ -102,7 +102,7 @@ v1.openapi(
         .map(async (r) => ({
           id: r.id as RegionId,
           name: r.name,
-          country: r.country as 'JP' | 'US',
+          country: r.country as Region['country'],
           city: r.city,
           timezone: r.timezone,
           enabled: r.enabled,

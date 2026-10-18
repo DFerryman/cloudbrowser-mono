@@ -64,6 +64,8 @@ app.on(['GET', 'POST'], '/api/auth/*', limitSignIn, (c) => c.get('auth').handler
  */
 app.get('/api/echo/ip', (c) => {
   c.header('cache-control', 'no-store');
+  // The agent checks from a fresh about:blank context, whose origin is null.
+  c.header('access-control-allow-origin', '*');
   return c.text(c.req.header('cf-connecting-ip') ?? '');
 });
 

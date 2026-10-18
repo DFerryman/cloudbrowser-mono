@@ -11,15 +11,18 @@ RUN apt-get update \
 
 # Managed policies (page 3: no proxy, WebRTC public interface only, no DoH, no geolocation;
 # page 4: restore tabs on startup).
+# The upstream policies disable DevTools and incognito, which the agent needs for its CDP
+# connection and isolated IP checks. Keep every other upstream policy.
+RUN python3 -c 'import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); data=json.loads(p.read_text()); data.pop("DeveloperToolsAvailability",None); data.pop("IncognitoModeAvailability",None); p.write_text(json.dumps(data)+"\n")' /etc/opt/chrome/policies/managed/policies.json
 COPY policies.json /etc/opt/chrome/policies/managed/cloudbrowser.json
 # Chrome launch flags: profile on the data volume, stable cookie encryption, bounded cache,
 # DevTools on the loopback interface for the agent only.
 COPY google-chrome.conf /etc/neko/supervisord/google-chrome.conf
 COPY neko.yaml /etc/neko/neko.yaml
 
-# neko and Chrome run as the unprivileged `neko` user; the root file system is mounted read-only
-# by the agent, with /data (the instance's volume) and /tmp writable.
+# Supervisor needs root to manage its pid/socket and drop privileges for its programs.
+# neko and Chrome run as the unprivileged `neko` user in their supervisor configurations.
 LABEL org.opencontainers.image.source="https://github.com/DFerryman/cloudbrowser-mono"
 LABEL org.opencontainers.image.description="CloudBrowser browser image: neko v3 + Google Chrome"
 
-USER neko
+USER root

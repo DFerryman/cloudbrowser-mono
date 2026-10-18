@@ -5,13 +5,72 @@ or an AI agent helping them, can follow it step by step: every step has exact co
 check. Steps marked **(you)** need the account owner in person. An agent cannot do them: sign-up,
 payment, MFA and changes to GitHub package visibility.
 
-**What you get:** browsers created in Tokyo run on real EC2 VMs. Each has a dedicated Elastic IP,
-an encrypted 20 GB data volume and a 2 vCPU / 8 GB VM. The VM is stopped, never terminated, while
+**What you get:** browsers created in a region configured for AWS run on real EC2 VMs. Each has
+a dedicated Elastic IP, an encrypted 20 GB data volume and a 2 vCPU / 8 GB VM. The VM is stopped, never terminated, while
 the browser sleeps. Browsers created earlier on the simulator keep running there.
 
 **Cost (public list prices, estimates, not quotes):** about $0.11 per running hour
 (`m7i-flex.large` in Tokyo). A sleeping browser costs about $6 a month (Elastic IP $3.65, plus the
-20 GB data disk and the 16 GB system disk).
+20 GB data disk and the 16 GB system disk). Verify Sydney prices for the current deployment.
+
+## Current deployment: Sydney (new AWS experience)
+
+This project uses the selected Region **Sydney (`ap-southeast-2`)**, product region **`syd1`**,
+with timezone **`Australia/Sydney`**. The new AWS experience restricts this project to its selected
+Region: do not create deployment resources in Tokyo or US West as part of this setup.
+Confirm the selected Region in AWS Settings → View all projects → Overview → Additional Info →
+Region. The existing CLI profile is `cloudbrowser`.
+
+The detailed Tokyo commands in steps 1–3 and 8–9, and the US West second-region example, are retained
+as reference for advanced AWS projects that permit those Regions. **Do not run those region-specific
+examples in this project.** Use the Sydney substitutions below, then follow the shared image,
+credential and Cloudflare setup in steps 4–7. Existing Tokyo and US West simulator browsers keep
+their original regions and can still wake and sleep; never relabel them or update their immutable
+`region_id`.
+
+Use the unmodified CloudFormation template and its IAM policies. For the current stack:
+
+```bash
+export AWS_PROFILE=cloudbrowser
+export AWS_DEFAULT_REGION=ap-southeast-2
+aws cloudformation deploy \
+  --stack-name cloudbrowser \
+  --template-file infra/aws/cloudbrowser.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides AllowedRegions=ap-southeast-2 AllowedInstanceTypes=m7i-flex.large BudgetEmail=
+```
+
+`BudgetEmail=` skips the optional email budget. The project currently uses the Free plan; check
+service availability and the selected Region before provisioning. Check the quotas in step 2 in
+`ap-southeast-2`, without its Tokyo `export`. Retrieve the stack's `AwsRegions` output in Sydney;
+use that JSON for `AWS_REGIONS` on the engine, reaper and reconciler (step 6). Add
+`"instanceTypes":["m7i-flex.large"]` to the `ap-southeast-2` object so the runtime uses the same
+instance type allowed by the policy.
+
+The deployed configuration uses:
+
+| Setting | Value |
+|---|---|
+| api and engine `APP_URL` | `https://nevazu.com` |
+| api and engine `GATEWAY_URL` | `wss://connect.nevazu.com` |
+| gateway custom domain | `connect.nevazu.com` |
+| engine, reaper and reconciler `ENV_NAME` | `prod` (must match the existing resource tags) |
+
+Migration `0006_sydney.sql` registers Sydney with caps of three browsers and three running VMs.
+It starts **disabled**. After the AWS credentials are configured, the migration is applied and
+all five Workers are deployed, enable Sydney and stop new creates in the simulator regions:
+
+```bash
+pnpm --filter @cloudbrowser/api exec wrangler d1 execute cloudbrowser --remote \
+  --command "UPDATE regions SET enabled = CASE WHEN id = 'syd1' THEN 1 ELSE 0 END WHERE id IN ('syd1', 'tyo1', 'usw1')"
+pnpm --filter @cloudbrowser/api exec wrangler d1 execute cloudbrowser --remote \
+  --command "SELECT id, enabled, executor, provider_region, timezone FROM regions"
+```
+
+Check: `syd1` is enabled with `aws-ec2`, `ap-southeast-2` and `Australia/Sydney`; `tyo1` and `usw1`
+are disabled for new creates. Their existing instances retain their executor and region. For step 9,
+create a browser in **Sydney** at `https://nevazu.com`. Opening its live view uses
+`wss://connect.nevazu.com`; AWS VMs require TURN as described below.
 
 ## Rules for whoever runs this
 
@@ -20,7 +79,9 @@ the browser sleeps. Browsers created earlier on the simulator keep running there
    leaks, delete that access key in IAM at once and create a new one.
 2. **Never create access keys for the root user.** Use AWS CloudShell (in the console, no keys
    needed) or an IAM Identity Center / admin user that the owner signed in with.
-3. **Region:** everything happens in `ap-northeast-1` (Tokyo) unless a step says otherwise.
+3. **Region:** use the project's selected Region. This deployment uses `ap-southeast-2` (Sydney).
+   Tokyo and US West commands below are reference examples only for advanced AWS projects that
+   permit those Regions; the current new AWS experience cannot deploy across Regions.
 4. **Don't edit `infra/aws/cloudbrowser.yaml`** or its IAM policies, and never add inbound
    security-group rules. If something is refused, report the exact error instead.
 5. **Spending:** nothing here costs money until the first browser is created in step 9.
@@ -52,7 +113,7 @@ browser runs but the live view stays black.
 
 Check: open `https://<app domain>/api/v1/health`; it returns `{"ok":true}`.
 
-## 1. AWS account (you)
+## 1. AWS account (you; Tokyo reference for advanced projects)
 
 1. Sign up at aws.amazon.com and add a payment method.
 2. Turn on **MFA for the root user**: account menu → Security credentials.
@@ -234,7 +295,7 @@ pnpm deploy
 
 Check: `pnpm deploy` ends without errors for the engine, reaper, reconciler, api and gateway.
 
-## 8. Switch Tokyo to AWS
+## 8. Switch Tokyo to AWS (advanced-project reference)
 
 ```bash
 pnpm --filter @cloudbrowser/api exec wrangler d1 execute cloudbrowser --remote \
@@ -280,6 +341,9 @@ alerts.
 | Symptom | Where to look | Usual cause |
 |---|---|---|
 | Stuck at *Starting Chrome*, then *Failed* after 16 minutes | `aws ec2 get-console-output --instance-id i-… --latest --output text \| grep cloudbrowser:` (or EC2 → instance → Actions → Monitor and troubleshoot → Get system log) | Images still private (`pull access denied`); `GATEWAY_URL` wrong or not `wss://` |
+| *Starting Chrome* with supervisor permission or pid/socket errors | VM bootstrap and browser container logs | Supervisor must start as root; its Chrome and neko child programs must still run as the unprivileged `neko` user |
+| *Starting Chrome* with CDP unavailable or isolated-context errors | Chrome managed policies and agent logs | Inherited policies disable DevTools or incognito; remove only those conflicting policy keys as described below |
+| IP check fails with a CORS error from origin `null` | Agent logs; `GET /api/echo/ip` response | The fresh `about:blank` context needs `Access-Control-Allow-Origin: *` on the public IP echo endpoint |
 | *Failed* right after create, alert `forbidden` | /admin → Alerts | Missing key on that Worker, or the key belongs to another IAM user |
 | *Failed*, alert `invalid`: "AWS region … is not configured" | engine logs | `AWS_REGIONS` missing or not valid JSON |
 | *Waiting for capacity* | /admin → Operations | No capacity for any of the three instance types in the zone; it keeps retrying (a waking browser moves to another zone after 30 minutes) |
@@ -287,11 +351,26 @@ alerts.
 | Running, but the live view stays black | browser devtools console; api config | TURN key missing on the api; gateway domain or viewer keys wrong |
 | *Needs attention*: "Network paused while we check your dedicated IP" | /admin → the browser → Last IP check | Chrome saw a different IP than the Elastic IP; it stays blocked until checked |
 
+The browser container starts supervisor as root (`--user root` in the systemd Docker command),
+while the supervisor program configurations keep Chrome and neko running as `neko`. Running the
+whole container as `neko` prevents supervisor from managing its pid/socket and leaves startup stuck.
+
+Some upstream browser images set `DeveloperToolsAvailability=2` and
+`IncognitoModeAvailability=1` in inherited managed policies. Remove those two keys from the
+inherited policy files, preserving all other policies, and set `DeveloperToolsAvailability=1`
+and `IncognitoModeAvailability=0` in `cloudbrowser.json`. The agent needs CDP and an isolated
+browser context for its IP check. The first-boot script also patches older image versions and
+mounts the corrected policy directory read-only; clearing all managed policies is unnecessary.
+The public `/api/echo/ip` endpoint must return `Access-Control-Allow-Origin: *` and
+`Cache-Control: no-store` so that check can read its result from a fresh `about:blank` context.
+
 Engine logs: `cd apps/engine && pnpm exec wrangler tail` (the reaper: add `-c wrangler.reaper.jsonc`).
 
 ## Turning it off or cleaning up
 
-- **Stop new AWS browsers:** set the region back to `fake` (step 8).
+- **Stop new browsers in Sydney:** set `regions.enabled = 0` for `syd1`; existing instances remain
+  usable. For the Tokyo reference, switching its executor back to `fake` (step 8) sends new creates
+  to the simulator instead of AWS.
 - **Remove one browser:** delete it in the app. Within 7 days it can be restored. After that the
   reaper deletes the VM, disks, network interface and snapshots and releases the IP. The engine
   itself never deletes anything.
@@ -300,7 +379,10 @@ Engine logs: `cd apps/engine && pnpm exec wrangler tail` (the reaper: add `-c wr
   `aws cloudformation delete-stack --stack-name cloudbrowser`. The stack can only be deleted once
   no network interface uses its subnets.
 
-## Second region (US West)
+## Second region (US West; advanced-project reference only)
+
+This example requires an advanced AWS project that permits both Regions. It does not apply to
+the current Sydney project in the new AWS experience; do not run it there.
 
 ```bash
 export AWS_DEFAULT_REGION=us-west-2

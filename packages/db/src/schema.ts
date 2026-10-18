@@ -113,7 +113,7 @@ export const invites = sqliteTable('invites', {
 
 /** Owner: migrations; operators. */
 export const regions = sqliteTable('regions', {
-  id: text('id').primaryKey(), // tyo1, usw1
+  id: text('id').primaryKey(), // syd1, tyo1, usw1
   name: text('name').notNull(),
   country: text('country').notNull(),
   city: text('city').notNull(),

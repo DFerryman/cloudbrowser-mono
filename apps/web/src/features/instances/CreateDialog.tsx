@@ -1,4 +1,4 @@
-import { BrowserLocale, CreateInstanceBody, SCREEN_SIZES, type Region } from '@cloudbrowser/contracts';
+import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, SCREEN_SIZES, type Region } from '@cloudbrowser/contracts';
 import { Button, cn, Dialog, Input, Label, Select } from '@cloudbrowser/ui';
 import { ChevronRight } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
@@ -46,7 +46,7 @@ export function CreateDialog({ open, onClose, onCreated }: { open: boolean; onCl
   const latency = useLatency(regions.data);
 
   const [name, setName] = useState('');
-  const [regionId, setRegionId] = useState<Region['id']>('tyo1');
+  const [regionId, setRegionId] = useState<Region['id']>(DEFAULT_REGION);
   const [browserLocale, setBrowserLocale] = useState<BrowserLocale>(UI_TO_BROWSER_LOCALE[locale]);
   const [screen, setScreen] = useState<(typeof SCREEN_SIZES)[number]>('auto');
   const [advanced, setAdvanced] = useState(false);

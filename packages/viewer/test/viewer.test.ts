@@ -1,7 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { keysymFor, keysymForName } from '../src/keyboard.js';
 import { decode, encode, fitScreen } from '../src/neko.js';
-import { RemoteBrowser } from '../src/remote-browser.js';
+import { RemoteBrowser, type RemoteBrowserOptions } from '../src/remote-browser.js';
 import { qualityLevel } from '../src/stats.js';
 
 describe('neko data channel encoding', () => {
@@ -129,7 +129,15 @@ class FakePC {
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 describe('RemoteBrowser', () => {
-  function setup(iceServers: { urls: string[]; username?: string; credential?: string }[] = []) {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  function setup(
+    iceServers: { urls: string[]; username?: string; credential?: string }[] = [],
+    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs'> = {},
+  ) {
     FakeWS.all = [];
     const getConnectInfo = vi.fn(async () => ({ gatewayUrl: 'wss://gw/v1/stream/i1', token: `tok${getConnectInfo.mock.calls.length}`, iceServers }));
     const states: string[] = [];
@@ -138,6 +146,7 @@ describe('RemoteBrowser', () => {
       onState: (s) => states.push(s),
       WebSocketImpl: FakeWS as never,
       RTCPeerConnectionImpl: FakePC as never,
+      ...options,
     });
     return { b, getConnectInfo, states };
   }
@@ -149,6 +158,9 @@ describe('RemoteBrowser', () => {
     expect(ws.url).toBe('wss://gw/v1/stream/i1?token=tok1');
 
     ws.push({ t: 'agent_online' });
+    expect(ws.neko('signal/request')).toHaveLength(0);
+    ws.push({ t: 'neko', data: { event: 'system/init' } });
+    ws.push({ t: 'neko', data: { event: 'system/init' } });
     expect(ws.neko('signal/request')).toHaveLength(1);
     ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp', iceservers: [] } } });
     await tick();
@@ -185,6 +197,226 @@ describe('RemoteBrowser', () => {
     ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'o', iceservers: [{ urls: ['stun:x'] }] } } });
     await tick();
     expect(FakePC.last.config.iceTransportPolicy).toBe('all');
+    b.disconnect();
+  });
+
+  it('keeps trickle candidates that arrive before the offer and applies them in order', async () => {
+    vi.useFakeTimers();
+    const { b } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    const candidates = ['first', 'second'].map((candidate) => ({ candidate, sdpMid: '0', sdpMLineIndex: 0 }));
+    for (const payload of candidates) ws.push({ t: 'neko', data: { event: 'signal/candidate', payload } });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(FakePC.last.candidates).toEqual(candidates);
+    expect(ws.neko('signal/answer')).toHaveLength(1);
+    b.disconnect();
+  });
+
+  it('waits for the remote description before adding candidates received during negotiation', async () => {
+    vi.useFakeTimers();
+    let finishDescription!: () => void;
+    vi.spyOn(FakePC.prototype, 'setRemoteDescription').mockImplementationOnce(
+      () => new Promise<void>((resolve) => { finishDescription = resolve; }),
+    );
+    const { b } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    const pc = FakePC.last;
+    const candidate = { candidate: 'during-description', sdpMid: '0', sdpMLineIndex: 0 };
+    ws.push({ t: 'neko', data: { event: 'signal/candidate', payload: candidate } });
+    expect(pc.candidates).toEqual([]);
+
+    finishDescription();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pc.candidates).toEqual([candidate]);
+    expect(ws.neko('signal/answer')).toHaveLength(1);
+    b.disconnect();
+  });
+
+  it('clears old candidates on disconnect and ignores frames from the old socket', async () => {
+    vi.useFakeTimers();
+    const { b } = setup();
+    await b.connect();
+    const old = FakeWS.all[0]!;
+    old.push({ t: 'agent_online' });
+    old.push({ t: 'neko', data: { event: 'signal/candidate', payload: { candidate: 'stale' } } });
+    b.disconnect();
+    await b.connect();
+    const current = FakeWS.all[1]!;
+    current.push({ t: 'agent_online' });
+    old.push({ t: 'neko', data: { event: 'signal/candidate', payload: { candidate: 'late-stale' } } });
+    const candidate = { candidate: 'current', sdpMid: '0', sdpMLineIndex: 0 };
+    current.push({ t: 'neko', data: { event: 'signal/candidate', payload: candidate } });
+    current.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(FakePC.last.candidates).toEqual([candidate]);
+    b.disconnect();
+  });
+
+  it('retries instead of keeping an unbounded queue of candidates without an offer', async () => {
+    vi.useFakeTimers();
+    const { b, states } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    for (let i = 0; i < 257; i++) {
+      ws.push({ t: 'neko', data: { event: 'signal/candidate', payload: { candidate: `candidate-${i}` } } });
+    }
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(ws.readyState).toBe(3);
+    expect(states.at(-1)).toBe('reconnecting');
+    b.disconnect();
+  });
+
+  it('starts a fresh handshake and clears queued candidates after the agent goes offline', async () => {
+    vi.useFakeTimers();
+    const { b } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init' } });
+    ws.push({ t: 'neko', data: { event: 'signal/candidate', payload: { candidate: 'before-offline' } } });
+    ws.push({ t: 'agent_offline' });
+    expect(vi.getTimerCount()).toBe(0);
+    ws.push({ t: 'agent_online' });
+    expect(ws.neko('signal/request')).toHaveLength(1);
+    ws.push({ t: 'neko', data: { event: 'system/init' } });
+    ws.push({ t: 'neko', data: { event: 'system/init' } });
+    expect(ws.neko('signal/request')).toHaveLength(2);
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'fresh-offer' } } });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(FakePC.last.candidates).toEqual([]);
+    expect(ws.neko('signal/answer')).toHaveLength(1);
+    b.disconnect();
+  });
+
+  it('retries with a fresh token when an online agent never provides an offer', async () => {
+    vi.useFakeTimers();
+    const { b, getConnectInfo, states } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init' } });
+    expect(ws.neko('signal/request')).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(ws.readyState).toBe(1);
+    expect(getConnectInfo).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ws.readyState).toBe(3);
+    expect(states.at(-1)).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    expect(FakeWS.all[1]!.url).toContain('token=tok2');
+    b.disconnect();
+  });
+
+  it('also retries when ICE does not connect within the configured deadline', async () => {
+    vi.useFakeTimers();
+    const { b, getConnectInfo, states } = setup([], { connectionTimeoutMs: 1000 });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    const pc = FakePC.last;
+    expect(ws.neko('signal/answer')).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(ws.readyState).toBe(3);
+    expect(pc.closed).toBe(true);
+    expect(states.at(-1)).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    b.disconnect();
+  });
+
+  it('reconnects after an invalid offer instead of remaining in connecting', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(FakePC.prototype, 'setRemoteDescription').mockRejectedValueOnce(new Error('invalid offer'));
+    const { b, getConnectInfo, states } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'invalid-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(ws.readyState).toBe(3);
+    expect(FakePC.last.closed).toBe(true);
+    expect(states.at(-1)).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    b.disconnect();
+  });
+
+  it('cancels the connection deadline once the stream is live', async () => {
+    vi.useFakeTimers();
+    const { b, getConnectInfo, states } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(states.at(-1)).toBe('live');
+    expect(ws.readyState).toBe(1);
+    expect(getConnectInfo).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    b.disconnect();
+  });
+
+  it('cancels the connection deadline when disconnected', async () => {
+    vi.useFakeTimers();
+    const { b, getConnectInfo, states } = setup();
+    await b.connect();
+    FakeWS.all[0]!.push({ t: 'agent_online' });
+    b.disconnect();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(states.at(-1)).toBe('closed');
+    expect(getConnectInfo).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('ignores a rejected negotiation from a replaced connection', async () => {
+    vi.useFakeTimers();
+    let rejectOffer!: (error: Error) => void;
+    vi.spyOn(FakePC.prototype, 'setRemoteDescription').mockImplementationOnce(
+      () => new Promise<void>((_resolve, reject) => { rejectOffer = reject; }),
+    );
+    const { b, getConnectInfo, states } = setup();
+    await b.connect();
+    const old = FakeWS.all[0]!;
+    old.push({ t: 'agent_online' });
+    old.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'old-offer' } } });
+    old.close();
+    expect(vi.getTimerCount()).toBe(1); // only the reconnect backoff remains
+
+    await vi.advanceTimersByTimeAsync(500);
+    const current = FakeWS.all[1]!;
+    current.push({ t: 'agent_online' });
+    current.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'new-offer' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    rejectOffer(new Error('old peer closed'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(current.readyState).toBe(1);
+    FakePC.last.connect();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(states.at(-1)).toBe('live');
+    expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    b.disconnect();
   });
 
   it('reconnects with a fresh token after the connection drops, but not after a take-over', async () => {
@@ -197,11 +429,13 @@ describe('RemoteBrowser', () => {
     expect(getConnectInfo).toHaveBeenCalledTimes(2);
     expect(FakeWS.all[1]!.url).toContain('token=tok2');
 
+    FakeWS.all[1]!.push({ t: 'agent_online' });
     FakeWS.all[1]!.push({ t: 'taken_over' });
     FakeWS.all[1]!.close();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(states.at(-1)).toBe('taken-over');
     expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
     b.disconnect();
     vi.useRealTimers();
   });

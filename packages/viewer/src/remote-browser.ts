@@ -24,6 +24,8 @@ export interface RemoteBrowserOptions {
   /** Map Cmd → Ctrl and Option → Alt (macOS default, page 5). */
   macToPc?: boolean;
   statsIntervalMs?: number;
+  /** Maximum time for signaling and WebRTC to connect before retrying. Defaults to 20 s. */
+  connectionTimeoutMs?: number;
   WebSocketImpl?: typeof WebSocket;
   RTCPeerConnectionImpl?: typeof RTCPeerConnection;
 }
@@ -32,6 +34,8 @@ const BACKOFF_MS = [500, 1000, 2000, 4000, 8000, 15000, 30000];
 /** Screen size changes are debounced and applied at most once every 5 s (page 5). */
 const SCREEN_DEBOUNCE_MS = 750;
 const SCREEN_MIN_INTERVAL_MS = 5000;
+const CONNECTION_TIMEOUT_MS = 20_000;
+const MAX_PENDING_ICE_CANDIDATES = 256;
 
 /**
  * Live-view client for one browser (page 5, `packages/viewer`): signaling over the gateway
@@ -46,9 +50,12 @@ export class RemoteBrowser {
   private attempt = 0;
   private stopped = true;
   private signalRequested = false;
+  private remoteDescriptionReady = false;
+  private pendingCandidates: SignalCandidate[] = [];
   private iceServers: IceServer[] = [];
   private statsTimer: ReturnType<typeof setInterval> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectionTimer: ReturnType<typeof setTimeout> | null = null;
   private pressed = new Set<number>();
   private pendingScreen: { width: number; height: number } | null = null;
   private screenTimer: ReturnType<typeof setTimeout> | null = null;
@@ -63,6 +70,10 @@ export class RemoteBrowser {
   }
 
   async connect(): Promise<void> {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.clearConnectionTimer();
+    this.teardownPeer();
     this.stopped = false;
     this.setState(this.attempt === 0 ? 'connecting' : 'reconnecting');
     let info: ConnectInfo;
@@ -79,9 +90,13 @@ export class RemoteBrowser {
     const sep = info.gatewayUrl.includes('?') ? '&' : '?';
     const ws = new WS(`${info.gatewayUrl}${sep}token=${encodeURIComponent(info.token)}`);
     this.ws = ws;
-    ws.onmessage = (e) => this.onGatewayFrame(e.data);
+    ws.onmessage = (e) => {
+      if (this.ws === ws && !this.stopped) this.onGatewayFrame(e.data, ws);
+    };
     ws.onclose = () => {
       if (this.ws !== ws) return;
+      this.ws = null;
+      this.clearConnectionTimer();
       this.teardownPeer();
       if (!this.stopped && this.state !== 'taken-over') this.scheduleReconnect();
     };
@@ -90,6 +105,8 @@ export class RemoteBrowser {
   disconnect() {
     this.stopped = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.clearConnectionTimer();
     if (this.screenTimer) clearTimeout(this.screenTimer);
     this.releaseAllKeys();
     this.teardownPeer();
@@ -168,11 +185,38 @@ export class RemoteBrowser {
   }
 
   private scheduleReconnect() {
+    this.clearConnectionTimer();
     if (this.stopped) return;
+    if (this.retryTimer) return;
     const delay = BACKOFF_MS[Math.min(this.attempt, BACKOFF_MS.length - 1)]!;
     this.attempt++;
     this.setState('reconnecting');
-    this.retryTimer = setTimeout(() => void this.connect(), delay);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.connect();
+    }, delay);
+  }
+
+  private clearConnectionTimer() {
+    if (this.connectionTimer) clearTimeout(this.connectionTimer);
+    this.connectionTimer = null;
+  }
+
+  private startConnectionTimer(ws: WebSocket) {
+    if (this.connectionTimer) return;
+    this.connectionTimer = setTimeout(() => {
+      this.connectionTimer = null;
+      if (this.state !== 'live') this.reconnect(ws);
+    }, this.opts.connectionTimeoutMs ?? CONNECTION_TIMEOUT_MS);
+  }
+
+  private reconnect(ws: WebSocket) {
+    if (this.ws !== ws || this.stopped) return;
+    this.ws = null;
+    this.clearConnectionTimer();
+    this.teardownPeer();
+    ws.close();
+    this.scheduleReconnect();
   }
 
   private sendGateway(frame: { t: 'neko'; data: NekoMessage } | { t: 'ime'; text: string }) {
@@ -187,13 +231,14 @@ export class RemoteBrowser {
     if (this.dc && this.dc.readyState === 'open') this.dc.send(buf);
   }
 
-  private requestSignal() {
+  private requestSignal(ws: WebSocket) {
     if (this.signalRequested) return;
     this.signalRequested = true;
+    this.startConnectionTimer(ws);
     this.sendNeko({ event: EV.SIGNAL_REQUEST, payload: { video: {}, audio: {} } });
   }
 
-  private onGatewayFrame(raw: unknown) {
+  private onGatewayFrame(raw: unknown, ws: WebSocket) {
     if (typeof raw !== 'string') return;
     let frame: GatewayToViewer;
     try {
@@ -203,34 +248,50 @@ export class RemoteBrowser {
     }
     switch (frame.t) {
       case 'agent_online':
-        this.requestSignal();
+        // The tunnel is online before the agent's local neko relay is necessarily ready.
+        // Neko's system/init is the acknowledgment that it can receive signal/request.
+        if (this.state !== 'live') this.startConnectionTimer(ws);
         return;
       case 'agent_offline':
+        this.clearConnectionTimer();
         this.teardownPeer();
         this.signalRequested = false;
         this.setState('agent-offline');
         return;
       case 'taken_over':
         this.stopped = true;
+        if (this.retryTimer) clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+        this.clearConnectionTimer();
         this.teardownPeer();
         this.setState('taken-over');
         return;
       case 'neko':
-        void this.onNeko(frame.data as NekoMessage);
+        void this.onNeko(frame.data as NekoMessage, ws).catch(() => this.reconnect(ws));
     }
   }
 
-  private async onNeko(msg: NekoMessage) {
+  private async onNeko(msg: NekoMessage, ws: WebSocket) {
     switch (msg.event) {
       case EV.SYSTEM_INIT:
-        this.requestSignal();
+        this.requestSignal(ws);
         return;
       case EV.SIGNAL_PROVIDE:
-        await this.answer(msg.payload as unknown as SignalProvide);
+        await this.answer(msg.payload as unknown as SignalProvide, ws);
         return;
       case EV.SIGNAL_CANDIDATE: {
         const c = msg.payload as unknown as SignalCandidate;
-        await this.pc?.addIceCandidate({ candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex }).catch(() => {});
+        if (!this.pc || !this.remoteDescriptionReady) {
+          if (this.pendingCandidates.length >= MAX_PENDING_ICE_CANDIDATES) throw new Error('Too many pending ICE candidates');
+          this.pendingCandidates.push(c);
+          return;
+        }
+        const pc = this.pc;
+        try {
+          await pc.addIceCandidate(c);
+        } catch (error) {
+          if (this.pc === pc && this.ws === ws) throw error;
+        }
         return;
       }
       case EV.CLIPBOARD_UPDATED: {
@@ -249,8 +310,10 @@ export class RemoteBrowser {
   }
 
   /** neko offers; the viewer answers with a receive-only connection. */
-  private async answer(provide: SignalProvide) {
-    this.teardownPeer();
+  private async answer(provide: SignalProvide, ws: WebSocket) {
+    // Trickle candidates can arrive before the offer, while neko finishes creating its peer.
+    this.teardownPeer(true);
+    this.startConnectionTimer(ws);
     const servers = this.iceServers.length
       ? this.iceServers
       : (provide.iceservers ?? []).map((s) => ({ ...s, urls: Array.isArray(s.urls) ? s.urls : [s.urls] }));
@@ -273,7 +336,7 @@ export class RemoteBrowser {
       this.dc = dc;
     };
     pc.onicecandidate = (e) => {
-      if (e.candidate) {
+      if (this.pc === pc && this.ws === ws && e.candidate) {
         this.sendNeko({
           event: EV.SIGNAL_CANDIDATE,
           payload: { candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex },
@@ -283,6 +346,7 @@ export class RemoteBrowser {
     pc.onconnectionstatechange = () => {
       if (this.pc !== pc) return;
       if (pc.connectionState === 'connected') {
+        this.clearConnectionTimer();
         this.attempt = 0;
         this.setState('live');
         this.sendNeko({ event: EV.CONTROL_REQUEST });
@@ -290,14 +354,28 @@ export class RemoteBrowser {
         if (this.pendingScreen) this.applyScreen();
       } else if (pc.connectionState === 'failed') {
         // An ICE failure (e.g. a network change): start over with a fresh token.
-        this.ws?.close();
+        this.reconnect(ws);
       }
     };
 
-    await pc.setRemoteDescription({ type: 'offer', sdp: provide.sdp });
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    this.sendNeko({ event: EV.SIGNAL_ANSWER, payload: { sdp: answer.sdp } });
+    try {
+      await pc.setRemoteDescription({ type: 'offer', sdp: provide.sdp });
+      if (this.pc !== pc || this.ws !== ws) return;
+      // Keep queueing while these await: no candidate is added before its remote description.
+      while (this.pendingCandidates.length > 0) {
+        await pc.addIceCandidate(this.pendingCandidates.shift()!);
+        if (this.pc !== pc || this.ws !== ws) return;
+      }
+      this.remoteDescriptionReady = true;
+      const answer = await pc.createAnswer();
+      if (this.pc !== pc || this.ws !== ws) return;
+      await pc.setLocalDescription(answer);
+      if (this.pc !== pc || this.ws !== ws) return;
+      this.sendNeko({ event: EV.SIGNAL_ANSWER, payload: { sdp: answer.sdp } });
+    } catch (error) {
+      // A closed or replaced peer can finish an earlier negotiation after a retry.
+      if (this.pc === pc && this.ws === ws) throw error;
+    }
   }
 
   private onData(buf: ArrayBuffer) {
@@ -330,7 +408,9 @@ export class RemoteBrowser {
     }, this.opts.statsIntervalMs ?? 2000);
   }
 
-  private teardownPeer() {
+  private teardownPeer(preserveCandidates = false) {
+    this.remoteDescriptionReady = false;
+    if (!preserveCandidates) this.pendingCandidates = [];
     if (this.statsTimer) clearInterval(this.statsTimer);
     this.statsTimer = null;
     this.dc = null;

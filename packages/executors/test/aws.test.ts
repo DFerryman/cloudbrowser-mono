@@ -1,4 +1,7 @@
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AwsExecutor, bootstrapScript, ExecutorError, type CredentialMode, type OpContext, type Placement } from '../src/index.js';
 import { FakeEc2 } from './fake-ec2.js';
@@ -201,5 +204,59 @@ describe('first-boot script', () => {
     const line = script.split('\n').find((l) => l.startsWith('printf'))!.replace('>/etc/cloudbrowser/agent.json', '');
     const out = execFileSync('bash', ['-c', line]).toString();
     expect(JSON.parse(out)).toEqual({ instanceId: 'inst1', gatewayUrl: "wss://connect.example.com/it's", bootstrapToken: 'tok' });
+  });
+
+  it.each(['legacy', 'current'])('starts supervisor as root with the %s browser unit while Chrome remains unprivileged', (version) => {
+    const script = bootstrapScript({
+      instanceId: 'inst1', gatewayUrl: 'wss://connect.example.com', bootstrapToken: 'tok',
+      appUrl: 'https://app.example.com', agentImage: 'ghcr.io/x/agent:main', browserImage: 'ghcr.io/x/browser:main',
+    });
+    const patch = script.split('\n').find((line) => line.startsWith('sed -i ') && line.endsWith('/cloudbrowser-browser.service'))!;
+    expect(patch).toBeDefined();
+    expect(script.indexOf(patch)).toBeGreaterThan(script.indexOf('install -m 0644 /tmp/cbvm/systemd/*.service'));
+    expect(script.indexOf(patch)).toBeLessThan(script.indexOf('systemctl daemon-reload'));
+
+    const currentUnit = readFileSync(new URL('../../../images/vm/files/systemd/cloudbrowser-browser.service', import.meta.url), 'utf8');
+    const sourceUnit = version === 'legacy' ? currentUnit.replace(' --user root', '') : currentUnit;
+    const dir = mkdtempSync(join(tmpdir(), 'cloudbrowser-bootstrap-'));
+    const unitPath = join(dir, 'cloudbrowser-browser.service');
+    try {
+      writeFileSync(unitPath, sourceUnit);
+      const apply = () => execFileSync('bash', ['-c', patch.replace('/etc/systemd/system/cloudbrowser-browser.service', '"$1"'), 'unit-test', unitPath]);
+      apply();
+      expect(readFileSync(unitPath, 'utf8')).toBe(currentUnit);
+      apply();
+      expect(readFileSync(unitPath, 'utf8')).toBe(currentUnit);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const chromeConfig = readFileSync(new URL('../../../images/browser/google-chrome.conf', import.meta.url), 'utf8');
+    expect(chromeConfig).toMatch(/^user=neko$/m);
+  });
+});
+
+describe('browser image policies', () => {
+  it('keeps unrelated upstream policies while allowing CDP and isolated IP checks', () => {
+    const dockerfile = readFileSync(new URL('../../../images/browser/Dockerfile', import.meta.url), 'utf8');
+    const cleanup = dockerfile.split('\n').find((line) => line.startsWith('RUN python3 -c ') && line.endsWith('/policies.json'))!;
+    expect(cleanup).toBeDefined();
+    expect(dockerfile.indexOf(cleanup)).toBeLessThan(dockerfile.indexOf('COPY policies.json'));
+    const retained = { SafeBrowsingEnabled: true, ExtensionSettings: { '*': { installation_mode: 'allowed' } } };
+    const dir = mkdtempSync(join(tmpdir(), 'cloudbrowser-policies-'));
+    const policyPath = join(dir, 'policies.json');
+    try {
+      writeFileSync(policyPath, JSON.stringify({ ...retained, DeveloperToolsAvailability: 2, IncognitoModeAvailability: 1 }));
+      execFileSync('bash', ['-c', cleanup.slice('RUN '.length).replace('/etc/opt/chrome/policies/managed/policies.json', '"$1"'), 'policy-test', policyPath]);
+      expect(JSON.parse(readFileSync(policyPath, 'utf8'))).toEqual(retained);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const managed = JSON.parse(readFileSync(new URL('../../../images/browser/policies.json', import.meta.url), 'utf8'));
+    expect(managed).toMatchObject({
+      DeveloperToolsAvailability: 1,
+      IncognitoModeAvailability: 0,
+      ProxySettings: { ProxyMode: 'direct' },
+      WebRtcIPHandlingPolicy: 'default_public_interface_only',
+    });
   });
 });

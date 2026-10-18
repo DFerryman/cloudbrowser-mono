@@ -8,7 +8,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     // Ed25519 public key (JWK JSON) from `node scripts/gen-viewer-keys.mjs`.
-    "VIEWER_TOKEN_PUBLIC_KEY": ""
+    "VIEWER_TOKEN_PUBLIC_KEY": "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"9Qt3463-fc1wkrbVJ3I1AuwwLmyp_27PuwkJJpM3ras\"}"
   },
   // Agent auth, agent messages and viewer-token redemption go through the api's Internal entrypoint.
   "services": [{ "binding": "API", "service": "cloudbrowser", "entrypoint": "Internal" }],
@@ -22,7 +22,7 @@
     {
       "binding": "DB",
       "database_name": "cloudbrowser",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "c2a603c2-c3d4-409a-83fb-b2e6fac50a7d",
       "migrations_dir": "../../packages/db/migrations"
     }
   ],

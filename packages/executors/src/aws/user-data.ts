@@ -61,6 +61,33 @@ chmod 0755 /usr/local/bin/cloudbrowser-agent
 install -d /usr/local/lib/cloudbrowser /etc/cloudbrowser/nft
 install -m 0755 /tmp/cbvm/bin/* /usr/local/lib/cloudbrowser/
 install -m 0644 /tmp/cbvm/systemd/*.service /etc/systemd/system/
+# Older agent images ship a unit that inherits the browser image's non-root user, preventing
+# supervisor from starting. Only supervisor needs root; its Chrome and neko programs use neko.
+# The corrected unit already contains --user root, so this compatibility fix is idempotent.
+sed -i 's/--name browser --network/--name browser --user root --network/' /etc/systemd/system/cloudbrowser-browser.service
+
+# Older browser images inherit policies that disable CDP and isolated browser contexts. Keep
+# all other policies, and mount the corrected policy set so existing public images also work.
+install -d -m 0755 /etc/cloudbrowser/chrome-policies
+browser_cid=$(docker create "$BROWSER_IMAGE")
+docker cp "$browser_cid:/etc/opt/chrome/policies/managed/." /etc/cloudbrowser/chrome-policies/
+docker rm "$browser_cid" >/dev/null
+python3 - <<'POLICIES'
+import json
+from pathlib import Path
+directory = Path('/etc/cloudbrowser/chrome-policies')
+for path in directory.glob('*.json'):
+    policy = json.loads(path.read_text())
+    policy.pop('DeveloperToolsAvailability', None)
+    policy.pop('IncognitoModeAvailability', None)
+    path.write_text(json.dumps(policy))
+path = directory / 'cloudbrowser.json'
+policy = json.loads(path.read_text())
+policy.update(DeveloperToolsAvailability=1, IncognitoModeAvailability=0)
+path.write_text(json.dumps(policy))
+POLICIES
+grep -Fq '/etc/cloudbrowser/chrome-policies:' /etc/systemd/system/cloudbrowser-browser.service || \\
+  sed -i 's|--env-file /run/cloudbrowser/neko.env|--env-file /run/cloudbrowser/neko.env -v /etc/cloudbrowser/chrome-policies:/etc/opt/chrome/policies/managed:ro|' /etc/systemd/system/cloudbrowser-browser.service
 
 # Firewall rules apply to the browser's user; read its uid from the image.
 neko_uid=$(docker run --rm --entrypoint id "$BROWSER_IMAGE" -u neko)

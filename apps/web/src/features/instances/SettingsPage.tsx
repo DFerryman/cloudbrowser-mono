@@ -158,7 +158,7 @@ function Settings({ instance: i }: { instance: Instance }) {
               />
             </Row>
             <Row label={t('settings.location')}>
-              {region.country === 'JP' ? 'Japan' : 'United States'} · {region.city}
+              {{ AU: 'Australia', JP: 'Japan', US: 'United States' }[region.country]} · {region.city}
             </Row>
             <Row label={t('settings.dedicatedSince')}>{fmt(i.dedicatedSince)}</Row>
             <Row label={t('settings.timezone')}>{region.timezone}</Row>

@@ -107,6 +107,7 @@ export class InstanceGateway extends DurableObject<Env> {
     }
     const frame = parsed.data;
     if (frame.t === 'viewer') {
+      this.traceSignal('agent', frame.sessionId, frame.data);
       for (const v of this.ctx.getWebSockets(`session:${frame.sessionId}`)) this.send(v, { t: 'neko', data: frame.data });
       return;
     }
@@ -122,7 +123,16 @@ export class InstanceGateway extends DurableObject<Env> {
     const parsed = ViewerFrame.safeParse(raw);
     const agent = this.sockets('agent')[0];
     if (!parsed.success || !agent) return;
+    if (parsed.data.t === 'neko') this.traceSignal('viewer', att.sessionId, parsed.data.data);
     this.send(agent, { t: 'viewer', sessionId: att.sessionId, data: parsed.data });
+  }
+
+  /** Signal names help diagnose stalled handshakes without logging SDP, tokens or input. */
+  private traceSignal(role: 'agent' | 'viewer', sessionId: string, data: unknown) {
+    const event = data && typeof data === 'object' && 'event' in data ? data.event : undefined;
+    if (typeof event === 'string' && (event.startsWith('signal/') || event === 'system/init')) {
+      console.info('viewer signaling', { role, sessionId, event });
+    }
   }
 
   override async webSocketClose(ws: WebSocket) {
@@ -130,6 +140,11 @@ export class InstanceGateway extends DurableObject<Env> {
     if (att?.role === 'agent') {
       if (this.sockets('agent').every((s) => s === ws)) for (const v of this.sockets('viewer')) this.send(v, { t: 'agent_offline' });
     } else if (att?.role === 'viewer') {
+      // A reconnect can accept/open the same session before the replaced socket's close callback.
+      // Its relay now belongs to the replacement; the old close must not tear that relay down.
+      const replacement = this.ctx.getWebSockets(`session:${att.sessionId}`)
+        .some((s) => s !== ws && s.readyState === WebSocket.OPEN);
+      if (replacement) return;
       const agent = this.sockets('agent')[0];
       if (agent) this.send(agent, { t: 'viewer_close', sessionId: att.sessionId });
     }

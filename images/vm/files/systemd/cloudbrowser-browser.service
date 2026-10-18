@@ -11,7 +11,8 @@ ExecStartPre=-/usr/bin/docker rm -f browser
 # Host network: Chrome's traffic leaves with the VM's static IP; the VM firewall restricts the
 # browser's user (no private, link-local or metadata addresses). /data/browser holds the profile
 # and downloads; the agent's state is not mounted.
-ExecStart=/usr/bin/docker run --rm --name browser --network host --shm-size 2g --cap-add SYS_ADMIN \
+# Supervisor needs root and runs Chrome and neko as the unprivileged neko user.
+ExecStart=/usr/bin/docker run --rm --name browser --user root --network host --shm-size 2g --cap-add SYS_ADMIN \
   --env-file /run/cloudbrowser/neko.env -v /data/browser:/data ${BROWSER_IMAGE}
 ExecStop=/usr/bin/docker stop -t 25 browser
 Restart=on-failure

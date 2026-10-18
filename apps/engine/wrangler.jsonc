@@ -22,17 +22,17 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["EventHub"] }],
   "vars": {
     "ENGINE_MODE": "worker",
-    "ENV_NAME": "dev",
+    "ENV_NAME": "prod",
     // Written into each VM's user data: the session gateway's public URL.
-    "GATEWAY_URL": "ws://localhost:8790",
+    "GATEWAY_URL": "wss://connect.nevazu.com",
     // Public origin of the app: real VMs check their IP at ${APP_URL}/api/echo/ip (docs/aws.md).
     // AWS keys and AWS_REGIONS are secrets (wrangler secret put).
-    "APP_URL": "http://localhost:8787",
+    "APP_URL": "https://nevazu.com",
     "FAKE_DELAY_MS": "700",
     // Profile archives (page 4): the agent uploads to presigned R2 URLs. Archives are off until
     // these are set together with the secrets R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY and
     // ARCHIVE_MASTER_KEY (see docs/deploy-cloudflare.md).
-    "R2_ACCOUNT_ID": "",
+    "R2_ACCOUNT_ID": "84e421f26c708c0cf437e287eed11fa1",
     "R2_ARCHIVE_BUCKET": "cloudbrowser-archives"
   },
   "d1_databases": [
@@ -40,7 +40,7 @@
       "binding": "DB",
       "database_name": "cloudbrowser",
       // Replace with the id printed by `wrangler d1 create cloudbrowser` (see docs/deploy-cloudflare.md).
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "c2a603c2-c3d4-409a-83fb-b2e6fac50a7d",
       "migrations_dir": "../../packages/db/migrations"
     }
   ],

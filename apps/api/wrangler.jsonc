@@ -2,6 +2,7 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "cloudbrowser",
   "main": "src/index.ts",
+  "minify": true,
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
   // The web app is served from the same Worker, so /api is same-origin (no CORS).
@@ -12,13 +13,14 @@
     "run_worker_first": ["/api/*"]
   },
   "vars": {
+    "TURN_KEY_ID": "b465a1e4c38bbb6364fb92145ac9170c",
     // Set to your real origin, e.g. https://app.example.com (see docs/deploy-cloudflare.md).
-    "APP_URL": "http://localhost:8787",
-    "ENVIRONMENT": "development",
+    "APP_URL": "https://nevazu.com",
+    "ENVIRONMENT": "production",
     // Must be on a domain onboarded to Cloudflare Email Service (Email Sending).
-    "EMAIL_FROM": "no-reply@example.com",
+    "EMAIL_FROM": "no-reply@auth.nevazu.com",
     // Public URL of the session gateway Worker (apps/gateway), e.g. wss://connect.example.com.
-    "GATEWAY_URL": "ws://localhost:8790",
+    "GATEWAY_URL": "wss://connect.nevazu.com",
     // Billing with Creem (page 6). Off until the API base, the four product ids and the secrets
     // CREEM_API_KEY and CREEM_WEBHOOK_SECRET are all set. Test mode: https://test-api.creem.io
     "CREEM_API_BASE": "",
@@ -28,7 +30,7 @@
     "CREEM_PRODUCT_PRO_YEARLY": "",
     // Operator console (/admin, page 10): comma-separated IPs and CIDRs allowed to reach it. Empty
     // means nobody (except 127.0.0.1 under `wrangler dev`). Add a WAF rule on the same list.
-    "ADMIN_IP_ALLOWLIST": "",
+    "ADMIN_IP_ALLOWLIST": "154.9.249.41",
     // Operator alerts: comma-separated emails (via Email Service). The chat webhook URL is the
     // secret ALERT_WEBHOOK_URL (Slack-compatible).
     "ALERT_EMAILS": ""
@@ -62,7 +64,7 @@
       "binding": "DB",
       "database_name": "cloudbrowser",
       // Replace with the id printed by `wrangler d1 create cloudbrowser`.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "c2a603c2-c3d4-409a-83fb-b2e6fac50a7d",
       "migrations_dir": "../../packages/db/migrations"
     }
   ],
