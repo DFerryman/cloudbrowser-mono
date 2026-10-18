@@ -1,4 +1,4 @@
-import { newId, schema, type Db } from '@cloudbrowser/db';
+import { newId, raiseAlert, schema, type Db } from '@cloudbrowser/db';
 import type { Executor, ExecutorKind, OpContext } from '@cloudbrowser/executors';
 import { and, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 
@@ -48,6 +48,17 @@ async function openFinding(
     detail: f.detail,
     createdAt: deps.now(),
   });
+  await raiseAlert(
+    db,
+    {
+      source: 'reconciler',
+      severity: f.kind === 'missing' ? 'critical' : 'warning',
+      title: `Drift: ${f.kind} ${f.resourceKind ?? 'resource'} ${f.providerId} in ${f.executor}/${f.region}`,
+      detail: { ...f },
+      dedupeKey: `finding:${f.kind}:${f.providerId}`,
+    },
+    deps.now(),
+  );
   return true;
 }
 
@@ -60,6 +71,11 @@ async function freezeCreates(deps: ReconcilerDeps, reason: string) {
       .onConflictDoUpdate({ target: controlFlags.key, set: { value: 'true', reason, updatedAt: at } }),
     deps.db.insert(auditLog).values({ actor: 'reconciler', action: 'circuit_breaker.tripped', target: 'global', detail: { reason }, createdAt: at }),
   ]);
+  await raiseAlert(
+    deps.db,
+    { source: 'reconciler', severity: 'critical', title: `Circuit breaker: new browsers frozen (${reason})`, detail: { reason }, dedupeKey: 'circuit_breaker' },
+    at,
+  );
 }
 
 /**
@@ -205,11 +221,18 @@ export async function snapshotQuotasAndSpend(deps: ReconcilerDeps) {
     .where(inArray(browserInstances.status, ['running', 'starting', 'creating']));
   const daysInMonth = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 0)).getUTCDate();
   const runningHoursCents = Math.round(running * ACTIVE_HOURS_PER_DAY * daysInMonth * vmHourCents);
-  await db.insert(spendSnapshots).values({
-    month: at.toISOString().slice(0, 7),
-    activeMonthlyCents: Number(cents),
-    runningHoursCents,
-    projectedCents: Number(cents) + runningHoursCents,
-    takenAt: at,
-  });
+  const month = at.toISOString().slice(0, 7);
+  const projectedCents = Number(cents) + runningHoursCents;
+  await db.insert(spendSnapshots).values({ month, activeMonthlyCents: Number(cents), runningHoursCents, projectedCents, takenAt: at });
+
+  // Spend guard thresholds (page 10): alert at 80% of the budget; at 100% creates are refused.
+  const [budget] = await db.select().from(caps).where(and(eq(caps.scope, 'global'), eq(caps.metric, 'spend_budget_cents')));
+  if (budget && budget.limit > 0) {
+    const pct = Math.round((projectedCents / budget.limit) * 100);
+    if (pct >= 100) {
+      await raiseAlert(db, { source: 'reconciler', severity: 'critical', title: `Spend guard active: projected ${pct}% of the monthly budget`, detail: { projectedCents, budgetCents: budget.limit }, dedupeKey: `spend100:${month}` }, at);
+    } else if (pct >= 80) {
+      await raiseAlert(db, { source: 'reconciler', severity: 'warning', title: `Projected spend at ${pct}% of the monthly budget`, detail: { projectedCents, budgetCents: budget.limit }, dedupeKey: `spend80:${month}` }, at);
+    }
+  }
 }

@@ -1,6 +1,7 @@
 import { schema, type Db } from '@cloudbrowser/db';
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
+import { passkey } from '@better-auth/passkey';
 import { emailOTP } from 'better-auth/plugins';
 import { eq } from 'drizzle-orm';
 import { sendSignInCode } from './email.js';
@@ -11,10 +12,16 @@ async function isInvited(db: Db, email: string) {
   return !!row;
 }
 
+/** WebAuthn relying party: the app's own host and origin (passkeys are bound to them). */
+export function relyingParty(env: Env) {
+  const url = new URL(env.APP_URL);
+  return { rpID: url.hostname, origin: url.origin, rpName: 'CloudBrowser' };
+}
+
 /**
  * Better Auth with email one-time codes (page 1, "Auth"). The pilot is invite-only, so codes are
- * only sent to, and accounts only created for, addresses in the `invites` table. Passkeys, TOTP
- * and OAuth come later (page 12).
+ * only sent to, and accounts only created for, addresses in the `invites` table. Signed-in users
+ * can add passkeys, which also serve as the step-up for /admin (page 10). TOTP and OAuth come later.
  */
 export function createAuth(env: Env, db: Db, waitUntil: (p: Promise<unknown>) => void) {
   return betterAuth({
@@ -25,7 +32,7 @@ export function createAuth(env: Env, db: Db, waitUntil: (p: Promise<unknown>) =>
     trustedOrigins: [env.APP_URL],
     database: drizzleAdapter(db, {
       provider: 'sqlite',
-      schema: { user: schema.user, session: schema.session, account: schema.account, verification: schema.verification },
+      schema: { user: schema.user, session: schema.session, account: schema.account, verification: schema.verification, passkey: schema.passkey },
     }),
     session: {
       expiresIn: 60 * 60 * 24 * 30,
@@ -46,6 +53,7 @@ export function createAuth(env: Env, db: Db, waitUntil: (p: Promise<unknown>) =>
       },
     },
     plugins: [
+      passkey({ ...relyingParty(env), authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' } }),
       emailOTP({
         otpLength: 6,
         expiresIn: 300,

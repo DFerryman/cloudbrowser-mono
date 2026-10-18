@@ -42,6 +42,11 @@ export interface Env {
   CREEM_PRODUCT_PERSONAL_YEARLY?: string;
   CREEM_PRODUCT_PRO_MONTHLY?: string;
   CREEM_PRODUCT_PRO_YEARLY?: string;
+  /** /admin is refused unless the client IP is in this comma-separated list of IPs and CIDRs (page 10). */
+  ADMIN_IP_ALLOWLIST?: string;
+  /** Where operator alerts go: comma-separated emails (Email Service) and a Slack-compatible webhook URL. */
+  ALERT_EMAILS?: string;
+  ALERT_WEBHOOK_URL?: string;
   /** Wraps per-browser archive keys (base64, 32 bytes); same value as the engine's. Secret. */
   ARCHIVE_MASTER_KEY?: string;
 }
@@ -54,5 +59,6 @@ export type AppEnv = {
     db: Db;
     auth: ReturnType<typeof createAuth>;
     user: SessionUser;
+    sessionId: string;
   };
 };

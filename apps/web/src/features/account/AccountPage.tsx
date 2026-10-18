@@ -3,6 +3,7 @@ import { PageHeader, signOut } from '../../app/AppShell.js';
 import { api } from '../../lib/api.js';
 import { useI18n, type Locale } from '../../lib/i18n.js';
 import { BillingSection } from '../billing/BillingSection.js';
+import { Passkeys } from './Passkeys.js';
 import { useMe } from '../instances/hooks.js';
 
 export function AccountPage() {
@@ -29,6 +30,7 @@ export function AccountPage() {
         </Section>
         <BillingSection />
         <Section title={t('account.security')} description={t('account.securityBody')}>
+          <Passkeys />
           <div className="flex flex-wrap gap-2">
             <Button
               onClick={async () => {

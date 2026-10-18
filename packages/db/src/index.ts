@@ -18,3 +18,4 @@ export function eventRow(userId: string, type: string, data: Record<string, unkn
 }
 export { newArchiveKey, wrapArchiveKey, unwrapArchiveKey } from './archive-keys.js';
 export { userCaps, billingRequired, usageMonth } from './caps.js';
+export { raiseAlert, type AlertSeverity } from './alerts.js';

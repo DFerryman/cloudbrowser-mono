@@ -65,6 +65,12 @@ locally, put `CREEM_API_BASE=https://test-api.creem.io`, `CREEM_API_KEY`, `CREEM
 the four `CREEM_PRODUCT_*` ids in `apps/api/.dev.vars`, and expose the webhook with
 `cloudflared tunnel --url http://localhost:8787` (webhook URL: `<tunnel>/api/webhooks/creem`).
 
+Operator console: make yourself an admin with
+`INSERT INTO admins (user_id, created_at) SELECT id, 0 FROM user WHERE email = 'you@example.com'`
+(same `wrangler d1 execute --local` as above), add a passkey in Settings → Security (passkeys work
+on `localhost`), then open http://localhost:8787/admin. Under `wrangler dev` the IP allowlist admits
+127.0.0.1.
+
 ### With a real agent (agent ↔ gateway ↔ engine)
 
 ```bash

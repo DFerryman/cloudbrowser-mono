@@ -21,6 +21,8 @@ const TITLES: Record<ErrorType, string> = {
   hours_exhausted: 'Active hours used up',
   billing_unavailable: 'Billing is not available',
   too_many_browsers: 'Delete browsers first',
+  suspended: 'Suspended',
+  step_up_required: 'Confirm with your passkey',
   internal: 'Something went wrong',
 };
 

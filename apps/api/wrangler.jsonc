@@ -25,10 +25,16 @@
     "CREEM_PRODUCT_PERSONAL_MONTHLY": "",
     "CREEM_PRODUCT_PERSONAL_YEARLY": "",
     "CREEM_PRODUCT_PRO_MONTHLY": "",
-    "CREEM_PRODUCT_PRO_YEARLY": ""
+    "CREEM_PRODUCT_PRO_YEARLY": "",
+    // Operator console (/admin, page 10): comma-separated IPs and CIDRs allowed to reach it. Empty
+    // means nobody (except 127.0.0.1 under `wrangler dev`). Add a WAF rule on the same list.
+    "ADMIN_IP_ALLOWLIST": "",
+    // Operator alerts: comma-separated emails (via Email Service). The chat webhook URL is the
+    // secret ALERT_WEBHOOK_URL (Slack-compatible).
+    "ALERT_EMAILS": ""
   },
-  // Billing sweep every 5 minutes (period ends, notices, deletion after 30 days); 03:00 UTC run
-  // also reconciles every subscription with Creem.
+  // Every 5 minutes: billing sweep (period ends, notices, deletion after 30 days; the 03:00 UTC
+  // run also reconciles every subscription with Creem) and delivery of new operator alerts.
   "triggers": { "crons": ["*/5 * * * *"] },
   // Cloudflare Email Service: sign-in codes.
   "send_email": [{ "name": "EMAIL" }],

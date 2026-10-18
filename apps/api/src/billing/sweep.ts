@@ -6,14 +6,15 @@
  *    (soft delete, so they stay restorable for 7 more days, then purge releases data and IPs);
  *  - once a night, re-syncs every subscription from Creem and records any drift.
  */
-import { eventRow, operationRow, schema, type Db } from '@cloudbrowser/db';
+import { raiseAlert, schema, type Db } from '@cloudbrowser/db';
+import { systemOperation } from '../ops.js';
 import { and, eq, like, notInArray } from 'drizzle-orm';
 import type { Env } from '../env.js';
 import type { Creem } from './creem.js';
 import { accessOf, notifyHub, recomputeEntitlements, syncSubscription } from './sync.js';
 import { pendingWebhooks, processWebhook } from './webhooks.js';
 
-const { subscriptions, auditLog, browserInstances, operations, events, user } = schema;
+const { subscriptions, auditLog, browserInstances, user } = schema;
 const DAY = 86_400_000;
 export const DATA_KEPT_DAYS = 30;
 const NOTICE_DAYS = [1, 14, 28];
@@ -72,7 +73,13 @@ export async function billingSweep(env: Env, db: Db, creem: Creem | null, now: D
         const [after] = await db.select().from(subscriptions).where(eq(subscriptions.id, s.id));
         if (after && (after.status !== before.status || after.units !== before.units || after.plan !== before.plan)) {
           summary.drift++;
-          console.error('ALERT: billing drift', s.id, before, { status: after.status, units: after.units, plan: after.plan });
+          await raiseAlert(db, {
+            source: 'billing',
+            severity: 'warning',
+            title: `Billing drift on subscription ${s.id}`,
+            detail: { before, after: { status: after.status, units: after.units, plan: after.plan } },
+            dedupeKey: `drift:${s.id}`,
+          }, now);
           await db.insert(auditLog).values({
             actor: 'billing',
             action: 'billing.drift',
@@ -115,18 +122,22 @@ async function deleteBrowsers(env: Env, db: Db, userId: string, now: Date): Prom
     .select({ id: browserInstances.id })
     .from(browserInstances)
     .where(and(eq(browserInstances.userId, userId), notInArray(browserInstances.status, ['deleting', 'purged', 'failed'])));
-  if (!live.length) return 0;
   let n = 0;
   for (const inst of live) {
-    const op = operationRow({ instanceId: inst.id, userId: null, kind: 'delete', params: { reason: 'billing' }, now });
     try {
-      await db.batch([
-        db.insert(operations).values(op),
-        db.update(browserInstances).set({ desiredState: 'deleted', updatedAt: now }).where(eq(browserInstances.id, inst.id)),
-        db.insert(events).values(eventRow(userId, 'instance.updated', { instanceId: inst.id, operationId: op.id }, now)),
-        db.insert(auditLog).values({ actor: 'billing', action: 'instance.deleted_unpaid', target: `instance:${inst.id}`, createdAt: now }),
-      ]);
-      await env.OPERATIONS.send({ operationId: op.id }).catch(() => {}); // the engine's sweep is the backstop
+      await systemOperation(
+        env,
+        db,
+        {
+          instanceId: inst.id,
+          userId,
+          kind: 'delete',
+          actor: 'billing',
+          params: { reason: 'billing' },
+          before: [db.update(browserInstances).set({ desiredState: 'deleted', updatedAt: now }).where(eq(browserInstances.id, inst.id))],
+        },
+        now,
+      );
       n++;
     } catch {
       // Another operation is running for it (one unfinished operation per browser); the next sweep tries again.

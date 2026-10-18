@@ -6,6 +6,7 @@ import { OpenAPIHono } from '@hono/zod-openapi';
 import type { ViewerTokenClaims } from '@cloudbrowser/contracts';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { createDb } from '@cloudbrowser/db';
+import { deliverAlerts } from './admin/alerts.js';
 import { creemFrom } from './billing/creem.js';
 import { billingSweep } from './billing/sweep.js';
 import { processWebhook, receiveWebhook } from './billing/webhooks.js';
@@ -14,6 +15,7 @@ import { createAuth } from './auth.js';
 import type { AppEnv, Env } from './env.js';
 import { internalApi } from './internal.js';
 import { problem, ProblemError } from './problem.js';
+import { adminRoute } from './routes/admin.js';
 import { v1 } from './routes/v1.js';
 
 const app = new OpenAPIHono<AppEnv>();
@@ -88,6 +90,7 @@ const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
   const session = await c.get('auth').api.getSession({ headers: c.req.raw.headers });
   if (!session) throw problem(401, 'unauthenticated');
   c.set('user', { id: session.user.id, email: session.user.email, name: session.user.name });
+  c.set('sessionId', session.session.id);
   await next();
 };
 
@@ -106,6 +109,7 @@ app.doc31('/api/v1/openapi.json', {
   info: { title: 'CloudBrowser API', version: '1.0.0' },
 });
 app.use('/api/v1/*', sameOrigin, requireUser, limitWrites);
+app.route('/api/v1/admin', adminRoute);
 app.route('/api/v1', v1);
 
 export default {
@@ -130,11 +134,13 @@ export default {
     }
   },
 
-  /** Every 5 minutes: billing sweep; the 03:00–03:04 UTC run also reconciles with Creem. */
+  /** Every 5 minutes: billing sweep (the 03:00–03:04 UTC run also reconciles with Creem) and alert delivery. */
   async scheduled(controller: ScheduledController, env: Env) {
     const at = new Date(controller.scheduledTime);
     const nightly = at.getUTCHours() === 3 && at.getUTCMinutes() < 5;
-    console.log('billing sweep', JSON.stringify(await billingSweep(env, createDb(env.DB), creemFrom(env), new Date(), { nightly })));
+    const db = createDb(env.DB);
+    console.log('billing sweep', JSON.stringify(await billingSweep(env, db, creemFrom(env), new Date(), { nightly })));
+    console.log('alerts delivered', await deliverAlerts(env, db));
   },
 } satisfies ExportedHandler<Env, { eventId: string }>;
 

@@ -50,9 +50,21 @@ Cloudflare deployment.
   out (warning in the session view, banner at 80%). Volume size and snapshot retention follow the
   plan. A nightly re-sync logs drift. Billing is off until Creem is configured, and the pilot keeps
   its free plan until the `billing_required` flag is set.
+- **Operator console** (page 10): `/admin` (code-split, English-only) on `/api/v1/admin/*`, behind
+  the `admins` table, an IP allowlist (plus a recommended WAF rule) and a passkey step-up that lasts
+  30 minutes per session. Overview (browsers by status, unfinished and failed operations, findings,
+  alerts, pending webhooks, switches, spend guard, quotas), alerts with acknowledgement, operations
+  with their step journals, browser search by id, name, email or IP with the full timeline
+  (placements, ledger, IP history, operations, backups, audit), per-browser actions (retry, recover,
+  sleep, suspend), users with plan and a per-user kill switch, the ledger, drift findings, caps and
+  switches, and the audit log. Every change is audited. Users can add passkeys (Better Auth passkey
+  plugin) in Settings → Security. Suspended browsers sleep within a minute and cannot start.
+- **Alerts**: a shared `raiseAlert` (deduplicated while open) used by the reconciler (circuit
+  breaker, findings, spend 80%/100%), the engine (failed IP checks, quota/forbidden/invalid errors)
+  and billing (drift, disputes); delivered to email and a Slack-compatible webhook by the api cron.
 - **Reconciler** (`apps/reconciler`): ledger vs provider by tag, adoption, orphan and missing
   findings, circuit breaker, quota and spend snapshots feeding the spend guard.
-- **API** (`apps/api`): the page 2 API surface except downloads/admin — Better Auth
+- **API** (`apps/api`): the page 2 API surface except downloads — Better Auth
   email codes sent with Cloudflare Email Service (invite-only), Workers Rate Limiting on sign-in and
   writes, the IP echo endpoint, Idempotency-Key on lifecycle calls, admission checks (plan, region,
   global caps, quota headroom, spend guard, creation freeze), viewer sessions with take-over and
@@ -119,6 +131,8 @@ Cloud), because Cloudflare does not offer VMs with a dedicated static egress IP.
 | pg-boss job for Creem webhooks; nightly reconciliation job | `cloudbrowser-billing` queue consumed by the api Worker; the api's 5-minute cron (lost events, period ends, notices, deletion after 30 days) and its 03:00 UTC run (re-sync from Creem) | Same asynchronous, idempotent processing with Cloudflare primitives. |
 | Entitlements written into the user's `caps` | Caps under a separate `billing:<user>` scope, between the pilot defaults and operator overrides | The pilot's defaults and per-user overrides keep working unchanged; billing never overwrites an operator's override. |
 | Running-hours cap enforced by the engine | The engine meters `running` time per user and month every minute (at most 5 minutes per tick if a run is missed) and sleeps browsers 10 minutes after the hours run out | The session view gets the deadline from the heartbeat and warns the user; starts are refused with `hours_exhausted`. |
+| `/admin` limited by source IP at the load balancer | `ADMIN_IP_ALLOWLIST` checked in the api (404 for everyone else) plus a Cloudflare WAF rule | Two layers; the in-app check also covers preview URLs. |
+| Alerts through CloudWatch alarms | `alerts` table written by every Worker, delivered by the api cron to Email Service and a chat webhook, acknowledged in the console | One place to see and acknowledge alerts; no extra service. |
 | Random bootstrap token stored hashed | HMAC-derived token (Worker secret `BOOTSTRAP_SECRET`), only the hash stored | `create_vm` can mint it after a crash without the token ever being written down. |
 
 Considered and **not** used:
@@ -146,4 +160,6 @@ Considered and **not** used:
   60 fps for Pro (applied once the browser image is built); growing existing volumes online after an
   upgrade; verifying Creem's signed success-redirect parameters (not needed for access, which comes
   only from webhooks); confirming every Creem payload against recorded test-mode fixtures.
-- Admin console (`/admin`), passkeys/TOTP/OAuth, dashboard thumbnails, dependency-cruiser and `buf breaking` in CI.
+- Passkey sign-in (passkeys are registered and used for the admin step-up; sign-in with them is a
+  small UI addition), TOTP, OAuth; time-limited support share codes (page 4); dashboard
+  thumbnails; dependency-cruiser and an OpenAPI diff in CI.

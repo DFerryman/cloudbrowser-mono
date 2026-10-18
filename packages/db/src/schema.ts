@@ -77,6 +77,27 @@ export const verification = sqliteTable(
   (t) => [index('verification_identifier_idx').on(t.identifier)],
 );
 
+/** Better Auth passkey plugin (WebAuthn credentials). `publicKey` is the COSE key, base64. Owner: api. */
+export const passkey = sqliteTable(
+  'passkey',
+  {
+    id: text('id').primaryKey(),
+    name: text('name'),
+    publicKey: text('public_key').notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    credentialID: text('credential_id').notNull(),
+    counter: integer('counter').notNull(),
+    deviceType: text('device_type').notNull(),
+    backedUp: integer('backed_up', { mode: 'boolean' }).notNull(),
+    transports: text('transports'),
+    createdAt: ts('created_at'),
+    aaguid: text('aaguid'),
+  },
+  (t) => [index('passkey_user_idx').on(t.userId), index('passkey_credential_idx').on(t.credentialID)],
+);
+
 /** Pilot accounts are invite-only (page 12). Owner: operators (SQL), read by api. */
 export const invites = sqliteTable('invites', {
   email: text('email').primaryKey(),
@@ -137,6 +158,9 @@ export const browserInstances = sqliteTable(
     updatedAt: ts('updated_at').notNull(),
     deletedAt: ts('deleted_at'),
     purgeAfter: ts('purge_after'),
+    /** Operator kill switch (abuse, page 10): the browser sleeps and cannot start. Owner: api (admin). */
+    suspendedAt: ts('suspended_at'),
+    suspendedReason: text('suspended_reason'),
   },
   (t) => [index('instances_user_idx').on(t.userId), index('instances_status_idx').on(t.status)],
 );
@@ -592,4 +616,51 @@ export const activeUsage = sqliteTable(
     exhaustedAt: ts('exhausted_at'),
   },
   (t) => [primaryKey({ columns: [t.userId, t.month] })],
+);
+
+// ---------------------------------------------------------------------------------------------
+// Operator console (page 10). Owner: api (admin endpoints); alerts are raised by every Worker.
+// ---------------------------------------------------------------------------------------------
+
+/** Staff with access to /admin. Granted with SQL only (docs/deploy-cloudflare.md). */
+export const admins = sqliteTable('admins', {
+  userId: text('user_id')
+    .primaryKey()
+    .references(() => user.id, { onDelete: 'cascade' }),
+  note: text('note'),
+  createdAt: ts('created_at').notNull(),
+});
+
+/**
+ * A passkey step-up for one sign-in session: admin endpoints need one from the last 15 minutes.
+ * The challenge is stored until it is used once.
+ */
+export const adminStepUps = sqliteTable('admin_step_ups', {
+  sessionId: text('session_id').primaryKey(),
+  userId: text('user_id').notNull(),
+  challenge: text('challenge'),
+  challengeExpiresAt: ts('challenge_expires_at'),
+  verifiedAt: ts('verified_at'),
+});
+
+/**
+ * Alerts for operators (page 7, page 10): any Worker inserts a row; the api's cron sends new ones
+ * to the alert email and chat webhook, and the console lists them until acknowledged.
+ */
+export const alerts = sqliteTable(
+  'alerts',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    source: text('source').notNull(), // api | engine | reaper | reconciler | billing
+    severity: text('severity').notNull(), // critical | warning | info
+    title: text('title').notNull(),
+    detail: json<Record<string, unknown>>('detail'),
+    /** Same key while unacknowledged = one alert (e.g. `freeze:circuit_breaker`). */
+    dedupeKey: text('dedupe_key'),
+    createdAt: ts('created_at').notNull(),
+    sentAt: ts('sent_at'),
+    acknowledgedAt: ts('acknowledged_at'),
+    acknowledgedBy: text('acknowledged_by'),
+  },
+  (t) => [index('alerts_open_idx').on(t.acknowledgedAt, t.createdAt)],
 );

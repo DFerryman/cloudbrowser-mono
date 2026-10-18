@@ -20,6 +20,10 @@ it('records unknown provider resources as orphans and trips the circuit breaker'
   expect(summary.frozen).toBe(true);
   const [flag] = await db.select().from(schema.controlFlags).where(eq(schema.controlFlags.key, 'creation_freeze'));
   expect(flag?.value).toBe('true');
+  // One critical alert for the circuit breaker and one per orphan, each raised once.
+  const raised = await db.select().from(schema.alerts);
+  expect(raised.filter((a) => a.dedupeKey === 'circuit_breaker')).toHaveLength(1);
+  expect(raised.filter((a) => a.dedupeKey?.startsWith('finding:orphan:'))).toHaveLength(4);
 
   // Findings are not duplicated on the next run.
   expect((await reconcileLedger(deps)).orphans).toBe(0);

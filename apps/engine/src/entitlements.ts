@@ -3,6 +3,7 @@
  *  - meters active (running) time per user and month into `active_usage`;
  *  - when the month's hours run out, records it (the session view shows a 10-minute warning) and
  *    puts the user's running browsers to sleep 10 minutes later;
+ *  - puts suspended browsers to sleep (operator kill switch);
  *  - when a user may run no browsers at all (the subscription ended and the caps went to zero),
  *    puts every running browser to sleep within a minute.
  * Data and IPs are never touched here.
@@ -31,6 +32,7 @@ export async function meterAndEnforce(deps: EngineDeps) {
       id: browserInstances.id,
       userId: browserInstances.userId,
       status: browserInstances.status,
+      suspendedAt: browserInstances.suspendedAt,
       meteredAt: instanceHealth.meteredAt,
     })
     .from(browserInstances)
@@ -79,6 +81,9 @@ export async function meterAndEnforce(deps: EngineDeps) {
     const caps = await userCaps(db, userId);
     const mine = running.filter((r) => r.userId === userId);
     const stoppable = mine.filter((r) => r.status === 'running' && !busy.has(r.id));
+
+    // Suspended by an operator (abuse kill switch, page 10): sleep now.
+    for (const r of stoppable.filter((x) => x.suspendedAt)) if (await requestStop(deps, r, 'suspended')) summary.stopped++;
 
     // Active hours (page 6): warn, then sleep 10 minutes later.
     const hours = caps.get('hours_per_month');

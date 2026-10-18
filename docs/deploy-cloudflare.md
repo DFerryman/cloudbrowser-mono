@@ -137,6 +137,41 @@ deletes their browsers on day 30 (restorable 7 more days); at 03:00 UTC it re-sy
 subscription and logs drift to `audit_log` (`billing.drift`). The engine meters active hours every
 minute and puts browsers to sleep 10 minutes after a plan's hours run out.
 
+## 3c. Operator console and alerts
+
+The console is at `https://<app domain>/admin` (page 10). Three gates, all required:
+
+1. **Admin role** (SQL only, never from the app). Sign in once with the email first, then:
+
+```sql
+INSERT INTO admins (user_id, note, created_at)
+  SELECT id, 'ops', unixepoch() * 1000 FROM user WHERE email = 'you@example.com';
+```
+
+2. **IP allowlist:** `ADMIN_IP_ALLOWLIST` in `apps/api/wrangler.jsonc` (comma-separated IPs and
+   CIDRs, IPv4 and IPv6). Empty means nobody. Add the same list as a Cloudflare **WAF custom rule**
+   in front of the app: *(URI Path starts with `/admin` or `/api/v1/admin`) and not (IP Source
+   Address in {your list})* → **Block**. Everyone else gets a plain 404.
+3. **Passkey step-up:** each admin adds a passkey in **Settings → Security** (Touch ID, Windows
+   Hello or a security key), then confirms with it when opening the console. A confirmation lasts
+   30 minutes per sign-in session. Passkeys are bound to the app's domain (`APP_URL`), so register
+   them on the production domain.
+
+Every change made in the console (suspend, recover, retry, stop, caps, switches, finding
+resolutions, alert acknowledgements, step-ups) is written to `audit_log` with the admin as actor.
+
+**Alerts** (circuit breaker, drift findings, spend at 80% and 100%, failed IP checks, quota or
+permission errors, billing drift and disputes) are stored in `alerts`, listed in the console and
+sent by the api's 5-minute cron:
+
+```bash
+cd apps/api
+pnpm exec wrangler secret put ALERT_WEBHOOK_URL    # Slack-compatible incoming webhook, optional
+```
+
+and `ALERT_EMAILS` in `apps/api/wrangler.jsonc` (comma-separated; Email Service must be able to
+send to them).
+
 ## 4. Migrate and deploy
 
 ```bash
@@ -173,7 +208,10 @@ SELECT * FROM drift_findings WHERE status = 'open';
 SELECT * FROM subscriptions;                                   -- billing mirror (Creem is the source of truth)
 SELECT * FROM webhook_events WHERE processed_at IS NULL;      -- Creem events not applied yet (with error)
 SELECT * FROM active_usage WHERE month = strftime('%Y-%m', 'now');   -- active seconds per user
+SELECT * FROM alerts WHERE acknowledged_at IS NULL;          -- open operator alerts
 ```
+
+Most of these are also in the operator console (`/admin`).
 
 For chaos testing on staging, set `FAKE_FAULTS` on the engine, e.g.
 `{"ensureRunning":{"class":"capacity","rate":0.5}}`.

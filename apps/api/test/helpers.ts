@@ -69,7 +69,10 @@ export function setup() {
   const settle = async () => {
     while (pending.length) await pending.shift();
   };
-  return { d1, call, settle, emails, env, engineEnv, ctx };
+  // Switch between signed-in users within one test.
+  const getCookie = () => cookie;
+  const setCookie = (v: string) => void (cookie = v);
+  return { d1, call, settle, emails, env, engineEnv, ctx, cookie: getCookie, setCookie };
 }
 
 export async function signIn(t: ReturnType<typeof setup>, email: string) {

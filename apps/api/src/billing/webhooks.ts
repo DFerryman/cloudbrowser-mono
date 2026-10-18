@@ -3,7 +3,7 @@
  * by its id (duplicates are ignored) and answers at once; processing runs from the
  * `cloudbrowser-billing` queue, with the api's cron as a backstop for lost messages.
  */
-import { schema, type Db } from '@cloudbrowser/db';
+import { raiseAlert, schema, type Db } from '@cloudbrowser/db';
 import { and, eq, isNull, lt } from 'drizzle-orm';
 import type { Env } from '../env.js';
 import { type Creem, verifyWebhookSignature } from './creem.js';
@@ -90,7 +90,7 @@ export async function processWebhook(env: Env, db: Db, creem: Creem, eventId: st
       case 'dispute.created': {
         const subId = idOf(o.subscription);
         if (subId) userId = await revokeSubscription(env, db, subId, 'dispute', now);
-        console.error('ALERT: Creem dispute', eventId, subId);
+        await raiseAlert(db, { source: 'billing', severity: 'critical', title: `Creem dispute${subId ? ` on ${subId}` : ''}: account frozen`, detail: { eventId, subscriptionId: subId, userId } }, now);
         break;
       }
       default:

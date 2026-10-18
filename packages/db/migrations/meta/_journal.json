@@ -36,6 +36,13 @@
       "when": 1792255389209,
       "tag": "0004_billing",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1792296218348,
+      "tag": "0005_admin",
+      "breakpoints": true
     }
   ]
 }

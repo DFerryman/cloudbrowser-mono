@@ -1,5 +1,5 @@
 import { OPERATION_STEPS, type OperationKind } from '@cloudbrowser/contracts';
-import { eventRow, operationRow, schema } from '@cloudbrowser/db';
+import { eventRow, operationRow, raiseAlert, schema } from '@cloudbrowser/db';
 import { ExecutorError, type ErrorClass, type ResourceKind } from '@cloudbrowser/executors';
 import { and, eq, inArray, isNull, lt, lte, or } from 'drizzle-orm';
 import {
@@ -296,10 +296,27 @@ async function handleError(deps: EngineDeps, op: OperationRow, env: StepEnv, ste
     case 'step_failed':
       return fail(deps, op, env, cls, message);
     case 'quota':
-      return fail(deps, op, env, cls, `New browsers are temporarily unavailable in ${env.region.name}.`);
     case 'forbidden':
     case 'invalid':
-      return fail(deps, op, env, cls, 'Something went wrong on our side. We have been alerted.');
+      // These stop at once and alert (page 10, "Retries").
+      await raiseAlert(
+        deps.db,
+        {
+          source: deps.mode,
+          severity: 'critical',
+          title: `${cls} error in ${op.kind} (${env.region.id})`,
+          detail: { operationId: op.id, instanceId: op.instanceId, message },
+          dedupeKey: `op:${cls}:${op.kind}:${env.region.id}`,
+        },
+        deps.now(),
+      );
+      return fail(
+        deps,
+        op,
+        env,
+        cls,
+        cls === 'quota' ? `New browsers are temporarily unavailable in ${env.region.name}.` : 'Something went wrong on our side. We have been alerted.',
+      );
   }
 }
 

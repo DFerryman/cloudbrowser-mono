@@ -1,4 +1,4 @@
-import { eventRow, operationRow, schema } from '@cloudbrowser/db';
+import { eventRow, operationRow, raiseAlert, schema } from '@cloudbrowser/db';
 import type { ExecutorKind } from '@cloudbrowser/executors';
 import { and, asc, eq, gte, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
 import { placementRef, readContext, type EngineDeps } from './context.js';
@@ -118,10 +118,20 @@ async function recordIpCheck(deps: EngineDeps, inst: { id: string; userId: strin
   ] as const;
   if (!check.ok && inst.status === 'running') {
     await db.batch([...stmts, ...pauseNetwork(deps, inst.id, check, at)]);
+    await ipAlert(deps, inst.id, { ...check }, at);
   } else {
     await db.batch(stmts);
   }
   deps.notify(inst.userId);
+}
+
+/** A failed IP check is an IP-integrity incident until an operator looks at it (page 3). */
+function ipAlert(deps: EngineDeps, instanceId: string, detail: Record<string, unknown>, at: Date) {
+  return raiseAlert(
+    deps.db,
+    { source: 'engine', severity: 'critical', title: `IP check failed for ${instanceId}: network paused`, detail, dedupeKey: `ip:${instanceId}` },
+    at,
+  );
 }
 
 function pauseNetwork(deps: EngineDeps, instanceId: string, detail: Record<string, unknown>, at: Date) {
@@ -202,6 +212,7 @@ export async function periodicIpChecks(deps: EngineDeps) {
         ...pauseNetwork(deps, inst.id, { binding: binding.ok, lastCheck: last ?? null, stale }, at),
         db.insert(events).values(eventRow(inst.userId, 'instance.updated', { instanceId: inst.id }, at)),
       ]);
+      await ipAlert(deps, inst.id, { binding: binding.ok, lastCheck: last ?? null, stale }, at);
       deps.notify(inst.userId);
     }
   }

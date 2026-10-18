@@ -104,3 +104,45 @@ export function notifyUser(c: Context<AppEnv>, userId: string) {
     stub.fetch(`https://hub/notify?userId=${encodeURIComponent(userId)}`, { method: 'POST' }).catch((e) => console.error('notify failed', e)),
   );
 }
+
+/**
+ * An operation started by the system or an operator rather than a user request (billing, /admin).
+ * Same atomic batch as `enqueueOperation`, with an audit row naming the actor. Throws 409
+ * `operation_in_progress` if the browser already has an unfinished operation.
+ */
+export async function systemOperation(
+  env: AppEnv['Bindings'],
+  db: Db,
+  input: {
+    instanceId: string;
+    userId: string;
+    kind: OperationKind;
+    actor: string;
+    params?: Record<string, unknown>;
+    before?: BatchItem<'sqlite'>[];
+  },
+  now = new Date(),
+): Promise<string> {
+  const op = operationRow({ instanceId: input.instanceId, userId: null, kind: input.kind, params: input.params, now });
+  try {
+    const stmts: BatchItem<'sqlite'>[] = [
+      ...(input.before ?? []),
+      db.insert(operations).values(op),
+      db.insert(events).values(eventRow(input.userId, 'instance.updated', { instanceId: input.instanceId, operationId: op.id }, now)),
+      db.insert(schema.auditLog).values({
+        actor: input.actor,
+        action: `operation.${input.kind}`,
+        target: `instance:${input.instanceId}`,
+        detail: { operationId: op.id, ...(input.params ?? {}) },
+        createdAt: now,
+      }),
+    ];
+    await db.batch(stmts as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+  } catch (e) {
+    const running = await unfinishedOperation(db, input.instanceId);
+    if (running) throw problem(409, 'operation_in_progress', undefined, { operationId: running.id });
+    throw e;
+  }
+  await env.OPERATIONS.send({ operationId: op.id }).catch((e) => console.error('enqueue failed', op.id, e)); // the engine's sweep is the backstop
+  return op.id;
+}

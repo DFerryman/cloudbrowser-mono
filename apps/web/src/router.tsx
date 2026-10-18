@@ -17,7 +17,11 @@ export const router = createBrowserRouter([
   // The viewer is loaded on demand (page 1, "Performance and quality").
   {
     element: <AppShellGate />,
-    children: [{ path: '/b/:id', lazy: async () => ({ Component: (await import('./features/session/SessionPage.js')).SessionPage }) }],
+    children: [
+      { path: '/b/:id', lazy: async () => ({ Component: (await import('./features/session/SessionPage.js')).SessionPage }) },
+      // Operator console (page 10): its own layout, code-split, staff only.
+      { path: '/admin/*', lazy: async () => ({ Component: (await import('./features/admin/AdminApp.js')).AdminApp }) },
+    ],
   },
   {
     element: <AppShell />,

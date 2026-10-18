@@ -138,6 +138,8 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
 
 /** Running caps, checked before every start (page 10). */
 export async function admitStart(db: Db, userId: string, instanceId: string, regionId: string) {
+  const [inst] = await db.select({ suspendedAt: browserInstances.suspendedAt }).from(browserInstances).where(eq(browserInstances.id, instanceId));
+  if (inst?.suspendedAt) throw problem(403, 'suspended', 'This browser is suspended. Contact support.');
   const c = await userCaps(db, userId);
   if ((c.get('running') ?? 0) === 0) {
     throw problem(403, 'plan_limit', 'Your plan does not include running browsers. Renew it to wake this one; its data and IP are kept.', { limit: 'running' });
