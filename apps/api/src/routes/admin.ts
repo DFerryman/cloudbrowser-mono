@@ -482,7 +482,7 @@ adminRoute.get('/pricing', async (c) => {
   const month = now.toISOString().slice(0, 7);
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const usageRows = await db
-    .select({ item: usageRecords.item, amount: sql<number>`sum(${usageRecords.amountMicros})`, cost: sql<number>`sum(${usageRecords.costMicros})` })
+    .select({ item: usageRecords.item, amount: sql<number>`sum(${usageRecords.chargedMicros})`, cost: sql<number>`sum(${usageRecords.costMicros})` })
     .from(usageRecords)
     .where(like(usageRecords.day, `${month}-%`))
     .groupBy(usageRecords.item);

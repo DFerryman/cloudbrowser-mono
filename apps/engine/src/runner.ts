@@ -24,7 +24,7 @@ const TRANSITIONAL_STATUS: Partial<Record<OperationKind, string>> = {
   create: 'creating',
   start: 'starting',
   stop: 'stopping',
-  delete: 'stopping',
+  delete: 'deleting',
   recover: 'starting',
 };
 
@@ -82,6 +82,12 @@ export async function runOperation(deps: EngineDeps, operationId: string): Promi
 
   const env = await buildEnv(deps, op);
   if (!env) return fail(deps, op, null, 'invalid', 'Instance or region not found.');
+  // A retried admin job or a stale queue delivery must never resurrect a permanently deleted
+  // profile. The API checks the same boundary, but operation execution is a separate trust edge.
+  if ((env.instance.status === 'purged' && op.kind !== 'purge') ||
+      (env.instance.desiredState === 'deleted' && !['delete', 'purge', 'undelete'].includes(op.kind))) {
+    return fail(deps, op, null, 'invalid_state', 'This browser has been deleted.');
+  }
 
   if (now > op.deadlineAt) {
     // A start that ran out of time waiting for capacity moves the browser to another zone instead of failing.
@@ -360,6 +366,10 @@ async function fail(
   reason: string,
 ): Promise<RunResult> {
   const { db } = deps;
+  if (env && op.kind === 'purge') await raiseAlert(db, {
+    source: 'reaper', severity: 'critical', title: `Browser cleanup incomplete: ${op.instanceId}`,
+    detail: { instanceId: op.instanceId, operationId: op.id, errorClass, reason }, dedupeKey: `cleanup:${op.instanceId}`,
+  }, deps.now());
   if (env && op.kind === 'change_ip') {
     try {
       await compensateChangeIp(env);
@@ -373,6 +383,7 @@ async function fail(
   if (env) {
     if (op.kind === 'create') instanceStatus = 'failed';
     // A failed resize leaves the browser as it was (the volume keeps its size); it is reported, not shown as a problem.
+    else if (op.kind === 'delete') instanceStatus = 'deleting';
     else if (op.kind === 'change_ip' || op.kind === 'purge' || op.kind === 'resize_volume') instanceStatus = null;
     else instanceStatus = 'needs_attention';
   }

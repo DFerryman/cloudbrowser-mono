@@ -126,7 +126,7 @@ const RUN_STATES: Record<string, RunState> = {
   running: 'running',
   stopping: 'stopping',
   stopped: 'stopped',
-  'shutting-down': 'terminated',
+  'shutting-down': 'terminating',
   terminated: 'terminated',
 };
 
@@ -193,6 +193,14 @@ export class AwsExecutor implements Executor {
     return { ...ctx.tags, 'cb:kind': kind, 'cb:token': ctx.token, Name: `cloudbrowser-${ctx.tags['cb:instance']}` };
   }
 
+  private requireOwner(ctx: OpContext, node: XmlNode | null | undefined, providerId: string) {
+    if (!node) throw new ExecutorError('invalid', `${providerId} does not exist`);
+    const tags = tagsOf(node);
+    if (tags['cb:managed'] !== 'true' || tags['cb:instance'] !== ctx.tags['cb:instance'] || tags['cb:env'] !== ctx.tags['cb:env']) {
+      throw new ExecutorError('forbidden', `${providerId} does not belong to this browser`);
+    }
+  }
+
   /** Polls `check` until it returns a value or the deadline is near. */
   private async waitFor<T>(ctx: OpContext, what: string, check: () => Promise<T | null>): Promise<T> {
     for (;;) {
@@ -223,8 +231,20 @@ export class AwsExecutor implements Executor {
     }
   }
 
+  private async rootVolumeSize(ctx: OpContext, region: string, vmId: string): Promise<number | undefined> {
+    const volumes = await this.readAll(ctx, region, 'DescribeVolumes', 'volumeSet', filters({
+      'attachment.instance-id': vmId,
+      'tag:cb:kind': 'root_volume',
+    }));
+    const sizeGb = Number(text(volumes[0], 'size'));
+    return Number.isInteger(sizeGb) && sizeGb > 0 ? sizeGb : undefined;
+  }
+
   private async byToken(ctx: OpContext, region: string, action: string, setName: string, extra: Record<string, string | string[]> = {}) {
     const found = await this.readAll(ctx, region, action, setName, filters({ 'tag:cb:token': ctx.token, ...extra }));
+    // A token collision or stale ledger entry must never recover another browser's data or IP.
+    // Fail rather than issuing another create with that already-used provider idempotency token.
+    for (const node of found) this.requireOwner(ctx, action === 'DescribeInstances' ? items(node, 'instancesSet')[0] : node, `resource for ${ctx.step}`);
     return found[0] ?? null;
   }
 
@@ -278,6 +298,7 @@ export class AwsExecutor implements Executor {
   private async ensureAttached(ctx: OpContext, region: string, vmId: string, volumeId: string) {
     const vol = await this.volume(ctx, region, volumeId);
     if (!vol) throw new ExecutorError('invalid', `volume ${volumeId} does not exist`);
+    this.requireOwner(ctx, vol, volumeId);
     const att = items(vol, 'attachmentSet')[0];
     if (att && text(att, 'instanceId') === vmId) {
       if (text(att, 'status') === 'attached') return;
@@ -293,6 +314,14 @@ export class AwsExecutor implements Executor {
   }
 
   // --- Executor --------------------------------------------------------------------------------
+
+  pricingConfigKey(region: string): string {
+    const cfg = this.region(region);
+    return JSON.stringify({
+      instanceTypes: cfg.instanceTypes?.length ? cfg.instanceTypes : DEFAULT_INSTANCE_TYPES,
+      rootVolumeGb: this.opts.rootVolumeGb ?? DEFAULT_ROOT_VOLUME_GB,
+    });
+  }
 
   zones(region: string): string[] {
     return Object.keys(this.region(region).subnets);
@@ -335,6 +364,9 @@ export class AwsExecutor implements Executor {
     this.authorize('associateIp');
     const res = await this.read(ctx, region, 'DescribeAddresses', { 'AllocationId.1': ip.allocationId });
     const addr = items(res, 'addressesSet')[0];
+    this.requireOwner(ctx, addr, ip.allocationId);
+    const interfaces = await this.read(ctx, region, 'DescribeNetworkInterfaces', { 'NetworkInterfaceId.1': nicId });
+    this.requireOwner(ctx, items(interfaces, 'networkInterfaceSet')[0], nicId);
     if (text(addr, 'networkInterfaceId') === nicId) return;
     await this.call(ctx, region, 'AssociateAddress', { AllocationId: ip.allocationId, NetworkInterfaceId: nicId, AllowReassociation: true });
   }
@@ -411,14 +443,17 @@ export class AwsExecutor implements Executor {
     }
     const id = vmId;
     // The data volume can only be attached once the VM is running (or stopped).
-    const zone = await this.waitFor(ctx, `VM ${id} to start`, async () => {
+    const started = await this.waitFor(ctx, `VM ${id} to start`, async () => {
       const i = await this.instance(ctx, region, id);
       const state = this.stateOf(i);
-      if (state === 'terminated' || state === 'missing') throw new ExecutorError('capacity', `VM ${id} ended while starting`);
-      return state === 'running' || state === 'stopped' ? (text(i ?? undefined, 'placement', 'availabilityZone') ?? spec.zone) : null;
+      if (state === 'terminating' || state === 'terminated' || state === 'missing') throw new ExecutorError('capacity', `VM ${id} ended while starting`);
+      if (state !== 'running' && state !== 'stopped') return null;
+      const instanceType = text(i ?? undefined, 'instanceType');
+      if (!instanceType) throw new ExecutorError('retryable', `DescribeInstances returned no type for VM ${id}`);
+      return { zone: text(i ?? undefined, 'placement', 'availabilityZone') ?? spec.zone, instanceType };
     });
     await this.ensureAttached(ctx, region, id, spec.volumeId);
-    return { vmId: id, zone };
+    return { vmId: id, ...started, rootVolumeGb: await this.rootVolumeSize(ctx, region, id) };
   }
 
   async ensureRunning(ctx: OpContext, p: Placement): Promise<RunState> {
@@ -426,7 +461,7 @@ export class AwsExecutor implements Executor {
     const region = p.providerRegion;
     let inst = await this.instance(ctx, region, p.vmId);
     let state = this.stateOf(inst);
-    if (state === 'terminated' || state === 'missing') throw new ExecutorError('invalid', `VM ${p.vmId} no longer exists`);
+    if (state === 'terminating' || state === 'terminated' || state === 'missing') throw new ExecutorError('invalid', `VM ${p.vmId} no longer exists`);
     if (state === 'stopping') {
       await this.waitFor(ctx, `VM ${p.vmId} to stop`, async () => (this.stateOf(await this.instance(ctx, region, p.vmId)) === 'stopped' ? true : null));
       state = 'stopped';
@@ -455,6 +490,7 @@ export class AwsExecutor implements Executor {
 
   async snapshot(ctx: OpContext, region: string, volumeId: string): Promise<SnapshotRef> {
     this.authorize('snapshot');
+    this.requireOwner(ctx, await this.volume(ctx, region, volumeId), volumeId);
     let snap = await this.byToken(ctx, region, 'DescribeSnapshots', 'snapshotSet', {});
     if (!snap) {
       snap = await this.call(ctx, region, 'CreateSnapshot', {
@@ -468,6 +504,8 @@ export class AwsExecutor implements Executor {
 
   async ensureVolumeFromSnapshot(ctx: OpContext, region: string, zone: string, snapshotId: string, sizeGb: number): Promise<VolumeRef> {
     this.authorize('ensureVolumeFromSnapshot');
+    const snapshots = await this.read(ctx, region, 'DescribeSnapshots', { 'SnapshotId.1': snapshotId });
+    this.requireOwner(ctx, items(snapshots, 'snapshotSet')[0], snapshotId);
     let vol = await this.byToken(ctx, region, 'DescribeVolumes', 'volumeSet');
     if (!vol) {
       // A snapshot can only be used once it is complete (a first snapshot takes minutes).
@@ -508,6 +546,7 @@ export class AwsExecutor implements Executor {
     }
     const vol = await this.volume(ctx, region, volumeId);
     if (!vol) throw new ExecutorError('invalid', `volume ${volumeId} does not exist`);
+    this.requireOwner(ctx, vol, volumeId);
     const size = Number(text(vol, 'size') ?? 0);
     if (size >= sizeGb) return { state: 'ready', sizeGb: size };
     await this.call(ctx, region, 'ModifyVolume', { VolumeId: volumeId, Size: sizeGb });
@@ -518,6 +557,9 @@ export class AwsExecutor implements Executor {
     this.authorize('swapVolume');
     const region = p.providerRegion;
     const inst = await this.instance(ctx, region, p.vmId);
+    this.requireOwner(ctx, inst, p.vmId);
+    // Validate the replacement before detaching the current volume.
+    this.requireOwner(ctx, await this.volume(ctx, region, volumeId), volumeId);
     if (this.stateOf(inst) !== 'stopped') throw new ExecutorError('invalid', 'swapVolume needs a stopped VM');
     const attached = await this.readAll(
       ctx,
@@ -542,6 +584,8 @@ export class AwsExecutor implements Executor {
     const vol = p.volumeId ? await this.volume(ctx, region, p.volumeId) : null;
     return {
       vm: this.stateOf(inst),
+      ...(text(inst ?? undefined, 'instanceType') ? { instanceType: text(inst ?? undefined, 'instanceType')! } : {}),
+      ...(inst ? { rootVolumeGb: await this.rootVolumeSize(ctx, region, p.vmId) } : {}),
       publicAddresses: await this.publicAddresses(ctx, region, p),
       volumeAttached: !!vol && text(items(vol, 'attachmentSet')[0], 'instanceId') === p.vmId,
     };
@@ -559,27 +603,58 @@ export class AwsExecutor implements Executor {
     };
   }
 
+  /** A missing association/dependency is not proof that the resource itself is gone. */
+  private async deletionConfirmed(ctx: OpContext, region: string, kind: ResourceKind, providerId: string): Promise<boolean> {
+    try {
+      if (kind === 'vm') {
+        const state = this.stateOf(await this.instance(ctx, region, providerId));
+        return state === 'missing' || state === 'terminated';
+      }
+      if (kind === 'volume') {
+        const volume = await this.volume(ctx, region, providerId);
+        return !volume || text(volume, 'status') === 'deleted';
+      }
+      const describe = {
+        network_interface: { action: 'DescribeNetworkInterfaces', set: 'networkInterfaceSet', params: { 'NetworkInterfaceId.1': providerId } },
+        ip: { action: 'DescribeAddresses', set: 'addressesSet', params: { 'AllocationId.1': providerId } },
+        snapshot: { action: 'DescribeSnapshots', set: 'snapshotSet', params: { 'SnapshotId.1': providerId } },
+      }[kind];
+      return !items(await this.read(ctx, region, describe.action, describe.params), describe.set).length;
+    } catch (e) {
+      if (isNotFound(e)) return true; // This Describe targeted the resource, not an association.
+      throw e;
+    }
+  }
+
   async ensureDeleted(ctx: OpContext, region: string, kind: ResourceKind, providerId: string): Promise<void> {
     this.authorize('ensureDeleted');
     const managed = (t: Record<string, string>) => {
-      if (t['cb:managed'] !== 'true') throw new ExecutorError('forbidden', `${providerId} is not managed by us`);
+      if (t['cb:managed'] !== 'true' || t['cb:instance'] !== ctx.tags['cb:instance'] || t['cb:env'] !== ctx.tags['cb:env']) {
+        throw new ExecutorError('forbidden', `${providerId} does not belong to this browser`);
+      }
     };
     try {
       switch (kind) {
         case 'vm': {
           const inst = await this.instance(ctx, region, providerId);
           const state = this.stateOf(inst);
-          if (state === 'missing' || state === 'terminated') return;
+          if (state === 'missing') return;
           managed(tagsOf(inst!));
-          await this.call(ctx, region, 'ModifyInstanceAttribute', { InstanceId: providerId, 'DisableApiTermination.Value': false });
-          await this.call(ctx, region, 'TerminateInstances', { 'InstanceId.1': providerId });
+          if (state === 'terminated') return;
+          if (state !== 'terminating') {
+            await this.call(ctx, region, 'ModifyInstanceAttribute', { InstanceId: providerId, 'DisableApiTermination.Value': false });
+            await this.call(ctx, region, 'TerminateInstances', { 'InstanceId.1': providerId });
+          }
+          await this.waitFor(ctx, `VM ${providerId} to terminate`, async () => await this.deletionConfirmed(ctx, region, kind, providerId) ? true : null);
           return;
         }
         case 'volume': {
           const vol = await this.volume(ctx, region, providerId);
-          if (!vol || text(vol, 'status') === 'deleted') return;
+          if (!vol) return;
           managed(tagsOf(vol));
-          await this.call(ctx, region, 'DeleteVolume', { VolumeId: providerId });
+          if (text(vol, 'status') === 'deleted') return;
+          if (text(vol, 'status') !== 'deleting') await this.call(ctx, region, 'DeleteVolume', { VolumeId: providerId });
+          await this.waitFor(ctx, `volume ${providerId} to be deleted`, async () => await this.deletionConfirmed(ctx, region, kind, providerId) ? true : null);
           return;
         }
         case 'network_interface': {
@@ -588,6 +663,7 @@ export class AwsExecutor implements Executor {
           if (!eni) return;
           managed(tagsOf(eni));
           await this.call(ctx, region, 'DeleteNetworkInterface', { NetworkInterfaceId: providerId });
+          await this.waitFor(ctx, `network interface ${providerId} to be deleted`, async () => await this.deletionConfirmed(ctx, region, kind, providerId) ? true : null);
           return;
         }
         case 'ip': {
@@ -598,6 +674,7 @@ export class AwsExecutor implements Executor {
           const association = text(addr, 'associationId');
           if (association) await this.call(ctx, region, 'DisassociateAddress', { AssociationId: association });
           await this.call(ctx, region, 'ReleaseAddress', { AllocationId: providerId });
+          await this.waitFor(ctx, `IP allocation ${providerId} to be released`, async () => await this.deletionConfirmed(ctx, region, kind, providerId) ? true : null);
           return;
         }
         case 'snapshot': {
@@ -606,11 +683,15 @@ export class AwsExecutor implements Executor {
           if (!snap) return;
           managed(tagsOf(snap));
           await this.call(ctx, region, 'DeleteSnapshot', { SnapshotId: providerId });
+          await this.waitFor(ctx, `snapshot ${providerId} to be deleted`, async () => await this.deletionConfirmed(ctx, region, kind, providerId) ? true : null);
           return;
         }
       }
     } catch (e) {
-      if (isNotFound(e)) return; // already gone
+      if (isNotFound(e)) {
+        if (await this.deletionConfirmed(ctx, region, kind, providerId)) return;
+        throw new ExecutorError('retryable', `${providerId} still exists after a missing dependency was reported`);
+      }
       throw e;
     }
   }
@@ -629,8 +710,8 @@ export class AwsExecutor implements Executor {
       }
     }
     for (const v of await this.readAll(ctx, region, 'DescribeVolumes', 'volumeSet', f)) {
-      // Root disks belong to their VM and go with it.
-      if (tagsOf(v)['cb:kind'] === 'root_volume') continue;
+      // Include root disks: termination requests and DeleteOnTermination are asynchronous, so a
+      // remaining root disk must still block confirmation that the browser's data is gone.
       add('volume', text(v, 'volumeId'), v, text(v, 'status') ?? '', text(v, 'availabilityZone') ?? null);
     }
     for (const n of await this.readAll(ctx, region, 'DescribeNetworkInterfaces', 'networkInterfaceSet', f)) {
@@ -671,10 +752,11 @@ export class AwsExecutor implements Executor {
    * type, gp3 storage, EBS snapshots, an in-use public IPv4 address and data transfer out to the
    * internet (first paid tier). Throws if any of them is missing, so a partial sheet is never stored.
    */
-  async prices(ctx: OpContext, region: string): Promise<ProviderPriceSheet> {
+  async prices(ctx: OpContext, region: string, additionalInstanceTypes: string[] = []): Promise<ProviderPriceSheet> {
     this.authorize('prices');
     const cfg = this.region(region);
-    const types = cfg.instanceTypes?.length ? cfg.instanceTypes : DEFAULT_INSTANCE_TYPES;
+    const configuredTypes = cfg.instanceTypes?.length ? cfg.instanceTypes : DEFAULT_INSTANCE_TYPES;
+    const types = [...new Set([...configuredTypes, ...additionalInstanceTypes])];
     const dates: string[] = [];
     const price = (what: string, products: PriceListProduct[], match: (a: Record<string, string>) => boolean, unit: string): number => {
       for (const p of products.filter((x) => match(x.attributes))) {
@@ -696,13 +778,10 @@ export class AwsExecutor implements Executor {
         { regionCode: region, instanceType: type, operatingSystem: 'Linux', tenancy: 'Shared', preInstalledSw: 'NA', capacitystatus: 'Used', licenseModel: 'No License required', operation: 'RunInstances' },
         ctx.deadline,
       );
-      try {
-        instanceTypes[type] = price(`${type} instance`, products, ends(`BoxUsage:${type}`), 'Hrs');
-        if (i === 0) machine = machineOf(products.find((p) => ends(`BoxUsage:${type}`)(p.attributes))?.attributes);
-      } catch (e) {
-        // A fallback type without a price here is skipped; the first type must have one.
-        if (i === 0) throw e;
-      }
+      // Every configured type can be launched on a capacity fallback. A missing price for one
+      // must make the sheet unavailable instead of silently allowing an unpriced VM.
+      instanceTypes[type] = price(`${type} instance`, products, ends(`BoxUsage:${type}`), 'Hrs');
+      if (i === 0) machine = machineOf(products.find((p) => ends(`BoxUsage:${type}`)(p.attributes))?.attributes);
     }
     const storage = await this.ec2.products('AmazonEC2', { regionCode: region, productFamily: 'Storage', volumeApiName: 'gp3' }, ctx.deadline);
     const snapshots = await this.ec2.products('AmazonEC2', { regionCode: region, productFamily: 'Storage Snapshot', storageMedia: 'Amazon S3', locationType: 'AWS Region' }, ctx.deadline);

@@ -152,6 +152,12 @@ export class FakeExecutor implements Executor {
     return r;
   }
 
+  private requireOwner(ctx: OpContext, resource: FakeRecord) {
+    if (resource.tags['cb:managed'] !== 'true' || resource.tags['cb:instance'] !== ctx.tags['cb:instance'] || resource.tags['cb:env'] !== ctx.tags['cb:env']) {
+      throw new ExecutorError('forbidden', `${resource.id} does not belong to this browser`);
+    }
+  }
+
   private async createOnce(
     ctx: OpContext,
     kind: ResourceKind,
@@ -162,7 +168,11 @@ export class FakeExecutor implements Executor {
     prefix: string,
   ): Promise<FakeRecord> {
     const existing = await this.store.findByToken(kind, ctx.token);
-    if (existing) return existing;
+    if (existing) {
+      this.requireOwner(ctx, existing);
+      if (existing.state === 'deleted') throw new ExecutorError('invalid', 'A deleted resource cannot be reused');
+      return existing;
+    }
     const rec: FakeRecord = {
       id: this.id(prefix),
       kind,
@@ -210,6 +220,7 @@ export class FakeExecutor implements Executor {
   ensureNetworkInterface(ctx: OpContext, region: string, ip: IpAllocation, zone?: string): Promise<NetworkInterfaceRef> {
     return this.call('ensureNetworkInterface', ctx, async () => {
       const addr = await this.mustGet(ip.allocationId, 'ip');
+      this.requireOwner(ctx, addr);
       const rec = await this.createOnce(
         ctx,
         'network_interface',
@@ -233,6 +244,7 @@ export class FakeExecutor implements Executor {
   snapshot(ctx: OpContext, region: string, volumeId: string): Promise<SnapshotRef> {
     return this.call('snapshot', ctx, async () => {
       const vol = await this.mustGet(volumeId, 'volume');
+      this.requireOwner(ctx, vol);
       const rec = await this.createOnce(ctx, 'snapshot', region, null, 'completed', { volumeId, sizeGb: vol.attrs.sizeGb }, 'snap');
       return { snapshotId: rec.id, sizeGb: rec.attrs.sizeGb as number };
     });
@@ -240,7 +252,7 @@ export class FakeExecutor implements Executor {
 
   ensureVolumeFromSnapshot(ctx: OpContext, region: string, zone: string, snapshotId: string, sizeGb: number): Promise<VolumeRef> {
     return this.call('ensureVolumeFromSnapshot', ctx, async () => {
-      await this.mustGet(snapshotId, 'snapshot');
+      this.requireOwner(ctx, await this.mustGet(snapshotId, 'snapshot'));
       const rec = await this.createOnce(ctx, 'volume', region, zone, 'available', { sizeGb, encrypted: true, fromSnapshot: snapshotId }, 'vol');
       return { volumeId: rec.id, zone: rec.zone!, sizeGb };
     });
@@ -249,6 +261,7 @@ export class FakeExecutor implements Executor {
   resizeVolume(ctx: OpContext, _region: string, volumeId: string, sizeGb: number): Promise<ResizeState> {
     return this.call('resizeVolume', ctx, async () => {
       const vol = await this.mustGet(volumeId, 'volume');
+      this.requireOwner(ctx, vol);
       const size = Number(vol.attrs.sizeGb ?? 0);
       if (size < sizeGb) await this.store.update(volumeId, { attrs: { ...vol.attrs, sizeGb } });
       return { state: 'ready' as const, sizeGb: Math.max(size, sizeGb) };
@@ -258,8 +271,10 @@ export class FakeExecutor implements Executor {
   swapVolume(ctx: OpContext, p: Placement, volumeId: string): Promise<void> {
     return this.call('swapVolume', ctx, async () => {
       const vm = await this.mustGet(p.vmId, 'vm');
+      this.requireOwner(ctx, vm);
       if (vm.state !== 'stopped') throw new ExecutorError('invalid', 'swapVolume needs a stopped VM');
       const next = await this.mustGet(volumeId, 'volume');
+      this.requireOwner(ctx, next);
       if (next.zone !== vm.zone) throw new ExecutorError('invalid', 'volume and VM are in different zones');
       const current = vm.attrs.volumeId as string;
       if (current === volumeId) return;
@@ -278,8 +293,8 @@ export class FakeExecutor implements Executor {
 
   ensureVm(ctx: OpContext, region: string, spec: VmSpec): Promise<VmRef> {
     return this.call('ensureVm', ctx, async () => {
-      await this.mustGet(spec.nicId, 'network_interface');
-      await this.mustGet(spec.volumeId, 'volume');
+      this.requireOwner(ctx, await this.mustGet(spec.nicId, 'network_interface'));
+      this.requireOwner(ctx, await this.mustGet(spec.volumeId, 'volume'));
       const rec = await this.createOnce(
         ctx,
         'vm',
@@ -289,6 +304,7 @@ export class FakeExecutor implements Executor {
         {
           nicId: spec.nicId,
           volumeId: spec.volumeId,
+          rootVolumeGb: this.priceSheet.rootVolumeGb,
           terminationProtection: true,
           // What a real VM receives as user data; `scripts/dev-agent.sh` reads it to start a local agent.
           userData: { instanceId: spec.instanceId, gatewayUrl: spec.gatewayUrl, bootstrapToken: spec.bootstrapToken },
@@ -297,14 +313,15 @@ export class FakeExecutor implements Executor {
       );
       await this.store.update(spec.volumeId, { state: 'in-use' });
       await this.store.update(spec.nicId, { state: 'in-use' });
-      return { vmId: rec.id, zone: rec.zone! };
+      return { vmId: rec.id, zone: rec.zone!, instanceType: 'fake.large', rootVolumeGb: Number(rec.attrs.rootVolumeGb ?? 16) };
     });
   }
 
   associateIp(ctx: OpContext, _region: string, nicId: string, ip: IpAllocation): Promise<void> {
     return this.call('associateIp', ctx, async () => {
       const nic = await this.mustGet(nicId, 'network_interface');
-      await this.mustGet(ip.allocationId, 'ip');
+      this.requireOwner(ctx, nic);
+      this.requireOwner(ctx, await this.mustGet(ip.allocationId, 'ip'));
       const previous = nic.attrs.ipAllocationId as string | undefined;
       if (previous && previous !== ip.allocationId) await this.store.update(previous, { state: 'allocated' });
       await this.store.update(nicId, { attrs: { ...nic.attrs, ipAllocationId: ip.allocationId } });
@@ -336,6 +353,8 @@ export class FakeExecutor implements Executor {
       const vol = await this.store.get(p.volumeId);
       return {
         vm: !vm || vm.state === 'deleted' ? 'missing' : (vm.state as RunState),
+        ...(!vm || vm.state === 'deleted' ? {} : { instanceType: 'fake.large' }),
+        ...(!vm || vm.state === 'deleted' ? {} : { rootVolumeGb: Number(vm.attrs.rootVolumeGb ?? 16) }),
         publicAddresses: await this.publicAddressesOf(p.nicId),
         volumeAttached: !!vol && vol.state === 'in-use',
       };
@@ -358,10 +377,13 @@ export class FakeExecutor implements Executor {
   ensureDeleted(ctx: OpContext, _region: string, kind: ResourceKind, providerId: string): Promise<void> {
     return this.call('ensureDeleted', ctx, async () => {
       const r = await this.store.get(providerId);
-      if (!r || r.state === 'deleted') return;
+      if (!r) return;
       if (r.kind !== kind) throw new ExecutorError('invalid', `${providerId} is a ${r.kind}, not a ${kind}`);
-      if (r.tags['cb:managed'] !== 'true') throw new ExecutorError('forbidden', `${providerId} is not managed by us`);
-      await this.store.update(providerId, { state: 'deleted' });
+      this.requireOwner(ctx, r);
+      if (r.state === 'deleted') return;
+      await this.store.update(providerId, { state: 'deleted', attrs: {} });
+      const confirmed = await this.store.get(providerId);
+      if (confirmed && confirmed.state !== 'deleted') throw new ExecutorError('retryable', `still waiting for ${providerId} to be deleted`);
     });
   }
 
@@ -390,12 +412,16 @@ export class FakeExecutor implements Executor {
    * The simulator has no price list; it reports a plausible sheet, marked `simulated`, so the
    * pricing, metering and billing paths run end to end in local development and tests.
    */
-  prices(ctx: OpContext, _region: string): Promise<ProviderPriceSheet> {
+  pricingConfigKey(_region: string): string {
+    return JSON.stringify({ instanceTypes: ['fake.large'], rootVolumeGb: this.priceSheet.rootVolumeGb });
+  }
+
+  prices(ctx: OpContext, _region: string, additionalInstanceTypes: string[] = []): Promise<ProviderPriceSheet> {
     return this.call('prices', ctx, async () => ({
       source: 'simulated' as const,
       instanceType: 'fake.large',
       vmHour: this.priceSheet.vmHour,
-      instanceTypes: { 'fake.large': this.priceSheet.vmHour },
+      instanceTypes: Object.fromEntries(['fake.large', ...additionalInstanceTypes].map((type) => [type, this.priceSheet.vmHour])),
       machine: { vcpu: 2, memoryGb: 4 },
       volumeGbMonth: this.priceSheet.volumeGbMonth,
       snapshotGbMonth: this.priceSheet.snapshotGbMonth,

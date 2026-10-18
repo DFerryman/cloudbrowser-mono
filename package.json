@@ -13,7 +13,7 @@
     "db:generate": "pnpm --filter @cloudbrowser/db generate",
     "db:migrate:local": "pnpm --filter @cloudbrowser/api exec wrangler d1 migrations apply cloudbrowser --local --persist-to ../../.wrangler/state",
     "db:migrate:remote": "pnpm --filter @cloudbrowser/api exec wrangler d1 migrations apply cloudbrowser --remote",
-    "deploy": "pnpm build && pnpm --filter @cloudbrowser/engine run deploy && pnpm --filter @cloudbrowser/reconciler run deploy && pnpm --filter @cloudbrowser/api run deploy && pnpm --filter @cloudbrowser/gateway run deploy"
+    "deploy": "pnpm build && pnpm --filter @cloudbrowser/gateway run deploy && pnpm --filter @cloudbrowser/engine run deploy && pnpm --filter @cloudbrowser/reconciler run deploy && pnpm --filter @cloudbrowser/api run deploy"
   },
   "devDependencies": {
     "turbo": "^2.11.9",

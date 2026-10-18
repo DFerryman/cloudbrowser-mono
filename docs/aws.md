@@ -19,25 +19,27 @@ browser with the default 10 GB data disk and 16 GB system disk costs about $6.15
 **Why 2 vCPU / 4 GB.** Each browser gets its own small VM rather than sharing a large host: the
 VM is stopped while the browser sleeps, so it costs nothing to run then, and isolation, the
 dedicated IP (an Elastic IP on the VM's own interface) and persistence (its own volume) need no
-extra machinery. Chrome with a handful of tabs plus neko's 1080p30 H.264 stream uses about 2.5 GB
-and most of one vCPU while the screen moves, so 4 GB (plus a 1 GB swap file for spikes) and 2 vCPU
-are enough. `c7i-flex` has the CPU the first real browsers ran smoothly on (`m7i-flex.large`,
-8 GB) for 7.5% less; the fallbacks `c6i.large` and `c5.large` are 2 vCPU / 4 GB at the same price
-(customers always pay the region's price for the first type). Burstable `t3` types are not used:
+extra machinery. The proposed default is 4 GB plus a 1 GB swap file for spikes and 2 vCPU;
+real-hardware memory, swap and stream performance still need validation. `c7i-flex` has the CPU
+the first real browsers ran smoothly on (`m7i-flex.large`, 8 GB) for 7.5% less in the sampled
+Sydney price sheet. The fallbacks `c6i.large` and `c5.large` are also 2 vCPU / 4 GB; their actual
+unit prices are queried separately (customers pay the region's price for the first type).
+Burstable `t3` types are not used:
 when their CPU credits run out they either throttle the video or bill surplus credits that the
 price list does not show.
 
 **Switching an existing deployment to 4 GB VMs.** Re-run the deploy command above with the new
 `AllowedInstanceTypes`, set `instanceTypes` in `AWS_REGIONS` as above (or remove it), and redeploy
 the engine. New browsers get the new type. Existing browsers keep their VM (`m7i-flex.large`):
-they still wake and sleep, are charged the region's new, lower price, and their real cost is
-about 8% above what the margin report shows until they are recreated.
+they still wake and sleep and use the region's customer price. The engine discovers and records
+each retained VM's actual type and root disk size and queries its own type's price for cost
+estimates, so changing the default does not relabel an existing machine as a 4 GB VM.
 
 **Updating an existing stack for prices and storage growth.** This release adds
 `pricing:GetProducts` (runtime and read-only users) and `ec2:ModifyVolume` (runtime) to the
 template. Re-run the `aws cloudformation deploy` command below; until then prices show as
 unavailable and no new browsers can be created. Growing a volume also needs agent **0.2.0** in the
-browser image (step 4): rebuild and push the agent image. Browsers created with an older agent
+agent image (step 4): rebuild and push that image. Browsers created with an older agent
 keep working, but their Storage tab does not offer more space.
 
 ## Current deployment: Sydney (new AWS experience)

@@ -113,7 +113,8 @@ Resources:
     Condition: AccountResources
     Properties:
       ManagedPolicyName: cloudbrowser-runtime
-      Description: Engine worker - create, start, stop and grow tagged browser resources, read prices; never delete.
+      # Keep the deployed description immutable: changing it replaces a named IAM policy.
+      Description: Engine worker - create, start and stop tagged browser resources; never delete.
       PolicyDocument:
         Version: '2012-10-17'
         Statement:

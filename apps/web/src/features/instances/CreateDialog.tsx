@@ -1,4 +1,4 @@
-import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, HOURS_PER_MONTH, SCREEN_SIZES, browserEstimate, type Region } from '@cloudbrowser/contracts';
+import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, HOURS_PER_MONTH, SCREEN_SIZES, browserEstimate, type Instance, type Region } from '@cloudbrowser/contracts';
 import { Button, cn, Dialog, Input, Label, Select } from '@cloudbrowser/ui';
 import { ChevronRight } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
@@ -41,7 +41,7 @@ function useLatency(regions: Region[] | undefined) {
   return ms;
 }
 
-export function CreateDialog({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: (instanceId: string) => void }) {
+export function CreateDialog({ open, initialInstance, onClose, onCreated }: { open: boolean; initialInstance?: Instance; onClose: () => void; onCreated: (instanceId: string) => void }) {
   const { t, locale, errorMessage } = useI18n();
   const regions = useRegions();
   const instances = useInstances();
@@ -61,10 +61,15 @@ export function CreateDialog({ open, onClose, onCreated }: { open: boolean; onCl
 
   useEffect(() => {
     if (open) {
-      setName(`Browser ${(instances.data?.length ?? 0) + 1}`);
+      setName(initialInstance?.name ?? `Browser ${(instances.data?.length ?? 0) + 1}`);
+      if (initialInstance) {
+        setRegionId(initialInstance.regionId);
+        setBrowserLocale(initialInstance.locale);
+        setScreen(initialInstance.screen);
+      }
       setError(null);
     }
-  }, [open, instances.data?.length]);
+  }, [open, initialInstance?.id]);
   // Never preselect a region that cannot take new browsers.
   useEffect(() => {
     const list = regions.data;
@@ -94,7 +99,7 @@ export function CreateDialog({ open, onClose, onCreated }: { open: boolean; onCl
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    const parsed = CreateInstanceBody.safeParse({ name, regionId, locale: browserLocale, screen, priceVersion: price?.version ?? undefined, ...(trial ? { trial: true } : {}) });
+    const parsed = CreateInstanceBody.safeParse({ name, regionId, locale: browserLocale, screen, priceVersion: price?.version ?? undefined, storageGb: trial ? b!.trial.storageGb : price?.defaultStorageGb, ...(trial ? { trial: true } : {}) });
     if (!parsed.success) {
       setError(t('error.validation_failed'));
       return;
@@ -234,9 +239,10 @@ export function CreateDialog({ open, onClose, onCreated }: { open: boolean; onCl
               {error}
             </p>
           ) : null}
+          {initialInstance?.trial && initialInstance.trial.state !== 'converted' ? <p className="text-sm text-muted">{t('create.retryTrial')}</p> : null}
           <div className="flex justify-end gap-2">
             <Button onClick={onClose}>{t('common.cancel')}</Button>
-            <Button type="submit" variant="primary" disabled={create.isPending || atLimit || needsCredit || !price?.available}>
+            <Button type="submit" variant="primary" disabled={create.isPending || pricing.isFetching || pricing.isError || atLimit || needsCredit || !price?.available || !price.version}>
               {t('create.submit')}
             </Button>
           </div>

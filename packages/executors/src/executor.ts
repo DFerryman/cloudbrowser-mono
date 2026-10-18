@@ -108,6 +108,10 @@ export interface SnapshotRef {
 export interface VmRef {
   vmId: string;
   zone: string;
+  /** Actual type selected by the provider, including capacity fallbacks. */
+  instanceType?: string;
+  /** Actual system disk size; separate from the browser's data volume. */
+  rootVolumeGb?: number;
 }
 
 export interface Placement {
@@ -120,10 +124,13 @@ export interface Placement {
   ipAddress: string;
 }
 
-export type RunState = 'pending' | 'running' | 'stopping' | 'stopped' | 'terminated' | 'missing';
+export type RunState = 'pending' | 'running' | 'stopping' | 'stopped' | 'terminating' | 'terminated' | 'missing';
 
 export interface ObservedState {
   vm: RunState;
+  /** Present for an existing VM; lets older placements recover their actual type. */
+  instanceType?: string;
+  rootVolumeGb?: number;
   publicAddresses: string[];
   volumeAttached: boolean;
 }
@@ -191,6 +198,11 @@ export interface Executor {
   // Used by the reconciler and the checks before create/start.
   listManaged(ctx: OpContext, region: string): Promise<ObservedResource[]>;
   quotas(ctx: OpContext, region: string): Promise<QuotaSnapshot[]>;
-  /** What this region costs, from the provider's price list (never a built-in number). */
-  prices(ctx: OpContext, region: string): Promise<ProviderPriceSheet>;
+  /** Stable identity for settings that affect the default machine and its provider price sheet. */
+  pricingConfigKey(region: string): string;
+  /**
+   * What this region costs, from the provider's price list (never a built-in number). Additional
+   * types price existing VMs; they do not become launch candidates.
+   */
+  prices(ctx: OpContext, region: string, additionalInstanceTypes?: string[]): Promise<ProviderPriceSheet>;
 }

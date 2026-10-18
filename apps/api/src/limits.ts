@@ -40,6 +40,13 @@ export async function billingAccount(db: Db, userId: string) {
   return { balanceMicros: row?.balanceMicros ?? 0, exhaustedAt: row?.exhaustedAt ?? null, frozenAt: row?.frozenAt ?? null, trialUsedAt: row?.trialUsedAt ?? null };
 }
 
+/** Payment disputes block new resources and wakes, including free trial resources and pilot use. */
+export async function requireUnfrozen(db: Db, userId: string) {
+  const account = await billingAccount(db, userId);
+  if (account.frozenAt) throw problem(403, 'account_frozen', 'Your account is on hold because of a payment dispute. Contact support.');
+  return account;
+}
+
 /** An unconverted free trial browser (page 6). */
 export const isTrial = (row: { trialState: string | null }) => row.trialState === 'active' || row.trialState === 'ended';
 
@@ -74,9 +81,8 @@ const usd = (micros: number) => `$${(micros / MICROS_PER_USD).toFixed(2)}`;
  * Creating or waking a browser costs money from then on, so it needs the minimum balance (unless
  * the deployment runs the free pilot). A frozen account can do neither.
  */
-export async function admitSpend(db: Db, userId: string, action: 'create a browser' | 'wake a browser' | 'add storage' | 'turn on snapshots') {
-  const account = await billingAccount(db, userId);
-  if (account.frozenAt) throw problem(403, 'account_frozen', 'Your account is on hold because of a payment dispute. Contact support.');
+export async function admitSpend(db: Db, userId: string, action: 'create a browser' | 'wake a browser' | 'add storage' | 'turn on snapshots' | 'request a new IP') {
+  const account = await requireUnfrozen(db, userId);
   if (!(await billingRequired(db))) return;
   const { minBalanceMicros } = await pricingSettings(db);
   if (account.balanceMicros < Math.max(1, minBalanceMicros)) {
@@ -136,6 +142,7 @@ async function checkRegionRoom(db: Db, regionId: string) {
  * the spend guard and the circuit breaker are all checked before a create is admitted.
  */
 export async function admitCreate(db: Db, userId: string, regionId: string, now: Date, opts: { trial?: boolean } = {}) {
+  await requireUnfrozen(db, userId);
   const [freeze] = await db.select().from(controlFlags).where(eq(controlFlags.key, 'creation_freeze'));
   if (freeze?.value === 'true') throw problem(503, 'creation_frozen', 'New browsers are temporarily unavailable.');
 
@@ -180,6 +187,7 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
 
 /** Running caps, checked before every start (page 10). */
 export async function admitStart(db: Db, userId: string, instanceId: string, regionId: string) {
+  await requireUnfrozen(db, userId);
   const [inst] = await db
     .select({ suspendedAt: browserInstances.suspendedAt, trialState: browserInstances.trialState, trialUsedS: browserInstances.trialUsedS, trialReclaimAt: browserInstances.trialReclaimAt })
     .from(browserInstances)

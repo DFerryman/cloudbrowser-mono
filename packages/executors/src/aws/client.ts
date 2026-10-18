@@ -78,7 +78,8 @@ export class Ec2Error extends ExecutorError {
   }
 }
 
-export const isNotFound = (e: unknown) => e instanceof Ec2Error && /NotFound$|\.Malformed$/.test(e.code);
+// A malformed id is not proof that the intended resource was deleted.
+export const isNotFound = (e: unknown) => e instanceof Ec2Error && /NotFound$/.test(e.code);
 
 type Service = 'ec2' | 'servicequotas' | 'pricing';
 
@@ -180,6 +181,8 @@ export class Ec2Client {
     const out: PriceListProduct[] = [];
     let next: string | undefined;
     do {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new ExecutorError('retryable', `GetProducts ${serviceCode}: deadline passed`);
       const body = {
         ServiceCode: serviceCode,
         FormatVersion: 'aws_v1',
@@ -194,7 +197,7 @@ export class Ec2Client {
           headers: { 'content-type': 'application/x-amz-json-1.1', 'x-amz-target': 'AWSPriceListService.GetProducts' },
           body: JSON.stringify(body),
         });
-        res = await (this.opts.fetch ?? fetch)(req, { signal: AbortSignal.timeout(Math.max(1, Math.min(deadline - Date.now(), 20_000))) });
+        res = await (this.opts.fetch ?? fetch)(req, { signal: AbortSignal.timeout(Math.min(remaining, 20_000)) });
       } catch (e) {
         throw new ExecutorError('retryable', `GetProducts ${serviceCode}: ${(e as Error).message}`);
       }

@@ -27,6 +27,10 @@ export interface CreemCheckout {
   customerId: string | null;
   orderId: string | null;
   orderStatus: string | null;
+  /** Authoritative settled order amounts, never the mutable product catalog price. */
+  orderCurrency: string | null;
+  paidCents: number | null;
+  taxCents: number | null;
   metadata: Record<string, unknown>;
 }
 
@@ -39,8 +43,8 @@ export function parseProduct(o: Record<string, unknown>): CreemProduct {
     id: String(o.id),
     name: str(o.name) ?? String(o.id),
     priceCents: Math.round(Number(o.price ?? 0)),
-    currency: (str(o.currency) ?? 'USD').toUpperCase(),
-    billingType: str(o.billing_type) ?? 'onetime',
+    currency: (str(o.currency) ?? '').toUpperCase(),
+    billingType: str(o.billing_type) ?? 'unknown',
   };
 }
 
@@ -55,6 +59,9 @@ export function parseCheckout(o: Record<string, unknown>): CreemCheckout {
     customerId: idOf(o.customer),
     orderId: idOf(o.order),
     orderStatus: str(order.status),
+    orderCurrency: str(order.currency)?.toUpperCase() ?? null,
+    paidCents: typeof order.amount_paid === 'number' ? order.amount_paid : typeof order.amount === 'number' ? order.amount : null,
+    taxCents: typeof order.tax_amount === 'number' ? order.tax_amount : null,
     metadata: obj(o.metadata),
   };
 }

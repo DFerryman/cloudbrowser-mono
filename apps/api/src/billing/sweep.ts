@@ -8,15 +8,14 @@
  *  - once a night, credits top-ups whose webhook never arrived (Creem's checkout is re-read).
  */
 import { BALANCE_GRACE_MS, DATA_KEPT_DAYS } from '@cloudbrowser/contracts';
-import { billingRequired, pricingSettings, schema, type Db } from '@cloudbrowser/db';
+import { billingRequired, operationRow, pricingSettings, schema, type Db } from '@cloudbrowser/db';
 import { and, eq, gte, isNotNull, isNull, like, lte, notInArray, sql } from 'drizzle-orm';
 import type { Env } from '../env.js';
-import { systemOperation } from '../ops.js';
 import type { Creem } from './creem.js';
 import { notifyHub, refreshTopupPacks } from './ledger.js';
 import { creditCheckout, pendingWebhooks, processWebhook } from './webhooks.js';
 
-const { billingAccounts, auditLog, browserInstances, user, topupCheckouts, topupPacks } = schema;
+const { billingAccounts, auditLog, browserInstances, user, topupCheckouts, topupPacks, operations, events } = schema;
 const DAY = 86_400_000;
 const NOTICE_DAYS = [1, 14, 28];
 
@@ -140,20 +139,25 @@ async function deleteBrowsers(env: Env, db: Db, userId: string, now: Date): Prom
   let n = 0;
   for (const inst of live) {
     try {
-      await systemOperation(
-        env,
-        db,
-        {
-          instanceId: inst.id,
-          userId,
-          kind: 'delete',
-          actor: 'billing',
-          params: { reason: 'billing' },
-          before: [db.update(browserInstances).set({ desiredState: 'deleted', updatedAt: now }).where(eq(browserInstances.id, inst.id))],
-        },
-        now,
-      );
-      n++;
+      const op = operationRow({ instanceId: inst.id, userId: null, kind: 'delete', params: { reason: 'billing' }, now });
+      // Recheck the account in the same transaction that admits deletion. A concurrent top-up
+      // resets exhausted_at and must save the browser even if this sweep selected it earlier.
+      const eligible = sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${userId}
+        AND ${billingAccounts.balanceMicros} <= 0 AND ${billingAccounts.exhaustedAt} <= ${now.getTime() - DATA_KEPT_DAYS * DAY})
+        AND EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${inst.id} AND ${browserInstances.status} NOT IN ('deleting', 'purged', 'failed'))`;
+      const exists = sql`EXISTS (SELECT 1 FROM ${operations} WHERE ${operations.id} = ${op.id})`;
+      const [inserted] = await db.batch([
+        db.insert(operations).select(sql`SELECT ${op.id}, ${inst.id}, NULL, 'delete', 'queued', NULL, 0, NULL, NULL, NULL,
+          ${op.deadlineAt.getTime()}, NULL, NULL, ${JSON.stringify(op.params)}, ${now.getTime()}, ${now.getTime()}, NULL WHERE ${eligible}`)
+          .returning({ id: operations.id }),
+        db.update(browserInstances).set({ desiredState: 'deleted', updatedAt: now }).where(and(eq(browserInstances.id, inst.id), exists)),
+        db.insert(events).select(sql`SELECT NULL, ${userId}, 'instance.updated', ${JSON.stringify({ instanceId: inst.id, operationId: op.id })}, ${now.getTime()} WHERE ${exists}`),
+        db.insert(auditLog).select(sql`SELECT NULL, 'billing', 'operation.delete', ${`instance:${inst.id}`}, ${JSON.stringify({ operationId: op.id, reason: 'billing' })}, ${now.getTime()} WHERE ${exists}`),
+      ]);
+      if (inserted.length) {
+        n++;
+        await env.OPERATIONS.send({ operationId: op.id }).catch((e) => console.error('billing delete enqueue failed', op.id, e));
+      }
     } catch {
       // Another operation is running for it (one unfinished operation per browser); the next sweep tries again.
     }

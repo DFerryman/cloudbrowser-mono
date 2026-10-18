@@ -27,8 +27,11 @@ export interface StoredSheet {
 /** Every region's last price sheet read from the provider, keyed by product region. */
 export async function priceSheets(db: Db): Promise<Map<string, StoredSheet>> {
   const rows = await db.select().from(schema.providerPrices);
+  const regions = new Map((await db.select().from(schema.regions)).map((r) => [r.id, r]));
   const out = new Map<string, StoredSheet>();
   for (const r of rows) {
+    const region = regions.get(r.regionId);
+    if (!region || region.executor !== r.executor || region.providerRegion !== r.providerRegion) continue;
     const parsed = ProviderPriceSheet.safeParse(r.sheet);
     if (parsed.success && r.fetchedAt) out.set(r.regionId, { regionId: r.regionId, sheet: parsed.data, fetchedAt: r.fetchedAt });
   }

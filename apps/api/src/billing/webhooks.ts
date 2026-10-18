@@ -44,29 +44,36 @@ export async function receiveWebhook(env: Env, db: Db, raw: string, signature: s
  */
 export async function creditCheckout(db: Db, creem: Creem, checkoutId: string, now: Date): Promise<string | null> {
   const c = await creem.getCheckout(checkoutId);
+  if (c.id !== checkoutId) throw new BillingError('Checkout identity mismatch');
   const [attempt] = c.requestId ? await db.select().from(topupCheckouts).where(eq(topupCheckouts.id, c.requestId)) : [];
-  const userId = attempt?.userId ?? (typeof c.metadata.userId === 'string' ? c.metadata.userId : null);
-  if (!userId) throw new BillingError(`Cannot match checkout ${c.id} to a user`);
-  if (c.status !== 'completed' || (c.orderStatus && c.orderStatus !== 'paid')) return null;
-  const productId = c.productId ?? attempt?.productId ?? null;
-  if (!productId || !creem.topupProductIds.includes(productId)) throw new BillingError(`Checkout ${c.id} is for ${productId ?? 'no product'}, not a top-up`);
-  // The pack's price as read from Creem is what the user was offered and what is credited.
-  let [pack] = await db.select().from(topupPacks).where(eq(topupPacks.productId, productId));
-  if (!pack) {
-    const p = await creem.getProduct(productId);
-    pack = { productId, name: p.name, amountCents: p.priceCents, currency: p.currency, active: true, fetchedAt: now };
+  if (!attempt || (attempt.checkoutId && attempt.checkoutId !== checkoutId)) throw new BillingError(`Cannot match checkout ${c.id} to a local request`);
+  const userId = attempt.userId;
+  if ((c.metadata.userId && c.metadata.userId !== userId) || (c.metadata.attemptId && c.metadata.attemptId !== attempt.id)) throw new BillingError('Checkout metadata mismatch');
+  if (c.status !== 'completed') return null;
+  if (c.orderStatus !== 'paid' || !c.orderId) throw new BillingError('Completed checkout has no settled order');
+  const productId = c.productId;
+  if (!productId || productId !== attempt.productId) throw new BillingError('Checkout product mismatch');
+  if (c.orderCurrency !== 'USD' || !Number.isSafeInteger(c.paidCents) || !Number.isSafeInteger(c.taxCents)
+    || c.paidCents! <= 0 || c.taxCents! < 0 || c.taxCents! >= c.paidCents! || !Number.isSafeInteger(centsToMicros(c.paidCents! - c.taxCents!))) throw new BillingError('Checkout has no valid paid USD amounts');
+  const netCents = c.paidCents! - c.taxCents!;
+  const [pack] = await db.select().from(topupPacks).where(eq(topupPacks.productId, productId));
+  if (c.customerId) {
+    const [owner] = await db.select().from(billingCustomers).where(eq(billingCustomers.creemCustomerId, c.customerId));
+    if (owner && owner.userId !== userId) throw new BillingError('Checkout customer belongs to another user');
   }
-  if (pack.currency !== 'USD' || pack.amountCents <= 0) throw new BillingError(`Top-up product ${productId} has no USD price`);
   if (c.customerId) await db.insert(billingCustomers).values({ userId, creemCustomerId: c.customerId, createdAt: now }).onConflictDoNothing();
   await applyBalance(
     db,
     {
       userId,
       kind: 'topup',
-      amountMicros: centsToMicros(pack.amountCents),
+      amountMicros: centsToMicros(netCents),
+      orderId: c.orderId,
+      grossAmountCents: c.paidCents!,
+      currency: c.orderCurrency,
       reference: `order:${c.orderId ?? c.id}`,
       productId,
-      description: pack.name,
+      description: pack?.name ?? 'Prepaid credit',
       actor: 'creem',
     },
     now,
@@ -75,19 +82,16 @@ export async function creditCheckout(db: Db, creem: Creem, checkoutId: string, n
   return userId;
 }
 
-/** The user an order, checkout or customer belongs to, from our own records. */
-async function userFor(db: Db, o: Record<string, unknown>): Promise<string | null> {
-  const orderId = idOf(o.order);
-  if (orderId) {
-    const [tx] = await db.select({ userId: balanceTransactions.userId }).from(balanceTransactions).where(eq(balanceTransactions.reference, `order:${orderId}`));
-    if (tx) return tx.userId;
+/** Reversals must name the exact credited payment; a customer alone is ambiguous. */
+async function paymentFor(db: Db, o: Record<string, unknown>) {
+  const orderId = idOf(o.order) ?? idOf(obj(o.transaction).order);
+  if (!orderId) throw new BillingError('Reversal has no order id');
+  const [payment] = await db.select().from(balanceTransactions).where(eq(balanceTransactions.reference, `order:${orderId}`));
+  if (!payment || payment.kind !== 'topup' || payment.currency !== 'USD' || !payment.grossAmountCents) {
+    // Webhooks may arrive out of order. Leave this event pending until checkout credit is recorded.
+    throw new BillingError(`Payment ${orderId} has not been credited yet`);
   }
-  const customerId = idOf(o.customer);
-  if (customerId) {
-    const [c] = await db.select().from(billingCustomers).where(eq(billingCustomers.creemCustomerId, customerId));
-    if (c) return c.userId;
-  }
-  return null;
+  return { payment, orderId };
 }
 
 /** Applies one stored event. Idempotent: re-running it gives the same final state. */
@@ -103,27 +107,23 @@ export async function processWebhook(env: Env, db: Db, creem: Creem, eventId: st
         if (checkoutId) userId = await creditCheckout(db, creem, checkoutId, now);
         break;
       }
-      case 'refund.created': {
-        // A refund takes the refunded amount back out of the balance (it may go below zero).
-        userId = await userFor(db, o);
-        const cents = Number(o.refund_amount ?? o.amount ?? NaN);
-        const refundId = str(o.id);
-        if (userId && refundId && Number.isFinite(cents) && cents > 0) {
-          await applyBalance(db, { userId, kind: 'refund', amountMicros: -centsToMicros(cents), reference: `refund:${refundId}`, description: 'Refund', actor: 'creem' }, now);
-        }
-        break;
-      }
+      case 'refund.created':
       case 'dispute.created': {
-        userId = await userFor(db, o);
-        const cents = Number(o.amount ?? NaN);
-        const disputeId = str(o.id);
-        if (userId) {
-          await freezeAccount(db, userId, 'dispute', now);
-          if (disputeId && Number.isFinite(cents) && cents > 0) {
-            await applyBalance(db, { userId, kind: 'dispute', amountMicros: -centsToMicros(cents), reference: `dispute:${disputeId}`, description: 'Payment disputed', actor: 'creem' }, now);
-          }
-        }
-        await raiseAlert(db, { source: 'billing', severity: 'critical', title: `Creem dispute${userId ? ` by user ${userId}` : ''}: account frozen`, detail: { eventId, userId } }, now);
+        const dispute = row.type === 'dispute.created';
+        const { payment, orderId } = await paymentFor(db, o);
+        userId = payment.userId;
+        const cents = Number(dispute ? o.amount : o.refund_amount ?? o.amount ?? NaN);
+        const reversalId = str(o.id);
+        const currency = str(dispute ? o.currency : o.refund_currency ?? o.currency)?.toUpperCase();
+        if (!reversalId || !Number.isSafeInteger(cents) || cents <= 0 || currency !== payment.currency) throw new BillingError('Reversal has invalid id, amount or currency');
+        if (!dispute && o.status !== 'succeeded') throw new BillingError('Refund has not succeeded');
+        if (dispute) await freezeAccount(db, userId, 'dispute', now);
+        await applyBalance(db, {
+          userId, kind: dispute ? 'dispute' : 'refund', amountMicros: 0,
+          reference: `${dispute ? 'dispute' : 'refund'}:${reversalId}`, description: dispute ? 'Payment disputed' : 'Refund', actor: 'creem',
+          currency, reversal: { orderId, grossAmountCents: cents },
+        }, now);
+        if (dispute) await raiseAlert(db, { source: 'billing', severity: 'critical', title: `Creem dispute by user ${userId}: account frozen`, detail: { eventId, userId } }, now);
         break;
       }
       default:
@@ -149,11 +149,11 @@ export async function processWebhook(env: Env, db: Db, creem: Creem, eventId: st
   }
 }
 
-/** Events whose queue message was lost or whose processing failed (retried up to 10 times). */
+/** Pending events, including out-of-order reversals, keep retrying until reconciled. */
 export async function pendingWebhooks(db: Db, now: Date) {
   const rows = await db
     .select({ id: webhookEvents.id, attempts: webhookEvents.attempts })
     .from(webhookEvents)
     .where(and(isNull(webhookEvents.processedAt), lt(webhookEvents.receivedAt, new Date(now.getTime() - 60_000))));
-  return rows.filter((r) => r.attempts < 10).map((r) => r.id);
+  return rows.map((r) => r.id);
 }

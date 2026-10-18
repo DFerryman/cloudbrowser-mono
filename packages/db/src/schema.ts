@@ -188,6 +188,10 @@ export const placements = sqliteTable(
     providerRegion: text('provider_region').notNull(),
     zone: text('zone'),
     vmId: text('vm_id'),
+    /** Observed provider type, independent of the default used for future browsers. */
+    instanceType: text('instance_type'),
+    /** Actual root disk size of this VM; existing deployments used 16 GB. */
+    rootVolumeGb: integer('root_volume_gb').notNull().default(16),
     volumeId: text('volume_id'),
     networkId: text('network_id'),
     ipAllocationId: text('ip_allocation_id'),
@@ -573,6 +577,8 @@ export const providerPrices = sqliteTable('provider_prices', {
   providerRegion: text('provider_region').notNull(),
   /** ProviderPriceSheet (packages/contracts/src/pricing.ts), USD. */
   sheet: json<Record<string, unknown>>('sheet'),
+  /** Types and disk settings used to fetch this sheet; changing defaults invalidates it. */
+  configurationKey: text('configuration_key'),
   fetchedAt: ts('fetched_at'),
   lastError: text('last_error'),
   lastErrorAt: ts('last_error_at'),
@@ -623,6 +629,10 @@ export const balanceTransactions = sqliteTable(
     amountMicros: integer('amount_micros').notNull(),
     reference: text('reference').notNull().unique(),
     productId: text('product_id'),
+    /** Immutable payment facts for proportional, capped refunds and disputes. */
+    orderId: text('order_id'),
+    grossAmountCents: integer('gross_amount_cents'),
+    currency: text('currency'),
     description: text('description'),
     actor: text('actor').notNull(),
     createdAt: ts('created_at').notNull(),
@@ -652,6 +662,8 @@ export const usageRecords = sqliteTable(
     quantity: real('quantity').notNull(),
     amountMicros: integer('amount_micros').notNull(),
     costMicros: integer('cost_micros').notNull(),
+    /** Amount actually debited; pilot and trial usage is never revenue. */
+    chargedMicros: integer('charged_micros').notNull().default(0),
     updatedAt: ts('updated_at').notNull(),
   },
   (t) => [

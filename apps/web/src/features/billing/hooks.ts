@@ -1,10 +1,16 @@
 import type { AccountUsage, BalanceTransaction, BillingState, RegionPricing } from '@cloudbrowser/contracts';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { api } from '../../lib/api.js';
-import { keys } from '../../lib/query.js';
+import { api, ApiError } from '../../lib/api.js';
+import { keys, queryClient } from '../../lib/query.js';
 
 export const useBilling = () => useQuery({ queryKey: keys.billing, queryFn: () => api<BillingState>('GET', '/billing'), refetchInterval: 60_000 });
 export const usePricing = () => useQuery({ queryKey: keys.pricing, queryFn: () => api<RegionPricing[]>('GET', '/pricing'), staleTime: 60_000 });
+export const isPriceChanged = (error: unknown) => error instanceof ApiError && error.problem.type === 'price_changed';
+
+/** Fetch the replacement quote, but never retry a purchase at a price the user has not reviewed. */
+export async function refreshChangedPrices(error: unknown) {
+  if (isPriceChanged(error)) await queryClient.invalidateQueries({ queryKey: keys.pricing });
+}
 export const useTransactions = () => useQuery({ queryKey: keys.transactions, queryFn: () => api<BalanceTransaction[]>('GET', '/billing/transactions') });
 export const useAccountUsage = (month: string) =>
   useQuery({ queryKey: keys.usage(month), queryFn: () => api<AccountUsage>('GET', `/usage?month=${month}`) });

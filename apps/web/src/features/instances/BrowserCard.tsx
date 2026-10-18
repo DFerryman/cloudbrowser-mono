@@ -4,7 +4,7 @@ import { BarChart3, Moon, MoreHorizontal, Pencil, Settings, Trash2 } from 'lucid
 import { useNavigate } from 'react-router';
 import { useI18n, useRelativeTime } from '../../lib/i18n.js';
 import { CreateProgress } from './CreateProgress.js';
-import { useCreateInstance, useLifecycle, useUpdateInstance } from './hooks.js';
+import { useLifecycle, useUpdateInstance } from './hooks.js';
 import { regionInfo, STATUS_TONE, statusKey } from './status.js';
 import { TrialBadge } from './Trial.js';
 
@@ -15,34 +15,29 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
   const toast = useToast();
   const lifecycle = useLifecycle();
   const update = useUpdateInstance();
-  const create = useCreateInstance();
   const region = regionInfo(i.regionId);
   const run = (p: Promise<unknown>) => p.catch((e) => toast(errorMessage(e), 'error'));
 
   const deleted = i.status === 'deleting';
+  const recoverable = deleted && i.purgeAfter !== null && Date.parse(i.purgeAfter) > Date.now();
   const failed = i.status === 'failed';
   const creating = i.status === 'creating';
 
   let primary: React.ReactNode;
-  if (deleted) {
+  if (recoverable) {
     primary = (
       <Button variant="secondary" className="flex-1 justify-center" disabled={lifecycle.isPending} onClick={() => run(lifecycle.mutateAsync({ id: i.id, action: 'undelete' }))}>
         {t('browsers.restore')}
       </Button>
     );
+  } else if (deleted) {
+    primary = <Button variant="secondary" className="flex-1 justify-center" disabled>{t('browsers.deletePending')}</Button>;
   } else if (failed) {
     primary = (
       <Button
         variant="secondary"
         className="flex-1 justify-center"
-        disabled={create.isPending}
-        onClick={() =>
-          run(
-            lifecycle
-              .mutateAsync({ id: i.id, action: 'delete' })
-              .then(() => create.mutateAsync({ name: i.name, regionId: i.regionId, locale: i.locale, screen: i.screen })),
-          )
-        }
+        onClick={() => navigate(`/browsers/new?retry=${encodeURIComponent(i.id)}`)}
       >
         {t('browsers.tryAgain')}
       </Button>
@@ -73,9 +68,11 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
         pendingLabel={t('browsers.reservingIp')}
       />
       <p className="mt-1 text-xs text-muted">
-        {deleted && i.purgeAfter
+        {recoverable && i.purgeAfter
           ? t('browsers.recoverableUntil', { date: new Date(i.purgeAfter).toLocaleDateString(locale) })
-          : i.lastActiveAt
+          : deleted
+            ? t('browsers.deletePendingHint')
+            : i.lastActiveAt
             ? t('browsers.usedAgo', { ago: ago(i.lastActiveAt)! })
             : t('browsers.neverUsed')}
       </p>

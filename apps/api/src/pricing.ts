@@ -39,9 +39,10 @@ export async function regionPrice(db: Db, regionId: string): Promise<RegionPrice
 
 /** Like regionPrice, but refuses the action when there is no price or the user saw an older one. */
 export async function requirePrice(db: Db, regionId: string, shownVersion: string | undefined): Promise<RegionPrice> {
+  if (shownVersion === undefined) throw problem(400, 'validation_failed', 'Review the current prices before confirming this action.');
   const p = await regionPrice(db, regionId);
   if (!p) throw problem(503, 'price_unavailable', 'Prices for this region are being updated. Try again in a few minutes.');
-  if (shownVersion !== undefined && shownVersion !== p.version) {
+  if (shownVersion !== p.version) {
     throw problem(409, 'price_changed', 'Prices changed since this page was opened. Review the new price and try again.');
   }
   return p;

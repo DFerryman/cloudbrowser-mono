@@ -5,14 +5,27 @@
  */
 import { MICROS_PER_USD, type TopUpPack } from '@cloudbrowser/contracts';
 import { eventRow, newId, pricingSettings, schema, type Db } from '@cloudbrowser/db';
-import { and, asc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import type { Env } from '../env.js';
 import type { Creem } from './creem.js';
-import { convertTrials } from '../limits.js';
 
-const { balanceTransactions, billingAccounts, events, topupPacks, auditLog } = schema;
+const { balanceTransactions, billingAccounts, events, topupPacks, auditLog, browserInstances } = schema;
 
 export type BalanceKind = 'topup' | 'refund' | 'dispute' | 'adjustment';
+
+interface BalanceChange {
+  userId: string;
+  kind: BalanceKind;
+  amountMicros: number;
+  reference: string;
+  actor: string;
+  productId?: string | null;
+  description?: string | null;
+  orderId?: string;
+  grossAmountCents?: number;
+  currency?: string;
+  reversal?: { orderId: string; grossAmountCents: number };
+}
 
 /** Wakes the user's EventHub so open pages pick up the new balance. */
 export function notifyHub(env: Env, userId: string): Promise<unknown> {
@@ -28,18 +41,30 @@ export const centsToMicros = (cents: number) => Math.round(cents * (MICROS_PER_U
  */
 export async function applyBalance(
   db: Db,
-  change: { userId: string; kind: BalanceKind; amountMicros: number; reference: string; productId?: string | null; description?: string | null; actor: string },
+  change: BalanceChange,
   now: Date,
 ): Promise<boolean> {
+  // Reversals are calculated in the transaction. Cumulative gross refunds map to the
+  // original net credit, so tax and a dispute after a refund cannot overdraw a payment.
+  const reversal = change.reversal;
+  const appliedAmount = reversal ? sql`(SELECT -max(0,
+    round(min(original.gross_amount_cents, coalesce((SELECT sum(gross_amount_cents) FROM balance_transactions WHERE order_id = ${reversal.orderId} AND kind IN ('refund', 'dispute')), 0) + ${reversal.grossAmountCents})
+      * 1.0 * original.amount_micros / original.gross_amount_cents)
+    + coalesce((SELECT sum(amount_micros) FROM balance_transactions WHERE order_id = ${reversal.orderId} AND kind IN ('refund', 'dispute')), 0))
+    FROM balance_transactions AS original WHERE original.reference = ${`order:${reversal.orderId}`} AND original.kind = 'topup' AND original.gross_amount_cents > 0)` : change.amountMicros;
   const amount = sql`coalesce((SELECT ${balanceTransactions.amountMicros} FROM ${balanceTransactions} WHERE ${balanceTransactions.reference} = ${change.reference} AND ${balanceTransactions.appliedAt} IS NULL), 0)`;
-  const [inserted] = await db.batch([
+  const minimum = change.amountMicros > 0 && !reversal ? Math.max(1, (await pricingSettings(db)).minBalanceMicros) : 1;
+  const [inserted, , , converted] = await db.batch([
     db
       .insert(balanceTransactions)
       .values({
         id: newId(now.getTime()),
         userId: change.userId,
         kind: change.kind,
-        amountMicros: change.amountMicros,
+        amountMicros: appliedAmount,
+        orderId: change.orderId ?? reversal?.orderId ?? null,
+        grossAmountCents: change.grossAmountCents ?? reversal?.grossAmountCents ?? null,
+        currency: change.currency ?? null,
         reference: change.reference,
         productId: change.productId ?? null,
         description: change.description ?? null,
@@ -47,12 +72,18 @@ export async function applyBalance(
         createdAt: now,
       })
       .onConflictDoNothing()
-      .returning({ id: balanceTransactions.id }),
+      .returning({ id: balanceTransactions.id, amountMicros: balanceTransactions.amountMicros }),
     db.insert(billingAccounts).values({ userId: change.userId, balanceMicros: 0, updatedAt: now }).onConflictDoNothing(),
     db
       .update(billingAccounts)
       .set({ balanceMicros: sql`${billingAccounts.balanceMicros} + ${amount}`, updatedAt: now })
       .where(eq(billingAccounts.userId, change.userId)),
+    // Conversion commits with the credit, so trial reclamation cannot slip between them.
+    db.update(browserInstances).set({ trialState: 'converted', trialReclaimAt: null, updatedAt: now })
+      .where(and(eq(browserInstances.userId, change.userId), inArray(browserInstances.trialState, ['active', 'ended']),
+        notInArray(browserInstances.status, ['deleting', 'purged', 'failed']), ne(browserInstances.desiredState, 'deleted'),
+        sql`${amount} > 0`, sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${change.userId} AND ${billingAccounts.balanceMicros} >= ${minimum})`))
+      .returning({ id: browserInstances.id }),
     db
       .update(balanceTransactions)
       .set({ appliedAt: now })
@@ -67,19 +98,12 @@ export async function applyBalance(
       actor: change.actor,
       action: `balance.${change.kind}`,
       target: `user:${change.userId}`,
-      detail: { amountMicros: change.amountMicros, reference: change.reference },
+      detail: sql`json_object('amountMicros', (SELECT amount_micros FROM balance_transactions WHERE reference = ${change.reference}), 'reference', ${change.reference})`,
       createdAt: now,
     }),
   ]);
-  if (inserted.length > 0 && change.amountMicros > 0) {
-    // Paying converts a free trial browser into a normal one (same data and IP), if the balance is enough to run it.
-    const [account] = await db.select().from(billingAccounts).where(eq(billingAccounts.userId, change.userId));
-    if ((account?.balanceMicros ?? 0) >= (await pricingSettings(db)).minBalanceMicros) {
-      const converted = await convertTrials(db, change.userId, now);
-      if (converted.length) {
-        await db.insert(events).values(converted.map((c) => eventRow(change.userId, 'instance.updated', { instanceId: c.id }, now)));
-      }
-    }
+  if (converted.length) {
+    await db.insert(events).values(converted.map((c) => eventRow(change.userId, 'instance.updated', { instanceId: c.id }, now)));
   }
   return inserted.length > 0;
 }

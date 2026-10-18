@@ -1,11 +1,11 @@
-import { HOURS_PER_MONTH, IDLE_TIMEOUT_OPTIONS_S, SCREEN_SIZES, type BrowserLocale, type Instance } from '@cloudbrowser/contracts';
+import { HOURS_PER_MONTH, IDLE_TIMEOUT_OPTIONS_S, SCREEN_SIZES, type BrowserLocale, type Instance, type RegionPricing } from '@cloudbrowser/contracts';
 import { Button, Dialog, Input, Label, Section, Select, useToast } from '@cloudbrowser/ui';
 import { ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
-import { usePricing } from '../billing/hooks.js';
+import { isPriceChanged, usePricing } from '../billing/hooks.js';
 import { useManagedInstance } from './BrowserLayout.js';
 import { useLifecycle, useMe, useRecentSessions, useUpdateInstance, useVerifyIp } from './hooks.js';
 import { regionInfo } from './status.js';
@@ -33,7 +33,8 @@ export function SettingsPage() {
   const pricing = usePricing();
   const region = regionInfo(i.regionId);
   const [name, setName] = useState(i.name);
-  const [confirmIp, setConfirmIp] = useState(false);
+  const [ipQuote, setIpQuote] = useState<RegionPricing | null>(null);
+  const [ipError, setIpError] = useState<string | null>(null);
   const [deleteText, setDeleteText] = useState('');
   useEffect(() => setName(i.name), [i.name]);
 
@@ -44,7 +45,7 @@ export function SettingsPage() {
   // A free trial browser keeps its IP until the user adds credit (page 6).
   const onTrial = i.trial !== null && i.trial.state !== 'converted';
   const check = i.lastIpCheck;
-  const ipRate = pricing.data?.find((p) => p.regionId === i.regionId)?.rates?.ip;
+  const price = pricing.isError ? undefined : pricing.data?.find((p) => p.regionId === i.regionId);
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -83,7 +84,7 @@ export function SettingsPage() {
           >
             {t('settings.verify')}
           </Button>
-          <Button disabled={!['running', 'sleeping'].includes(i.status) || onTrial} onClick={() => setConfirmIp(true)}>
+          <Button disabled={!['running', 'sleeping'].includes(i.status) || onTrial || !price?.rates || !price.version} onClick={() => { setIpError(null); setIpQuote(price!); }}>
             {t('settings.requestIp')}
           </Button>
           {onTrial ? (
@@ -92,6 +93,7 @@ export function SettingsPage() {
             <span className="text-xs text-muted">{t('settings.verifyRunningOnly')}</span>
           ) : null}
         </div>
+        {ipError ? <p role="alert" className="mt-2 text-sm text-error">{ipError}</p> : null}
       </Section>
 
       <div className="space-y-4">
@@ -172,26 +174,30 @@ export function SettingsPage() {
         </div>
       </Section>
 
-      <Dialog open={confirmIp} onOpenChange={setConfirmIp} title={t('settings.requestIpTitle')} description={t('settings.requestIpBody')} closeLabel={t('common.cancel')}>
-        {ipRate !== undefined ? (
+      <Dialog open={ipQuote !== null} onOpenChange={(open) => !open && setIpQuote(null)} title={t('settings.requestIpTitle')} description={t('settings.requestIpBody')} closeLabel={t('common.cancel')}>
+        {ipQuote?.rates ? (
           <p className="mb-4 rounded-[var(--radius-control)] bg-surface-2 px-3 py-2 text-sm">
-            {t('settings.requestIpCost', { amount: money(ipRate * HOURS_PER_MONTH, locale) })}
+            {t('settings.requestIpCost', { amount: money(ipQuote.rates.ip * HOURS_PER_MONTH, locale) })}
           </p>
         ) : null}
         <div className="flex justify-end gap-2">
-          <Button onClick={() => setConfirmIp(false)}>{t('common.cancel')}</Button>
+          <Button onClick={() => setIpQuote(null)}>{t('common.cancel')}</Button>
           <Button
             variant="primary"
-            disabled={lifecycle.isPending}
+            disabled={lifecycle.isPending || !ipQuote?.version}
             onClick={() =>
               lifecycle.mutate(
-                { id: i.id, action: 'ip-change' },
+                { id: i.id, action: 'ip-change', body: { priceVersion: ipQuote!.version! } },
                 {
                   onSuccess: () => {
-                    setConfirmIp(false);
+                    setIpQuote(null);
                     toast(t('settings.requestIpDone'));
                   },
-                  onError: (e) => toast(errorMessage(e), 'error'),
+                  onError: (e) => {
+                    if (isPriceChanged(e)) setIpQuote(null);
+                    setIpError(errorMessage(e));
+                    toast(errorMessage(e), 'error');
+                  },
                 },
               )
             }

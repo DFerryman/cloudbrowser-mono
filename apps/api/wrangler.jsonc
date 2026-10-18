@@ -41,8 +41,11 @@
   "triggers": { "crons": ["*/5 * * * *"] },
   // Cloudflare Email Service: sign-in codes.
   "send_email": [{ "name": "EMAIL" }],
-  // Synchronous calls to the engine (IP checks).
-  "services": [{ "binding": "ENGINE", "service": "cloudbrowser-engine" }],
+  // Internal calls only: IP checks and immediate connection revocation after browser deletion.
+  "services": [
+    { "binding": "ENGINE", "service": "cloudbrowser-engine" },
+    { "binding": "GATEWAY", "service": "cloudbrowser-gateway", "entrypoint": "Internal" }
+  ],
   // Operation dispatch to the engine; Creem webhooks are processed from cloudbrowser-billing.
   "queues": {
     "producers": [

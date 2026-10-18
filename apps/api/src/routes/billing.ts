@@ -95,7 +95,7 @@ billingRoute.openapi(
       month: { month, ...(await monthTotals(db, user.id, month)) },
       trial: {
         // The free trial is offered only where usage is paid (not during the free pilot), once.
-        eligible: (await entitlementsFor(db, user.id)).billing === 'prepaid' && !account.trialUsedAt,
+        eligible: (await entitlementsFor(db, user.id)).billing === 'prepaid' && !account.trialUsedAt && !account.frozenAt,
         regionId: TRIAL.regionId,
         minutes: TRIAL.runningSeconds / 60,
         storageGb: TRIAL.storageGb,

@@ -13,6 +13,8 @@ export function BrowsersPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const instances = useInstances();
+  const retryId = new URLSearchParams(location.search).get('retry');
+  const retry = instances.data?.find((i) => i.id === retryId && i.status === 'failed');
   const dialogOpen = location.pathname === '/browsers/new';
   // The session view opens automatically once a new browser's IP check passes (page 1).
   const [openWhenReady, setOpenWhenReady] = useState<string | null>(null);
@@ -63,6 +65,7 @@ export function BrowsersPage() {
       )}
       <CreateDialog
         open={dialogOpen}
+        initialInstance={retry}
         onClose={() => navigate('/browsers')}
         onCreated={(id) => {
           setOpenWhenReady(id);

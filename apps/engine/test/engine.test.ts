@@ -224,6 +224,9 @@ describe('create', () => {
 
     await reaperTick(w.deps('reaper'));
     expect(w.liveProvider()).toHaveLength(0);
+    // A provider request with no recorded ID is kept pending through its visibility window.
+    w.advance(16 * 60_000);
+    await reaperTick(w.deps('reaper'));
     expect(await w.openLedger()).toHaveLength(0);
     const [ip] = await w.db.select().from(ipAddresses);
     expect(ip?.releasedAt).not.toBeNull();
@@ -258,6 +261,8 @@ describe('create', () => {
         expect(w.liveProvider()).toHaveLength(4);
       } else {
         w.faults = () => null;
+        await reaperTick(w.deps('reaper'));
+        w.advance(16 * 60_000);
         await reaperTick(w.deps('reaper'));
         expect(w.liveProvider()).toHaveLength(0);
       }

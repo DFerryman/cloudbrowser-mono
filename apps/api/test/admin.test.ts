@@ -20,6 +20,7 @@ import { ORIGIN, setup, signIn } from './helpers.js';
 
 const IP = { 'cf-connecting-ip': '203.0.113.9' };
 let t: ReturnType<typeof setup>;
+const quote = async (regionId = 'tyo1') => (await t.call('GET', '/api/v1/pricing')).body.find((p: { regionId: string; version: string }) => p.regionId === regionId).version as string;
 let token: string;
 const callAdmin = (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => adminCall(t, token, method, path, body, headers);
 
@@ -147,7 +148,7 @@ describe('admin console', () => {
     // A user with one running browser.
     await signIn(t, 'user@example.com');
     owner = (await t.call('GET', '/api/v1/me')).body.user.id;
-    browser = (await t.call('POST', '/api/v1/instances', { name: 'Work', regionId: 'tyo1' }, { 'idempotency-key': 'w' })).body.instanceId;
+    browser = (await t.call('POST', '/api/v1/instances', { name: 'Work', regionId: 'tyo1', storageGb: 10, priceVersion: await quote('tyo1') }, { 'idempotency-key': 'w' })).body.instanceId;
     await t.settle();
   });
 
@@ -208,7 +209,7 @@ describe('admin console', () => {
 
     await signIn(t, 'user@example.com');
     expect((await t.call('GET', '/api/v1/me')).body.entitlements.maxBrowsers).toBe(5);
-    expect((await t.call('POST', '/api/v1/instances', { name: 'x', regionId: 'tyo1' }, { 'idempotency-key': 'x' })).body.type).toBe('creation_frozen');
+    expect((await t.call('POST', '/api/v1/instances', { name: 'x', regionId: 'tyo1', storageGb: 10, priceVersion: await quote('tyo1') }, { 'idempotency-key': 'x' })).body.type).toBe('creation_frozen');
     const audit = (await callAdmin('GET', '/api/v1/admin/audit', undefined, IP)).body.map((a: { action: string }) => a.action);
     expect(audit).toEqual(expect.arrayContaining(['flag.creation_freeze', 'cap.set']));
   });
@@ -241,6 +242,20 @@ describe('admin console', () => {
     expect((await t.call('GET', '/api/v1/billing/transactions')).body[0]).toMatchObject({ kind: 'adjustment', amountMicros: 5_000_000, description: 'pilot credit' });
     const audit = (await callAdmin('GET', '/api/v1/admin/audit', undefined, IP)).body.map((a: { action: string }) => a.action);
     expect(audit).toEqual(expect.arrayContaining(['pricing.settings', 'user.credit']));
+  });
+
+  it('reports only money actually charged as revenue, while retaining the cost of free usage', async () => {
+    const day = new Date().toISOString().slice(0, 10);
+    t.d1.sqlite.prepare(`INSERT INTO usage_records
+      (instance_id, user_id, region_id, item, day, unit_price_micros, unit_cost_micros, quantity, amount_micros, charged_micros, cost_micros, updated_at)
+      VALUES (?, ?, 'tyo1', 'compute', ?, 120000, 100000, 1, 120000, 0, 100000, ?)`)
+      .run(browser, owner, day, Date.now());
+    let month = (await callAdmin('GET', '/api/v1/admin/pricing')).body.month;
+    expect(month).toMatchObject({ revenueMicros: 0, costMicros: 100_000, grossMarginMicros: -100_000 });
+    t.d1.sqlite.prepare('UPDATE usage_records SET charged_micros = 120000 WHERE instance_id = ?').run(browser);
+    month = (await callAdmin('GET', '/api/v1/admin/pricing')).body.month;
+    expect(month).toMatchObject({ revenueMicros: 120_000, costMicros: 100_000, grossMarginMicros: 20_000 });
+    expect(month.byItem.compute).toEqual({ revenueMicros: 120_000, costMicros: 100_000 });
   });
 
   it('raises alerts once, delivers them to email and the chat webhook, and acknowledges them', async () => {

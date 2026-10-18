@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "wrangler dev --port 8790 --persist-to ../../.wrangler/state",
     "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
     "deploy": "wrangler deploy"
   },
   "dependencies": {
@@ -15,6 +16,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260702.1",
     "typescript": "~5.9.3",
+    "vitest": "^3.2.7",
     "wrangler": "^4.151.1"
   }
 }

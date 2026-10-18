@@ -19,13 +19,16 @@ export class FakeEc2 {
   calls: { action: string; params: Record<string, string> }[] = [];
   /** Return an error for a call, e.g. capacity for one instance type. */
   fail: (action: string, p: Record<string, string>) => { code: string; status?: number } | null = () => null;
+  /** A delete may be accepted while its resource remains visible in subsequent Describe calls. */
+  deferDeletes = false;
   subnetAz: Record<string, string> = { 'subnet-a': 'ap-northeast-1a', 'subnet-c': 'ap-northeast-1c' };
   quotas: Record<string, number> = { 'L-0263D0A3': 5, 'L-1216C47A': 16 };
   /** Volume modifications, newest last; each one reports `modifying` once, then `optimizing`. */
   modifications: { volume: string; target: number; state: string; describes: number; start: string }[] = [];
   /** Price List items in the API's format (each one is sent as a JSON string), by service code. */
   priceList: Record<string, Record<string, unknown>[]> = {};
-  pricingCalls: { ServiceCode: string; Filters: { Field: string; Value: string }[] }[] = [];
+  pricingPageSize = 100;
+  pricingCalls: { ServiceCode: string; Filters: { Field: string; Value: string }[]; NextToken?: string }[] = [];
   private n = 0;
 
   private id(prefix: string) {
@@ -36,13 +39,20 @@ export class FakeEc2 {
     const req = input instanceof Request ? input : new Request(String(input), init);
     if (!req.headers.get('authorization')?.startsWith('AWS4-HMAC-SHA256')) return new Response('unsigned', { status: 403 });
     if (req.headers.get('x-amz-target') === 'AWSPriceListService.GetProducts') {
-      const body = (await req.json()) as { ServiceCode: string; Filters: { Field: string; Value: string }[] };
+      const body = (await req.json()) as { ServiceCode: string; Filters: { Field: string; Value: string }[]; MaxResults: number; NextToken?: string };
       this.pricingCalls.push(body);
       const items = (this.priceList[body.ServiceCode] ?? []).filter((item) => {
         const attrs = (item.product as { attributes: Record<string, string> }).attributes;
         return body.Filters.every((f) => attrs[f.Field] === f.Value);
       });
-      return Response.json({ FormatVersion: 'aws_v1', PriceList: items.map((i) => JSON.stringify(i)) });
+      const offset = Number(body.NextToken ?? 0);
+      const pageSize = Math.min(body.MaxResults, this.pricingPageSize);
+      const page = items.slice(offset, offset + pageSize);
+      return Response.json({
+        FormatVersion: 'aws_v1',
+        PriceList: page.map((i) => JSON.stringify(i)),
+        ...(offset + page.length < items.length ? { NextToken: String(offset + page.length) } : {}),
+      });
     }
     if (req.headers.get('x-amz-target')?.includes('GetServiceQuota')) {
       const body = (await req.json()) as { QuotaCode: string };
@@ -140,7 +150,7 @@ export class FakeEc2 {
       case 'ReleaseAddress': {
         const a = this.need(this.addresses, p.AllocationId, 'InvalidAllocationID.NotFound');
         if (a.eni) throw new Error('InvalidIPAddress.InUse|400');
-        this.addresses.delete(a.id);
+        if (!this.deferDeletes) this.addresses.delete(a.id);
         return '<return>true</return>';
       }
       case 'CreateNetworkInterface': {
@@ -160,8 +170,10 @@ export class FakeEc2 {
       case 'DeleteNetworkInterface': {
         const e = this.need(this.enis, p.NetworkInterfaceId, 'InvalidNetworkInterfaceID.NotFound');
         if (e.instance) throw new Error('InvalidNetworkInterface.InUse|400');
-        for (const a of this.addresses.values()) if (a.eni === e.id) a.eni = a.assoc = undefined;
-        this.enis.delete(e.id);
+        if (!this.deferDeletes) {
+          for (const a of this.addresses.values()) if (a.eni === e.id) a.eni = a.assoc = undefined;
+          this.enis.delete(e.id);
+        }
         return '<return>true</return>';
       }
       case 'CreateVolume': {
@@ -219,7 +231,8 @@ export class FakeEc2 {
       case 'DeleteVolume': {
         const v = this.need(this.volumes, p.VolumeId, 'InvalidVolume.NotFound');
         if (v.instance) throw new Error('VolumeInUse|400');
-        this.volumes.delete(v.id);
+        if (this.deferDeletes) v.status = 'deleting';
+        else this.volumes.delete(v.id);
         return '<return>true</return>';
       }
       case 'DescribeImages':
@@ -240,7 +253,7 @@ export class FakeEc2 {
             protected: p.DisableApiTermination === 'true',
             pendingDescribes: 1,
           });
-          this.volumes.set(root, { id: root, tags: this.tagsFrom(p, 'volume'), az: eni.az, size: 16, status: 'in-use', instance: id, device: '/dev/sda1' });
+          this.volumes.set(root, { id: root, tags: this.tagsFrom(p, 'volume'), az: eni.az, size: Number(p['BlockDeviceMapping.1.Ebs.VolumeSize']), status: 'in-use', instance: id, device: '/dev/sda1' });
           Object.assign(eni, { instance: id, status: 'in-use' });
           return id;
         });
@@ -276,6 +289,10 @@ export class FakeEc2 {
       case 'TerminateInstances': {
         const i = this.need(this.instances, p['InstanceId.1'], 'InvalidInstanceID.NotFound');
         if (i.protected) throw new Error('OperationNotPermitted|400');
+        if (this.deferDeletes) {
+          i.state = 'shutting-down';
+          return '<instancesSet/>';
+        }
         i.state = 'terminated';
         for (const v of [...this.volumes.values()]) {
           if (v.instance !== i.id) continue;
@@ -301,7 +318,7 @@ export class FakeEc2 {
       }
       case 'DeleteSnapshot': {
         this.need(this.snapshots, p.SnapshotId, 'InvalidSnapshot.NotFound');
-        this.snapshots.delete(p.SnapshotId!);
+        if (!this.deferDeletes) this.snapshots.delete(p.SnapshotId!);
         return '<return>true</return>';
       }
       default:

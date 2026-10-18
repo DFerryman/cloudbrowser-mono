@@ -26,7 +26,9 @@ class FakeCreem {
   /** Creem marks the checkout paid (what the hosted checkout does when the buyer pays). */
   pay(id: string, orderId = `ord_${id}`) {
     const c = this.checkouts.get(id)!;
-    this.checkouts.set(id, { ...c, status: 'completed', order: { id: orderId, status: 'paid', amount: 1100, sub_total: 1000, tax_amount: 100, currency: 'USD' }, customer: { id: 'cust_1' } });
+    const net = Number(this.products[String(c.product)]!.price);
+    const tax = Math.round(net / 10);
+    this.checkouts.set(id, { ...c, status: 'completed', order: { id: orderId, status: 'paid', amount: net + tax, amount_paid: net + tax, sub_total: net, tax_amount: tax, currency: 'USD' }, customer: { id: 'cust_1' } });
     return this.checkouts.get(id)!;
   }
 
@@ -77,6 +79,7 @@ async function webhook(event: Record<string, unknown>, signature?: string) {
 let n = 0;
 const event = (eventType: string, object: Record<string, unknown>) => ({ id: `evt_${++n}`, eventType, created_at: Date.now(), object });
 const prepaid = () => t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()})`);
+const quoteVersion = async (regionId: string) => ((await t.call('GET', '/api/v1/pricing')).body.find((p: { regionId: string }) => p.regionId === regionId)?.version ?? 'unavailable') as string;
 const balance = async () => (await t.call('GET', '/api/v1/billing')).body.balanceMicros as number;
 
 /** Starts a top-up checkout as the signed-in user and pays it in Creem. */
@@ -126,9 +129,9 @@ describe('prices', () => {
     const prices = (await t.call('GET', '/api/v1/pricing')).body;
     const tyo = prices.find((p: { regionId: string }) => p.regionId === 'tyo1');
     expect(tyo).toMatchObject({ available: true, source: 'simulated', rootVolumeGb: 16, defaultStorageGb: 10, maxStorageGb: 100 });
-    const stale = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1', priceVersion: 'old' }, { 'idempotency-key': 'a' });
+    const stale = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1', priceVersion: 'old' , storageGb: 10}, { 'idempotency-key': 'a' });
     expect(stale).toMatchObject({ status: 409, body: { type: 'price_changed' } });
-    const ok = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1', priceVersion: tyo.version }, { 'idempotency-key': 'b' });
+    const ok = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1', priceVersion: tyo.version , storageGb: 10}, { 'idempotency-key': 'b' });
     expect(ok.status).toBe(202);
   });
 
@@ -137,7 +140,7 @@ describe('prices', () => {
     t.d1.sqlite.exec(`INSERT INTO invites (email) VALUES ('p2@example.com')`);
     await signIn(t, 'p2@example.com');
     expect((await t.call('GET', '/api/v1/pricing')).body[0]).toMatchObject({ available: false, rates: null, version: null });
-    const res = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' }, { 'idempotency-key': 'a' });
+    const res = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' , storageGb: 10, priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'a' });
     expect(res).toMatchObject({ status: 503, body: { type: 'price_unavailable' } });
   });
 });
@@ -147,7 +150,7 @@ describe('prepaid balance', () => {
     expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ mode: 'pilot', enabled: true, balanceMicros: 0 });
     prepaid();
     expect((await t.call('GET', '/api/v1/me')).body.entitlements.billing).toBe('prepaid');
-    const res = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' }, { 'idempotency-key': 'a' });
+    const res = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' , storageGb: 10, priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'a' });
     expect(res).toMatchObject({ status: 402, body: { type: 'insufficient_balance' } });
   });
 
@@ -184,7 +187,7 @@ describe('prepaid balance', () => {
     ]);
 
     // Now a browser can be created, and the receipts portal works.
-    expect((await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' }, { 'idempotency-key': 'a' })).status).toBe(202);
+    expect((await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' , storageGb: 10, priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'a' })).status).toBe(202);
     expect((await t.call('POST', '/api/v1/billing/portal')).body.url).toBe('https://portal.test/cust_1');
   });
 
@@ -203,20 +206,20 @@ describe('prepaid balance', () => {
     await webhook(event('checkout.completed', { id }));
     expect(await balance()).toBe(25_000_000);
     const order = (paid.order as { id: string }).id;
-    await webhook(event('refund.created', { id: 'ref_1', refund_amount: 500, order: { id: order } }));
-    await webhook(event('refund.created', { id: 'ref_1', refund_amount: 500, order: { id: order } }));
+    await webhook(event('refund.created', { id: 'ref_1', refund_amount: 550, refund_currency: 'USD', status: 'succeeded', order: { id: order } }));
+    await webhook(event('refund.created', { id: 'ref_1', refund_amount: 550, refund_currency: 'USD', status: 'succeeded', order: { id: order } }));
     expect(await balance()).toBe(20_000_000);
 
-    await webhook(event('dispute.created', { id: 'dsp_1', amount: 2500, order: order }));
+    await webhook(event('dispute.created', { id: 'dsp_1', amount: 2750, currency: 'USD', order: order }));
     const b = (await t.call('GET', '/api/v1/billing')).body;
-    expect(b).toMatchObject({ frozen: true, balanceMicros: -5_000_000 });
-    expect((await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' }, { 'idempotency-key': 'a' })).body.type).toBe('account_frozen');
+    expect(b).toMatchObject({ frozen: true, balanceMicros: 0 });
+    expect((await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' , storageGb: 10, priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'a' })).body.type).toBe('account_frozen');
   });
 
   it('sleeps browsers when the balance runs out, warns, keeps them 30 days, then deletes them', async () => {
     prepaid();
     t.d1.sqlite.exec(`INSERT INTO billing_accounts (user_id, balance_micros, updated_at) VALUES ('${userId}', 2000000, ${Date.now()})`);
-    await t.call('POST', '/api/v1/instances', { name: 'w', regionId: 'tyo1' }, { 'idempotency-key': 'w' });
+    await t.call('POST', '/api/v1/instances', { name: 'w', regionId: 'tyo1' , storageGb: 10, priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'w' });
     await t.settle();
     const [inst] = (await t.call('GET', '/api/v1/instances')).body;
     expect(inst.status).toBe('running');
@@ -263,24 +266,24 @@ describe('prepaid balance', () => {
 
 describe('storage and usage of one browser', () => {
   it('grows the volume after showing the price, at most once every 6 hours, and never shrinks it', async () => {
-    const created = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' }, { 'idempotency-key': 'a' });
+    const created = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' , storageGb: 10, priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'a' });
     await t.settle();
     const id = created.body.instanceId;
     expect((await t.call('GET', `/api/v1/instances/${id}/storage`)).body).toMatchObject({ sizeGb: 10, rootVolumeGb: 16, maxGb: 100, resizable: true, blockedReason: null });
 
-    expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 8 }, { 'idempotency-key': 'g0' })).status).toBe(400);
-    expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 500 }, { 'idempotency-key': 'g1' })).body.type).toBe('plan_limit');
+    expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 8 , priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'g0' })).status).toBe(400);
+    expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 500 , priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'g1' })).body.type).toBe('plan_limit');
     expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 20, priceVersion: 'old' }, { 'idempotency-key': 'g2' })).body.type).toBe('price_changed');
-    const grown = await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 20 }, { 'idempotency-key': 'g3' });
+    const grown = await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 20 , priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'g3' });
     expect(grown.status).toBe(202);
     await t.settle();
     expect((await t.call('GET', `/api/v1/instances/${id}`)).body.storageGb).toBe(20);
     expect((await t.call('GET', `/api/v1/instances/${id}/storage`)).body).toMatchObject({ sizeGb: 20, resizable: false, blockedReason: 'cooldown' });
-    expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 30 }, { 'idempotency-key': 'g4' })).body.type).toBe('invalid_state');
+    expect((await t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 30 , priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'g4' })).body.type).toBe('invalid_state');
   });
 
   it('shows what the browser has cost this month and what it costs now', async () => {
-    const created = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' }, { 'idempotency-key': 'a' });
+    const created = await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1' , storageGb: 10, priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'a' });
     await t.settle();
     const id = created.body.instanceId;
     const db = createDb(t.d1 as never);
@@ -297,7 +300,7 @@ describe('storage and usage of one browser', () => {
 });
 
 describe('free trial', () => {
-  const syd = () => t.d1.sqlite.exec(`UPDATE regions SET enabled = 1, executor = 'fake' WHERE id = 'syd1'`);
+  const syd = () => t.d1.sqlite.exec(`UPDATE regions SET enabled = 1, executor = 'fake' WHERE id = 'syd1'; UPDATE provider_prices SET executor = 'fake' WHERE region_id = 'syd1'`);
   const db = () => createDb(t.d1 as never);
   const engineAt = (at: number) => ({ db: db(), now: () => new Date(at), notify: () => {} }) as never;
   const runOps = async () => {
@@ -312,8 +315,8 @@ describe('free trial', () => {
     prepaid();
     syd();
     expect((await t.call('GET', '/api/v1/billing')).body.trial).toMatchObject({ eligible: true, regionId: 'syd1', minutes: 10, storageGb: 2, keptDays: 7 });
-    expect((await t.call('POST', '/api/v1/instances', { name: 'x', regionId: 'tyo1', trial: true }, { 'idempotency-key': 'x' })).status).toBe(400);
-    const created = await t.call('POST', '/api/v1/instances', { name: 'Trial', regionId: 'syd1', trial: true }, { 'idempotency-key': 't1' });
+    expect((await t.call('POST', '/api/v1/instances', { name: 'x', regionId: 'tyo1', trial: true , storageGb: 2, priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'x' })).status).toBe(400);
+    const created = await t.call('POST', '/api/v1/instances', { name: 'Trial', regionId: 'syd1', trial: true , storageGb: 2, priceVersion: await quoteVersion('syd1')}, { 'idempotency-key': 't1' });
     expect(created.status).toBe(202);
     await t.settle();
     const id = created.body.instanceId;
@@ -321,7 +324,7 @@ describe('free trial', () => {
     expect(inst).toMatchObject({ status: 'running', storageGb: 2, backupsEnabled: false, idleTimeoutS: 300, trial: { state: 'active', secondsLeft: 600 } });
     // Once per user.
     expect((await t.call('GET', '/api/v1/billing')).body.trial.eligible).toBe(false);
-    expect((await t.call('POST', '/api/v1/instances', { name: 'again', regionId: 'syd1', trial: true }, { 'idempotency-key': 't2' })).body.type).toBe('invalid_state');
+    expect((await t.call('POST', '/api/v1/instances', { name: 'again', regionId: 'syd1', trial: true , storageGb: 2, priceVersion: await quoteVersion('syd1')}, { 'idempotency-key': 't2' })).body.type).toBe('invalid_state');
     // No paid extras during the trial.
     expect((await t.call('PATCH', `/api/v1/instances/${id}`, { backupsEnabled: true })).body.type).toBe('invalid_state');
     expect((await t.call('GET', `/api/v1/instances/${id}/storage`)).body.blockedReason).toBe('trial');
@@ -353,7 +356,7 @@ describe('free trial', () => {
   it('keeps the same browser when the user pays before it is reclaimed, and charges it from then on', async () => {
     prepaid();
     syd();
-    const created = await t.call('POST', '/api/v1/instances', { name: 'Trial', regionId: 'syd1', trial: true }, { 'idempotency-key': 't1' });
+    const created = await t.call('POST', '/api/v1/instances', { name: 'Trial', regionId: 'syd1', trial: true , storageGb: 2, priceVersion: await quoteVersion('syd1')}, { 'idempotency-key': 't1' });
     await t.settle();
     const id = created.body.instanceId;
     const before = (await t.call('GET', `/api/v1/instances/${id}`)).body;
@@ -374,5 +377,300 @@ describe('free trial', () => {
     const compute = t.d1.sqlite.prepare(`SELECT amount_micros AS a FROM usage_records WHERE instance_id = ? AND item = 'compute' AND amount_micros > 0`).get(id) as { a: number };
     expect(compute.a).toBe(10_000); // 5 minutes at $0.12/h
     expect((await t.call('GET', '/api/v1/billing')).body.balanceMicros).toBeLessThan(10_000_000);
+  });
+});
+
+describe('billing failure and concurrency regressions', () => {
+  const db = () => createDb(t.d1 as never);
+  const at = (time: number) => ({ db: db(), now: () => new Date(time), notify: () => {} }) as never;
+  const sqlOne = (query: string) => t.d1.sqlite.prepare(query).get() as Record<string, number | string | null>;
+  async function browser() {
+    const { applyBalance } = await import('../src/billing/ledger.js');
+    await applyBalance(db(), { userId, kind: 'adjustment', amountMicros: 10_000_000, reference: 'seed', actor: 'test' }, new Date());
+    prepaid();
+    const r = await t.call('POST', '/api/v1/instances', { name: 'Metered', regionId: 'tyo1', storageGb: 10, priceVersion: await quoteVersion('tyo1') }, { 'idempotency-key': 'metered' });
+    expect(r.status).toBe(202);
+    await t.settle();
+    return r.body.instanceId as string;
+  }
+  function charged() { return Number(sqlOne('SELECT coalesce(sum(charged_micros), 0) AS n FROM usage_records').n); }
+
+  it('rolls back the cursor, traffic counter and debit if writing usage fails, then safely retries', async () => {
+    const id = await browser();
+    const start = Date.now();
+    await meterUsage(at(start));
+    t.d1.sqlite.exec(`UPDATE instance_health SET net_tx_bytes = 1000000000, net_tx_billed_bytes = 0 WHERE instance_id = '${id}';
+      CREATE TRIGGER meter_fault BEFORE INSERT ON usage_records BEGIN SELECT RAISE(ABORT, 'usage unavailable'); END;`);
+    await expect(meterUsage(at(start + 60_000))).rejects.toThrow(/usage unavailable/);
+    expect(sqlOne(`SELECT base_metered_at AS cursor, net_tx_billed_bytes AS tx FROM instance_health WHERE instance_id = '${id}'`)).toEqual({ cursor: start, tx: 0 });
+    expect(await balance()).toBe(10_000_000);
+    t.d1.sqlite.exec('DROP TRIGGER meter_fault');
+    const done = await meterUsage(at(start + 60_000));
+    expect(done.chargedMicros).toBe(charged());
+    expect(charged()).toBeGreaterThan(100_000); // the unbilled transfer survived rollback
+    expect(10_000_000 - await balance()).toBe(charged());
+    await meterUsage(at(start + 60_000));
+    expect(10_000_000 - await balance()).toBe(charged());
+  });
+
+  it('does not let an overlapping older cron overwrite a newer cursor or debit the same interval', async () => {
+    const id = await browser();
+    const start = Date.now();
+    await meterUsage(at(start));
+    const original = t.d1.batch.bind(t.d1);
+    let release!: () => void;
+    let ready!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const reached = new Promise<void>((resolve) => { ready = resolve; });
+    let first = true;
+    t.d1.batch = (async (statements: D1PreparedStatement[]) => {
+      if (first) { first = false; ready(); await held; }
+      return original(statements);
+    }) as typeof t.d1.batch;
+    const older = meterUsage(at(start + 60_000));
+    await reached;
+    expect((await meterUsage(at(start + 120_000))).metered).toBe(1);
+    release();
+    expect((await older).metered).toBe(0);
+    t.d1.batch = original;
+    expect(sqlOne(`SELECT base_metered_at AS cursor FROM instance_health WHERE instance_id = '${id}'`).cursor).toBe(start + 120_000);
+    await meterUsage(at(start + 180_000));
+    expect(Number(sqlOne("SELECT quantity AS q FROM usage_records WHERE item = 'compute'").q)).toBeCloseTo(3 / 60, 10);
+    expect(10_000_000 - await balance()).toBe(charged());
+  });
+
+  it('keeps pilot estimates separate from revenue after billing is enabled', async () => {
+    const created = await t.call('POST', '/api/v1/instances', { name: 'Pilot', regionId: 'tyo1', storageGb: 10, priceVersion: await quoteVersion('tyo1') }, { 'idempotency-key': 'pilot' });
+    expect(created.status).toBe(202);
+    await t.settle();
+    const start = Date.now();
+    await meterUsage(at(start));
+    await meterUsage(at(start + 60_000));
+    const estimate = Number(sqlOne('SELECT sum(amount_micros) AS n FROM usage_records').n);
+    expect(estimate).toBeGreaterThan(0);
+    expect(charged()).toBe(0);
+    const { applyBalance } = await import('../src/billing/ledger.js');
+    await applyBalance(db(), { userId, kind: 'adjustment', amountMicros: 10_000_000, reference: 'pilot-credit', actor: 'test' }, new Date());
+    prepaid();
+    await meterUsage(at(start + 120_000));
+    expect(charged()).toBeGreaterThan(0);
+    expect(charged()).toBeLessThan(Number(sqlOne('SELECT sum(amount_micros) AS n FROM usage_records').n));
+    expect(10_000_000 - await balance()).toBe(charged());
+  });
+
+  it('uses the existing machine price and root disk size while keeping the customer regional rate', async () => {
+    const id = await browser();
+    const sheet = { ...SIMULATED_SHEET, instanceTypes: { ...SIMULATED_SHEET.instanceTypes, 'old.large': 0.2 } };
+    t.d1.sqlite.prepare('UPDATE provider_prices SET sheet = ?').run(JSON.stringify(sheet));
+    t.d1.sqlite.prepare('UPDATE placements SET instance_type = ?, root_volume_gb = ? WHERE instance_id = ?').run('old.large', 32, id);
+    const start = Date.now();
+    await meterUsage(at(start));
+    await meterUsage(at(start + 300_000));
+    expect(sqlOne("SELECT unit_price_micros AS price, unit_cost_micros AS cost FROM usage_records WHERE item = 'compute'")).toEqual({ price: 120_000, cost: 200_000 });
+    expect(Number(sqlOne("SELECT quantity AS q FROM usage_records WHERE item = 'storage'").q)).toBeCloseTo(42 * (5 / 60) / 730, 10);
+  });
+
+  it('does not invent cost for a known unpriced machine or advance its billing cursor', async () => {
+    const id = await browser();
+    const start = Date.now();
+    await meterUsage(at(start));
+    t.d1.sqlite.prepare('UPDATE placements SET instance_type = ? WHERE instance_id = ?').run('unknown.large', id);
+    await meterUsage(at(start + 60_000));
+    await meterUsage(at(start + 120_000));
+    expect(sqlOne(`SELECT base_metered_at AS cursor FROM instance_health WHERE instance_id = '${id}'`).cursor).toBe(start);
+    expect(charged()).toBe(0);
+    expect(sqlOne("SELECT count(*) AS n FROM alerts WHERE dedupe_key LIKE 'machine-price:%'").n).toBe(1);
+  });
+
+  it('records retained system-deletion costs without charging the customer, stopping each cost when its resource is gone', async () => {
+    const id = await browser();
+    const start = Date.now();
+    t.d1.sqlite.prepare("UPDATE browser_instances SET status = 'deleting', desired_state = 'deleted', deleted_at = ?, purge_after = ? WHERE id = ?").run(start, start + 7 * 86_400_000, id);
+    await meterUsage(at(start));
+    await meterUsage(at(start + 300_000));
+    const before = Number(sqlOne("SELECT quantity AS q FROM usage_records WHERE item = 'storage'").q);
+    expect(before).toBeCloseTo(26 * (5 / 60) / 730, 10);
+    expect(charged()).toBe(0);
+    expect(await balance()).toBe(10_000_000);
+    expect(Number(sqlOne('SELECT sum(cost_micros) AS c FROM usage_records').c)).toBeGreaterThan(0);
+    t.d1.sqlite.prepare("UPDATE resources SET state = 'deleted' WHERE instance_id = ? AND kind = 'vm'").run(id);
+    await meterUsage(at(start + 600_000));
+    expect(Number(sqlOne("SELECT quantity AS q FROM usage_records WHERE item = 'storage'").q) - before).toBeCloseTo(10 * (5 / 60) / 730, 10);
+    const cost = Number(sqlOne('SELECT sum(cost_micros) AS c FROM usage_records').c);
+    t.d1.sqlite.prepare("UPDATE resources SET state = 'deleted' WHERE instance_id = ?").run(id);
+    await meterUsage(at(start + 900_000));
+    expect(Number(sqlOne('SELECT sum(cost_micros) AS c FROM usage_records').c)).toBe(cost);
+    expect(await balance()).toBe(10_000_000);
+  });
+
+  it('saves a browser if its owner adds credit while a 30-day deletion sweep is admitting work', async () => {
+    const id = await browser();
+    const now = Date.now();
+    t.d1.sqlite.prepare('UPDATE billing_accounts SET balance_micros = 0, exhausted_at = ?').run(now - 31 * 86_400_000);
+    const original = t.d1.batch.bind(t.d1);
+    let topped = false;
+    t.d1.batch = (async (statements: D1PreparedStatement[]) => {
+      if (!topped) {
+        topped = true;
+        const { applyBalance } = await import('../src/billing/ledger.js');
+        await applyBalance(db(), { userId, kind: 'adjustment', amountMicros: 10_000_000, reference: 'race-topup', actor: 'test' }, new Date(now));
+      }
+      return original(statements);
+    }) as typeof t.d1.batch;
+    expect((await billingSweep(t.env as never, db(), null, new Date(now), { nightly: false })).deleted).toBe(0);
+    expect(sqlOne(`SELECT desired_state AS state FROM browser_instances WHERE id = '${id}'`).state).toBe('running');
+    expect(sqlOne("SELECT count(*) AS n FROM operations WHERE kind = 'delete'").n).toBe(0);
+  });
+});
+
+describe('payment reconciliation regressions', () => {
+  it('credits the settled net amount when catalog prices change or checkout discounts apply', async () => {
+    const { id, paid } = await topUp();
+    t.d1.sqlite.exec("UPDATE topup_packs SET amount_cents = 2500 WHERE product_id = 'prod_10'");
+    creem.checkouts.set(id, { ...paid, order: { ...(paid.order as object), amount: 1100, amount_paid: 880, tax_amount: 80 } });
+    await webhook(event('checkout.completed', { id }));
+    expect(await balance()).toBe(8_000_000);
+    expect(t.d1.sqlite.prepare('SELECT gross_amount_cents AS gross, amount_micros AS net, currency FROM balance_transactions').get()).toEqual({ gross: 880, net: 8_000_000, currency: 'USD' });
+  });
+
+  it('rejects a paid checkout with mismatched local identity, product or currency', async () => {
+    const { creditCheckout } = await import('../src/billing/webhooks.js');
+    const { id, paid } = await topUp();
+    const creemApi = creemFrom(t.env as never)!;
+    const db = createDb(t.d1 as never);
+    for (const changed of [
+      { ...paid, id: 'other-checkout' },
+      { ...paid, request_id: 'unrelated-request' },
+      { ...paid, product: 'prod_25' },
+      { ...paid, metadata: { userId: 'other-user' } },
+      { ...paid, order: { ...(paid.order as object), currency: 'EUR' } },
+      { ...paid, order: { ...(paid.order as object), amount_paid: 0 } },
+      { ...paid, order: { ...(paid.order as object), status: 'pending' } },
+    ]) {
+      creem.checkouts.set(id, changed);
+      await expect(creditCheckout(db, creemApi, id, new Date())).rejects.toThrow();
+      expect(await balance()).toBe(0);
+    }
+  });
+
+  it('retains an early refund or dispute until the checkout credit arrives, even after 10 retry attempts', async () => {
+    const { pendingWebhooks } = await import('../src/billing/webhooks.js');
+    const { id, paid } = await topUp();
+    const order = (paid.order as { id: string }).id;
+    const refund = event('refund.created', { id: 'early-refund', refund_amount: 550, refund_currency: 'USD', status: 'succeeded', order });
+    const dispute = event('dispute.created', { id: 'early-dispute', amount: 1100, currency: 'USD', transaction: { order } });
+    await webhook(refund);
+    await webhook(dispute);
+    expect(await balance()).toBe(0);
+    t.d1.sqlite.exec('UPDATE webhook_events SET attempts = 11');
+    const db = createDb(t.d1 as never);
+    const later = new Date(Date.now() + 120_000);
+    expect(await pendingWebhooks(db, later)).toEqual(expect.arrayContaining([refund.id, dispute.id]));
+    await webhook(event('checkout.completed', { id }));
+    await billingSweep(t.env as never, db, creemFrom(t.env as never), later, { nightly: false });
+    expect(await balance()).toBe(0);
+    expect((await t.call('GET', '/api/v1/billing')).body.frozen).toBe(true);
+    expect(t.d1.sqlite.prepare('SELECT count(*) AS n FROM webhook_events WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
+  });
+
+  it('caps concurrent refund events at the original net credit including tax', async () => {
+    const { processWebhook } = await import('../src/billing/webhooks.js');
+    const { id, paid } = await topUp();
+    await webhook(event('checkout.completed', { id }));
+    const order = (paid.order as { id: string }).id;
+    const a = event('refund.created', { id: 'ref-a', refund_amount: 1100, refund_currency: 'USD', status: 'succeeded', order });
+    const b = event('refund.created', { id: 'ref-b', refund_amount: 1100, refund_currency: 'USD', status: 'succeeded', order });
+    const { schema } = await import('@cloudbrowser/db');
+    const db = createDb(t.d1 as never);
+    for (const e of [a, b]) await db.insert(schema.webhookEvents).values({ id: e.id, type: e.eventType, payload: e, receivedAt: new Date() });
+    const original = t.d1.batch.bind(t.d1);
+    let tail = Promise.resolve();
+    t.d1.batch = ((statements: D1PreparedStatement[]) => {
+      const result = tail.then(() => original(statements));
+      tail = result.then(() => {}, () => {});
+      return result;
+    }) as typeof t.d1.batch;
+    await Promise.all([a, b].map((e) => processWebhook(t.env as never, db, creemFrom(t.env as never)!, e.id)));
+    expect(await balance()).toBe(0);
+    expect(t.d1.sqlite.prepare("SELECT sum(amount_micros) AS amount FROM balance_transactions WHERE kind = 'refund'").get()).toEqual({ amount: -10_000_000 });
+  });
+});
+
+describe('trial enforcement regressions', () => {
+  async function trial() {
+    prepaid();
+    t.d1.sqlite.exec("UPDATE regions SET enabled = 1, executor = 'fake' WHERE id = 'syd1'; UPDATE provider_prices SET executor = 'fake' WHERE region_id = 'syd1'");
+    const created = await t.call('POST', '/api/v1/instances', { name: 'Trial', regionId: 'syd1', trial: true, storageGb: 2, priceVersion: await quoteVersion('syd1') }, { 'idempotency-key': 'regression-trial' });
+    expect(created.status).toBe(202);
+    await t.settle();
+    return created.body.instanceId as string;
+  }
+  const at = (time: number) => ({ db: createDb(t.d1 as never), now: () => new Date(time), notify: () => {} }) as never;
+
+  it('retries the 10-minute stop after a concurrent operation prevented it', async () => {
+    const { operationRow, schema } = await import('@cloudbrowser/db');
+    const db = createDb(t.d1 as never);
+    const id = await trial();
+    const start = Date.now();
+    await meterUsage(at(start));
+    t.d1.sqlite.prepare('UPDATE browser_instances SET trial_used_s = 599 WHERE id = ?').run(id);
+    const busy = operationRow({ instanceId: id, userId: null, kind: 'restore', now: new Date(start) });
+    await db.insert(schema.operations).values(busy);
+    await meterUsage(at(start + 60_000));
+    expect(t.d1.sqlite.prepare('SELECT trial_state AS state FROM browser_instances WHERE id = ?').get(id)).toEqual({ state: 'ended' });
+    expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM operations WHERE kind = 'stop'").get()).toEqual({ n: 0 });
+    t.d1.sqlite.prepare('UPDATE operations SET finished_at = ? WHERE id = ?').run(start + 61_000, busy.id);
+    expect((await meterUsage(at(start + 120_000))).stopped).toBe(1);
+    expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM operations WHERE kind = 'stop' AND finished_at IS NULL").get()).toEqual({ n: 1 });
+    expect(await balance()).toBe(0);
+  });
+
+  it('ends and stops a trial even while provider pricing is unavailable', async () => {
+    const id = await trial();
+    const start = Date.now();
+    await meterUsage(at(start));
+    t.d1.sqlite.exec('DELETE FROM provider_prices');
+    t.d1.sqlite.prepare('UPDATE browser_instances SET trial_used_s = 599 WHERE id = ?').run(id);
+    expect((await meterUsage(at(start + 60_000))).stopped).toBe(1);
+    expect(t.d1.sqlite.prepare('SELECT trial_state AS state FROM browser_instances WHERE id = ?').get(id)).toEqual({ state: 'ended' });
+    expect(await balance()).toBe(0);
+  });
+
+  it('commits trial conversion and paid credit together, including when conversion fails', async () => {
+    const { applyBalance } = await import('../src/billing/ledger.js');
+    const id = await trial();
+    const db = createDb(t.d1 as never);
+    t.d1.sqlite.exec(`CREATE TRIGGER conversion_fault BEFORE UPDATE OF trial_state ON browser_instances BEGIN SELECT RAISE(ABORT, 'conversion unavailable'); END;`);
+    const credit = { userId, kind: 'adjustment' as const, amountMicros: 10_000_000, reference: 'atomic-conversion', actor: 'test' };
+    await expect(applyBalance(db, credit, new Date())).rejects.toThrow(/conversion unavailable/);
+    expect(await balance()).toBe(0);
+    expect(t.d1.sqlite.prepare('SELECT trial_state AS state FROM browser_instances WHERE id = ?').get(id)).toEqual({ state: 'active' });
+    t.d1.sqlite.exec('DROP TRIGGER conversion_fault');
+    expect(await applyBalance(db, credit, new Date())).toBe(true);
+    expect(await balance()).toBe(10_000_000);
+    expect(t.d1.sqlite.prepare('SELECT trial_state AS state FROM browser_instances WHERE id = ?').get(id)).toEqual({ state: 'converted' });
+  });
+
+  it('does not reclaim a trial that converted after the expired list was read', async () => {
+    const { reclaimTrials } = await import('@cloudbrowser/engine');
+    const { applyBalance } = await import('../src/billing/ledger.js');
+    const id = await trial();
+    await t.call('POST', `/api/v1/instances/${id}/stop`, undefined, { 'idempotency-key': 'sleep-regression' });
+    await t.settle();
+    const now = Date.now();
+    t.d1.sqlite.prepare('UPDATE browser_instances SET trial_reclaim_at = ? WHERE id = ?').run(now - 1, id);
+    const db = createDb(t.d1 as never);
+    const original = t.d1.batch.bind(t.d1);
+    let paid = false;
+    t.d1.batch = (async (statements: D1PreparedStatement[]) => {
+      if (!paid) {
+        paid = true;
+        await applyBalance(db, { userId, kind: 'adjustment', amountMicros: 10_000_000, reference: 'trial-race', actor: 'test' }, new Date(now));
+      }
+      return original(statements);
+    }) as typeof t.d1.batch;
+    expect(await reclaimTrials(at(now))).toBe(0);
+    expect(t.d1.sqlite.prepare('SELECT trial_state AS state, desired_state AS desired FROM browser_instances WHERE id = ?').get(id)).toEqual({ state: 'converted', desired: 'stopped' });
+    expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM operations WHERE kind = 'delete'").get()).toEqual({ n: 0 });
   });
 });

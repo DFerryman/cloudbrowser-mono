@@ -38,7 +38,7 @@ import { problem } from '../problem.js';
 import { toInstances, toOperation } from '../views.js';
 import { eventsRoute } from './events.js';
 
-const { browserInstances, regions, operations, viewerSessions, instanceHealth, placements, events, auditLog, backups } = schema;
+const { browserInstances, regions, operations, viewerSessions, instanceHealth, placements, events, auditLog, backups, agentCredentials, archiveKeys, agentCommands } = schema;
 
 /** AWS allows one change to a volume every 6 hours. */
 const RESIZE_COOLDOWN_MS = 6 * 3_600_000;
@@ -177,6 +177,8 @@ v1.openapi(
     await admitCreate(db, user.id, body.regionId, now, { trial });
     // The user must have been shown this region's current prices (create dialog).
     await requirePrice(db, body.regionId, body.priceVersion);
+    const storageGb = trial ? TRIAL.storageGb : (await storageLimits(db, user.id)).defaultGb;
+    if (body.storageGb !== storageGb) throw problem(409, 'price_changed', 'The storage included with a new browser changed. Review the new price and try again.');
     if (trial && !(await claimTrial(db, user.id, now))) throw problem(409, 'invalid_state', 'You have already used your free trial.');
 
     const info = REGION_INFO[body.regionId];
@@ -190,6 +192,7 @@ v1.openapi(
           kind: 'create',
           key,
           route,
+          params: { storageGb },
           before: [
             db.insert(browserInstances).values({
               id: instanceId,
@@ -198,6 +201,7 @@ v1.openapi(
               regionId: body.regionId,
               status: 'creating',
               desiredState: 'running',
+              storageGb,
               idleTimeoutS: trial ? TRIAL.idleTimeoutS : DEFAULT_IDLE_TIMEOUT_S,
               ...(trial ? { trialState: 'active' } : {}),
               locale,
@@ -291,7 +295,7 @@ v1.openapi(
     method: 'delete',
     path: '/instances/{id}',
     tags: ['instances'],
-    description: 'Soft delete: the browser sleeps and can be restored for 7 days with the same data and IP.',
+    description: 'Permanently delete this browser. Access is revoked immediately; its machine, disks, snapshots, archives and IP are then released. This cannot be undone.',
     request: { params: IdParam, headers: IdempotencyHeader },
     responses: { ...accepted, ...errors },
   }),
@@ -303,13 +307,27 @@ v1.openapi(
     if (earlier) return c.json(earlier, 202);
     const row = await ownedInstance(c, c.req.valid('param').id);
     if (row.status === 'deleting') throw problem(409, 'invalid_state', 'This browser is already deleted.');
+    const now = new Date();
     const result = await enqueueOperation(c, {
       instanceId: row.id,
       kind: 'delete',
       key,
       route,
-      before: [db.update(browserInstances).set({ desiredState: 'deleted', updatedAt: new Date() }).where(eq(browserInstances.id, row.id))],
+      params: { reason: 'user', purgeNow: true },
+      // One transaction: accepting a permanent deletion also invalidates every route back to the
+      // profile. Provider deletion is asynchronous and may be retried; access never waits for it.
+      before: [
+        db.update(browserInstances).set({ status: 'deleting', desiredState: 'deleted', deletedAt: now, purgeAfter: now, updatedAt: now }).where(eq(browserInstances.id, row.id)),
+        db.update(viewerSessions).set({ endedAt: now }).where(and(eq(viewerSessions.instanceId, row.id), isNull(viewerSessions.endedAt))),
+        db.update(agentCredentials).set({ credentialHash: null, bootstrapHash: null, bootstrapExpiresAt: null, rotatedAt: now }).where(eq(agentCredentials.instanceId, row.id)),
+        db.update(archiveKeys).set({ wrappedKey: null, destroyedAt: now }).where(eq(archiveKeys.instanceId, row.id)),
+        db.update(agentCommands).set({ status: 'failed', reply: { error: 'Browser permanently deleted.' }, completedAt: now }).where(and(eq(agentCommands.instanceId, row.id), isNull(agentCommands.completedAt))),
+      ],
+      after: [db.insert(auditLog).values({ actor: `user:${c.get('user').id}`, action: 'instance.delete_requested', target: `instance:${row.id}`, detail: { permanent: true }, createdAt: now })],
     });
+    // Existing WebRTC sessions outlive their short-lived entry tokens. Close their signaling
+    // sockets now as well; the gateway's per-frame database checks are the lost-RPC backstop.
+    await c.env.GATEWAY?.revokeInstance(row.id).catch((e: unknown) => console.error('revoke deleted browser connections failed', row.id, e));
     return c.json(result, 202);
   },
 );
@@ -429,6 +447,8 @@ v1.openapi(
       throw problem(409, 'invalid_state', 'A new IP can be requested while the browser is running or sleeping.');
     }
     if (isTrial(row)) throw problem(409, 'invalid_state', 'A new IP is not part of the free trial. Add credit to keep this browser first.');
+    await requirePrice(db, row.regionId, c.req.valid('json').priceVersion);
+    await admitSpend(db, user.id, 'request a new IP');
     await admitIpChange(db, user.id, new Date());
     const result = await enqueueOperation(c, {
       instanceId: row.id,
@@ -681,7 +701,7 @@ v1.openapi(
     const db = c.get('db');
     const user = c.get('user');
     const row = await ownedInstance(c, c.req.valid('param').id);
-    if (['deleting', 'failed'].includes(row.status)) throw problem(409, 'invalid_state');
+    if (row.desiredState === 'deleted' || ['deleting', 'failed'].includes(row.status)) throw problem(409, 'invalid_state');
 
     let operationId: string | null = null;
     if (row.status === 'sleeping') {
@@ -734,6 +754,9 @@ async function ownedSession(c: Vars, id: string) {
     .from(viewerSessions)
     .where(and(eq(viewerSessions.id, id), eq(viewerSessions.userId, user.id)));
   if (!s) throw problem(404, 'not_found');
+  const [inst] = await db.select({ userId: browserInstances.userId, status: browserInstances.status, desiredState: browserInstances.desiredState }).from(browserInstances).where(eq(browserInstances.id, s.instanceId));
+  if (!inst || inst.userId !== user.id) throw problem(404, 'not_found');
+  if (inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) throw problem(409, 'invalid_state', 'This browser has been deleted.');
   return s;
 }
 

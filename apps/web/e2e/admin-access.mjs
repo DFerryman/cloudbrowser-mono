@@ -58,7 +58,18 @@ async function fixture(mode = 'allowed') {
         status = mode === 'unauthenticated' ? 401 : mode === 'forbidden' ? 403 : 200;
         body = status === 200 ? { email: 'operator@example.test' } : { type: status === 401 ? 'unauthenticated' : 'forbidden', status };
       } else if (url.pathname === '/api/v1/admin/overview') body = overview;
-      else if (url.pathname === '/api/v1/me') { status = 401; body = { type: 'unauthenticated', status }; }
+      else if (url.pathname === '/api/v1/admin/pricing') body = {
+        settings: { markupPercent: 120, minBalanceMicros: 1_000_000, lowBalanceMicros: 2_000_000, paymentFeeBps: 0, paymentFeeFixedCents: 0 },
+        regions: [], month: { month: '2026-10', revenueMicros: 0, costMicros: 0, grossMarginMicros: 0, byItem: {}, topupMicros: 0, topups: 0,
+          refundMicros: 0, creditMicros: 0, estimatedFeesMicros: 0, projectedAwsCents: null }, balances: { totalMicros: 0, negativeMicros: 0 },
+      };
+      // The lookalike-host case is an ordinary signed-out app. Every ordinary v1 endpoint is
+      // protected, including the billing query mounted alongside /me. Returning an arbitrary
+      // 200 [] here produces malformed BillingState data and a race with the /me redirect.
+      else if (url.pathname.startsWith('/api/v1/') && !url.pathname.startsWith('/api/v1/admin/')) {
+        status = 401;
+        body = { type: 'unauthenticated', status };
+      }
       else if (url.pathname.startsWith('/api/auth/')) body = null;
       return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
     }
@@ -83,7 +94,7 @@ try {
   noOrdinaryLogin(f);
   assert.ok(f.requests.some((r) => r.path === '/api/v1/admin/session'));
   const links = await f.page.locator('nav a').evaluateAll((nodes) => nodes.map((node) => ({ text: node.textContent, href: node.getAttribute('href') })));
-  assert.deepEqual(links.map((link) => link.href), ['/', '/alerts', '/operations', '/browsers', '/users', '/ledger', '/findings', '/limits', '/audit']);
+  assert.deepEqual(links.map((link) => link.href), ['/', '/alerts', '/operations', '/browsers', '/users', '/pricing', '/ledger', '/findings', '/limits', '/audit']);
   await f.page.getByRole('link', { name: 'Alerts', exact: true }).click();
   await f.page.waitForURL(`${admin.origin}/alerts`);
   await f.page.getByRole('heading', { name: 'Alerts', exact: true }).waitFor();
@@ -97,6 +108,13 @@ try {
   await deep.page.getByRole('heading', { name: 'Operations', exact: true }).waitFor();
   noOrdinaryLogin(deep);
   await finish(deep, 'dedicated host deep links load the console directly');
+
+  const pricing = await fixture();
+  await pricing.page.goto(`${admin.origin}/pricing`);
+  await pricing.page.getByRole('heading', { name: 'Pricing & margin', exact: true }).waitFor();
+  await pricing.page.getByLabel('Markup (% of AWS cost)', { exact: true }).waitFor();
+  noOrdinaryLogin(pricing);
+  await finish(pricing, 'pricing deep link stays inside the Access-protected console');
 
   for (const [legacy, target] of [
     ['/admin?from=legacy#overview', '/?from=legacy#overview'],

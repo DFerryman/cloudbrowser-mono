@@ -92,14 +92,16 @@ export const Instance = z.object({
 export type Instance = z.infer<typeof Instance>;
 
 /** The price version (`priceVersion` in pricing.ts) the user saw; refused with `price_changed` if stale. */
-export const PriceVersion = z.string().max(200);
+export const PriceVersion = z.string().min(1).max(200);
 
 export const CreateInstanceBody = z.object({
   name: InstanceName,
   regionId: RegionId,
   locale: BrowserLocale.optional(),
   screen: ScreenSize.optional(),
-  priceVersion: PriceVersion.optional(),
+  priceVersion: PriceVersion,
+  /** Data volume size shown in the quote; must still match the default size when confirmed. */
+  storageGb: z.number().int().min(1).max(16_384),
   /** Use the one free trial (TRIAL): only in its region, once per user. */
   trial: z.boolean().optional(),
 });
@@ -122,12 +124,13 @@ export type UpdateInstanceBody = z.infer<typeof UpdateInstanceBody>;
 export const IpChangeRequestBody = z.object({
   /** Must be true: a new IP is only ever issued on a confirmed user request. */
   confirm: z.literal(true),
+  priceVersion: PriceVersion,
 });
 
 /** Grow the data volume (never shrink). AWS allows one change every 6 hours. */
 export const ResizeStorageBody = z.object({
   sizeGb: z.number().int().min(1).max(16_384),
-  priceVersion: PriceVersion.optional(),
+  priceVersion: PriceVersion,
 });
 
 export const InstanceStorage = z.object({

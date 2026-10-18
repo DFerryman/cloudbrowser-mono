@@ -23,18 +23,18 @@ import {
   type Rates,
   type UsageItem,
 } from '@cloudbrowser/contracts';
-import { billingRequired, eventRow, operationRow, priceSheets, pricingSettings, schema, usageDay, userCaps } from '@cloudbrowser/db';
+import { billingRequired, eventRow, operationRow, priceSheets, pricingSettings, raiseAlert, schema, usageDay, userCaps } from '@cloudbrowser/db';
 import { and, eq, gt, inArray, isNotNull, isNull, lte, notInArray, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import type { EngineDeps } from './context.js';
 import { requestStop } from './scheduler.js';
 
-const { browserInstances, instanceHealth, operations, events, usageRecords, billingAccounts, backups } = schema;
+const { browserInstances, instanceHealth, operations, events, usageRecords, billingAccounts, backups, placements, resources } = schema;
 
 /** A missed cron run is not billed beyond this. */
 const MAX_METER_STEP_MS = 5 * 60_000;
 /** States in which a browser holds its IP and volume and is charged for them. */
-const NOT_BILLED = ['creating', 'failed', 'deleting', 'purged'];
+const NOT_BILLED = ['creating', 'failed', 'purged'];
 const RUNNING = ['creating', 'starting', 'running', 'waiting_capacity'];
 
 export async function meterUsage(deps: EngineDeps) {
@@ -51,7 +51,10 @@ export async function meterUsage(deps: EngineDeps) {
     .from(browserInstances)
     .leftJoin(instanceHealth, eq(instanceHealth.instanceId, browserInstances.id))
     .where(notInArray(browserInstances.status, NOT_BILLED));
+  const actual = new Map((await db.select().from(placements).where(eq(placements.status, 'current'))).map((p) => [p.instanceId, p]));
   const ids = rows.map((r) => r.inst.id);
+  const deleting = rows.filter((r) => r.inst.status === 'deleting').map((r) => r.inst.id);
+  const retained = deleting.length ? await db.select().from(resources).where(inArray(resources.instanceId, deleting)) : [];
   const withSnapshots = new Set(
     ids.length
       ? (
@@ -62,12 +65,6 @@ export async function meterUsage(deps: EngineDeps) {
         ).map((r) => r.id)
       : [],
   );
-  const today = ids.length ? await db.select().from(usageRecords).where(and(eq(usageRecords.day, day), inArray(usageRecords.instanceId, ids))) : [];
-  const keyOf = (r: { instanceId: string; item: string; unitPriceMicros: number; unitCostMicros: number }) =>
-    `${r.instanceId}|${r.item}|${r.unitPriceMicros}|${r.unitCostMicros}`;
-  const existing = new Map(today.map((r) => [keyOf(r), r]));
-
-  const debits = new Map<string, number>();
   for (const { inst, health } of rows) {
     const running = inst.status === 'running';
     const step = (from: Date | null | undefined) => Math.max(0, Math.min(MAX_METER_STEP_MS, now.getTime() - (from?.getTime() ?? now.getTime()))) / 3_600_000;
@@ -75,86 +72,115 @@ export async function meterUsage(deps: EngineDeps) {
     const computeHours = running ? step(health?.meteredAt) : 0;
     const tx = health?.netTxBytes ?? null;
     const billedTx = health?.netTxBilledBytes ?? null;
-    // The counter restarts at each boot: a lower value than last billed is all new traffic.
     const txBytes = tx === null || billedTx === null ? 0 : tx >= billedTx ? tx - billedTx : tx;
-
-    // Claim this minute for the browser, so an overlapping run cannot bill it twice.
     if (!health) await db.insert(instanceHealth).values({ instanceId: inst.id }).onConflictDoNothing();
-    const claimed = await db
-      .update(instanceHealth)
-      .set({ baseMeteredAt: now, meteredAt: running ? now : null, ...(tx !== null ? { netTxBilledBytes: tx } : {}) })
-      .where(
-        and(
-          eq(instanceHealth.instanceId, inst.id),
-          health?.baseMeteredAt ? eq(instanceHealth.baseMeteredAt, health.baseMeteredAt) : isNull(instanceHealth.baseMeteredAt),
-        ),
-      )
-      .returning({ id: instanceHealth.instanceId });
-    if (!claimed.length) continue;
-    summary.metered++;
 
+    // Every statement uses the same old cursor and commits in one D1 transaction. A failed batch
+    // leaves the cursor intact; a concurrent or delayed cron cannot charge twice or move it back.
+    const cursor = health?.baseMeteredAt?.getTime() ?? null;
+    const claim = sql`EXISTS (SELECT 1 FROM ${instanceHealth}
+      WHERE ${instanceHealth.instanceId} = ${inst.id}
+      AND ${instanceHealth.baseMeteredAt} IS ${cursor}
+      AND (${instanceHealth.baseMeteredAt} IS NULL OR ${instanceHealth.baseMeteredAt} < ${now.getTime()}))`;
     const trial = inst.trialState === 'active' || inst.trialState === 'ended';
-    if (inst.trialState === 'active' && computeHours > 0) {
-      const used = inst.trialUsedS + Math.round(computeHours * 3600);
-      const over = used >= TRIAL.runningSeconds;
-      await db
-        .update(browserInstances)
-        .set({ trialUsedS: used, ...(over ? { trialState: 'ended', updatedAt: now } : {}) })
-        .where(eq(browserInstances.id, inst.id));
-      if (over) {
-        await db.insert(events).values(eventRow(inst.userId, 'instance.updated', { instanceId: inst.id }, now));
-        if (await requestStop(deps, inst, 'trial')) summary.stopped++;
-      }
-    }
-
     const priced = sheets.get(inst.regionId);
-    // Without prices for the region nothing is charged (an alert is raised by the price refresh).
-    if (!priced) continue;
+    const placement = actual.get(inst.id);
+    const missingType = priced && placement?.instanceType && priced.sheet.instanceTypes[placement.instanceType] === undefined;
+    // Keep the billing cursor intact until this actual machine is priced. Trial minutes remain
+    // enforceable even if AWS pricing is unavailable; their separate compute cursor still advances.
+    if (!priced || missingType) {
+      if (missingType) await raiseAlert(db, { source: 'billing', severity: 'warning', title: `Missing price for ${placement.instanceType} in ${inst.regionId}`, detail: { instanceId: inst.id }, dedupeKey: `machine-price:${inst.regionId}:${placement.instanceType}` }, now);
+      if (inst.trialState === 'active' && computeHours > 0) {
+        const seconds = Math.round(computeHours * 3600);
+        const trialClaim = sql`EXISTS (SELECT 1 FROM ${instanceHealth} WHERE ${instanceHealth.instanceId} = ${inst.id}
+          AND ${instanceHealth.meteredAt} IS ${health?.meteredAt?.getTime() ?? null}
+          AND (${instanceHealth.meteredAt} IS NULL OR ${instanceHealth.meteredAt} < ${now.getTime()}))`;
+        await db.batch([
+          db.update(browserInstances).set({ trialUsedS: sql`${browserInstances.trialUsedS} + ${seconds}`,
+            trialState: sql`CASE WHEN ${browserInstances.trialUsedS} + ${seconds} >= ${TRIAL.runningSeconds} THEN 'ended' ELSE 'active' END`, updatedAt: now,
+          }).where(and(eq(browserInstances.id, inst.id), eq(browserInstances.trialState, 'active'), trialClaim)),
+          db.update(instanceHealth).set({ meteredAt: now }).where(and(eq(instanceHealth.instanceId, inst.id), trialClaim)),
+        ]);
+      } else if (inst.trialState === 'active' && !health?.meteredAt && running) {
+        await db.update(instanceHealth).set({ meteredAt: now }).where(and(eq(instanceHealth.instanceId, inst.id), isNull(instanceHealth.meteredAt)));
+      }
+      continue;
+    }
     const cost = costRates(priced.sheet);
+    if (placement?.instanceType) cost.compute = Math.round(priced.sheet.instanceTypes[placement.instanceType]! * 1_000_000);
+    const rootVolumeGb = placement?.rootVolumeGb ?? priced.sheet.rootVolumeGb;
     const free: Rates = { compute: 0, ip: 0, storage: 0, snapshot: 0, transfer: 0 };
-    const price = trial ? free : customerRates(priced.sheet, markupPercent);
+    // Deleted browsers are no longer billed to customers. The platform still incurs costs
+    // for resources retained by the seven-day system restore window or an incomplete purge.
+    const removed = inst.status === 'deleting';
+    const price = trial || removed ? free : customerRates(priced.sheet, markupPercent);
+    const ledger = removed ? retained.filter((r) => r.instanceId === inst.id) : [];
+    const live = ledger.filter((r) => r.state !== 'deleted' && r.providerId !== null);
+    const roots = ledger.filter((r) => r.kind === 'volume' && r.tags['cb:kind'] === 'root_volume');
+    const rootCount = roots.length ? live.filter((r) => r.kind === 'volume' && r.tags['cb:kind'] === 'root_volume').length : live.filter((r) => r.kind === 'vm').length;
+    const dataCount = live.filter((r) => r.kind === 'volume' && r.tags['cb:kind'] !== 'root_volume').length;
+    const storageGb = removed ? inst.storageGb * dataCount + rootVolumeGb * rootCount : inst.storageGb + rootVolumeGb;
     const quantities: Record<UsageItem, number> = {
       compute: computeHours,
-      ip: baseHours,
-      storage: ((inst.storageGb + priced.sheet.rootVolumeGb) * baseHours) / HOURS_PER_MONTH,
-      snapshot: inst.backupsEnabled && withSnapshots.has(inst.id) ? (inst.storageGb * baseHours) / HOURS_PER_MONTH : 0,
+      ip: baseHours * (removed ? live.filter((r) => r.kind === 'ip').length : 1),
+      storage: (storageGb * baseHours) / HOURS_PER_MONTH,
+      snapshot: (removed ? live.some((r) => r.kind === 'snapshot') : inst.backupsEnabled && withSnapshots.has(inst.id)) ? (inst.storageGb * baseHours) / HOURS_PER_MONTH : 0,
       transfer: txBytes / BYTES_PER_GB,
     };
-
-    const stmts: BatchItem<'sqlite'>[] = [];
-    let debit = 0;
-    for (const item of Object.keys(quantities) as UsageItem[]) {
+    const items = (Object.keys(quantities) as UsageItem[]).filter((item) => quantities[item] > 0);
+    const charged = () => db.select({ amount: sql<number>`coalesce(sum(${usageRecords.chargedMicros}), 0)` }).from(usageRecords).where(and(eq(usageRecords.instanceId, inst.id), eq(usageRecords.day, day)));
+    const stmts: BatchItem<'sqlite'>[] = [charged()];
+    // Calculate rounding deltas from the rows inside the transaction, never from a stale JS copy.
+    const deltas = items.map((item) => {
+      const existing = sql`SELECT ${usageRecords.quantity} AS q, ${usageRecords.amountMicros} AS a
+        FROM ${usageRecords} WHERE ${usageRecords.instanceId} = ${inst.id}
+        AND ${usageRecords.item} = ${item} AND ${usageRecords.day} = ${day}
+        AND ${usageRecords.unitPriceMicros} = ${price[item]} AND ${usageRecords.unitCostMicros} = ${cost[item]}`;
+      return sql`(round((coalesce((SELECT q FROM (${existing})), 0) + ${quantities[item]}) * ${price[item]})
+        - coalesce((SELECT a FROM (${existing})), 0))`;
+    });
+    const debit = deltas.length ? sql.join(deltas, sql` + `) : sql`0`;
+    if (prepaid && items.length) {
+      stmts.push(db.insert(billingAccounts).select(sql`SELECT ${inst.userId}, -(${debit}), NULL, NULL, NULL, NULL, NULL, ${now.getTime()} WHERE ${claim}`)
+        .onConflictDoUpdate({ target: billingAccounts.userId, set: {
+          balanceMicros: sql`${billingAccounts.balanceMicros} + excluded.balance_micros`, updatedAt: now,
+        } }));
+    }
+    for (const item of items) {
       const q = quantities[item];
-      if (q <= 0) continue;
-      const key = { instanceId: inst.id, item, unitPriceMicros: price[item], unitCostMicros: cost[item] };
-      const prev = existing.get(keyOf(key));
-      const quantity = (prev?.quantity ?? 0) + q;
-      const amountMicros = Math.round(quantity * price[item]);
-      const costMicros = Math.round(quantity * cost[item]);
-      debit += amountMicros - (prev?.amountMicros ?? 0);
-      const row = { ...key, userId: inst.userId, regionId: inst.regionId, day, quantity, amountMicros, costMicros, updatedAt: now };
-      existing.set(keyOf(key), row);
-      stmts.push(
-        db
-          .insert(usageRecords)
-          .values(row)
-          .onConflictDoUpdate({
-            target: [usageRecords.instanceId, usageRecords.item, usageRecords.day, usageRecords.unitPriceMicros, usageRecords.unitCostMicros],
-            set: { quantity, amountMicros, costMicros, updatedAt: now },
-          }),
-      );
+      stmts.push(db.insert(usageRecords).select(sql`SELECT ${inst.id}, ${inst.userId}, ${inst.regionId}, ${item}, ${day}, ${price[item]}, ${cost[item]},
+          ${q}, round(${q} * ${price[item]}), round(${q} * ${cost[item]}), ${prepaid ? Math.round(q * price[item]) : 0}, ${now.getTime()} WHERE ${claim}`)
+        .onConflictDoUpdate({
+          target: [usageRecords.instanceId, usageRecords.item, usageRecords.day, usageRecords.unitPriceMicros, usageRecords.unitCostMicros],
+          set: {
+            chargedMicros: sql`${usageRecords.chargedMicros} + ${prepaid ? sql`round((${usageRecords.quantity} + excluded.quantity) * ${usageRecords.unitPriceMicros}) - ${usageRecords.amountMicros}` : sql`0`}`,
+            quantity: sql`${usageRecords.quantity} + excluded.quantity`,
+            amountMicros: sql`round((${usageRecords.quantity} + excluded.quantity) * ${usageRecords.unitPriceMicros})`,
+            costMicros: sql`round((${usageRecords.quantity} + excluded.quantity) * ${usageRecords.unitCostMicros})`,
+            updatedAt: now,
+          },
+        }));
     }
-    if (prepaid && debit !== 0) {
-      stmts.push(
-        db
-          .insert(billingAccounts)
-          .values({ userId: inst.userId, balanceMicros: -debit, updatedAt: now })
-          .onConflictDoUpdate({ target: billingAccounts.userId, set: { balanceMicros: sql`${billingAccounts.balanceMicros} - ${debit}`, updatedAt: now } }),
-      );
-      debits.set(inst.userId, (debits.get(inst.userId) ?? 0) + debit);
+
+    if (inst.trialState === 'active' && computeHours > 0) {
+      const seconds = Math.round(computeHours * 3600);
+      stmts.push(db.update(browserInstances).set({
+        trialUsedS: sql`${browserInstances.trialUsedS} + ${seconds}`,
+        trialState: sql`CASE WHEN ${browserInstances.trialUsedS} + ${seconds} >= ${TRIAL.runningSeconds} THEN 'ended' ELSE 'active' END`,
+        updatedAt: now,
+      }).where(and(eq(browserInstances.id, inst.id), eq(browserInstances.trialState, 'active'), claim)));
     }
-    if (stmts.length) await db.batch(stmts as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
-    summary.chargedMicros += debit;
+    stmts.push(db.update(instanceHealth)
+      .set({ baseMeteredAt: now, meteredAt: running ? now : null, ...(tx !== null ? { netTxBilledBytes: tx } : {}) })
+      .where(and(eq(instanceHealth.instanceId, inst.id), claim))
+      .returning({ id: instanceHealth.instanceId }));
+    stmts.push(charged());
+    const results = await db.batch(stmts as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+    const claimed = results.at(-2) as { id: string }[];
+    if (claimed.length) {
+      summary.metered++;
+      summary.chargedMicros += Number((results.at(-1) as { amount: number }[])[0]!.amount) - Number((results[0] as { amount: number }[])[0]!.amount);
+    }
   }
 
   summary.stopped = await enforce(deps, prepaid, now);
@@ -211,6 +237,8 @@ async function enforce(deps: EngineDeps, prepaid: boolean, now: Date): Promise<n
 
   for (const userId of users) {
     const stoppable = running.filter((r) => r.userId === userId && r.status === 'running' && !busy.has(r.id));
+    // A trial stop can race with another operation. Retry it every tick until it is asleep.
+    for (const r of stoppable.filter((x) => x.trialState === 'ended')) if (await requestStop(deps, r, 'trial')) stopped++;
     // Suspended by an operator (abuse kill switch, page 10): sleep now.
     for (const r of stoppable.filter((x) => x.suspendedAt)) if (await requestStop(deps, r, 'suspended')) stopped++;
 
@@ -248,13 +276,19 @@ export async function reclaimTrials(deps: EngineDeps) {
   for (const inst of due) {
     const row = operationRow({ instanceId: inst.id, userId: null, kind: 'delete', params: { reason: 'trial_expired', purgeNow: true }, now });
     try {
-      await db.batch([
-        db.insert(operations).values(row),
-        db.update(browserInstances).set({ desiredState: 'deleted', updatedAt: now }).where(eq(browserInstances.id, inst.id)),
-        db.insert(events).values(eventRow(inst.userId, 'operation.updated', { operationId: row.id, instanceId: inst.id }, now)),
+      const eligible = sql`EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${inst.id}
+        AND ${browserInstances.trialState} IN ('active', 'ended') AND ${browserInstances.trialReclaimAt} <= ${now.getTime()}
+        AND ${browserInstances.status} IN ('sleeping', 'needs_attention'))`;
+      const [inserted] = await db.batch([
+        db.insert(operations).select(sql`SELECT ${row.id}, ${inst.id}, NULL, 'delete', 'queued', NULL, 0, NULL, NULL, NULL,
+          ${row.deadlineAt.getTime()}, NULL, NULL, ${JSON.stringify(row.params)}, ${now.getTime()}, ${now.getTime()}, NULL WHERE ${eligible}`)
+          .returning({ id: operations.id }),
+        db.update(browserInstances).set({ desiredState: 'deleted', updatedAt: now })
+          .where(and(eq(browserInstances.id, inst.id), sql`EXISTS (SELECT 1 FROM ${operations} WHERE ${operations.id} = ${row.id})`)),
+        db.insert(events).select(sql`SELECT NULL, ${inst.userId}, 'operation.updated', ${JSON.stringify({ operationId: row.id, instanceId: inst.id })}, ${now.getTime()}
+          WHERE EXISTS (SELECT 1 FROM ${operations} WHERE ${operations.id} = ${row.id})`),
       ]);
-      deps.notify(inst.userId);
-      n++;
+      if (inserted.length) { deps.notify(inst.userId); n++; }
     } catch {
       // Another operation is running for it; the next minute tries again.
     }

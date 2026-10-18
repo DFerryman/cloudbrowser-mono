@@ -114,7 +114,9 @@ the real prices, but nothing is charged. Top-ups turn on when every value below 
 
 1. **Creem dashboard (test mode first):** create one **one-time** product in **USD** per top-up
    amount, e.g. *Credit $10*, *Credit $25*, *Credit $50*, and note their ids. The amount credited
-   is the product's price, read from Creem. Submit the store for review early; it can take days.
+   is the checkout's actual paid USD amount excluding tax, verified against the local checkout.
+   Product catalogue changes after checkout do not change the credited amount. Submit the store
+   for review early; it can take days.
 2. **Webhook:** Developers → Webhooks → add `https://<your app domain>/api/webhooks/creem` and copy
    the signing secret. `checkout.completed`, `refund.created` and `dispute.created` are used;
    other events are stored and ignored.
@@ -145,6 +147,39 @@ the top-up products hourly, emails a low-balance warning, emails users on day 1,
 the balance ran out and deletes their browsers on day 30 (restorable 7 more days); a nightly run
 credits any paid order a lost webhook missed. Credit can also be added by hand in the console
 (*Users* → Credit), which is recorded as an adjustment.
+
+AWS Price List supplies public unit prices, not an AWS invoice. Usage costs and the reconciler's
+monthly projection are estimates based on those prices and platform measurements/provisioned
+capacity; they do not reconcile AWS credits, discounts, free tiers or actual incremental snapshot
+storage. Cost Explorer/CUR billing ingestion is not included in this release. Pilot usage is
+shown as an estimate; only actual balance debits count as customer revenue in the margin report.
+
+### Existing deployment rollout
+
+Keep `billing_required=false` until payment-provider test checkouts and refunds have been verified.
+Before migration `0007`, capture a D1 Time Travel bookmark. The migration preserves legacy
+subscription, checkout and active-usage tables and archives changed caps in `legacy_billing_caps`.
+If rolling Workers back, restore those caps as well; do not assume a Worker rollback undoes SQL.
+Pause new creates while updating the AWS allowed types, `AWS_REGIONS`, D1 and all Workers. Publish
+the updated agent image before allowing new browsers, refresh prices, and confirm Sydney has a
+complete price sheet before removing the create pause. Existing browsers retain their VM/data/IP.
+Deploy the gateway before the API: the API's `GATEWAY` service binding uses the gateway's new
+`Internal` entrypoint to revoke live connections immediately after deletion.
+
+### Permanent user deletion and isolation
+
+A user's explicit delete request is permanent. It revokes the browser's agent credentials,
+viewer tokens and active gateway connections and destroys its wrapped archive key. The reaper
+removes all of its VMs, root/data disks, snapshots, archives and IP allocations, including
+superseded and partially created resources. Cleanup failures are retried; the browser remains
+`deleting` until provider deletion is confirmed. Outstanding archive upload URLs may require a
+final cleanup pass after their expiry. The seven-day restore window applies only to system
+billing retention, not explicit user deletion.
+
+Each browser uses a fresh data volume and its own Elastic IP. Recovery and restore may access
+only resources tagged for that same browser and environment. The IP is retained while its
+allocation exists, including during sleep; after release AWS may reuse the address, without any
+of the deleted browser's data or credentials.
 
 ## 3c. Operator console and alerts
 

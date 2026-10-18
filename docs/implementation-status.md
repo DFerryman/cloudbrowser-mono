@@ -25,7 +25,7 @@ Cloudflare deployment.
   per error class, IP screening (never reuse an address), binding check and in-Chrome IP check,
   honest states (*Waiting for capacity*, *Provider issue*, *Needs attention*, *Failed*), idle sleep,
   5-minute IP checks with fail-closed status, change-IP rollback, and a separate **reaper**
-  deployment (purge after 7 days, failed-create cleanup, rejected/superseded IPs after 30 days,
+  deployment (permanent user-delete cleanup, system retention purge after 7 days, failed-create cleanup, rejected/superseded IPs after 30 days,
   orphans after 24 h).
 - **Backups and recovery** (page 4, page 10): a daily provider snapshot of each volume (cron, kept
   7 days, the newest always kept); an encrypted profile archive at each sleep (the agent closes

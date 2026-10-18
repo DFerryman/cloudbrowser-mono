@@ -2,8 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { AwsExecutor, bootstrapScript, ExecutorError, type CredentialMode, type OpContext, type Placement } from '../src/index.js';
+import { describe, expect, it, vi } from 'vitest';
+import { AwsExecutor, bootstrapScript, ExecutorError, FakeExecutor, MemoryFakeStore, type CredentialMode, type Executor, type OpContext, type Placement, type ResourceKind } from '../src/index.js';
 import { FakeEc2 } from './fake-ec2.js';
 
 const REGION = 'ap-northeast-1';
@@ -33,7 +33,7 @@ const ctx = (step: string, token = `op1:${step}:1`): OpContext => ({
   deadline: Date.now() + 60_000,
 });
 
-async function create(ex: AwsExecutor) {
+async function create(ex: Executor) {
   const ip = await ex.allocateIp(ctx('allocate_ip'), REGION);
   const nic = await ex.ensureNetworkInterface(ctx('create_nic'), REGION, ip);
   const vol = await ex.ensureVolume(ctx('create_volume'), REGION, nic.zone, 20);
@@ -49,6 +49,32 @@ async function create(ex: AwsExecutor) {
   return { ip, nic, vol, vm, p };
 }
 
+async function rejectCrossBrowserReuse(ex: Executor) {
+  const first = await create(ex);
+  const otherCtx = (step: string): OpContext => ({
+    ...ctx(step, `op2:${step}:1`), operationId: 'op2',
+    tags: { ...ctx(step).tags, 'cb:instance': 'inst2', 'cb:op': 'op2' },
+  });
+  const ip = await ex.allocateIp(otherCtx('allocate_ip'), REGION);
+  const nic = await ex.ensureNetworkInterface(otherCtx('create_nic'), REGION, ip);
+  const vol = await ex.ensureVolume(otherCtx('create_volume'), REGION, nic.zone, 20);
+  expect(vol.volumeId).not.toBe(first.vol.volumeId);
+  const snap = await ex.snapshot(otherCtx('snapshot'), REGION, vol.volumeId);
+
+  // Neither the address owner nor the target owner can transfer a fixed IP across browsers.
+  await expect(ex.associateIp(otherCtx('steal_ip'), REGION, nic.nicId, first.ip)).rejects.toMatchObject({ errorClass: 'forbidden' });
+  await expect(ex.associateIp(ctx('foreign_nic'), REGION, nic.nicId, first.ip)).rejects.toMatchObject({ errorClass: 'forbidden' });
+  expect(await ex.verifyEgress(ctx('original_ip'), first.p)).toMatchObject({ ok: true, publicAddresses: [first.ip.address] });
+
+  await ex.ensureStopped(ctx('stop'), first.p);
+  await expect(ex.swapVolume(ctx('foreign_volume'), first.p, vol.volumeId)).rejects.toMatchObject({ errorClass: 'forbidden' });
+  expect((await ex.describe(ctx('original_volume'), first.p)).volumeAttached).toBe(true);
+  await expect(ex.ensureVolumeFromSnapshot(ctx('foreign_snapshot'), REGION, first.p.zone, snap.snapshotId, 20)).rejects.toMatchObject({ errorClass: 'forbidden' });
+
+  // An accidentally reused operation token must fail instead of adopting the old user's disk.
+  await expect(ex.ensureVolume({ ...otherCtx('collision'), token: ctx('create_volume').token }, REGION, nic.zone, 20)).rejects.toMatchObject({ errorClass: 'forbidden' });
+}
+
 describe('aws-ec2 executor', () => {
   it('creates a tagged VM with its static IP, data volume and first-boot script, then sleeps and wakes it', async () => {
     const { ex, ec2 } = setup();
@@ -56,6 +82,8 @@ describe('aws-ec2 executor', () => {
     const inst = ec2.instances.get(vm.vmId)!;
     expect(inst.state).toBe('running');
     expect(inst.type).toBe('c7i-flex.large');
+    expect(vm.instanceType).toBe('c7i-flex.large');
+    expect(vm.rootVolumeGb).toBe(16);
     expect(inst.protected).toBe(true);
     expect(inst.tags).toMatchObject({ 'cb:managed': 'true', 'cb:instance': 'inst1', 'cb:kind': 'vm', 'cb:token': 'op1:create_vm:1' });
     expect(inst.userData).toContain('"bootstrapToken":"boot-token"');
@@ -68,7 +96,7 @@ describe('aws-ec2 executor', () => {
     expect(await ex.ensureStopped(ctx('stop'), p)).toBe('stopped');
     expect(await ex.ensureStopped(ctx('stop'), p)).toBe('stopped');
     expect(await ex.ensureRunning(ctx('start'), p)).toBe('running');
-    expect(await ex.describe(ctx('describe'), p)).toEqual({ vm: 'running', publicAddresses: [p.ipAddress], volumeAttached: true });
+    expect(await ex.describe(ctx('describe'), p)).toEqual({ vm: 'running', instanceType: 'c7i-flex.large', rootVolumeGb: 16, publicAddresses: [p.ipAddress], volumeAttached: true });
     // A stopped VM keeps its IP and disk.
     expect(ec2.addresses.get(p.ipAllocationId)?.eni).toBe(p.nicId);
   });
@@ -85,11 +113,24 @@ describe('aws-ec2 executor', () => {
     expect(ec2.calls.filter((c) => c.action === 'AllocateAddress')).toHaveLength(1);
   });
 
+  it('reports the existing machine and root disk after provider-side changes instead of the launch defaults', async () => {
+    const { ex, ec2 } = setup();
+    const first = await create(ex);
+    ec2.instances.get(first.vm.vmId)!.type = 'm7i-flex.large';
+    const root = [...ec2.volumes.values()].find((v) => v.instance === first.vm.vmId && v.tags['cb:kind'] === 'root_volume')!;
+    root.size = 24;
+    const again = await create(ex);
+    expect(again.vm).toMatchObject({ vmId: first.vm.vmId, instanceType: 'm7i-flex.large', rootVolumeGb: 24 });
+    expect(await ex.describe(ctx('describe'), first.p)).toMatchObject({ instanceType: 'm7i-flex.large', rootVolumeGb: 24 });
+    expect(ec2.calls.filter((c) => c.action === 'RunInstances')).toHaveLength(1);
+  });
+
   it('tries the next instance type when one has no capacity', async () => {
     const { ex, ec2 } = setup();
     ec2.fail = (a, p) => (a === 'RunInstances' && p.InstanceType === 'c7i-flex.large' ? { code: 'InsufficientInstanceCapacity', status: 500 } : null);
     const { vm } = await create(ex);
     expect(ec2.instances.get(vm.vmId)?.type).toBe('c6i.large');
+    expect(vm.instanceType).toBe('c6i.large');
     ec2.fail = (a) => (a === 'RunInstances' ? { code: 'InsufficientInstanceCapacity', status: 500 } : null);
     await expect(ex.ensureVm(ctx('create_vm', 'op2:create_vm:1'), REGION, {
       instanceId: 'inst2', zone: 'ap-northeast-1a', nicId: [...ec2.enis.keys()][0]!, volumeId: 'vol-x', bootstrapToken: 't', gatewayUrl: 'wss://g',
@@ -161,12 +202,33 @@ describe('aws-ec2 executor', () => {
     expect(ex.zones(REGION)).toEqual(['ap-northeast-1a', 'ap-northeast-1c']);
   });
 
-  it('lists managed resources (not root disks) and deletes everything with the reaper', async () => {
+  it('rejects another browser’s fixed IP, volume, snapshot and reused resource token', async () => {
+    const { ex, ec2 } = setup();
+    await rejectCrossBrowserReuse(ex);
+    const creates = ec2.calls.filter((c) => c.action === 'CreateVolume');
+    expect(creates).toHaveLength(2);
+    expect(creates.every((c) => c.params.SnapshotId === undefined)).toBe(true);
+    expect(ec2.calls.filter((c) => c.action === 'DetachVolume')).toHaveLength(0);
+  });
+
+  it.each([
+    ['cb:managed', 'false'], ['cb:instance', 'another-browser'], ['cb:env', 'another-environment'],
+  ])('refuses to rebind an address with a mismatched %s tag', async (key, value) => {
+    const { ex, ec2 } = setup();
+    const { ip, p } = await create(ex);
+    const addr = ec2.addresses.get(ip.allocationId)!;
+    addr.tags[key!] = value!;
+    await expect(ex.associateIp(ctx('bind'), REGION, p.nicId, ip)).rejects.toMatchObject({ errorClass: 'forbidden' });
+    expect(addr.eni).toBe(p.nicId);
+    expect(ec2.calls.filter((c) => c.action === 'AssociateAddress')).toHaveLength(1);
+  });
+
+  it('lists every managed resource including root disks and deletes everything with the reaper', async () => {
     const { ex, ec2 } = setup();
     const { p } = await create(ex);
     await ex.snapshot(ctx('snapshot_volume'), REGION, p.volumeId);
     const listed = await ex.listManaged(ctx('l'), REGION);
-    expect(listed.map((r) => r.kind).sort()).toEqual(['ip', 'network_interface', 'snapshot', 'vm', 'volume']);
+    expect(listed.map((r) => r.kind).sort()).toEqual(['ip', 'network_interface', 'snapshot', 'vm', 'volume', 'volume']);
     const other = await ex.listManaged({ ...ctx('l'), tags: { ...ctx('l').tags, 'cb:env': 'prod' } }, REGION);
     expect(other).toEqual([]);
 
@@ -184,6 +246,96 @@ describe('aws-ec2 executor', () => {
       { metric: 'static_ips', limit: 5, used: 1 },
       { metric: 'vcpus', limit: 16, used: 2 },
     ]);
+  });
+});
+
+describe('confirmed provider deletion', () => {
+  const shortDelete = (): OpContext => ({ ...ctx('purge'), deadline: Date.now() + 1000 });
+
+  it('does not treat an accepted termination or shutting-down state as a deleted VM', async () => {
+    const { ex, ec2 } = setup();
+    const { p } = await create(ex);
+    const { ex: reaper } = setup('reaper', ec2);
+    ec2.deferDeletes = true;
+    await expect(reaper.ensureDeleted(shortDelete(), REGION, 'vm', p.vmId)).rejects.toMatchObject({ errorClass: 'retryable' });
+    expect((await ex.describe(ctx('state'), p)).vm).toBe('terminating');
+    await expect(reaper.ensureDeleted(shortDelete(), REGION, 'vm', p.vmId)).rejects.toMatchObject({ errorClass: 'retryable' });
+    expect(ec2.calls.filter((c) => c.action === 'TerminateInstances')).toHaveLength(1);
+    // The root disk remains visible to the final purge inventory until its own deletion finishes.
+    expect((await ex.listManaged(ctx('inventory'), REGION)).some((r) => r.tags['cb:kind'] === 'root_volume')).toBe(true);
+    ec2.instances.get(p.vmId)!.state = 'terminated';
+    await expect(reaper.ensureDeleted(shortDelete(), REGION, 'vm', p.vmId)).resolves.toBeUndefined();
+  });
+
+  it.each(['volume', 'network_interface', 'ip', 'snapshot'] as const)('requires %s disappearance after an accepted delete', async (kind) => {
+    const { ex, ec2 } = setup();
+    const { p } = await create(ex);
+    const snapshot = await ex.snapshot(ctx('snapshot'), REGION, p.volumeId);
+    const { ex: reaper } = setup('reaper', ec2);
+    await reaper.ensureDeleted(ctx('terminate'), REGION, 'vm', p.vmId);
+    const id = { volume: p.volumeId, network_interface: p.nicId, ip: p.ipAllocationId, snapshot: snapshot.snapshotId }[kind];
+    ec2.deferDeletes = true;
+    await expect(reaper.ensureDeleted(shortDelete(), REGION, kind, id)).rejects.toMatchObject({ errorClass: 'retryable' });
+    expect((await ex.listManaged(ctx('inventory'), REGION)).some((r) => r.providerId === id)).toBe(true);
+    // Simulate the provider completing its asynchronous deletion.
+    const remove = {
+      volume: () => ec2.volumes.delete(id), network_interface: () => ec2.enis.delete(id),
+      ip: () => ec2.addresses.delete(id), snapshot: () => ec2.snapshots.delete(id),
+    };
+    remove[kind]();
+    await expect(reaper.ensureDeleted(shortDelete(), REGION, kind, id)).resolves.toBeUndefined();
+  });
+
+  it.each(['vm', 'volume', 'network_interface', 'ip', 'snapshot'] as ResourceKind[])('does not accept a malformed %s id as proof of deletion', async (kind) => {
+    const { ex, ec2 } = setup('reaper');
+    ec2.fail = () => ({ code: 'InvalidResource.Malformed', status: 400 });
+    await expect(ex.ensureDeleted(ctx('purge'), REGION, kind, 'bad-id')).rejects.toMatchObject({ errorClass: 'invalid' });
+  });
+
+  it('does not mistake a missing IP association for a released fixed IP allocation', async () => {
+    const { ex, ec2 } = setup();
+    const { ip } = await create(ex);
+    const { ex: reaper } = setup('reaper', ec2);
+    ec2.fail = (action) => action === 'DisassociateAddress' ? { code: 'InvalidAssociationID.NotFound', status: 400 } : null;
+    await expect(reaper.ensureDeleted(ctx('purge'), REGION, 'ip', ip.allocationId)).rejects.toMatchObject({ errorClass: 'retryable' });
+    expect(ec2.addresses.has(ip.allocationId)).toBe(true);
+  });
+
+  it('cannot delete resources belonging to a different browser or environment', async () => {
+    const { ex, ec2 } = setup();
+    const { p } = await create(ex);
+    const { ex: reaper } = setup('reaper', ec2);
+    for (const tags of [
+      { ...ctx('purge').tags, 'cb:instance': 'another-browser' },
+      { ...ctx('purge').tags, 'cb:env': 'another-environment' },
+    ]) {
+      await expect(reaper.ensureDeleted({ ...ctx('purge'), tags }, REGION, 'vm', p.vmId)).rejects.toMatchObject({ errorClass: 'forbidden' });
+    }
+    expect(ec2.instances.get(p.vmId)?.state).toBe('running');
+    expect(ec2.instances.get(p.vmId)?.protected).toBe(true);
+    expect(ec2.calls.filter((call) => call.action === 'TerminateInstances')).toHaveLength(0);
+  });
+});
+
+describe('fake provider isolation and deletion', () => {
+  it('enforces the same fixed IP and browser data ownership as AWS', async () => {
+    const store = new MemoryFakeStore();
+    await rejectCrossBrowserReuse(new FakeExecutor({ store, mode: 'runtime' }));
+  });
+
+  it('does not confirm a delete when the fake provider failed to remove the resource', async () => {
+    const store = new MemoryFakeStore();
+    const runtime = new FakeExecutor({ store, mode: 'runtime' });
+    const vol = await runtime.ensureVolume(ctx('volume'), REGION, `${REGION}a`, 20);
+    const reaper = new FakeExecutor({ store, mode: 'reaper' });
+    await expect(reaper.ensureDeleted({ ...ctx('purge'), tags: { ...ctx('purge').tags, 'cb:instance': 'another-browser' } }, REGION, 'volume', vol.volumeId)).rejects.toMatchObject({ errorClass: 'forbidden' });
+    const failDelete = vi.spyOn(store, 'update').mockResolvedValueOnce(undefined);
+    await expect(reaper.ensureDeleted(ctx('purge'), REGION, 'volume', vol.volumeId)).rejects.toMatchObject({ errorClass: 'retryable' });
+    expect((await store.get(vol.volumeId))?.state).toBe('available');
+    failDelete.mockRestore();
+    await reaper.ensureDeleted(ctx('purge'), REGION, 'volume', vol.volumeId);
+    expect(await store.get(vol.volumeId)).toMatchObject({ state: 'deleted', attrs: {} });
+    await expect(runtime.ensureVolume(ctx('volume'), REGION, `${REGION}a`, 20)).rejects.toMatchObject({ errorClass: 'invalid' });
   });
 });
 
@@ -341,6 +493,42 @@ describe('aws-ec2 prices', () => {
     tokyoPriceList(ec2);
     ec2.priceList.AmazonVPC = [];
     await expect(ex.prices(ctx('prices'), REGION)).rejects.toThrow(/public IPv4/);
+  });
+
+  it('requires a price for every capacity fallback that it may launch', async () => {
+    const { ex, ec2 } = setup('readonly');
+    tokyoPriceList(ec2);
+    ec2.priceList.AmazonEC2 = ec2.priceList.AmazonEC2!.filter((p) => (p.product as { attributes: Record<string, string> }).attributes.instanceType !== 'c6i.large');
+    await expect(ex.prices(ctx('prices'), REGION)).rejects.toThrow(/c6i.large instance/);
+  });
+
+  it('prices existing machine types without making them launch candidates', async () => {
+    const { ex, ec2 } = setup('readonly');
+    tokyoPriceList(ec2);
+    ec2.priceList.AmazonEC2!.push(priceItem('AmazonEC2', {
+      ...linux, instanceType: 'm7i-flex.large', vcpu: '2', memory: '8 GiB', usagetype: 'APN1-BoxUsage:m7i-flex.large',
+    }, [{ usd: '0.1197000000', unit: 'Hrs' }]));
+    const key = ex.pricingConfigKey(REGION);
+    const sheet = await ex.prices(ctx('prices'), REGION, ['m7i-flex.large']);
+    expect(sheet.instanceTypes['m7i-flex.large']).toBe(0.1197);
+    expect(sheet.instanceType).toBe('c7i-flex.large');
+    expect(sheet.vmHour).toBe(0.1065);
+    expect(sheet.machine).toEqual({ vcpu: 2, memoryGb: 4 });
+    expect(ex.pricingConfigKey(REGION)).toBe(key);
+  });
+
+  it('reads every page so unrelated snapshot archive products cannot hide the standard price', async () => {
+    const { ex, ec2 } = setup('readonly');
+    tokyoPriceList(ec2);
+    ec2.pricingPageSize = 1;
+    expect((await ex.prices(ctx('prices'), REGION)).snapshotGbMonth).toBe(0.05);
+    expect(ec2.pricingCalls.some((call) => call.NextToken === '1')).toBe(true);
+  });
+
+  it('does not start another price request after the deadline', async () => {
+    const { ex, ec2 } = setup('readonly');
+    await expect(ex.prices({ ...ctx('prices'), deadline: Date.now() - 1 }, REGION)).rejects.toMatchObject({ errorClass: 'retryable' });
+    expect(ec2.pricingCalls).toHaveLength(0);
   });
 });
 

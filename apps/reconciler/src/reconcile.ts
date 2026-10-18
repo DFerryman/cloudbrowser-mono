@@ -93,7 +93,9 @@ export async function reconcileLedger(deps: ReconcilerDeps) {
   for (const t of targets) {
     const executor = deps.executor(t.executor as ExecutorKind);
     const observed = (await executor.listManaged(ctx(deps, 'list'), t.providerRegion)).filter(
-      (r) => r.tags['cb:env'] === deps.envName,
+      // Root disks are accounted for by their VM ledger row. The complete inventory still
+      // exposes them to permanent deletion, including an orphaned disk after termination.
+      (r) => r.tags['cb:env'] === deps.envName && r.tags['cb:kind'] !== 'root_volume',
     );
     const ledger = await db
       .select()

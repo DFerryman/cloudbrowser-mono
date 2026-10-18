@@ -30,8 +30,8 @@ export async function authenticateAgent(
   now = new Date(),
 ): Promise<AgentAuth> {
   const [row] = await db.select().from(agentCredentials).where(eq(agentCredentials.instanceId, input.instanceId));
-  const [inst] = await db.select({ status: browserInstances.status }).from(browserInstances).where(eq(browserInstances.id, input.instanceId));
-  if (!row || !inst || inst.status === 'purged') return { ok: false, reason: 'unknown_instance' };
+  const [inst] = await db.select({ status: browserInstances.status, desiredState: browserInstances.desiredState }).from(browserInstances).where(eq(browserInstances.id, input.instanceId));
+  if (!row || !inst || inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) return { ok: false, reason: 'unknown_instance' };
 
   if (input.credential) {
     return row.credentialHash && row.credentialHash === (await sha256Hex(input.credential))
@@ -42,10 +42,13 @@ export async function authenticateAgent(
     if (!row.bootstrapHash || row.bootstrapHash !== (await sha256Hex(input.bootstrap))) return { ok: false, reason: 'invalid_token' };
     if (!row.bootstrapExpiresAt || row.bootstrapExpiresAt <= now) return { ok: false, reason: 'expired' };
     const credential = randomSecret();
-    await db
+    const activated = await db
       .update(agentCredentials)
       .set({ credentialHash: await sha256Hex(credential), bootstrapHash: null, activatedAt: now })
-      .where(and(eq(agentCredentials.instanceId, input.instanceId), eq(agentCredentials.bootstrapHash, row.bootstrapHash)));
+      .where(and(eq(agentCredentials.instanceId, input.instanceId), eq(agentCredentials.bootstrapHash, row.bootstrapHash)))
+      .returning({ instanceId: agentCredentials.instanceId });
+    // A deletion or another bootstrap activation may have won after the read above.
+    if (!activated.length) return { ok: false, reason: 'invalid_token' };
     return { ok: true, generation: row.generation, credential };
   }
   return { ok: false, reason: 'invalid_token' };
@@ -63,6 +66,10 @@ async function kickOperation(env: Env, db: Db, instanceId: string) {
 /** Handles one frame from an agent. Returns a frame to send back, if any. */
 export async function agentMessage(env: Env, db: Db, instanceId: string, generation: number, raw: unknown, now = new Date()): Promise<GatewayToAgent | null> {
   const frame = AgentFrame.parse(raw);
+  const [inst] = await db.select({ status: browserInstances.status, desiredState: browserInstances.desiredState }).from(browserInstances).where(eq(browserInstances.id, instanceId));
+  if (!inst || inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) return null;
+  const [identity] = await db.select({ generation: agentCredentials.generation }).from(agentCredentials).where(eq(agentCredentials.instanceId, instanceId));
+  if (!identity || identity.generation !== generation) return null;
   switch (frame.t) {
     case 'hello':
     case 'viewer':
@@ -151,6 +158,8 @@ export async function redeemViewerToken(db: Db, claims: ViewerTokenClaims, now =
     .from(viewerSessions)
     .where(and(eq(viewerSessions.id, claims.sid), eq(viewerSessions.instanceId, claims.iid), eq(viewerSessions.userId, claims.uid)));
   if (!session || session.endedAt) return false;
+  const [inst] = await db.select({ userId: browserInstances.userId, status: browserInstances.status, desiredState: browserInstances.desiredState }).from(browserInstances).where(eq(browserInstances.id, claims.iid));
+  if (!inst || inst.userId !== claims.uid || inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) return false;
   try {
     await db.insert(viewerTokens).values({ jti: claims.jti, sessionId: claims.sid, redeemedAt: now });
     return true;
@@ -165,6 +174,8 @@ export async function redeemViewerToken(db: Db, claims: ViewerTokenClaims, now =
  */
 export async function archiveKey(env: Env, db: Db, instanceId: string): Promise<string | null> {
   if (!env.ARCHIVE_MASTER_KEY) return null;
+  const [inst] = await db.select({ status: browserInstances.status, desiredState: browserInstances.desiredState }).from(browserInstances).where(eq(browserInstances.id, instanceId));
+  if (!inst || inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) return null;
   const [row] = await db.select().from(archiveKeys).where(eq(archiveKeys.instanceId, instanceId));
   if (!row?.wrappedKey || row.destroyedAt) return null;
   return unwrapArchiveKey(env.ARCHIVE_MASTER_KEY, row.wrappedKey);

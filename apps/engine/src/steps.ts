@@ -1,9 +1,10 @@
 import { ProviderPriceSheet, TRIAL, resourceMonthlyCostCents } from '@cloudbrowser/contracts';
-import { eventRow, newArchiveKey, newId, schema, sha256Hex, userCaps, type Db } from '@cloudbrowser/db';
-import type { ResourceKind } from '@cloudbrowser/executors';
-import { and, eq, inArray, ne } from 'drizzle-orm';
+import { eventRow, newArchiveKey, newId, raiseAlert, schema, sha256Hex, userCaps, type Db } from '@cloudbrowser/db';
+import { ExecutorError, type ExecutorKind, type ResourceKind } from '@cloudbrowser/executors';
+import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
 import {
   placementRef,
+  readContext,
   RestartFrom,
   StepFailed,
   type PlacementRow,
@@ -13,7 +14,7 @@ import {
 import { bootstrapToken, type CommandReply } from './agent.js';
 import { archiveObjectKey } from './archives.js';
 
-const { browserInstances, instanceHealth, ipAddresses, placements, resources, auditLog, events, agentCredentials, backups, archiveKeys, providerPrices } = schema;
+const { browserInstances, instanceHealth, ipAddresses, placements, resources, auditLog, events, agentCredentials, agentCommands, viewerSessions, backups, archiveKeys, providerPrices, regions } = schema;
 
 /**
  * A new browser's data volume. The profile without caches is typically well under 2 GB, Chrome's
@@ -23,6 +24,9 @@ const { browserInstances, instanceHealth, ipAddresses, placements, resources, au
 const VOLUME_GB = 10;
 
 async function newVolumeGb(env: StepEnv): Promise<number> {
+  // Keep the capacity the customer confirmed even if an operator changes defaults while queued.
+  const quoted = env.op.params?.storageGb;
+  if (typeof quoted === 'number' && Number.isInteger(quoted) && quoted > 0) return quoted;
   // The free trial runs on the smallest practical volume (page 6); it can grow after conversion.
   if (env.instance.trialState) return TRIAL.storageGb;
   return (await userCaps(env.deps.db, env.instance.userId)).get('storage_gb') ?? VOLUME_GB;
@@ -231,6 +235,19 @@ async function ensureRunning(env: StepEnv): Promise<StepOutcome> {
  * stores are journaled.
  */
 async function prepareShutdown(env: StepEnv): Promise<StepOutcome> {
+  // Permanent deletion has already revoked the agent and archive key. Never create a fresh
+  // profile copy or wait for an agent that is intentionally unable to authenticate.
+  if (env.op.kind === 'delete' && env.op.params?.purgeNow === true) {
+    const at = env.deps.now();
+    // System trial reclamation has no API acceptance transaction. Record its purge eligibility
+    // before stopping the VM too, so a failed provider stop cannot strand the deleted profile.
+    await env.deps.db.update(browserInstances).set({
+      status: 'deleting', desiredState: 'deleted', deletedAt: env.instance.deletedAt ?? at,
+      purgeAfter: env.instance.purgeAfter && env.instance.purgeAfter <= at ? env.instance.purgeAfter : at, updatedAt: at,
+    }).where(eq(browserInstances.id, env.instance.id));
+    await revokeDeletedInstance(env);
+    return { result: { skipped: true, reason: 'permanent deletion' } };
+  }
   const p = await currentPlacement(env);
   if (!p) return { result: { skipped: true } };
   const archive = await prepareArchive(env, p, 'sleep');
@@ -360,6 +377,8 @@ async function createVm(env: StepEnv): Promise<StepOutcome> {
       providerRegion: env.region.providerRegion,
       zone: vm.zone,
       vmId: vm.vmId,
+      instanceType: vm.instanceType ?? null,
+      rootVolumeGb: vm.rootVolumeGb ?? 16,
       volumeId,
       networkId: nicId,
       ipAllocationId: ip.allocationId,
@@ -453,61 +472,121 @@ export async function compensateChangeIp(env: StepEnv) {
 // --- purge (reaper only) -----------------------------------------------------------------------
 
 const DELETE_ORDER: ResourceKind[] = ['vm', 'network_interface', 'volume', 'snapshot', 'ip'];
+// AWS create calls can time out before their identifiers reach the ledger. Leave enough time for
+// their tagged resources to become visible instead of pretending a missing identifier means gone.
+const UNKNOWN_RESOURCE_SETTLE_MS = 15 * 60_000;
+// An already-issued R2 PUT cannot be revoked. Delete now and again after every URL has expired;
+// immediate destruction of the per-instance encryption key makes any late upload unreadable.
+const ARCHIVE_UPLOAD_SETTLE_MS = 16 * 60_000;
 
-/** Deletes every ledger resource of an instance that is still open. Reaper credentials only. */
+type DeleteEnv = Pick<StepEnv, 'deps' | 'executor' | 'ctx'>;
+
+/** Find owned resources even if a create response or the subsequent ledger write was lost. */
+export async function discoverInstanceResources(env: DeleteEnv, instanceId: string) {
+  const { db, now } = env.deps;
+  const rows = await db.select().from(resources).where(eq(resources.instanceId, instanceId));
+  const places = await db.select().from(placements).where(eq(placements.instanceId, instanceId));
+  const [inst] = await db.select({ regionId: browserInstances.regionId }).from(browserInstances).where(eq(browserInstances.id, instanceId));
+  const [region] = inst ? await db.select().from(regions).where(eq(regions.id, inst.regionId)) : [];
+  const groups = new Map<string, { executor: ExecutorKind; region: string }>();
+  const add = (executor: string, providerRegion: string) => groups.set(`${executor}:${providerRegion}`, { executor: executor as ExecutorKind, region: providerRegion });
+  for (const r of rows) add(r.executor, r.region);
+  for (const p of places) add(p.executor, p.providerRegion);
+  if (region) add(region.executor, region.providerRegion);
+  let live = 0;
+  for (const group of groups.values()) {
+    const observed = await env.deps.executor(group.executor).listManaged(readContext('reaper:discover-delete', env.deps.envName), group.region);
+    for (const r of observed) {
+      if (r.tags['cb:managed'] !== 'true' || r.tags['cb:env'] !== env.deps.envName || r.tags['cb:instance'] !== instanceId) continue;
+      live++;
+      const known = rows.find((x) => x.executor === group.executor && x.region === group.region && x.providerId === r.providerId);
+      if (known) {
+        if (known.state === 'deleted') await db.update(resources).set({ state: 'active', deletedAt: null, lastSeenAt: now() }).where(eq(resources.id, known.id));
+        continue;
+      }
+      await db.insert(resources).values({
+        id: newId(), instanceId, executor: group.executor, kind: r.kind, providerId: r.providerId,
+        region: r.region, zone: r.zone, state: 'active', tags: r.tags,
+        requestToken: `discovered:${group.executor}:${group.region}:${r.providerId}`,
+        firstSeenAt: now(), lastSeenAt: now(),
+      }).onConflictDoNothing();
+    }
+  }
+  return live;
+}
+
+/** Deletes every selected ledger resource. A provider must confirm deletion before its row closes. */
 export async function deleteLedgerResources(
-  env: Pick<StepEnv, 'deps' | 'executor' | 'ctx'>,
+  env: DeleteEnv,
   instanceId: string,
   filter: (r: typeof resources.$inferSelect) => boolean = () => true,
 ) {
   const { db, now } = env.deps;
   const open = (
-    await db
-      .select()
-      .from(resources)
-      .where(and(eq(resources.instanceId, instanceId), ne(resources.state, 'deleted')))
+    await db.select().from(resources).where(and(eq(resources.instanceId, instanceId), ne(resources.state, 'deleted')))
   ).filter(filter);
   open.sort((a, b) => DELETE_ORDER.indexOf(a.kind as ResourceKind) - DELETE_ORDER.indexOf(b.kind as ResourceKind));
+  let deleted = 0;
+  let waitingForUnknown = false;
   for (const r of open) {
+    const base = env.ctx('delete', r.id);
+    const ctx = { ...base, tags: { ...base.tags, 'cb:managed': 'true' as const, 'cb:env': env.deps.envName, 'cb:instance': instanceId, 'cb:kind': r.kind as ResourceKind } };
+    const executor = env.deps.executor(r.executor as ExecutorKind);
     if (r.providerId) {
-      await env.executor.ensureDeleted(env.ctx('delete', r.id), r.region, r.kind as ResourceKind, r.providerId);
+      await executor.ensureDeleted(ctx, r.region, r.kind as ResourceKind, r.providerId);
+    } else {
+      // The pending row is evidence of a possible unknown-outcome create, never proof of absence.
+      const possible = (await executor.listManaged(readContext('reaper:resolve-pending-delete', env.deps.envName), r.region)).filter((x) =>
+        x.kind === r.kind && x.tags['cb:env'] === env.deps.envName && x.tags['cb:instance'] === instanceId &&
+        (x.tags['cb:token'] === r.requestToken || x.tags['cb:op'] === r.createdByOp),
+      );
+      for (const x of possible) await executor.ensureDeleted(ctx, r.region, x.kind, x.providerId);
+      if (!possible.length && now().getTime() - r.firstSeenAt.getTime() < UNKNOWN_RESOURCE_SETTLE_MS) {
+        waitingForUnknown = true;
+        continue;
+      }
     }
     const at = now();
     await db.update(resources).set({ state: 'deleted', deletedAt: at }).where(eq(resources.id, r.id));
     if (r.kind === 'ip' && r.address) {
-      // The address row stays forever, so it is never given to another instance.
+      // The history row stays forever; a released address is never assigned to another browser.
       await db.update(ipAddresses).set({ releasedAt: at }).where(eq(ipAddresses.address, r.address));
     }
+    deleted++;
   }
-  return open.length;
+  if (waitingForUnknown) throw new ExecutorError('retryable', 'Waiting to confirm a resource from an unfinished provider request is absent.');
+  return deleted;
+}
+
+async function revokeDeletedInstance(env: Pick<StepEnv, 'deps' | 'instance'>) {
+  const { db, now } = env.deps;
+  const at = now();
+  await db.batch([
+    db.update(agentCredentials).set({ credentialHash: null, bootstrapHash: null, bootstrapExpiresAt: null, rotatedAt: at }).where(eq(agentCredentials.instanceId, env.instance.id)),
+    db.update(archiveKeys).set({ wrappedKey: null, destroyedAt: at }).where(eq(archiveKeys.instanceId, env.instance.id)),
+    db.update(viewerSessions).set({ endedAt: at }).where(and(eq(viewerSessions.instanceId, env.instance.id), isNull(viewerSessions.endedAt))),
+    db.update(agentCommands).set({ status: 'failed', reply: { error: 'Browser permanently deleted.' }, completedAt: at }).where(and(eq(agentCommands.instanceId, env.instance.id), isNull(agentCommands.completedAt))),
+  ]);
 }
 
 async function purgeResources(env: StepEnv): Promise<StepOutcome> {
+  await revokeDeletedInstance(env);
+  await discoverInstanceResources(env, env.instance.id);
   const deleted = await deleteLedgerResources(env, env.instance.id);
+  // Recheck after deletion as well: a lost create response can appear during the cleanup pass.
+  if (await discoverInstanceResources(env, env.instance.id)) return { wait: 5_000, reason: 'confirming all browser resources have been released' };
+  const copies = await env.deps.db.select().from(backups).where(eq(backups.instanceId, env.instance.id));
+  const archives = copies.filter((b) => b.kind === 'archive' && b.location);
+  if (archives.length && !env.deps.deleteArchive) throw new StepFailed('Archive deletion is not configured. Browser cleanup remains pending.');
+  for (const b of archives) await env.deps.deleteArchive!(b.location!);
+  const deletedAt = env.instance.deletedAt ?? env.op.createdAt;
+  if (archives.length && env.deps.now().getTime() < deletedAt.getTime() + ARCHIVE_UPLOAD_SETTLE_MS) {
+    return { wait: deletedAt.getTime() + ARCHIVE_UPLOAD_SETTLE_MS - env.deps.now().getTime(), reason: 'waiting for issued archive upload URLs to expire' };
+  }
   await env.deps.db.batch([
     env.deps.db.update(placements).set({ status: 'superseded' }).where(eq(placements.instanceId, env.instance.id)),
-    // The VM is gone; its agent identity is revoked so it can never connect again.
-    env.deps.db
-      .update(agentCredentials)
-      .set({ credentialHash: null, bootstrapHash: null, rotatedAt: env.deps.now() })
-      .where(eq(agentCredentials.instanceId, env.instance.id)),
-    // Destroying the archive key makes every archive unreadable, even before R2 deletes them (page 4).
-    env.deps.db
-      .update(archiveKeys)
-      .set({ wrappedKey: null, destroyedAt: env.deps.now() })
-      .where(eq(archiveKeys.instanceId, env.instance.id)),
+    env.deps.db.update(backups).set({ status: 'deleted', deletedAt: env.deps.now() }).where(eq(backups.instanceId, env.instance.id)),
   ]);
-  const left = await env.deps.db
-    .select()
-    .from(backups)
-    .where(and(eq(backups.instanceId, env.instance.id), ne(backups.status, 'deleted')));
-  for (const b of left) {
-    if (b.kind === 'archive' && b.location && env.deps.deleteArchive) await env.deps.deleteArchive(b.location);
-  }
-  await env.deps.db
-    .update(backups)
-    .set({ status: 'deleted', deletedAt: env.deps.now() })
-    .where(eq(backups.instanceId, env.instance.id));
   return { result: { deleted } };
 }
 
@@ -522,6 +601,8 @@ const SUPERSEDED_KEEP_MS = 7 * 86_400_000;
 export async function ensureArchiveKey(env: Pick<StepEnv, 'deps'>, instanceId: string) {
   const { db, archiveMasterKey, now } = env.deps;
   if (!archiveMasterKey) return false;
+  const [instance] = await db.select({ status: browserInstances.status, desiredState: browserInstances.desiredState }).from(browserInstances).where(eq(browserInstances.id, instanceId));
+  if (!instance || instance.desiredState === 'deleted' || ['deleting', 'purged'].includes(instance.status)) return false;
   const [row] = await db.select().from(archiveKeys).where(eq(archiveKeys.instanceId, instanceId));
   if (row?.wrappedKey) return true;
   if (row?.destroyedAt) return false;
@@ -756,6 +837,8 @@ async function recoverVm(env: StepEnv): Promise<StepOutcome> {
       providerRegion: p.providerRegion,
       zone: vm.zone,
       vmId: vm.vmId,
+      instanceType: vm.instanceType ?? null,
+      rootVolumeGb: vm.rootVolumeGb ?? 16,
       volumeId,
       networkId: nicId,
       ipAllocationId: p.ipAllocationId,
@@ -816,6 +899,11 @@ async function growFilesystem(env: StepEnv): Promise<StepOutcome> {
   if (env.instance.status !== 'running') return { result: { grown: false, when: 'next start' } };
   const { reply, timedOut } = await command(env, 'grow_filesystem', 'grow_filesystem', {});
   if (reply.status === 'pending' && !timedOut) return { wait: COMMAND_POLL_MS, reason: 'growing the file system' };
+  if (reply.status !== 'succeeded') await raiseAlert(env.deps.db, {
+    source: 'engine', severity: 'warning', title: `Browser file system growth needs attention: ${env.instance.id}`,
+    detail: { instanceId: env.instance.id, operationId: env.op.id, volumeSizeGb: env.results.resize_volume?.sizeGb, error: reply.error ?? 'Agent did not confirm file system growth before timeout.' },
+    dedupeKey: `filesystem-grow:${env.instance.id}`,
+  }, env.deps.now());
   return { result: { grown: reply.status === 'succeeded', ...(reply.error ? { error: reply.error } : {}) } };
 }
 
@@ -900,6 +988,7 @@ export const HANDLERS: Record<string, Record<string, Handler>> = {
   },
   undelete: {
     finish: async (env) => {
+      if (!env.instance.purgeAfter || env.instance.purgeAfter <= env.deps.now()) throw new StepFailed('This browser was permanently deleted and cannot be restored.');
       const p = await currentPlacement(env);
       if (!p) {
         await finishWithStatus(env, 'failed', { deletedAt: null, purgeAfter: null });

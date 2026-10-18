@@ -1,9 +1,9 @@
 import { operationRow, schema, userCaps } from '@cloudbrowser/db';
 import type { ExecutorKind } from '@cloudbrowser/executors';
-import { and, eq, isNull, lt, lte, ne, sql } from 'drizzle-orm';
+import { and, eq, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
 import { readContext, type EngineDeps } from './context.js';
 import { runPending } from './scheduler.js';
-import { deleteLedgerResources } from './steps.js';
+import { deleteLedgerResources, discoverInstanceResources } from './steps.js';
 
 const { browserInstances, operations, resources, driftFindings, events, idempotencyKeys, auditLog, viewerTokens, backups } = schema;
 
@@ -19,11 +19,11 @@ export async function reaperTick(deps: EngineDeps) {
   const now = deps.now();
   const summary = { purgesQueued: 0, purgesRun: 0, failedCleanups: 0, released: 0, orphans: 0, backupsExpired: 0 };
 
-  // 1. Purge soft-deleted instances after 7 days.
+  // 1. Permanent user deletions are eligible immediately; system recovery windows keep their deadline.
   const expired = await db
     .select({ id: browserInstances.id, userId: browserInstances.userId })
     .from(browserInstances)
-    .where(and(eq(browserInstances.status, 'deleting'), lte(browserInstances.purgeAfter, now)));
+    .where(and(ne(browserInstances.status, 'purged'), or(eq(browserInstances.status, 'deleting'), eq(browserInstances.desiredState, 'deleted')), lte(browserInstances.purgeAfter, now)));
   for (const inst of expired) {
     try {
       await db.insert(operations).values(operationRow({ instanceId: inst.id, userId: null, kind: 'purge', now }));
@@ -51,7 +51,15 @@ export async function reaperTick(deps: EngineDeps) {
       .from(resources)
       .where(and(eq(resources.instanceId, inst.id), ne(resources.state, 'deleted')));
     for (const { executor } of kinds) {
-      summary.failedCleanups += await deleteLedgerResources(env(executor as ExecutorKind), inst.id);
+      const cleanup = env(executor as ExecutorKind);
+      try {
+        await discoverInstanceResources(cleanup, inst.id);
+        summary.failedCleanups += await deleteLedgerResources(cleanup, inst.id, (r) => r.executor === executor);
+      } catch (e) {
+        // Provider deletion and unknown-outcome creates may take multiple passes. Preserve every
+        // unconfirmed ledger row and let the next reaper tick retry without skipping other users.
+        console.error('failed browser cleanup pending', inst.id, e);
+      }
     }
   }
 
@@ -82,7 +90,16 @@ export async function reaperTick(deps: EngineDeps) {
     );
   for (const o of orphans) {
     const ex = deps.executor(o.executor as ExecutorKind);
-    await ex.ensureDeleted(readContext('reaper:orphan', deps.envName), o.region, (o.resourceKind ?? 'vm') as never, o.providerId);
+    const observed = (await ex.listManaged(readContext('reaper:orphan-ownership', deps.envName), o.region))
+      .find((r) => r.providerId === o.providerId && r.kind === (o.resourceKind ?? 'vm'));
+    const ownerId = observed?.tags['cb:instance'];
+    if (!observed || !ownerId || ownerId === '-' || observed.tags['cb:env'] !== deps.envName) continue;
+    const [owner] = await db.select({ status: browserInstances.status }).from(browserInstances).where(eq(browserInstances.id, ownerId));
+    // An orphan finding can be stale: never delete a resource of a live browser just because the
+    // reconciler saw it before its ledger write. Its own purge handles a deleted browser.
+    if (owner && owner.status !== 'purged') continue;
+    const ctx = readContext('reaper:orphan', deps.envName);
+    await ex.ensureDeleted({ ...ctx, tags: { ...ctx.tags, 'cb:instance': ownerId, 'cb:kind': observed.kind } }, o.region, observed.kind, o.providerId);
     await db.batch([
       db.update(driftFindings).set({ status: 'resolved', resolvedAt: now }).where(eq(driftFindings.id, o.id)),
       db.insert(auditLog).values({
@@ -169,7 +186,8 @@ async function expireBackups(deps: EngineDeps, env: (kind: ExecutorKind) => Para
       if (b.kind === 'snapshot') {
         const [r] = await db.select().from(resources).where(and(eq(resources.instanceId, instanceId), eq(resources.providerId, b.location ?? '')));
         if (r) await deleteLedgerResources(env(r.executor as ExecutorKind), instanceId, (x) => x.id === r.id);
-      } else if (deps.deleteArchive && b.location) {
+      } else if (b.kind === 'archive' && b.location) {
+        if (!deps.deleteArchive) continue;
         await deps.deleteArchive(b.location);
       }
       await db.update(backups).set({ status: 'deleted', deletedAt: now }).where(eq(backups.id, id));

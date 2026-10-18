@@ -1,11 +1,9 @@
 -- Prices and prepaid billing (page 6). Provider prices are read from the AWS Price List API by the
 -- engine; customers pay them times the markup in `pricing_settings` from a prepaid balance.
--- The subscription tables were never used in production (Creem was not configured) and go.
-DROP TABLE IF EXISTS `subscriptions`;
---> statement-breakpoint
-DROP TABLE IF EXISTS `checkout_attempts`;
---> statement-breakpoint
-DROP TABLE IF EXISTS `active_usage`;
+-- Keep legacy subscription/checkouts/usage tables during rollout so a Worker rollback does not
+-- destroy or lose access to the earlier billing data. Archive changed caps before switching models.
+CREATE TABLE `legacy_billing_caps` AS SELECT * FROM `caps`
+WHERE `scope` LIKE 'billing:%' OR `metric` IN ('hours_per_month', 'storage_gb', 'storage_max_gb');
 --> statement-breakpoint
 DELETE FROM `caps` WHERE `scope` LIKE 'billing:%' OR `metric` = 'hours_per_month';
 --> statement-breakpoint
@@ -14,6 +12,7 @@ CREATE TABLE `provider_prices` (
 	`executor` text NOT NULL,
 	`provider_region` text NOT NULL,
 	`sheet` text,
+	`configuration_key` text,
 	`fetched_at` integer,
 	`last_error` text,
 	`last_error_at` integer,
@@ -53,6 +52,9 @@ CREATE TABLE `balance_transactions` (
 	`amount_micros` integer NOT NULL,
 	`reference` text NOT NULL,
 	`product_id` text,
+	`order_id` text,
+	`gross_amount_cents` integer,
+	`currency` text,
 	`description` text,
 	`actor` text NOT NULL,
 	`created_at` integer NOT NULL,
@@ -75,6 +77,7 @@ CREATE TABLE `usage_records` (
 	`quantity` real NOT NULL,
 	`amount_micros` integer NOT NULL,
 	`cost_micros` integer NOT NULL,
+	`charged_micros` integer DEFAULT 0 NOT NULL,
 	`updated_at` integer NOT NULL,
 	PRIMARY KEY(`instance_id`, `item`, `day`, `unit_price_micros`, `unit_cost_micros`),
 	FOREIGN KEY (`instance_id`) REFERENCES `browser_instances`(`id`) ON UPDATE no action ON DELETE no action
@@ -129,6 +132,10 @@ ALTER TABLE `instance_health` ADD `net_tx_bytes` integer;
 ALTER TABLE `instance_health` ADD `net_tx_billed_bytes` integer;
 --> statement-breakpoint
 ALTER TABLE `instance_health` ADD `agent_version` text;
+--> statement-breakpoint
+ALTER TABLE `placements` ADD `instance_type` text;
+--> statement-breakpoint
+ALTER TABLE `placements` ADD `root_volume_gb` integer DEFAULT 16 NOT NULL;
 --> statement-breakpoint
 -- A new browser's data volume and the most it can grow to (users can add storage, page 4).
 INSERT OR REPLACE INTO `caps` (`scope`, `metric`, `limit`) VALUES

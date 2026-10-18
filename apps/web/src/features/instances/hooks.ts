@@ -1,7 +1,8 @@
-import type { Accepted, Backup, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, Region } from '@cloudbrowser/contracts';
+import type { Accepted, Backup, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, Region } from '@cloudbrowser/contracts';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api.js';
 import { keys, queryClient } from '../../lib/query.js';
+import { refreshChangedPrices } from '../billing/hooks.js';
 
 export const useMe = () => useQuery({ queryKey: keys.me, queryFn: () => api<Me>('GET', '/me') });
 export const useRegions = () => useQuery({ queryKey: keys.regions, queryFn: () => api<Region[]>('GET', '/regions'), staleTime: 60_000 });
@@ -36,19 +37,21 @@ const refresh = (instanceId?: string) => {
  */
 export function useLifecycle() {
   return useMutation({
-    mutationFn: ({ id, action, body }: { id: string; action: 'start' | 'stop' | 'undelete' | 'delete' | 'ip-change'; body?: unknown }) => {
+    mutationFn: ({ id, action, body }: { id: string; action: 'start' | 'stop' | 'undelete' | 'delete'; body?: unknown } | { id: string; action: 'ip-change'; body: { priceVersion: string } }) => {
       if (action === 'delete') return api<Accepted>('DELETE', `/instances/${id}`, { idempotent: true });
-      if (action === 'ip-change') return api<Accepted>('POST', `/instances/${id}/ip-change-requests`, { idempotent: true, body: { confirm: true } });
+      if (action === 'ip-change') return api<Accepted>('POST', `/instances/${id}/ip-change-requests`, { idempotent: true, body: { confirm: true, ...body } });
       return api<Accepted>('POST', `/instances/${id}/${action}`, { idempotent: true, body });
     },
+    onError: refreshChangedPrices,
     onSettled: (_d, _e, v) => refresh(v.id),
   });
 }
 
 export function useCreateInstance() {
   return useMutation({
-    mutationFn: (body: { name: string; regionId: Instance['regionId']; locale?: Instance['locale']; screen?: Instance['screen']; priceVersion?: string }) =>
+    mutationFn: (body: CreateInstanceBody) =>
       api<Accepted>('POST', '/instances', { idempotent: true, body }),
+    onError: refreshChangedPrices,
     onSettled: () => refresh(),
   });
 }
@@ -65,7 +68,10 @@ export function useUpdateInstance() {
       queryClient.setQueryData<Instance[]>(keys.instances, (list) => list?.map((i) => (i.id === id ? { ...i, ...fields } : i)));
       return { prev };
     },
-    onError: (_e, _v, ctx) => ctx?.prev && queryClient.setQueryData(keys.instances, ctx.prev),
+    onError: async (error, _v, ctx) => {
+      if (ctx?.prev) queryClient.setQueryData(keys.instances, ctx.prev);
+      await refreshChangedPrices(error);
+    },
     onSettled: (_d, _e, v) => refresh(v.id),
   });
 }
@@ -89,8 +95,9 @@ export function useRestoreBackup() {
 /** Grows the data volume; the price version is the one the user confirmed. */
 export function useResizeStorage() {
   return useMutation({
-    mutationFn: ({ id, sizeGb, priceVersion }: { id: string; sizeGb: number; priceVersion: string | null }) =>
-      api<Accepted>('POST', `/instances/${id}/storage`, { idempotent: true, body: { sizeGb, ...(priceVersion ? { priceVersion } : {}) } }),
+    mutationFn: ({ id, sizeGb, priceVersion }: { id: string; sizeGb: number; priceVersion: string }) =>
+      api<Accepted>('POST', `/instances/${id}/storage`, { idempotent: true, body: { sizeGb, priceVersion } }),
+    onError: refreshChangedPrices,
     onSettled: (_d, _e, v) => refresh(v.id),
   });
 }

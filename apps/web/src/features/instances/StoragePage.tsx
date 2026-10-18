@@ -3,7 +3,7 @@ import { Button, cn, Dialog, Input, Label, Section, Skeleton, useToast } from '@
 import { useEffect, useState } from 'react';
 import { useI18n } from '../../lib/i18n.js';
 import { bytes, money } from '../../lib/money.js';
-import { usePricing } from '../billing/hooks.js';
+import { isPriceChanged, usePricing } from '../billing/hooks.js';
 import { useManagedInstance } from './BrowserLayout.js';
 import { useBackups, useResizeStorage, useRestoreBackup, useStorage, useUpdateInstance } from './hooks.js';
 
@@ -11,7 +11,7 @@ import { useBackups, useResizeStorage, useRestoreBackup, useStorage, useUpdateIn
 export function StoragePage() {
   const i = useManagedInstance();
   const pricing = usePricing();
-  const price = pricing.data?.find((p) => p.regionId === i.regionId);
+  const price = pricing.isError ? undefined : pricing.data?.find((p) => p.regionId === i.regionId);
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <StorageCard instance={i} pricing={price} />
@@ -27,7 +27,8 @@ function StorageCard({ instance: i, pricing }: { instance: Instance; pricing: Re
   const storage = useStorage(i.id);
   const resize = useResizeStorage();
   const [size, setSize] = useState(i.storageGb + 10);
-  const [confirm, setConfirm] = useState(false);
+  const [quote, setQuote] = useState<{ pricing: RegionPricing; from: number; to: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => setSize((s) => Math.max(s, i.storageGb + 1)), [i.storageGb]);
   const s = storage.data;
   if (!s) return <Skeleton className="h-64" />;
@@ -37,7 +38,11 @@ function StorageCard({ instance: i, pricing }: { instance: Instance; pricing: Re
   const target = Math.min(s.maxGb, Math.max(s.sizeGb + 1, Math.floor(size) || 0));
   const before = monthly(s.sizeGb);
   const after = monthly(target);
+  const quoteMonthly = (gb: number) => quote!.pricing.rates!.storage * (gb + quote!.pricing.rootVolumeGb);
   const pct = s.usedBytes !== null && s.totalBytes ? Math.min(100, (s.usedBytes / s.totalBytes) * 100) : null;
+  // A completed EBS resize can precede filesystem growth or the next agent report.
+  // Leave room for filesystem overhead; missing usage reports are not evidence of a mismatch.
+  const capacityPending = s.totalBytes !== null && s.totalBytes > 0 && s.totalBytes < s.sizeGb * 1024 ** 3 * 0.85;
   const blocked =
     s.blockedReason === 'cooldown'
       ? t('storage.blocked.cooldown', { time: new Date(s.nextResizeAt ?? Date.now()).toLocaleString(locale) })
@@ -63,6 +68,11 @@ function StorageCard({ instance: i, pricing }: { instance: Instance; pricing: Re
         >
           <div className={cn('h-full rounded-full', pct !== null && pct >= 90 ? 'bg-error' : pct !== null && pct >= 75 ? 'bg-starting' : 'bg-accent')} style={{ width: `${pct ?? 0}%` }} />
         </div>
+        {capacityPending && (i.status === 'sleeping' || i.status === 'running') ? (
+          <p role="status" className="mt-2 text-sm text-starting">
+            {t(i.status === 'sleeping' ? 'storage.capacityAfterStart' : 'storage.capacityPending')}
+          </p>
+        ) : null}
         <p className="mt-2 text-xs text-muted">{t('storage.system', { gb: s.rootVolumeGb })}</p>
         {before !== null && rate !== null ? (
           <p className="mt-1 text-sm">{t('storage.cost', { amount: m(before), rate: t('price.perGbMonth', { amount: m(rate) }) })}</p>
@@ -80,7 +90,7 @@ function StorageCard({ instance: i, pricing }: { instance: Instance; pricing: Re
                 <Label htmlFor="size">{t('storage.newSize')}</Label>
                 <Input id="size" type="number" inputMode="numeric" min={s.sizeGb + 1} max={s.maxGb} value={size} onChange={(e) => setSize(Number(e.target.value))} />
               </div>
-              <Button variant="primary" disabled={rate === null || resize.isPending || target <= s.sizeGb} onClick={() => setConfirm(true)}>
+              <Button variant="primary" disabled={rate === null || !pricing?.version || resize.isPending || target <= s.sizeGb} onClick={() => { setError(null); setQuote({ pricing: pricing!, from: s.sizeGb, to: target }); }}>
                 {t('storage.grow')}
               </Button>
             </div>
@@ -92,29 +102,34 @@ function StorageCard({ instance: i, pricing }: { instance: Instance; pricing: Re
           </>
         )}
         <p className="mt-2 text-xs text-muted">{t('storage.rules')}</p>
+        {error ? <p role="alert" className="mt-2 text-sm text-error">{error}</p> : null}
       </div>
 
       <Dialog
-        open={confirm}
-        onOpenChange={setConfirm}
-        title={t('storage.confirmTitle', { gb: target - s.sizeGb })}
-        description={before !== null && after !== null ? t('storage.confirmBody', { from: s.sizeGb, to: target, amount: m(after), before: m(before) }) : ''}
+        open={quote !== null}
+        onOpenChange={(open) => !open && setQuote(null)}
+        title={t('storage.confirmTitle', { gb: quote ? quote.to - quote.from : 0 })}
+        description={quote ? t('storage.confirmBody', { from: quote.from, to: quote.to, amount: m(quoteMonthly(quote.to)), before: m(quoteMonthly(quote.from)) }) : ''}
         closeLabel={t('common.cancel')}
       >
         <div className="flex justify-end gap-2">
-          <Button onClick={() => setConfirm(false)}>{t('common.cancel')}</Button>
+          <Button onClick={() => setQuote(null)}>{t('common.cancel')}</Button>
           <Button
             variant="primary"
-            disabled={resize.isPending}
+            disabled={resize.isPending || !quote?.pricing.version}
             onClick={() =>
               resize.mutate(
-                { id: i.id, sizeGb: target, priceVersion: pricing?.version ?? null },
+                { id: i.id, sizeGb: quote!.to, priceVersion: quote!.pricing.version! },
                 {
                   onSuccess: () => {
-                    setConfirm(false);
+                    setQuote(null);
                     toast(t('storage.started'));
                   },
-                  onError: (e) => toast(errorMessage(e), 'error'),
+                  onError: (e) => {
+                    if (isPriceChanged(e)) setQuote(null);
+                    setError(errorMessage(e));
+                    toast(errorMessage(e), 'error');
+                  },
                 },
               )
             }
@@ -132,20 +147,27 @@ function SnapshotsCard({ instance: i, pricing }: { instance: Instance; pricing: 
   const toast = useToast();
   const storage = useStorage(i.id);
   const update = useUpdateInstance();
-  const [confirm, setConfirm] = useState<'on' | 'off' | null>(null);
+  const [confirm, setConfirm] = useState<'off' | RegionPricing | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const days = storage.data?.snapshots.retentionDays ?? 7;
   const rate = pricing?.rates?.snapshot ?? null;
   const m = (v: number) => money(v, locale);
   const monthly = rate === null ? null : rate * i.storageGb;
+  const trial = !!i.trial && i.trial.state !== 'converted';
+  const quote = confirm && confirm !== 'off' ? confirm : null;
   const set = (backupsEnabled: boolean) =>
     update.mutate(
-      { id: i.id, patch: { backupsEnabled, ...(pricing?.version ? { priceVersion: pricing.version } : {}) } },
+      { id: i.id, patch: { backupsEnabled, ...(backupsEnabled && quote?.version ? { priceVersion: quote.version } : {}) } },
       {
         onSuccess: () => {
           setConfirm(null);
           toast(backupsEnabled ? t('snapshots.enabled') : t('snapshots.disabled'));
         },
-        onError: (e) => toast(errorMessage(e), 'error'),
+        onError: (e) => {
+          if (isPriceChanged(e)) setConfirm(null);
+          setError(errorMessage(e));
+          toast(errorMessage(e), 'error');
+        },
       },
     );
 
@@ -160,11 +182,13 @@ function SnapshotsCard({ instance: i, pricing }: { instance: Instance; pricing: 
             {t('snapshots.disable')}
           </Button>
         ) : (
-          <Button variant="primary" disabled={update.isPending || monthly === null || i.status === 'deleting'} onClick={() => setConfirm('on')}>
+          <Button variant="primary" disabled={update.isPending || monthly === null || !pricing?.version || trial || i.status === 'deleting'} onClick={() => { setError(null); setConfirm(pricing!); }}>
             {t('snapshots.enable')}
           </Button>
         )}
       </div>
+      {trial ? <p className="mt-3 text-sm text-muted">{t('snapshots.trial')}</p> : null}
+      {error ? <p role="alert" className="mt-2 text-sm text-error">{error}</p> : null}
       {monthly !== null && rate !== null ? (
         <p className="mt-3 text-sm">{t('snapshots.cost', { amount: m(monthly), rate: t('price.perGbMonth', { amount: m(rate) }), gb: i.storageGb })}</p>
       ) : (
@@ -176,17 +200,17 @@ function SnapshotsCard({ instance: i, pricing }: { instance: Instance; pricing: 
       </div>
 
       <Dialog
-        open={confirm === 'on'}
+        open={quote !== null}
         onOpenChange={(o) => !o && setConfirm(null)}
         title={t('snapshots.enableTitle')}
         description={
-          monthly !== null && rate !== null ? t('snapshots.enableBody', { gb: i.storageGb, days, amount: m(monthly), rate: t('price.perGbMonth', { amount: m(rate) }) }) : ''
+          quote?.rates ? t('snapshots.enableBody', { gb: i.storageGb, days, amount: m(quote.rates.snapshot * i.storageGb), rate: t('price.perGbMonth', { amount: m(quote.rates.snapshot) }) }) : ''
         }
         closeLabel={t('common.cancel')}
       >
         <div className="flex justify-end gap-2">
           <Button onClick={() => setConfirm(null)}>{t('common.cancel')}</Button>
-          <Button variant="primary" disabled={update.isPending} onClick={() => set(true)}>
+          <Button variant="primary" disabled={update.isPending || !quote?.version} onClick={() => set(true)}>
             {t('snapshots.enable')}
           </Button>
         </div>

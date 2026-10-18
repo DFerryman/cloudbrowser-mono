@@ -56,7 +56,7 @@ export function PricingPage() {
         <h2 className="mb-2 text-sm font-medium">This month ({mo.month}), metered usage</h2>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Tile label="Charged to customers" value={usd(mo.revenueMicros)} />
-          <Tile label="AWS cost of that usage" value={usd(mo.costMicros)} />
+          <Tile label="Est. AWS cost of metered usage" value={usd(mo.costMicros)} />
           <Tile label={`Gross margin${marginPct !== null ? ` (${marginPct}%)` : ''}`} value={usd(mo.grossMarginMicros)} tone={mo.grossMarginMicros < 0 ? 'bad' : undefined} />
           <Tile label="Top-ups received" value={`${usd(mo.topupMicros)} · ${mo.topups}`} />
         </div>
@@ -67,14 +67,15 @@ export function PricingPage() {
           <Tile label="AWS projected (all resources)" value={mo.projectedAwsCents !== null ? `$${(mo.projectedAwsCents / 100).toFixed(2)}` : '—'} />
         </div>
         <p className="mt-2 text-xs text-muted">
-          Metered cost covers what customers are charged for. AWS projected (from the reconciler) also includes what nobody is charged for: browsers being created,
-          deleted browsers during their 7-day recovery, old IPs kept 30 days after a change, and recover snapshots. Outstanding balances: {usd(d.balances.totalMicros)} (of which{' '}
+          Costs use AWS public unit prices and platform usage, not an AWS bill. Free-tier allowances, credits, discounts and actual snapshot sizes are not reconciled.
+          AWS projected (from the reconciler) also includes resources not charged to anyone: browsers being created,
+          resources awaiting cleanup, old IPs kept 30 days after a change, and recover snapshots. Outstanding balances: {usd(d.balances.totalMicros)} (of which{' '}
           {usd(d.balances.negativeMicros)} below zero).
         </p>
         <Table
           rows={ITEMS.map(([key, label]) => ({ key, label, ...(mo.byItem[key] ?? { revenueMicros: 0, costMicros: 0 }) }))}
           rowKey={(r) => r.key}
-          columns={['Item', 'Charged', 'AWS cost', 'Margin']}
+          columns={['Item', 'Charged', 'Est. AWS cost', 'Est. margin']}
           cells={(r) => [r.label.replace(/ \(.*\)/, ''), usd(r.revenueMicros), usd(r.costMicros), usd(r.revenueMicros - r.costMicros)]}
         />
       </section>

@@ -17,7 +17,7 @@
   "queues": {
     "consumers": [{ "queue": "cloudbrowser-agent-commands", "max_batch_size": 20, "max_batch_timeout": 1 }]
   },
-  // Reads and marks pending agent_commands only.
+  // Reads browser/session/generation revocation state and marks pending agent_commands delivered.
   "d1_databases": [
     {
       "binding": "DB",
