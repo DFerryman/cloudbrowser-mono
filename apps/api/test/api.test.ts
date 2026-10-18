@@ -269,7 +269,10 @@ describe('gateway internal API and live view', () => {
     const claims = await verifyViewerToken(keys.publicJwk, info.token);
     expect(claims?.iid).toBe(id);
     expect(await verifyViewerToken(keys.publicJwk, info.token, Date.now() + 61_000)).toBeNull();
-    const tampered = info.token.slice(0, -2) + (info.token.endsWith('A') ? 'BB' : 'AA');
+    // Change actual signature bits; the last base64url character also has unused padding bits.
+    const signatureStart = info.token.indexOf('.') + 1;
+    const tampered = info.token.slice(0, signatureStart)
+      + (info.token[signatureStart] === 'A' ? 'B' : 'A') + info.token.slice(signatureStart + 1);
     expect(await verifyViewerToken(keys.publicJwk, tampered)).toBeNull();
 
     const api = internalApi(t.env as never);
