@@ -36,7 +36,7 @@ const MAX_METER_STEP_MS = 5 * 60_000;
 /** States in which a browser holds its IP and volume and is charged for them. */
 const NOT_BILLED = ['creating', 'failed', 'purged'];
 
-export async function meterUsage(deps: EngineDeps) {
+export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: number } = {}) {
   const { db } = deps;
   const now = deps.now();
   const summary = { metered: 0, chargedMicros: 0, stopped: 0 };
@@ -53,6 +53,12 @@ export async function meterUsage(deps: EngineDeps) {
   const retained = ids.length ? await db.select().from(resources).where(inArray(resources.instanceId, ids)) : [];
   const snapshots = ids.length ? await db.select().from(backups).where(and(inArray(backups.instanceId, ids), eq(backups.kind, 'snapshot'), eq(backups.status, 'complete'))) : [];
   for (const { inst, health } of rows) {
+    // Cron enforcement still runs each minute; settlement can skip unchanged short windows.
+    if (health?.baseMeteredAt && !health.pendingComputeMs && options.minIntervalMs
+      && now.getTime() - health.baseMeteredAt.getTime() < options.minIntervalMs) {
+      // Settle immediately at depletion/expiry so the atomic stop guard sees the actual debit.
+      if (inst.status !== 'running' || (await prepaidAccess(db, inst.userId, inst.id, now)).allowed) continue;
+    }
     const running = inst.status === 'running';
     const trial = inst.trialState === 'active' || inst.trialState === 'ended';
     const from = health?.baseMeteredAt?.getTime() ?? now.getTime();
@@ -124,9 +130,6 @@ export async function meterUsage(deps: EngineDeps) {
     const reference = `usage:${inst.id}:${from}:${now.getTime()}`;
     const journal = sql`EXISTS (SELECT 1 FROM ${balanceTransactions} WHERE ${balanceTransactions.reference} = ${reference} AND ${balanceTransactions.appliedAt} IS NULL)`;
     const paidEntries = entries.filter((e) => e.price > 0);
-    const debit = paidEntries.length ? sql`(WITH charges(day,item,price,cost,q) AS (VALUES ${sql.join(paidEntries.map((e) => sql`(${e.day},${e.item},${e.price},${e.cost},${e.quantity})`), sql`,`)})
-      SELECT coalesce(sum(round((coalesce(u.quantity,0)+c.q)*c.price)-coalesce(u.amount_micros,0)),0)
-      FROM charges c LEFT JOIN usage_records u ON u.instance_id=${inst.id} AND u.day=c.day AND u.item=c.item AND u.unit_price_micros=c.price AND u.unit_cost_micros=c.cost)` : sql`0`;
     const balance = sql`coalesce((SELECT balance_micros FROM billing_accounts WHERE user_id=${inst.userId}),0)`;
     const spendable = retaining ? sql`min(max(0,${balance}),coalesce((SELECT reserved_micros FROM browser_reservations WHERE instance_id=${inst.id}),0))`
       : sql`max(0,${balance}-${reservedTotalSql(inst.userId)})`;
@@ -134,24 +137,29 @@ export async function meterUsage(deps: EngineDeps) {
       // This internal journal is created in the same transaction as usage and the cursor. It caps
       // a multi-browser debit at spendable credit and allocates that exact payment across items.
       const eligible = retaining && hold?.retentionEndsAt && now >= hold.retentionEndsAt ? sql`0` : claim;
-      stmts.push(db.insert(balanceTransactions).select(sql`SELECT ${newId(now.getTime())},${inst.userId},'usage',-min(${spendable},${debit}),${reference},NULL,NULL,NULL,NULL,'{}','engine',${now.getTime()},NULL WHERE ${eligible}`)
+      // Compute all allocations before changing usage rows, in the journal's single INSERT.
+      // Repeatedly rewriting this JSON once per item used most of the billing write quota.
+      stmts.push(db.insert(balanceTransactions).select(sql`WITH charges(idx,day,item,price,cost,q) AS
+        (VALUES ${sql.join(paidEntries.map((e, i) => sql`(${i},${e.day},${e.item},${e.price},${e.cost},${e.quantity})`), sql`,`)}),
+        deltas AS (SELECT c.idx,c.day,c.item,round((coalesce(u.quantity,0)+c.q)*c.price)-coalesce(u.amount_micros,0) AS delta
+          FROM charges c LEFT JOIN usage_records u ON u.instance_id=${inst.id} AND u.day=c.day AND u.item=c.item
+            AND u.unit_price_micros=c.price AND u.unit_cost_micros=c.cost),
+        budget AS (SELECT min(${spendable},coalesce(sum(delta),0)) AS amount FROM deltas),
+        allocated AS (SELECT day,item,min(delta,max(0,budget.amount-coalesce(sum(delta) OVER
+          (ORDER BY idx ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),0))) AS amount FROM deltas,budget)
+        SELECT ${newId(now.getTime())},${inst.userId},'usage',-(SELECT amount FROM budget),${reference},NULL,NULL,NULL,NULL,
+          json_object('itemCharges',json((SELECT json_group_object(day || ':' || item,amount) FROM allocated))),
+          'engine',${now.getTime()},NULL WHERE ${eligible}`)
         .onConflictDoNothing().returning({ amountMicros: balanceTransactions.amountMicros }));
-      stmts.push(db.update(balanceTransactions).set({ description: sql`json_object('remainingMicros',-${balanceTransactions.amountMicros})` }).where(and(eq(balanceTransactions.reference, reference), isNull(balanceTransactions.appliedAt))));
     }
     for (const e of entries) {
-      const previous = sql`SELECT quantity,amount_micros FROM usage_records WHERE instance_id=${inst.id} AND day=${e.day} AND item=${e.item} AND unit_price_micros=${e.price} AND unit_cost_micros=${e.cost}`;
-      const delta = sql`round((coalesce((SELECT quantity FROM (${previous})),0)+${e.quantity})*${e.price})-coalesce((SELECT amount_micros FROM (${previous})),0)`;
-      if (prepaid && paidEntries.length) stmts.push(db.update(balanceTransactions).set({ description: sql`json_set(${balanceTransactions.description},'$.itemCharge',min(coalesce(json_extract(${balanceTransactions.description},'$.remainingMicros'),0),${delta}))` })
-        .where(and(eq(balanceTransactions.reference, reference), isNull(balanceTransactions.appliedAt), claim)));
-      const itemCharge = prepaid && paidEntries.length ? sql`coalesce((SELECT json_extract(description,'$.itemCharge') FROM balance_transactions WHERE reference=${reference} AND applied_at IS NULL),0)` : sql`0`;
+      const itemCharge = prepaid && paidEntries.length ? sql`coalesce((SELECT json_extract(description,${`$.itemCharges."${e.day}:${e.item}"`}) FROM balance_transactions WHERE reference=${reference} AND applied_at IS NULL),0)` : sql`0`;
       stmts.push(db.insert(usageRecords).select(sql`SELECT ${inst.id},${inst.userId},${inst.regionId},${e.item},${e.day},${e.price},${e.cost},${e.quantity},round(${e.quantity}*${e.price}),round(${e.quantity}*${e.cost}),${itemCharge},${now.getTime()} WHERE ${claim}`)
         .onConflictDoUpdate({ target: [usageRecords.instanceId, usageRecords.item, usageRecords.day, usageRecords.unitPriceMicros, usageRecords.unitCostMicros], set: {
           chargedMicros: sql`${usageRecords.chargedMicros}+${itemCharge}`, quantity: sql`${usageRecords.quantity}+excluded.quantity`,
           amountMicros: sql`round((${usageRecords.quantity}+excluded.quantity)*${usageRecords.unitPriceMicros})`,
           costMicros: sql`round((${usageRecords.quantity}+excluded.quantity)*${usageRecords.unitCostMicros})`, updatedAt: now,
         } }));
-      if (prepaid && paidEntries.length) stmts.push(db.update(balanceTransactions).set({ description: sql`json_set(${balanceTransactions.description},'$.remainingMicros',max(0,json_extract(${balanceTransactions.description},'$.remainingMicros')-json_extract(${balanceTransactions.description},'$.itemCharge')))` })
-        .where(and(eq(balanceTransactions.reference, reference), isNull(balanceTransactions.appliedAt), claim)));
     }
     if (prepaid && paidEntries.length) {
       const actualDebit = sql`coalesce((SELECT amount_micros FROM balance_transactions WHERE reference=${reference} AND applied_at IS NULL),0)`;

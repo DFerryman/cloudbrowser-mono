@@ -74,7 +74,8 @@ export default {
         return;
       }
       await idleStops(deps);
-      await meterUsage(deps);
+      // Four-minute settlement leaves one cron tick of headroom under the five-minute billing cap.
+      await meterUsage(deps, { minIntervalMs: 4 * 60_000 });
       await reclaimTrials(deps);
       await runPending(deps);
       const minute = new Date(controller.scheduledTime).getUTCMinutes();

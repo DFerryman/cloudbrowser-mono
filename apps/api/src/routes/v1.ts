@@ -790,20 +790,21 @@ v1.openapi(
     await requireViewerCredit(db, s.userId, s.instanceId);
     const now = new Date();
     const { input } = c.req.valid('json');
-    await db.batch([
-      db.update(viewerSessions).set({ lastSeenAt: now }).where(eq(viewerSessions.id, s.id)),
-      db
-        .insert(instanceHealth)
-        .values({ instanceId: s.instanceId, viewers: 1, lastHeartbeatAt: now, ...(input ? { lastInputAt: now } : {}) })
-        .onConflictDoUpdate({
-          target: instanceHealth.instanceId,
-          set: { viewers: 1, lastHeartbeatAt: now, ...(input ? { lastInputAt: now } : {}) },
-        }),
-    ]);
     const [inst] = await db.select().from(browserInstances).where(eq(browserInstances.id, s.instanceId));
     const [h] = await db.select().from(instanceHealth).where(eq(instanceHealth.instanceId, s.instanceId));
+    // Keep the 15-second authorization checks, but do not rewrite D1 on every heartbeat.
+    if (now.getTime() - s.lastSeenAt.getTime() >= 60_000) {
+      await db.update(viewerSessions).set({ lastSeenAt: now }).where(and(eq(viewerSessions.id, s.id), isNull(viewerSessions.endedAt),
+        sql`${viewerSessions.lastSeenAt} <= ${now.getTime() - 60_000}`));
+    }
+    const inputInterval = Math.min(60_000, (inst?.idleTimeoutS ?? 60) * 500);
+    if (input && (!h?.lastInputAt || now.getTime() - h.lastInputAt.getTime() >= inputInterval)) {
+      await db.insert(instanceHealth).values({ instanceId: s.instanceId, lastInputAt: now })
+        .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastInputAt: now },
+          setWhere: sql`${instanceHealth.lastInputAt} IS NULL OR ${instanceHealth.lastInputAt} <= ${now.getTime() - inputInterval}` });
+    }
     if (!inst || inst.status !== 'running') return c.json({ sleepAt: null }, 200);
-    const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, h?.lastInputAt?.getTime() ?? 0);
+    const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, h?.lastInputAt?.getTime() ?? 0, input ? now.getTime() : 0);
     const idleAt = last + inst.idleTimeoutS * 1000;
     // A paid authorization lease is renewed every minute. Its renewal time is not a sleep
     // deadline: only a genuine depletion projection should produce a balance warning.

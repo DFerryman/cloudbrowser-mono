@@ -60,6 +60,46 @@ beforeEach(async () => {
 });
 
 describe('seven-day prepaid resource deposits', () => {
+  it('writes nothing between cron settlements and writes each billing row only once per settlement', async () => {
+    await credit(10_000_000);
+    const id = await browser();
+    await sleep(id);
+    const start = Date.now();
+    const options = { minIntervalMs: 4 * 60_000 };
+    await meterUsage(at(start), options);
+    const writes = () => Number(one('SELECT total_changes() AS n').n);
+    const before = writes();
+    for (let minute = 1; minute < 4; minute++) {
+      expect((await meterUsage(at(start + minute * 60_000), options)).metered).toBe(0);
+    }
+    expect(writes()).toBe(before);
+    const previousCharge = charged();
+    expect((await meterUsage(at(start + 4 * 60_000), options)).metered).toBe(1);
+    // One journal insert + two usage items + account + journal completion + cursor.
+    expect(writes() - before).toBe(6);
+    expect(charged()).toBeGreaterThan(previousCharge);
+    expect(10_000_000 - (await state()).balanceMicros).toBe(charged());
+  });
+
+  it('still stops an unfunded browser between settlement ticks', async () => {
+    await credit(10_000_000);
+    const id = await browser();
+    const start = Date.now();
+    await meterUsage(at(start));
+    t.d1.sqlite.prepare('UPDATE instance_health SET net_tx_bytes=1000000000000,net_tx_billed_bytes=0 WHERE instance_id=?').run(id);
+    expect((await meterUsage(at(start + 60_000), { minIntervalMs: 4 * 60_000 })).stopped).toBe(1);
+  });
+
+  it('still ends a trial between settlement ticks', async () => {
+    await credit(10_000_000);
+    const id = await browser();
+    const start = Date.now();
+    await meterUsage(at(start));
+    t.d1.sqlite.prepare("UPDATE browser_instances SET trial_state='active',trial_used_ms=540000,trial_used_s=540 WHERE id=?").run(id);
+    expect((await meterUsage(at(start + 60_000), { minIntervalMs: 4 * 60_000 })).stopped).toBe(1);
+    expect(one('SELECT trial_state AS state FROM browser_instances WHERE id=?', id).state).toBe('ended');
+  });
+
   it('holds a new browser deposit inside the total balance without charging it as usage', async () => {
     await credit(10_000_000);
     expect(await state()).toMatchObject({ balanceMicros: 10_000_000, reservedMicros: 0, availableMicros: 10_000_000 });

@@ -66,7 +66,7 @@ async function kickOperation(env: Env, db: Db, instanceId: string) {
 /** Handles one frame from an agent. Returns a frame to send back, if any. */
 export async function agentMessage(env: Env, db: Db, instanceId: string, generation: number, raw: unknown, now = new Date()): Promise<GatewayToAgent | null> {
   const frame = AgentFrame.parse(raw);
-  const [inst] = await db.select({ status: browserInstances.status, desiredState: browserInstances.desiredState }).from(browserInstances).where(eq(browserInstances.id, instanceId));
+  const [inst] = await db.select({ status: browserInstances.status, desiredState: browserInstances.desiredState, idleTimeoutS: browserInstances.idleTimeoutS }).from(browserInstances).where(eq(browserInstances.id, instanceId));
   if (!inst || inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) return null;
   const [identity] = await db.select({ generation: agentCredentials.generation }).from(agentCredentials).where(eq(agentCredentials.instanceId, instanceId));
   if (!identity || identity.generation !== generation) return null;
@@ -117,7 +117,15 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
         await db.insert(instanceHealth).values({ instanceId, ...set }).onConflictDoUpdate({ target: instanceHealth.instanceId, set });
         await kickOperation(env, db, instanceId);
       } else if (frame.kind === 'heartbeat') {
+        const [health] = await db.select().from(instanceHealth).where(eq(instanceHealth.instanceId, instanceId));
         const lastInputAt = typeof d.lastInputAt === 'string' && !Number.isNaN(Date.parse(d.lastInputAt)) ? new Date(d.lastInputAt) : null;
+        const viewers = typeof d.viewers === 'number' ? d.viewers : 0;
+        const inputInterval = Math.min(60_000, inst.idleTimeoutS * 500);
+        // Transport heartbeats remain frequent; persist only once a minute or on a viewer/input
+        // transition. Short idle timeouts keep an appropriately shorter input reporting interval.
+        const inputDue = lastInputAt && lastInputAt.getTime() - (health?.lastInputAt?.getTime() ?? 0) >= inputInterval;
+        if (health?.lastHeartbeatAt && now.getTime() - health.lastHeartbeatAt.getTime() < 60_000
+          && health.viewers === viewers && !inputDue) return null;
         const count = (v: unknown) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null);
         const disk = d.disk && typeof d.disk === 'object' ? (d.disk as Record<string, unknown>) : null;
         const used = count(disk?.usedBytes);
@@ -125,8 +133,8 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
         const tx = count(d.netTxBytes);
         const set = {
           lastHeartbeatAt: now,
-          viewers: typeof d.viewers === 'number' ? d.viewers : 0,
-          ...(lastInputAt ? { lastInputAt } : {}),
+          viewers,
+          ...(lastInputAt ? { lastInputAt: new Date(Math.max(lastInputAt.getTime(), health?.lastInputAt?.getTime() ?? 0)) } : {}),
           // Storage page (used / total) and data-transfer metering (page 6).
           ...(used !== null && total !== null ? { diskUsedBytes: used, diskTotalBytes: total, diskReportedAt: now } : {}),
           ...(tx !== null ? { netTxBytes: tx } : {}),
