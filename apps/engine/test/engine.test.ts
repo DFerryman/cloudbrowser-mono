@@ -905,9 +905,12 @@ describe('on the aws-ec2 executor', () => {
   });
 });
 
-describe('billing totals stay consistent', () => {
+describe.each([
+  ['every minute', undefined],
+  ['in the production cron\'s four-minute settlement', 4 * 60_000],
+])('billing totals stay consistent, settling %s', (_name, minIntervalMs) => {
   const { billingAccounts, balanceTransactions, usageRecords, controlFlags, instanceHealth } = schema;
-  const meter = async () => (await import('../src/metering.js')).meterUsage(w.deps());
+  const meter = async () => (await import('../src/metering.js')).meterUsage(w.deps(), { minIntervalMs });
 
   /** Every place that shows money must agree with the balance and the ledger of debits. */
   async function expectConsistent() {
