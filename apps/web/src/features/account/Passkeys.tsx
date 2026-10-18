@@ -9,7 +9,7 @@ import { queryClient } from '../../lib/query.js';
 type Passkey = { id: string; name?: string | null; createdAt: string };
 const KEY = ['passkeys'] as const;
 
-/** Passkeys through Better Auth's passkey plugin (WebAuthn). They also unlock /admin for staff. */
+/** Passkeys through Better Auth's passkey plugin (WebAuthn) for the main app account. */
 export function Passkeys() {
   const { t, locale, errorMessage } = useI18n();
   const toast = useToast();

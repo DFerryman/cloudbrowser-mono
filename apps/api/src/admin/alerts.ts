@@ -12,7 +12,7 @@ export async function deliverAlerts(env: Env, db: Db, now = new Date()): Promise
   const pending = await db.select().from(alerts).where(isNull(alerts.sentAt)).orderBy(asc(alerts.createdAt)).limit(50);
   if (!pending.length) return 0;
   const lines = pending.map((a) => `[${a.severity.toUpperCase()}] ${a.source}: ${a.title}`);
-  const link = `${env.APP_URL}/admin/alerts`;
+  const link = env.ADMIN_URL ? new URL('/alerts', env.ADMIN_URL).href : `${env.APP_URL}/admin/alerts`;
   const emails = (env.ALERT_EMAILS ?? '').split(',').map((e) => e.trim()).filter(Boolean);
   const critical = pending.some((a) => a.severity === 'critical');
   try {

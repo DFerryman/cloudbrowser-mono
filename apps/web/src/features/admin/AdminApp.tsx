@@ -1,81 +1,50 @@
-import { Button, cn, useToast } from '@cloudbrowser/ui';
-import { startAuthentication, type PublicKeyCredentialRequestOptionsJSON } from '@simplewebauthn/browser';
-import { KeyRound, Shield } from 'lucide-react';
-import { useState } from 'react';
-import { Link, NavLink, Navigate, Route, Routes } from 'react-router';
-import { api, ApiError } from '../../lib/api.js';
-import { queryClient } from '../../lib/query.js';
+import { Button, cn } from '@cloudbrowser/ui';
+import { LogOut, Shield } from 'lucide-react';
+import { NavLink, Navigate, Route, Routes } from 'react-router';
+import { ApiError } from '../../lib/api.js';
 import { AlertsPage, AuditPage, FindingsPage, LedgerPage, OperationsPage, UsersPage } from './Lists.js';
 import { BrowserDetailPage, BrowsersPage } from './Browsers.js';
 import { LimitsPage } from './Limits.js';
 import { OverviewPage } from './Overview.js';
 import { useAdmin, type AdminSession } from './data.js';
+import { ACCESS_LOGIN_URL, ACCESS_LOGOUT_URL, APP_URL } from './location.js';
 
 /**
- * The operator console (page 10): staff only, from allowlisted IPs, after a passkey step-up that
- * lasts 30 minutes. Internal and English-only. Loaded on demand, so app users never download it.
+ * The operator console has its own host and Cloudflare Access email session. It does not use
+ * the main app's Better Auth session. Internal and English-only, loaded on demand.
  */
 export function AdminApp() {
   const session = useAdmin<AdminSession>('/session');
   if (session.isPending) return <Centered>Loading…</Centered>;
   if (session.isError) {
+    const status = session.error instanceof ApiError ? session.error.status : null;
     return (
       <Centered>
-        <p>Not found.</p>
-        <Link to="/browsers" className="text-accent hover:underline">
+        <Shield className="mx-auto size-8 text-accent" aria-hidden />
+        <h1 className="text-base font-semibold text-fg">Operator console</h1>
+        <p className="max-w-sm">
+          {status === 403
+            ? 'Access denied. Your email is not authorized to use this console.'
+            : status === 401
+              ? 'Your administrator session has expired. Sign in again with your email verification code.'
+              : 'Could not verify your administrator session. Try again or sign in with your email verification code.'}
+        </p>
+        <div className="flex flex-wrap justify-center gap-3">
+          {status !== 403 ? <a href={ACCESS_LOGIN_URL} className="rounded-[var(--radius-control)] bg-accent px-3 py-2 font-medium text-white">Sign in with email</a> : null}
+          {status !== 401 && status !== 403 ? <Button onClick={() => void session.refetch()}>Try again</Button> : null}
+          <a href={ACCESS_LOGOUT_URL} className="rounded-[var(--radius-control)] border border-border px-3 py-2 font-medium text-fg">Sign out</a>
+        </div>
+        <a href={APP_URL} className="text-accent hover:underline">
           Back to the app
-        </Link>
+        </a>
       </Centered>
     );
   }
-  const s = session.data;
-  if (!s.stepUpUntil || Date.parse(s.stepUpUntil) <= Date.now()) return <StepUp session={s} />;
-  return <Console session={s} />;
+  return <Console session={session.data} />;
 }
 
 function Centered({ children }: { children: React.ReactNode }) {
   return <div className="grid min-h-dvh place-items-center p-4 text-center text-sm text-muted">{<div className="space-y-3">{children}</div>}</div>;
-}
-
-function StepUp({ session }: { session: AdminSession }) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const confirm = async () => {
-    setBusy(true);
-    try {
-      const optionsJSON = await api<PublicKeyCredentialRequestOptionsJSON>('POST', '/admin/step-up/options');
-      const response = await startAuthentication({ optionsJSON });
-      await api('POST', '/admin/step-up/verify', { body: { response } });
-      await queryClient.invalidateQueries({ queryKey: ['admin'] });
-    } catch (e) {
-      if ((e as Error).name !== 'NotAllowedError') toast(e instanceof ApiError ? e.message : (e as Error).message, 'error');
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <Centered>
-      <Shield className="mx-auto size-8 text-accent" aria-hidden />
-      <h1 className="text-base font-semibold text-fg">Operator console</h1>
-      {session.passkeys ? (
-        <>
-          <p className="max-w-xs">Confirm it’s you with your passkey. The confirmation lasts 30 minutes.</p>
-          <Button variant="primary" disabled={busy} onClick={() => void confirm()}>
-            <KeyRound /> Confirm with passkey
-          </Button>
-        </>
-      ) : (
-        <p className="max-w-xs">
-          Add a passkey to your account first, in{' '}
-          <Link to="/settings" className="text-accent hover:underline">
-            Settings → Security
-          </Link>
-          .
-        </p>
-      )}
-      <p className="text-xs">Signed in as {session.email}</p>
-    </Centered>
-  );
 }
 
 const NAV = [
@@ -91,7 +60,6 @@ const NAV = [
 ] as const;
 
 function Console({ session }: { session: AdminSession }) {
-  const until = new Date(session.stepUpUntil!);
   return (
     <div className="flex min-h-dvh flex-col md:flex-row">
       <aside className="border-b border-border bg-surface p-3 md:sticky md:top-0 md:h-dvh md:w-52 md:shrink-0 md:border-r md:border-b-0">
@@ -102,7 +70,7 @@ function Console({ session }: { session: AdminSession }) {
           {NAV.map(([to, label]) => (
             <NavLink
               key={to}
-              to={`/admin${to ? `/${to}` : ''}`}
+              to={`/${to}`}
               end={to === ''}
               className={({ isActive }) =>
                 cn('rounded-[var(--radius-control)] px-2.5 py-1.5 text-sm whitespace-nowrap', isActive ? 'bg-surface-2 font-medium' : 'text-muted hover:bg-surface-2 hover:text-fg')
@@ -112,15 +80,15 @@ function Console({ session }: { session: AdminSession }) {
             </NavLink>
           ))}
         </nav>
-        <p className="mt-4 hidden px-2 text-xs text-muted md:block">
-          {session.email}
-          <br />
-          Step-up until {until.toLocaleTimeString()}
-          <br />
-          <Link to="/browsers" className="text-accent hover:underline">
+        <div className="mt-4 space-y-3 px-2 text-xs text-muted">
+          <p className="break-all">Signed in as {session.email}</p>
+          <a href={APP_URL} className="block text-accent hover:underline">
             Back to the app
-          </Link>
-        </p>
+          </a>
+          <a href={ACCESS_LOGOUT_URL} className="flex w-fit items-center gap-2 rounded-[var(--radius-control)] border border-border px-3 py-2 text-sm font-medium text-fg hover:bg-surface-2">
+            <LogOut className="size-4" aria-hidden /> Sign out
+          </a>
+        </div>
       </aside>
       <main className="min-w-0 flex-1 p-4 md:p-6">
         <Routes>
@@ -134,7 +102,7 @@ function Console({ session }: { session: AdminSession }) {
           <Route path="findings" element={<FindingsPage />} />
           <Route path="limits" element={<LimitsPage />} />
           <Route path="audit" element={<AuditPage />} />
-          <Route path="*" element={<Navigate to="/admin" replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
     </div>

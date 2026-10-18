@@ -15,9 +15,9 @@ export function OverviewPage() {
     <div className="space-y-6">
       <PageTitle title="Overview" />
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <Tile label="Open alerts" value={<Link to="/admin/alerts">{d.alertsOpen}</Link>} tone={d.alertsOpen ? 'bad' : undefined} />
-        <Tile label="Open findings" value={<Link to="/admin/findings">{d.findingsOpen}</Link>} tone={d.findingsOpen ? 'warn' : undefined} />
-        <Tile label="Unfinished operations" value={<Link to="/admin/operations">{d.operations.unfinished}</Link>} />
+        <Tile label="Open alerts" value={<Link to="/alerts">{d.alertsOpen}</Link>} tone={d.alertsOpen ? 'bad' : undefined} />
+        <Tile label="Open findings" value={<Link to="/findings">{d.findingsOpen}</Link>} tone={d.findingsOpen ? 'warn' : undefined} />
+        <Tile label="Unfinished operations" value={<Link to="/operations">{d.operations.unfinished}</Link>} />
         <Tile label="Failed in 24 h" value={d.operations.failed24h} tone={d.operations.failed24h ? 'warn' : undefined} />
         <Tile label="Webhooks pending" value={d.webhooksPending} tone={d.webhooksPending ? 'warn' : undefined} />
         <Tile label="Users" value={d.users} />

@@ -46,11 +46,12 @@ export function setup() {
   };
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => {
+    const url = new URL(path, ORIGIN);
     const res = await app.fetch(
-      new Request(`${ORIGIN}${path}`, {
+      new Request(url, {
         method,
         headers: {
-          origin: ORIGIN,
+          origin: url.origin,
           ...(cookie ? { cookie } : {}),
           ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
           ...headers,

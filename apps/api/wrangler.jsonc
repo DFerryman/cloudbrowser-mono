@@ -28,9 +28,12 @@
     "CREEM_PRODUCT_PERSONAL_YEARLY": "",
     "CREEM_PRODUCT_PRO_MONTHLY": "",
     "CREEM_PRODUCT_PRO_YEARLY": "",
-    // Operator console (/admin, page 10): comma-separated IPs and CIDRs allowed to reach it. Empty
-    // means nobody (except 127.0.0.1 under `wrangler dev`). Add a WAF rule on the same list.
-    "ADMIN_IP_ALLOWLIST": "154.9.249.41",
+    // Independent operator origin, protected by Cloudflare Access email OTP.
+    // Keep the Access policy and server-side email allowlist in sync. No IP restriction.
+    "ADMIN_URL": "https://admin.console.nevazu.com",
+    "ACCESS_TEAM_DOMAIN": "gotagma.cloudflareaccess.com",
+    "ACCESS_AUD": "3084001a20212c1625f2aa36fc813d2683597a5d3ebbf52d17a7af45b7968591",
+    "ADMIN_EMAIL_ALLOWLIST": "sanchai20@163.com",
     // Operator alerts: comma-separated emails (via Email Service). The chat webhook URL is the
     // secret ALERT_WEBHOOK_URL (Slack-compatible).
     "ALERT_EMAILS": ""

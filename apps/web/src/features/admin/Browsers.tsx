@@ -28,7 +28,7 @@ export function BrowsersPage() {
       <Table
         rows={rows.data}
         rowKey={(r) => r.id}
-        onRow={(r) => navigate(`/admin/browsers/${r.id}`)}
+        onRow={(r) => navigate(`/browsers/${r.id}`)}
         columns={['Browser', 'Status', 'Region', 'IP', 'Owner', 'Updated']}
         cells={(r) => [
           <span>
@@ -109,7 +109,7 @@ export function BrowserDetailPage() {
         <dt className="text-muted">Owner</dt>
         <dd>
           {d.data.owner ? (
-            <Link to={`/admin/browsers?q=${encodeURIComponent(d.data.owner.email)}`} className="text-accent hover:underline">
+            <Link to={`/browsers?q=${encodeURIComponent(d.data.owner.email)}`} className="text-accent hover:underline">
               {d.data.owner.email}
             </Link>
           ) : (

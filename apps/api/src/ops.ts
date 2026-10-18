@@ -118,6 +118,7 @@ export async function systemOperation(
     userId: string;
     kind: OperationKind;
     actor: string;
+    auditDetail?: Record<string, unknown>;
     params?: Record<string, unknown>;
     before?: BatchItem<'sqlite'>[];
   },
@@ -133,7 +134,7 @@ export async function systemOperation(
         actor: input.actor,
         action: `operation.${input.kind}`,
         target: `instance:${input.instanceId}`,
-        detail: { operationId: op.id, ...(input.params ?? {}) },
+        detail: { operationId: op.id, ...(input.params ?? {}), ...(input.auditDetail ?? {}) },
         createdAt: now,
       }),
     ];

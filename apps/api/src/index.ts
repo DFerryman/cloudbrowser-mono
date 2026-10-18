@@ -7,6 +7,7 @@ import type { ViewerTokenClaims } from '@cloudbrowser/contracts';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { createDb } from '@cloudbrowser/db';
 import { deliverAlerts } from './admin/alerts.js';
+import { adminOrigin, isAdminOrigin, isAdminPath, requireAdmin } from './admin/access.js';
 import { creemFrom } from './billing/creem.js';
 import { billingSweep } from './billing/sweep.js';
 import { processWebhook, receiveWebhook } from './billing/webhooks.js';
@@ -28,6 +29,9 @@ app.onError((err) => {
 app.notFound((c) => (c.req.path.startsWith('/api/') ? problem(404, 'not_found').toResponse() : c.env.ASSETS.fetch(c.req.raw)));
 
 app.use('/api/*', async (c, next) => {
+  // The administrator host exposes only its own API. Its identity never comes from Better Auth.
+  const adminHost = isAdminOrigin(c.env, c.req.url);
+  if ((isAdminPath(c.req.path) && !adminHost) || (adminHost && !isAdminPath(c.req.path))) throw problem(404, 'not_found');
   const db = createDb(c.env.DB);
   c.set('db', db);
   c.set('auth', createAuth(c.env, db, (p) => c.executionCtx.waitUntil(p)));
@@ -82,7 +86,9 @@ app.post('/api/webhooks/creem', async (c) => {
 const sameOrigin: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
     const origin = c.req.header('origin');
-    const allowed = new Set([new URL(c.env.APP_URL).origin, new URL(c.req.url).origin]);
+    const allowed = new Set(isAdminPath(c.req.path)
+      ? [adminOrigin(c.env)]
+      : [new URL(c.env.APP_URL).origin, new URL(c.req.url).origin]);
     if (!origin || !allowed.has(origin)) throw problem(403, 'forbidden', 'Cross-origin request refused.');
   }
   await next();
@@ -110,7 +116,10 @@ app.doc31('/api/v1/openapi.json', {
   openapi: '3.1.0',
   info: { title: 'CloudBrowser API', version: '1.0.0' },
 });
-app.use('/api/v1/*', sameOrigin, requireUser, limitWrites);
+app.use('/api/v1/*', sameOrigin, async (c, next) => {
+  if (isAdminPath(c.req.path)) return requireAdmin(c, next);
+  return requireUser(c, next);
+}, limitWrites);
 app.route('/api/v1/admin', adminRoute);
 app.route('/api/v1', v1);
 

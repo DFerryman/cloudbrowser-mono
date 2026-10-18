@@ -79,7 +79,7 @@ export function OperationsPage() {
           <Pill tone={statusTone(o.status === 'running' ? 'running_op' : o.status)}>{o.status}</Pill>,
           o.step ?? '—',
           o.attempt,
-          <Link to={`/admin/browsers/${o.instanceId}`} onClick={(e) => e.stopPropagation()} className="text-accent hover:underline">
+          <Link to={`/browsers/${o.instanceId}`} onClick={(e) => e.stopPropagation()} className="text-accent hover:underline">
             {o.instanceName ?? o.instanceId}
           </Link>,
           o.userEmail ?? '—',
@@ -158,7 +158,7 @@ export function LedgerPage() {
           `${String(r.region)}${r.zone ? ` / ${String(r.zone)}` : ''}`,
           <Pill tone={statusTone(String(r.state))}>{String(r.state)}</Pill>,
           r.instanceId ? (
-            <Link to={`/admin/browsers/${String(r.instanceId)}`} className="text-accent hover:underline">
+            <Link to={`/browsers/${String(r.instanceId)}`} className="text-accent hover:underline">
               <Mono>{String(r.instanceId)}</Mono>
             </Link>
           ) : (
@@ -205,7 +205,7 @@ export function FindingsPage() {
           </Mono>,
           `${String(r.executor)}/${String(r.region)}`,
           r.instanceId ? (
-            <Link to={`/admin/browsers/${String(r.instanceId)}`} className="text-accent hover:underline">
+            <Link to={`/browsers/${String(r.instanceId)}`} className="text-accent hover:underline">
               <Mono>{String(r.instanceId)}</Mono>
             </Link>
           ) : (
@@ -277,7 +277,7 @@ export function UsersPage() {
           ) : (
             <span className="text-muted">pilot / none</span>
           ),
-          <Link to={`/admin/browsers?q=${encodeURIComponent(u.email)}`} className="text-accent hover:underline">
+          <Link to={`/browsers?q=${encodeURIComponent(u.email)}`} className="text-accent hover:underline">
             {u.browsers}
             {u.suspended ? ` (${u.suspended} suspended)` : ''}
           </Link>,

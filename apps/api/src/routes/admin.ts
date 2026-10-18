@@ -1,18 +1,16 @@
 /**
  * Operator console API (page 10, "Operator console"): `/api/v1/admin/*`. Every route needs the
- * admin role and an allowlisted IP; everything but the step-up itself needs a passkey step-up from
- * the last 30 minutes. Every change is written to `audit_log` with the admin as actor. Internal:
+ * administrator host and a verified, allowlisted Cloudflare Access identity. Every change is
+ * written to `audit_log` with the admin's stable Access subject and email. Internal:
  * not part of the public OpenAPI document.
  */
 import { OPERATION_STEPS, type OperationKind } from '@cloudbrowser/contracts';
 import { schema, type Db } from '@cloudbrowser/db';
-import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { and, desc, eq, gte, inArray, isNotNull, isNull, like, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
-import { requireAdmin, requireStepUp, stepUpUntil } from '../admin/access.js';
+import { isAdminEmail } from '../admin/access.js';
 import { acknowledgeAlert } from '../admin/alerts.js';
-import { stepUpOptions, stepUpVerify } from '../admin/stepup.js';
 import { notifyHub } from '../billing/sync.js';
 import type { AppEnv } from '../env.js';
 import { systemOperation } from '../ops.js';
@@ -20,8 +18,6 @@ import { problem } from '../problem.js';
 
 const {
   user,
-  admins,
-  passkey,
   browserInstances,
   operations,
   operationSteps,
@@ -42,7 +38,7 @@ const {
 } = schema;
 
 export const adminRoute = new Hono<AppEnv>();
-adminRoute.use('*', requireAdmin);
+// index.ts applies the Access identity and exact-origin checks before mounting these routes.
 
 async function body<T extends z.ZodType>(c: Context<AppEnv>, schemaT: T): Promise<z.infer<T>> {
   const parsed = schemaT.safeParse(await c.req.json().catch(() => undefined));
@@ -52,37 +48,11 @@ async function body<T extends z.ZodType>(c: Context<AppEnv>, schemaT: T): Promis
 
 const actor = (c: Context<AppEnv>) => `admin:${c.get('user').id}`;
 const audit = (db: Db, c: Context<AppEnv>, action: string, target: string, detail: Record<string, unknown>) =>
-  db.insert(auditLog).values({ actor: actor(c), action, target, detail: { ...detail, ip: c.req.header('cf-connecting-ip') ?? null }, createdAt: new Date() });
+  db.insert(auditLog).values({ actor: actor(c), action, target, detail: { ...detail, email: c.get('user').email, ip: c.req.header('cf-connecting-ip') ?? null }, createdAt: new Date() });
 
-// --- session and step-up (no step-up needed) ------------------------------------------------------
+// --- session -----------------------------------------------------------------------------------
 
-adminRoute.get('/session', async (c) => {
-  const db = c.get('db');
-  const until = await stepUpUntil(db, c.get('sessionId'));
-  const [{ n } = { n: 0 }] = await db.select({ n: sql<number>`count(*)` }).from(passkey).where(eq(passkey.userId, c.get('user').id));
-  return c.json({
-    email: c.get('user').email,
-    passkeys: Number(n),
-    stepUpUntil: until && until.getTime() > Date.now() ? until.toISOString() : null,
-  });
-});
-
-adminRoute.post('/step-up/options', async (c) => c.json(await stepUpOptions(c.env, c.get('db'), c.get('user').id, c.get('sessionId'))));
-
-adminRoute.post('/step-up/verify', async (c) => {
-  const { response } = await body(c, z.object({ response: z.record(z.string(), z.unknown()) }));
-  const at = await stepUpVerify(
-    c.env,
-    c.get('db'),
-    c.get('user').id,
-    c.get('sessionId'),
-    response as unknown as AuthenticationResponseJSON,
-    c.req.header('cf-connecting-ip') ?? null,
-  );
-  return c.json({ stepUpUntil: new Date(at.getTime() + 30 * 60_000).toISOString() });
-});
-
-adminRoute.use('*', requireStepUp);
+adminRoute.get('/session', (c) => c.json({ email: c.get('user').email }));
 
 // --- overview ----------------------------------------------------------------------------------
 
@@ -293,6 +263,7 @@ adminRoute.post('/instances/:id/actions', async (c) => {
         userId: inst.userId,
         kind: last.kind as OperationKind,
         actor: actor(c),
+        auditDetail: { email: c.get('user').email },
         params: { ...(last.params ?? {}), retryOf: last.id, reason },
       });
       break;
@@ -301,7 +272,7 @@ adminRoute.post('/instances/:id/actions', async (c) => {
       if (!['running', 'sleeping', 'needs_attention', 'waiting_capacity', 'provider_issue'].includes(inst.status)) {
         throw problem(409, 'invalid_state', `Cannot recover a browser that is ${inst.status}.`);
       }
-      operationId = await systemOperation(c.env, db, { instanceId: id, userId: inst.userId, kind: 'recover', actor: actor(c), params: { reason: 'operator', note: reason } });
+      operationId = await systemOperation(c.env, db, { instanceId: id, userId: inst.userId, kind: 'recover', actor: actor(c), auditDetail: { email: c.get('user').email }, params: { reason: 'operator', note: reason } });
       break;
     case 'stop':
       operationId = await systemOperation(c.env, db, {
@@ -309,6 +280,7 @@ adminRoute.post('/instances/:id/actions', async (c) => {
         userId: inst.userId,
         kind: 'stop',
         actor: actor(c),
+        auditDetail: { email: c.get('user').email },
         params: { reason: 'operator', note: reason },
         before: [db.update(browserInstances).set({ desiredState: 'stopped', updatedAt: now }).where(eq(browserInstances.id, id))],
       });
@@ -431,7 +403,6 @@ adminRoute.get('/users', async (c) => {
     .where(and(inArray(browserInstances.userId, ids), sql`${browserInstances.status} <> 'purged'`))
     .groupBy(browserInstances.userId);
   const subs = await db.select().from(subscriptions).where(inArray(subscriptions.userId, ids));
-  const staff = new Set((await db.select().from(admins).where(inArray(admins.userId, ids))).map((a) => a.userId));
   return c.json(
     rows.map((r) => {
       const n = counts.find((x) => x.userId === r.id);
@@ -441,7 +412,7 @@ adminRoute.get('/users', async (c) => {
         browsers: Number(n?.n ?? 0),
         suspended: Number(n?.suspended ?? 0),
         subscription: s ? { plan: s.plan, status: s.status, units: s.units, revoked: !!s.revokedAt } : null,
-        admin: staff.has(r.id),
+        admin: isAdminEmail(c.env, r.email),
       };
     }),
   );

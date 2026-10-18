@@ -139,26 +139,42 @@ minute and puts browsers to sleep 10 minutes after a plan's hours run out.
 
 ## 3c. Operator console and alerts
 
-The console is at `https://<app domain>/admin` (page 10). Three gates, all required:
+The console is at `https://admin.console.nevazu.com`. The main site's `/admin` and
+`/admin/console` links redirect there. Administrator authentication is independent of main-site
+sessions, passkeys, and the legacy `admins` table. There is no administrator IP restriction.
 
-1. **Admin role** (SQL only, never from the app). Sign in once with the email first, then:
+Configure these layers together, before making the hostname public:
 
-```sql
-INSERT INTO admins (user_id, note, created_at)
-  SELECT id, 'ops', unixepoch() * 1000 FROM user WHERE email = 'you@example.com';
-```
+1. Create a **Cloudflare Access self-hosted application** for the entire administrator hostname.
+   Select **One-time PIN** as its only identity provider. Add one Allow policy including the exact
+   authorized email (`sanchai20@163.com` in this deployment), require that OTP provider, and use a
+   one-hour session duration. Do not add Everyone, Bypass, or service-token policies. Access
+   manages email delivery, login screens, and denial messages; this is email OTP, not MFA.
+2. Set `ADMIN_URL`, `ACCESS_TEAM_DOMAIN`, and `ACCESS_AUD` in the API Worker configuration from
+   that application. Set `ADMIN_EMAIL_ALLOWLIST` to the same exact email(s). The default email is
+   `sanchai20@163.com`; an explicitly empty list denies everyone. These values are public
+   configuration, not credentials. The Worker validates Access JWT signature, issuer, audience,
+   expiry and identity, then checks the email. Missing or invalid configuration fails closed.
+3. Add a **Workers Custom Domain** pointing `admin.console.nevazu.com` to `cloudbrowser`.
+   Cloudflare provisions DNS and a certificate, including for this multilevel subdomain. The
+   normal application stays on `APP_URL`. If changing the admin URL, also set the frontend build
+   variable `VITE_ADMIN_URL` to exactly that origin; it defaults to this deployment's admin URL.
 
-2. **IP allowlist:** `ADMIN_IP_ALLOWLIST` in `apps/api/wrangler.jsonc` (comma-separated IPs and
-   CIDRs, IPv4 and IPv6). Empty means nobody. Add the same list as a Cloudflare **WAF custom rule**
-   in front of the app: *(URI Path starts with `/admin` or `/api/v1/admin`) and not (IP Source
-   Address in {your list})* → **Block**. Everyone else gets a plain 404.
-3. **Passkey step-up:** each admin adds a passkey in **Settings → Security** (Touch ID, Windows
-   Hello or a security key), then confirms with it when opening the console. A confirmation lasts
-   30 minutes per sign-in session. Passkeys are bound to the app's domain (`APP_URL`), so register
-   them on the production domain.
+Only the administrator origin serves `/api/v1/admin/*`; that host rejects main-site authentication
+and user APIs. Administrator writes require an exact matching `Origin`. Main-site cookies and
+unsigned identity headers cannot grant administrator access. The old IP WAF rule must be removed
+after deploying the Access-protected backend. For development, use a separate HTTPS origin behind
+its own Access application and matching frontend/API configuration; localhost has no bypass.
 
 Every change made in the console (suspend, recover, retry, stop, caps, switches, finding
-resolutions, alert acknowledgements, step-ups) is written to `audit_log` with the admin as actor.
+resolutions, alert acknowledgements) is written to `audit_log` with the stable Access subject as
+actor and the verified email in its detail. Sign out uses `/cdn-cgi/access/logout`, which revokes
+the user's Access sessions across applications. To revoke an administrator, remove the email from
+both the Access policy and Worker allowlist, and revoke their existing Access sessions.
+
+Regression checks: API tests exercise signed JWTs, disallowed emails, expired/forged tokens,
+cross-origin writes and direct-host bypass attempts. `node apps/web/e2e/admin-access.mjs` exercises
+frontend routing and expired/denied sessions with mocked requests; it never sends OTP emails.
 
 **Alerts** (circuit breaker, drift findings, spend at 80% and 100%, failed IP checks, quota or
 permission errors, billing drift and disputes) are stored in `alerts`, listed in the console and
@@ -216,7 +232,7 @@ SELECT * FROM active_usage WHERE month = strftime('%Y-%m', 'now');   -- active s
 SELECT * FROM alerts WHERE acknowledged_at IS NULL;          -- open operator alerts
 ```
 
-Most of these are also in the operator console (`/admin`).
+Most of these are also in the operator console (`https://admin.console.nevazu.com`).
 
 For chaos testing on staging, set `FAKE_FAULTS` on the engine, e.g.
 `{"ensureRunning":{"class":"capacity","rate":0.5}}`.

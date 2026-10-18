@@ -42,8 +42,13 @@ export interface Env {
   CREEM_PRODUCT_PERSONAL_YEARLY?: string;
   CREEM_PRODUCT_PRO_MONTHLY?: string;
   CREEM_PRODUCT_PRO_YEARLY?: string;
-  /** /admin is refused unless the client IP is in this comma-separated list of IPs and CIDRs (page 10). */
-  ADMIN_IP_ALLOWLIST?: string;
+  /** Exact HTTPS origin of the Cloudflare Access-protected operator console. */
+  ADMIN_URL?: string;
+  /** Cloudflare Access team hostname and this admin application's audience tag. */
+  ACCESS_TEAM_DOMAIN?: string;
+  ACCESS_AUD?: string;
+  /** Authorized operator emails; defaults to the deployment owner's address. */
+  ADMIN_EMAIL_ALLOWLIST?: string;
   /** Where operator alerts go: comma-separated emails (Email Service) and a Slack-compatible webhook URL. */
   ALERT_EMAILS?: string;
   ALERT_WEBHOOK_URL?: string;

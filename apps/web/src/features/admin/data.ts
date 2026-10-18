@@ -1,26 +1,60 @@
 import { useMutation, useQuery, type QueryKey } from '@tanstack/react-query';
-import { api, ApiError } from '../../lib/api.js';
+import { ApiError } from '../../lib/api.js';
 import { queryClient } from '../../lib/query.js';
 
 /** Admin API under /api/v1/admin (page 10). Every query is refetched on window focus like the app. */
 export const adminKey = (...parts: unknown[]): QueryKey => ['admin', ...parts];
 
-/** A call that comes back `step_up_required` sends the console back to the passkey prompt. */
-function onStepUpExpired(e: unknown) {
-  if (e instanceof ApiError && e.problem.type === 'step_up_required') void queryClient.invalidateQueries({ queryKey: adminKey('/session') });
+/** Keep Access login redirects out of JSON parsing and present them as an expired session. */
+async function adminApi<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const response = await fetch(`/api/v1/admin${path}`, {
+    method,
+    credentials: 'same-origin',
+    redirect: 'manual',
+    headers: {
+      accept: 'application/json',
+      'x-requested-with': 'XMLHttpRequest',
+      ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (response.type === 'opaqueredirect' || response.status === 401) {
+    throw new ApiError(401, { type: 'unauthenticated', title: 'Your administrator session has expired.', status: 401 });
+  }
+  if (response.status === 403) throw new ApiError(403, { type: 'forbidden', title: 'You do not have administrator access.', status: 403 });
+  if (response.status === 204) return undefined as T;
+  const text = await response.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error('The administrator service returned an unreadable response.');
+  }
+  if (!response.ok) {
+    throw new ApiError(response.status, data && typeof data.type === 'string'
+      ? data
+      : { type: 'internal', title: data?.message ?? response.statusText, status: response.status });
+  }
+  return data as T;
+}
+
+function onAccessExpired(e: unknown) {
+  if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+    void queryClient.invalidateQueries({ queryKey: adminKey('/session') });
+  }
 }
 
 export function useAdmin<T>(path: string, opts: { refetchInterval?: number; enabled?: boolean } = {}) {
   return useQuery({
     queryKey: adminKey(path),
     queryFn: () =>
-      api<T>('GET', `/admin${path}`).catch((e: unknown) => {
-        onStepUpExpired(e);
+      adminApi<T>('GET', path).catch((e: unknown) => {
+        if (path !== '/session') onAccessExpired(e);
         throw e;
       }),
     refetchInterval: opts.refetchInterval,
     enabled: opts.enabled,
-    retry: (n, e) => !(e instanceof ApiError && e.status < 500) && n < 2,
+    retry: (n, e) => path !== '/session' && !(e instanceof ApiError && e.status < 500) && n < 2,
   });
 }
 
@@ -29,18 +63,18 @@ export function useAdminAction<V>(fn: (v: V) => Promise<unknown>) {
   return useMutation({
     mutationFn: (v: V) =>
       fn(v).catch((e: unknown) => {
-        onStepUpExpired(e);
+        onAccessExpired(e);
         throw e;
       }),
     onSettled: () => void queryClient.invalidateQueries({ queryKey: ['admin'] }),
   });
 }
 
-export const post = (path: string, body?: unknown) => api('POST', `/admin${path}`, { body });
-export const put = (path: string, body: unknown) => api('PUT', `/admin${path}`, { body });
-export const del = (path: string, body: unknown) => api('DELETE', `/admin${path}`, { body });
+export const post = (path: string, body?: unknown) => adminApi('POST', path, body);
+export const put = (path: string, body: unknown) => adminApi('PUT', path, body);
+export const del = (path: string, body: unknown) => adminApi('DELETE', path, body);
 
-export type AdminSession = { email: string; passkeys: number; stepUpUntil: string | null };
+export type AdminSession = { email: string };
 
 export type Overview = {
   instances: Record<string, number>;
