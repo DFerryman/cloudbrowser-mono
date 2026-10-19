@@ -1,5 +1,6 @@
 import { ExecutorError, type CredentialMode, type Executor, type ExecutorKind } from './executor.js';
 import { AwsExecutor, type AwsRegionConfig } from './aws/aws-executor.js';
+import { assumeRoleCredentials } from './aws/authorization.js';
 import { FakeExecutor, type FaultPlan } from './fake/fake-executor.js';
 import { D1FakeStore } from './fake/store.js';
 
@@ -16,6 +17,9 @@ export interface ExecutorEnv {
   /** `aws-ec2`: the IAM user's key for this process's mode (runtime, reaper or read-only). */
   AWS_ACCESS_KEY_ID?: string;
   AWS_SECRET_ACCESS_KEY?: string;
+  AWS_ROLE_ARN?: string;
+  AWS_ROLE_EXTERNAL_ID?: string;
+  AWS_REGION_CONFIG_RESOLVER?: (region: string) => Promise<AwsRegionConfig | null>;
   /** JSON: provider region → network ids, from the CloudFormation stack's outputs. */
   AWS_REGIONS?: string;
   /** Public origin of the app; VMs check their IP against `${APP_URL}/api/echo/ip`. */
@@ -68,7 +72,9 @@ export function createExecutor(kind: ExecutorKind, mode: CredentialMode, env: Ex
         mode,
         accessKeyId: env.AWS_ACCESS_KEY_ID,
         secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
-        regions: awsRegions(env.AWS_REGIONS),
+        credentials: env.AWS_ROLE_ARN ? assumeRoleCredentials({ accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY }, { arn: env.AWS_ROLE_ARN, externalId: env.AWS_ROLE_EXTERNAL_ID }) : undefined,
+        regions: env.AWS_REGIONS ? awsRegions(env.AWS_REGIONS) : {},
+        regionConfigResolver: env.AWS_REGION_CONFIG_RESOLVER,
         appUrl: env.APP_URL ?? '',
         agentImage: env.AGENT_IMAGE || DEFAULT_AGENT_IMAGE,
         browserImage: env.BROWSER_IMAGE || DEFAULT_BROWSER_IMAGE,

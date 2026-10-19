@@ -4,9 +4,9 @@
  * was shown; if prices changed meanwhile, the action is refused with `price_changed`.
  */
 import {
-  REGION_INFO,
   browserEstimate,
   customerRates,
+  AWS_PRICE_MAX_AGE_MS,
   priceVersion,
   type ProviderPriceSheet,
   type Rates,
@@ -53,6 +53,7 @@ export async function requirePrice(db: Db, regionId: string, shownVersion: strin
   if (shownVersion === undefined) throw problem(400, 'validation_failed', 'Review the current prices before confirming this action.');
   const p = await regionPrice(db, regionId);
   if (!p) throw problem(503, 'price_unavailable', 'Prices for this region are being updated. Try again in a few minutes.');
+  if (p.sheet.source==='aws-price-list' && Date.now()-p.fetchedAt.getTime()>AWS_PRICE_MAX_AGE_MS) throw problem(503,'price_unavailable','The AWS price feed is out of date. New purchases are paused until it refreshes.');
   if (shownVersion !== p.version) {
     throw problem(409, 'price_changed', 'Prices changed since this page was opened. Review the new price and try again.');
   }
@@ -66,7 +67,7 @@ export async function storageLimits(db: Db, userId: string) {
 
 /** Every region's customer prices, for the create dialog and the price list. */
 export async function allRegionPricing(db: Db, userId: string): Promise<RegionPricing[]> {
-  const regions = (await db.select().from(schema.regions).orderBy(asc(schema.regions.id))).filter((r) => r.id in REGION_INFO);
+  const regions = (await db.select().from(schema.regions).orderBy(asc(schema.regions.id))).filter((r)=>r.enabled || r.executor!=='fake');
   const sheets = await priceSheets(db);
   const { markupPercent } = await pricingSettings(db);
   const storage = await storageLimits(db, userId);
@@ -75,7 +76,7 @@ export async function allRegionPricing(db: Db, userId: string): Promise<RegionPr
     const rates = stored ? customerRates(stored.sheet, markupPercent) : null;
     return {
       regionId: r.id as RegionId,
-      available: !!stored,
+      available: !!stored && (stored.sheet.source!=='aws-price-list' || Date.now()-stored.fetchedAt.getTime()<=AWS_PRICE_MAX_AGE_MS),
       source: stored?.sheet.source ?? null,
       updatedAt: stored?.fetchedAt.toISOString() ?? null,
       rates,

@@ -6,7 +6,7 @@ import { Link } from 'react-router';
 import { PageHeader } from '../../app/AppShell.js';
 import { useI18n } from '../../lib/i18n.js';
 import { cents, money } from '../../lib/money.js';
-import { regionKey } from '../instances/status.js';
+import { useRegionInfo } from '../instances/hooks.js';
 import { isLowBalance } from './access.js';
 import { DailyCharges } from './DailyCharges.js';
 import { currentMonth, monthLabel, recentMonths, useAccountUsage, useBilling, useCheckout, usePortal, useTransactions } from './hooks.js';
@@ -64,6 +64,7 @@ function BalanceCard({ state }: { state: BillingState }) {
   const checkout = useCheckout();
   const portal = usePortal();
   const hours = runway(state);
+  const trialRegion = useRegionInfo(state.trial.regionId);
   const m = (v: number) => money(v, locale);
   const alert = state.frozen
     ? t('billing.frozen')
@@ -129,7 +130,7 @@ function BalanceCard({ state }: { state: BillingState }) {
         <div className="mt-4 flex gap-3 rounded-[var(--radius-control)] border border-accent/40 bg-accent/5 px-3 py-2.5 text-sm">
           <Gift className="mt-0.5 size-4 shrink-0 text-accent" aria-hidden />
           <div>
-            <p>{t('trial.billingCta', { minutes: state.trial.minutes, region: t(regionKey(state.trial.regionId)) })}</p>
+            <p>{t('trial.billingCta', { minutes: state.trial.minutes, region: trialRegion.name })}</p>
             <Link to="/browsers/new" className="mt-1 inline-block font-medium text-accent hover:underline">
               {t('trial.start')}
             </Link>
@@ -265,8 +266,9 @@ function UsageByBrowser({ month, setMonth }: { month: string; setMonth: (m: stri
   );
 }
 
-function BrowserName({ instanceId, name, regionId, deleted }: { instanceId: string; name: string; regionId: Parameters<typeof regionKey>[0]; deleted: boolean }) {
+function BrowserName({ instanceId, name, regionId, deleted }: { instanceId: string; name: string; regionId: string; deleted: boolean }) {
   const { t } = useI18n();
+  const region = useRegionInfo(regionId);
   return (
     <span className="min-w-0">
       {deleted ? (
@@ -278,7 +280,7 @@ function BrowserName({ instanceId, name, regionId, deleted }: { instanceId: stri
       )}
       <span className="text-xs text-muted">
         {' '}
-        · {t(regionKey(regionId))}
+        · {region.name}
         {deleted ? ` · ${t('billing.deletedBrowser')}` : ''}
       </span>
     </span>

@@ -14,7 +14,7 @@ export interface ReconcilerDeps {
 }
 
 /** Assumed active hours per running browser per day, for the month projection (page 12). */
-const ACTIVE_HOURS_PER_DAY = 8;
+// The operator policy is read at run time (24 hours/day initially).
 
 function ctx(deps: ReconcilerDeps, purpose: string): OpContext {
   return {
@@ -88,7 +88,7 @@ export async function reconcileLedger(deps: ReconcilerDeps) {
   const targets = await db
     .selectDistinct({ executor: regions.executor, providerRegion: regions.providerRegion })
     .from(regions)
-    .where(eq(regions.enabled, true));
+    .where(and(eq(regions.enabled, true),sql`NOT EXISTS (SELECT 1 FROM aws_provider_regions a WHERE a.region_id=${regions.id} AND a.status!='ready')`));
 
   for (const t of targets) {
     const executor = deps.executor(t.executor as ExecutorKind);
@@ -200,7 +200,7 @@ export async function snapshotQuotasAndSpend(deps: ReconcilerDeps) {
   const targets = await db
     .selectDistinct({ executor: regions.executor, providerRegion: regions.providerRegion })
     .from(regions)
-    .where(eq(regions.enabled, true));
+    .where(and(eq(regions.enabled, true),sql`NOT EXISTS (SELECT 1 FROM aws_provider_regions a WHERE a.region_id=${regions.id} AND a.status!='ready')`));
   // The hourly VM price comes from the providers' price lists (refreshed by the engine), never a constant.
   let vmHourCents = 0;
   for (const s of (await priceSheets(db)).values()) vmHourCents = Math.max(vmHourCents, s.sheet.vmHour * 100);
@@ -223,7 +223,8 @@ export async function snapshotQuotasAndSpend(deps: ReconcilerDeps) {
     .from(browserInstances)
     .where(inArray(browserInstances.status, ['running', 'starting', 'creating']));
   const daysInMonth = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 0)).getUTCDate();
-  const runningHoursCents = Math.round(running * ACTIVE_HOURS_PER_DAY * daysInMonth * vmHourCents);
+  const [policy]=await db.select().from(schema.awsProviderSettings);
+  const runningHoursCents = Math.round(running * (policy?.estimatedHoursPerDay ?? 24) * daysInMonth * vmHourCents);
   const month = at.toISOString().slice(0, 7);
   const projectedCents = Number(cents) + runningHoursCents;
   await db.insert(spendSnapshots).values({ month, activeMonthlyCents: Number(cents), runningHoursCents, projectedCents, takenAt: at });

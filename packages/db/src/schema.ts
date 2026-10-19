@@ -171,6 +171,8 @@ export const browserInstances = sqliteTable(
       .references(() => regions.id),
     status: text('status').notNull(),
     statusReason: text('status_reason'),
+    /** Set by the reaper only after failed-create resources are confirmed absent. */
+    providerReleasedAt: ts('provider_released_at'),
     desiredState: text('desired_state').notNull(),
     idleTimeoutS: integer('idle_timeout_s').notNull(),
     locale: text('locale').notNull(),
@@ -607,6 +609,25 @@ export const providerPrices = sqliteTable('provider_prices', {
   fetchedAt: ts('fetched_at'),
   lastError: text('last_error'),
   lastErrorAt: ts('last_error_at'),
+});
+
+/** AWS observations; credentials stay in Worker secrets, never in D1 or admin responses. */
+export const awsProviderSettings = sqliteTable('aws_provider_settings', {
+  id: integer('id').primaryKey(), inventoryMode: text('inventory_mode').notNull(),
+  monthlyBudgetMicros: integer('monthly_budget_micros'), estimatedHoursPerDay: real('estimated_hours_per_day').notNull(),
+  updatedAt: ts('updated_at').notNull(), updatedBy: text('updated_by'),
+});
+export const awsProviderState = sqliteTable('aws_provider_state', {
+  id: integer('id').primaryKey(), accountId: text('account_id'), managementAccountId: text('management_account_id'), organizationId: text('organization_id'),
+  connection: json<Record<string, unknown>>('connection'), billing: json<Record<string, unknown>>('billing'),
+  billingAt: ts('billing_at'), catalogAt: ts('catalog_at'), lastError: text('last_error'), lastErrorAt: ts('last_error_at'),
+  syncLeaseUntil: ts('sync_lease_until').notNull(),
+});
+export const awsProviderRegions = sqliteTable('aws_provider_regions', {
+  regionId: text('region_id').primaryKey().references(() => regions.id), providerRegion: text('provider_region').notNull().unique(),
+  optInStatus: text('opt_in_status').notNull(), status: text('status').notNull(),
+  config: json<Record<string, unknown>>('config'), quotas: json<{ metric: string; limit: number; used: number }[]>('quotas'),
+  capacity: integer('capacity').notNull(), checkedAt: ts('checked_at'), lastError: text('last_error'),
 });
 
 /** One row (id 1): markup and balance thresholds, edited in the operator console. Owner: api (admin). */

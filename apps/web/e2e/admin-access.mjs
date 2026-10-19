@@ -63,6 +63,16 @@ async function fixture(mode = 'allowed') {
         regions: [], month: { month: '2026-10', revenueMicros: 0, costMicros: 0, grossMarginMicros: 0, byItem: {}, topupMicros: 0, topups: 0,
           refundMicros: 0, creditMicros: 0, estimatedFeesMicros: 0, projectedAwsCents: null }, balances: { totalMicros: 0, negativeMicros: 0 },
       };
+      else if (url.pathname === '/api/v1/admin/aws-provider') body = {
+        settings: { inventoryMode: 'budget', monthlyBudgetMicros: 200_000_000, estimatedHoursPerDay: 24 },
+        state: { accountId: '123456789012', managementAccountId: '210987654321', organizationId: 'o-test',
+          connection: { runtimeAuthorization: 'sts-assume-role', automaticSessionRefresh: true, baseCredentialRotation: 'operator-managed' },
+          billing: { month: '2026-10', spendMicros: 5_000_000, budgetMicros: 50_000_000, estimated: true, accounts: [], credits: [], auxiliaryErrors: {} },
+          billingAt: new Date().toISOString(), catalogAt: new Date().toISOString(), lastError: null },
+        regions: [{ regionId: 'eu-central-1', providerRegion: 'eu-central-1', name: 'Europe (Frankfurt)', optInStatus: 'opt-in-not-required', status: 'ready',
+          quotas: [{ metric: 'static_ips', used: 1, limit: 5 }], checkedAt: new Date().toISOString(), price: { fetchedAt: new Date().toISOString(), lastError: null },
+          inventory: { available: 3, quota_available: 4, monthly_unit_micros: 60_000_000, budget_remaining_micros: 195_000_000, availability: 'ready' } }],
+      };
       // The lookalike-host case is an ordinary signed-out app. Every ordinary v1 endpoint is
       // protected, including the billing query mounted alongside /me. Returning an arbitrary
       // 200 [] here produces malformed BillingState data and a race with the /me redirect.
@@ -94,7 +104,7 @@ try {
   noOrdinaryLogin(f);
   assert.ok(f.requests.some((r) => r.path === '/api/v1/admin/session'));
   const links = await f.page.locator('nav a').evaluateAll((nodes) => nodes.map((node) => ({ text: node.textContent, href: node.getAttribute('href') })));
-  assert.deepEqual(links.map((link) => link.href), ['/', '/alerts', '/operations', '/browsers', '/users', '/pricing', '/ledger', '/findings', '/limits', '/audit']);
+  assert.deepEqual(links.map((link) => link.href), ['/', '/alerts', '/operations', '/browsers', '/users', '/pricing', '/aws-provider', '/ledger', '/findings', '/limits', '/audit']);
   await f.page.getByRole('link', { name: 'Alerts', exact: true }).click();
   await f.page.waitForURL(`${admin.origin}/alerts`);
   await f.page.getByRole('heading', { name: 'Alerts', exact: true }).waitFor();
@@ -115,6 +125,16 @@ try {
   await pricing.page.getByLabel('Markup (% of AWS cost)', { exact: true }).waitFor();
   noOrdinaryLogin(pricing);
   await finish(pricing, 'pricing deep link stays inside the Access-protected console');
+
+  const provider = await fixture();
+  await provider.page.goto(`${admin.origin}/aws-provider`);
+  await provider.page.getByRole('heading', { name: 'AWS Provider', exact: true }).waitFor();
+  await provider.page.getByText('Europe (Frankfurt)', { exact: false }).first().waitFor();
+  assert.equal(await provider.page.getByLabel('Estimated running hours/day').inputValue(), '24');
+  assert.equal(await provider.page.getByLabel('Project budget (USD/month)').inputValue(), '200');
+  await provider.page.getByText('static_ips: 1 / 5', { exact: true }).waitFor();
+  noOrdinaryLogin(provider);
+  await finish(provider, 'AWS Provider displays dynamic regions, quota inventory, budget policy and session renewal status');
 
   for (const [legacy, target] of [
     ['/admin?from=legacy#overview', '/?from=legacy#overview'],

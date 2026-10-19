@@ -59,6 +59,7 @@ export const en = {
 
   'create.title': 'New browser',
   'create.name': 'Name',
+  'create.region.stock': '{count} available',
   'create.region': 'Region',
   'create.region.syd1': 'Sydney, Australia',
   'create.region.syd1.hint': 'Australian IP',

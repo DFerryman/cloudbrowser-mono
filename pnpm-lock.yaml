@@ -128,6 +128,9 @@ importers:
 
   apps/reconciler:
     dependencies:
+      '@cloudbrowser/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@cloudbrowser/db':
         specifier: workspace:*
         version: link:../../packages/db

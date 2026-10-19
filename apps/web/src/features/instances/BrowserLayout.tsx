@@ -1,10 +1,11 @@
+import { useRegionInfo } from './hooks.js';
 import type { Instance } from '@cloudbrowser/contracts';
 import { Button, cn, RegionIpChip, Skeleton, StatusBadge } from '@cloudbrowser/ui';
 import { ArrowLeft } from 'lucide-react';
 import { Link, NavLink, Outlet, useNavigate, useOutletContext, useParams } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
 import { useInstance } from './hooks.js';
-import { regionInfo, STATUS_TONE, statusKey } from './status.js';
+import { STATUS_TONE, statusKey } from './status.js';
 import { TrialBadge, TrialNotice } from './Trial.js';
 import { useBilling } from '../billing/hooks.js';
 import { canUseBrowser } from '../billing/access.js';
@@ -17,10 +18,10 @@ export function BrowserLayout() {
   const navigate = useNavigate();
   const instance = useInstance(id);
   const billing = useBilling();
+  const region = useRegionInfo(instance.data?.regionId ?? '');
   if (instance.isPending) return <Skeleton className="h-96" />;
   if (instance.isError) return <p className="text-sm text-error">{t('error.not_found')}</p>;
   const i = instance.data;
-  const region = regionInfo(i.regionId);
   const tabs = [
     { to: 'settings', label: t('manage.settings') },
     { to: 'storage', label: t('manage.storage') },

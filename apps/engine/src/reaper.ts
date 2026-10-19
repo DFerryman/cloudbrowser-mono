@@ -57,17 +57,22 @@ export async function reaperTick(deps: EngineDeps) {
       .selectDistinct({ executor: resources.executor })
       .from(resources)
       .where(and(eq(resources.instanceId, inst.id), ne(resources.state, 'deleted')));
+    const [region]=await db.select().from(schema.regions).where(eq(schema.regions.id,inst.regionId));
+    if (region && !kinds.some((k)=>k.executor===region.executor)) kinds.push({executor:region.executor});
+    let confirmed=true;
     for (const { executor } of kinds) {
       const cleanup = env(executor as ExecutorKind);
       try {
         await discoverInstanceResources(cleanup, inst.id);
         summary.failedCleanups += await deleteLedgerResources(cleanup, inst.id, (r) => r.executor === executor);
       } catch (e) {
+        confirmed=false;
         // Provider deletion and unknown-outcome creates may take multiple passes. Preserve every
         // unconfirmed ledger row and let the next reaper tick retry without skipping other users.
         console.error('failed browser cleanup pending', inst.id, e);
       }
     }
+    if (confirmed) await db.update(browserInstances).set({providerReleasedAt:now}).where(and(eq(browserInstances.id,inst.id),eq(browserInstances.status,'failed')));
   }
 
   // 3. IPs rejected by screening, and superseded resources past their keep period

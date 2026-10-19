@@ -61,6 +61,7 @@ export const zhCN: Messages = {
 
   'create.title': '新建浏览器',
   'create.name': '名称',
+  'create.region.stock': '库存：{count} 个',
   'create.region': '地区',
   'create.region.syd1': '澳大利亚悉尼',
   'create.region.syd1.hint': '澳大利亚 IP',

@@ -25,7 +25,7 @@ import {
   type RegionId,
 } from '@cloudbrowser/contracts';
 import { turnIceServers } from '../turn.js';
-import { billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, sha256Hex, settleRunningStatements } from '@cloudbrowser/db';
+import { awsInventory, billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, sha256Hex, settleRunningStatements } from '@cloudbrowser/db';
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import type { AppEnv } from '../env.js';
 import { admitCreate, admitInstanceSpend, admitIpChange, admitSpend, admitStart, claimTrial, entitlementsFor, isTrial, regionAcceptingNew, trialSecondsLeft, usage } from '../limits.js';
@@ -123,9 +123,11 @@ v1.openapi(
   async (c) => {
     const db = c.get('db');
     const rows = await db.select().from(regions).orderBy(asc(regions.id));
+    const inventory = await awsInventory(db);
     const out = await Promise.all(
       rows
-        .filter((r) => r.id in REGION_INFO)
+        .filter((r) => r.enabled || r.executor!=='fake')
+        .filter((r) => !['not-enabled','not-supported'].includes(inventory.get(r.id)?.status ?? ''))
         .map(async (r) => ({
           id: r.id as RegionId,
           name: r.name,
@@ -133,7 +135,8 @@ v1.openapi(
           city: r.city,
           timezone: r.timezone,
           enabled: r.enabled,
-          acceptingNew: r.enabled && (await regionAcceptingNew(db, r.id)),
+          acceptingNew: r.enabled && (inventory.has(r.id) ? inventory.get(r.id)!.available>0 : await regionAcceptingNew(db, r.id)),
+          ...(inventory.has(r.id) ? { inventory: { available: inventory.get(r.id)!.available, checkedAt: inventory.get(r.id)!.checked_at ? new Date(inventory.get(r.id)!.checked_at!).toISOString() : null, status: inventory.get(r.id)!.availability === 'ready' ? 'ready' as const : 'unavailable' as const, constraint: inventory.get(r.id)!.availability === 'ready' ? (inventory.get(r.id)!.inventory_mode === 'budget' ? 'quota_and_budget' : 'quota') : 'sync_unavailable' } } : {}),
           probeUrl: r.probeUrl,
         })),
     );
@@ -184,7 +187,7 @@ v1.openapi(
     const now = new Date();
     // The free trial (page 6): only where usage is paid, only in its region, once per user.
     const trial = body.trial === true && (await entitlementsFor(db, user.id)).billing === 'prepaid';
-    if (trial && body.regionId !== TRIAL.regionId) throw problem(400, 'validation_failed', `The free trial runs in ${REGION_INFO[TRIAL.regionId].city} only.`);
+    if (trial && body.regionId !== TRIAL.regionId) throw problem(400, 'validation_failed', `The free trial runs in ${REGION_INFO[TRIAL.regionId]?.city ?? TRIAL.regionId} only.`);
     await admitCreate(db, user.id, body.regionId, now, { trial });
     // The user must have been shown this region's current prices (create dialog).
     const confirmedPrice = await requirePrice(db, body.regionId, body.priceVersion);
@@ -192,7 +195,8 @@ v1.openapi(
     if (body.storageGb !== storageGb) throw problem(409, 'price_changed', 'The storage included with a new browser changed. Review the new price and try again.');
     if (trial && !(await claimTrial(db, user.id, now))) throw problem(409, 'invalid_state', 'You have already used your free trial.');
 
-    const info = REGION_INFO[body.regionId];
+    const [info] = await db.select().from(regions).where(eq(regions.id, body.regionId));
+    if (!info) throw problem(409, 'region_unavailable');
     const locale: BrowserLocale = body.locale ?? 'en-US';
     const screen = body.screen ?? 'auto';
     const instanceId = newId(now.getTime());

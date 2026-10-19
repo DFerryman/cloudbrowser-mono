@@ -6,6 +6,7 @@
 import { AwsClient } from 'aws4fetch';
 import { ExecutorError, type ErrorClass } from '../executor.js';
 import { parseXml, text, type XmlNode } from './xml.js';
+import type { AwsCredentialProvider } from './authorization.js';
 
 export type Params = Record<string, string | number | boolean | undefined>;
 
@@ -93,6 +94,8 @@ export interface PriceListProduct {
 export interface ClientOptions {
   accessKeyId: string;
   secretAccessKey: string;
+  sessionToken?: string;
+  credentials?: AwsCredentialProvider;
   /** Tests point this at a fake EC2. */
   endpoint?: (service: Service, region: string) => string;
   fetch?: typeof fetch;
@@ -102,12 +105,14 @@ export class Ec2Client {
   private readonly signers = new Map<string, AwsClient>();
   constructor(private readonly opts: ClientOptions) {}
 
-  private signer(service: string, region: string) {
-    const key = `${service}/${region}`;
+  private async signer(service: string, region: string) {
+    const credentials = this.opts.credentials ? await this.opts.credentials() : this.opts;
+    const key = `${service}/${region}/${credentials.accessKeyId}`;
     let s = this.signers.get(key);
     if (!s) {
       // Retries are ours (the engine's journal decides), never aws4fetch's.
-      s = new AwsClient({ accessKeyId: this.opts.accessKeyId, secretAccessKey: this.opts.secretAccessKey, service, region, retries: 0 });
+      this.signers.clear();
+      s = new AwsClient({ accessKeyId: credentials.accessKeyId, secretAccessKey: credentials.secretAccessKey, sessionToken: credentials.sessionToken, service, region, retries: 0 });
       this.signers.set(key, s);
     }
     return s;
@@ -129,7 +134,7 @@ export class Ec2Client {
     for (const [k, v] of Object.entries(params)) if (v !== undefined) body.set(k, String(v));
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new ExecutorError(mutating ? 'unknown_outcome' : 'retryable', `${action}: deadline passed`);
-    const signer = this.signer('ec2', region);
+    const signer = await this.signer('ec2', region);
     let req: Request;
     try {
       req = await signer.sign(this.url('ec2', region), {
@@ -166,7 +171,7 @@ export class Ec2Client {
 
   /** Service Quotas (JSON 1.1). Returns null when the quota cannot be read. */
   async serviceQuota(region: string, serviceCode: string, quotaCode: string, deadline: number): Promise<number | null> {
-    const signer = this.signer('servicequotas', region);
+    const signer = await this.signer('servicequotas', region);
     try {
       const req = await signer.sign(this.url('servicequotas', region), {
         method: 'POST',
@@ -188,7 +193,7 @@ export class Ec2Client {
    * `retryable`: the engine keeps the last good prices and tries again later.
    */
   async products(serviceCode: string, filters: Record<string, string>, deadline: number): Promise<PriceListProduct[]> {
-    const signer = this.signer('pricing', 'us-east-1');
+    const signer = await this.signer('pricing', 'us-east-1');
     const out: PriceListProduct[] = [];
     let next: string | undefined;
     do {

@@ -1,4 +1,4 @@
-import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, REGION_INFO, SCREEN_SIZES, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
+import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, SCREEN_SIZES, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
 import { Button, cn, Dialog, Input, Label, Select } from '@cloudbrowser/ui';
 import { AlertCircle, ChevronRight, Gift, Info, Wallet } from 'lucide-react';
 import { useEffect, useId, useState, type FormEvent, type ReactNode } from 'react';
@@ -10,7 +10,7 @@ import { PriceBreakdown, PriceSource } from '../billing/PriceBreakdown.js';
 import { RateRow } from '../billing/RateRow.js';
 import { canSpend, minimumSpendBalance } from '../billing/access.js';
 import { useCreateInstance, useInstances, useMe, useRegions } from './hooks.js';
-import { regionKey } from './status.js';
+
 
 const UI_TO_BROWSER_LOCALE: Record<Locale, BrowserLocale> = { en: 'en-US', 'zh-CN': 'zh-CN' };
 const LANGUAGES: { value: BrowserLocale; label: string }[] = [
@@ -174,7 +174,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
             <div className="grid gap-2 sm:grid-cols-2" role="radiogroup">
               <Choice name="plan" checked={plan === 'trial'} onChange={() => setPlan('trial')} icon={<Gift className="size-4" />}
                 title={t('create.plan.trial')}
-                hint={t('create.plan.trialHint', { minutes: b.trial.minutes, region: t(regionKey(b.trial.regionId)) })} />
+                hint={t('create.plan.trialHint', { minutes: b.trial.minutes, region: regions.data?.find((r) => r.id === b.trial.regionId)?.name ?? b.trial.regionId })} />
               <Choice name="plan" checked={plan === 'paid'} onChange={() => setPlan('paid')} icon={<Wallet className="size-4" />}
                 title={t('create.plan.paid')}
                 hint={t('create.plan.paidHint')} />
@@ -202,7 +202,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
                   checked={regionId === r.id}
                   disabled={disabled}
                   onChange={() => setRegionId(r.id)}
-                  hint={!r.acceptingNew ? t('create.region.unavailable') : trialOnly ? t('create.region.notInTrial') : t(`create.region.${r.id}.hint`)}
+                  hint={!r.acceptingNew ? (r.inventory ? `${t('create.region.stock', { count: r.inventory.available })} · ${t('create.region.unavailable')}` : t('create.region.unavailable')) : trialOnly ? t('create.region.notInTrial') : (r.inventory ? t('create.region.stock', { count: r.inventory.available }) : r.city)}
                   latency={latency[r.id]}
                   price={disabled ? null : trial ? t('trial.free') : hourly !== null ? t('price.perHour', { amount: money(hourly, locale) }) : null}
                 />
@@ -250,7 +250,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
 
         <section aria-labelledby={`${formId}-cost`} className="rounded-[var(--radius-card)] border border-border bg-surface p-4">
           <h3 id={`${formId}-cost`} className="text-sm font-semibold">
-            {t('create.cost', { region: t(regionKey(regionId)) })}
+            {t('create.cost', { region: regions.data?.find((r) => r.id === regionId)?.name ?? regionId })}
           </h3>
           {!price ? (
             <p className="mt-2 text-sm text-muted">{pricing.isError ? t('price.unavailable') : t('common.loading')}</p>
@@ -306,10 +306,10 @@ function RegionRow({ region, checked, disabled, onChange, hint, latency, price }
         {checked && !disabled ? <span className="size-2 rounded-full bg-accent" /> : null}
       </span>
       <span className="w-7 shrink-0 rounded bg-surface-2 py-0.5 text-center font-mono text-[11px] font-medium text-muted" aria-hidden>
-        {REGION_INFO[region.id].country}
+        {region.country}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-medium">{t(regionKey(region.id))}</span>
+        <span className="block truncate text-sm font-medium">{region.name}</span>
         <span className="block truncate text-xs text-muted">{hint}</span>
       </span>
       <span className="shrink-0 text-right">

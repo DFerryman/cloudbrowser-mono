@@ -44,6 +44,7 @@
   // Internal calls only: IP checks and immediate connection revocation after browser deletion.
   "services": [
     { "binding": "ENGINE", "service": "cloudbrowser-engine" },
+    { "binding": "AWS_PROVIDER", "service": "cloudbrowser-reconciler" },
     { "binding": "GATEWAY", "service": "cloudbrowser-gateway", "entrypoint": "Internal" }
   ],
   // Operation dispatch to the engine; Creem webhooks are processed from cloudbrowser-billing.

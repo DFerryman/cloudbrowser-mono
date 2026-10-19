@@ -38,7 +38,7 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
   page.on('pageerror', (error) => errors.push(error.message));
   const i = { ...instance, storageGb: sizeGb, status, purgeAfter, ...(legacySnapshots ? { backupsEnabled: true } : {}), ...(busy ? { currentOperation: { id: 'busy-op', kind: 'start', status: 'running' } } : {}), ...(failed ? { status: 'failed' } : {}), ...(trial ? { storageGb: 2, trial: { state: trialSeconds > 0 ? 'active' : 'ended', secondsLeft: trialSeconds, reclaimAt: null } } : {}) };
   const fsTotalBytes = totalBytes === undefined ? i.storageGb * 1024 ** 3 * 0.93 : totalBytes;
-  const state = { version: 'quote-1', storageGb: 10, requests: [], reads: [], priceReads: 0, reject: false };
+  const state = { extraRegion: false, version: 'quote-1', storageGb: 10, requests: [], reads: [], priceReads: 0, reject: false };
   await context.route('**/*', async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -90,6 +90,8 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
       else if (url.pathname === '/api/v1/events') return route.fulfill({ contentType: 'text/event-stream', body: ': local fixture\n\n' });
       else if (url.pathname.endsWith('/sessions') || url.pathname.endsWith('/transactions')) body = [];
       else throw new Error(`Unhandled fixture route: ${request.method()} ${url.pathname}`);
+      if (request.method() === 'GET' && state.extraRegion && url.pathname === '/api/v1/regions') body.push({ id: 'eu-central-1', name: 'Europe (Frankfurt)', country: 'DE', city: 'Frankfurt', timezone: 'UTC', enabled: true, acceptingNew: true, probeUrl: null, inventory: { available: 4, checkedAt: new Date().toISOString(), status: 'ready', constraint: 'quota_and_budget' } });
+      if (request.method() === 'GET' && state.extraRegion && url.pathname === '/api/v1/pricing') body.push({ ...body[0], regionId: 'eu-central-1' });
       return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
     }
     let file = resolve(dist, `.${decodeURIComponent(url.pathname)}`);
@@ -156,6 +158,16 @@ try {
   await capacity.page.waitForURL('**/browsers');
   assert.equal(capacity.state.requests[1].body.storageGb, 100);
   await finish(capacity, 'changed default storage refreshes the shown capacity and requires a second confirmation');
+
+  const dynamic = await fixture();
+  dynamic.state.extraRegion = true;
+  await dynamic.page.goto(`${origin}/browsers/new`);
+  await dynamic.page.getByText('4 available', { exact: true }).waitFor();
+  await dynamic.page.getByText('Europe (Frankfurt)', { exact: true }).click();
+  await dynamic.page.getByRole('button', { name: 'Create browser', exact: true }).click();
+  await dynamic.page.waitForURL('**/browsers');
+  assert.equal(dynamic.state.requests[0].body.regionId, 'eu-central-1');
+  await finish(dynamic, 'an API-discovered region outside the legacy list shows live stock and can be selected for creation');
 
   for (const action of ['storage', 'ip']) {
     const f = await fixture({ width: action === 'storage' ? 820 : 1365 });

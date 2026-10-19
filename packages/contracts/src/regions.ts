@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const RegionId = z.enum(['syd1', 'tyo1', 'usw1']);
+export const RegionId = z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9-]*$/);
 export type RegionId = z.infer<typeof RegionId>;
 
 export const DEFAULT_REGION: RegionId = 'syd1';
@@ -15,12 +15,13 @@ export const REGION_INFO: Record<RegionId, { country: 'AU' | 'JP' | 'US'; city: 
 export const Region = z.object({
   id: RegionId,
   name: z.string(),
-  country: z.enum(['AU', 'JP', 'US']),
+  country: z.string(),
   city: z.string(),
   timezone: z.string(),
   enabled: z.boolean(),
   /** False when the region cap or provider quota leaves no room for a new browser. */
   acceptingNew: z.boolean(),
+  inventory: z.object({ available: z.number().int().nonnegative(), checkedAt: z.string().nullable(), status: z.enum(['ready', 'syncing', 'unavailable']), constraint: z.string().nullable() }).optional(),
   /** URL the client fetches to measure latency from its own network; null when not configured. */
   probeUrl: z.string().nullable(),
 });

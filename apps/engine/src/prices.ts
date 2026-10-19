@@ -29,6 +29,7 @@ export async function refreshPrices(deps: EngineDeps, opts: { force?: boolean } 
     const sameProvider = row?.executor === r.executor && row.providerRegion === r.providerRegion;
     try {
       const executor = deps.executor(r.executor as ExecutorKind);
+      await executor.prepareRegion?.(r.providerRegion);
       configurationKey = executor.pricingConfigKey(r.providerRegion);
       const machines = await db.select().from(placements).where(and(
         eq(placements.executor, r.executor), eq(placements.providerRegion, r.providerRegion),
