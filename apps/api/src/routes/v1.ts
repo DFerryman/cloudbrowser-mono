@@ -5,6 +5,7 @@ import {
   CreateInstanceBody,
   DEFAULT_IDLE_TIMEOUT_S,
   IDLE_TIMEOUT_OPTIONS_S,
+  NEVER_SLEEP_TIMEOUT_S,
   Instance,
   InstanceStorage,
   InstanceUsage,
@@ -766,7 +767,7 @@ v1.openapi(
       await db.update(viewerSessions).set({ lastSeenAt: now }).where(and(eq(viewerSessions.id, s.id), isNull(viewerSessions.endedAt),
         sql`${viewerSessions.lastSeenAt} <= ${now.getTime() - 60_000}`));
     }
-    const inputInterval = Math.min(60_000, (inst?.idleTimeoutS ?? 60) * 500);
+    const inputInterval = inst?.idleTimeoutS === NEVER_SLEEP_TIMEOUT_S ? 60_000 : Math.min(60_000, (inst?.idleTimeoutS ?? 60) * 500);
     if (input && (!h?.lastInputAt || now.getTime() - h.lastInputAt.getTime() >= inputInterval)) {
       await db.insert(instanceHealth).values({ instanceId: s.instanceId, lastInputAt: now })
         .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastInputAt: now },
@@ -774,7 +775,7 @@ v1.openapi(
     }
     if (!inst || inst.status !== 'running') return c.json({ sleepAt: null }, 200);
     const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, h?.lastInputAt?.getTime() ?? 0, input ? now.getTime() : 0);
-    const idleAt = last + inst.idleTimeoutS * 1000;
+    const idleAt = inst.idleTimeoutS === NEVER_SLEEP_TIMEOUT_S ? Infinity : last + inst.idleTimeoutS * 1000;
     // A paid authorization lease is renewed every minute. Its renewal time is not a sleep
     // deadline: only a genuine depletion projection should produce a balance warning.
     const access = await prepaidAccess(db, inst.userId, inst.id, now);
@@ -784,9 +785,10 @@ v1.openapi(
       if (trialAt < idleAt) return c.json({ sleepAt: new Date(trialAt).toISOString(), reason: 'trial' as const }, 200);
     }
     const balanceAt = !isTrial(inst) ? access.balanceDeadlineAt?.getTime() ?? Infinity : Infinity;
-    return balanceAt < idleAt
-      ? c.json({ sleepAt: new Date(balanceAt).toISOString(), reason: 'balance' as const }, 200)
-      : c.json({ sleepAt: new Date(idleAt).toISOString(), reason: 'idle' as const }, 200);
+    if (balanceAt < idleAt) return c.json({ sleepAt: new Date(balanceAt).toISOString(), reason: 'balance' as const }, 200);
+    return Number.isFinite(idleAt)
+      ? c.json({ sleepAt: new Date(idleAt).toISOString(), reason: 'idle' as const }, 200)
+      : c.json({ sleepAt: null }, 200);
   },
 );
 

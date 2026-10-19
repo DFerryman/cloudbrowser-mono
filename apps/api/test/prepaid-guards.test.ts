@@ -75,9 +75,10 @@ describe('prepaid runtime boundaries', () => {
     expect(requests).toBe(3);
   });
 
-  it('renews funded access without reporting the authorization lease as balance exhaustion', async () => {
+  it.each([600, 0])('renews funded access without treating the lease as balance exhaustion with timeout %s', async (idleTimeoutS) => {
     await credit(10_000_000);
     const id = await create(false); await meter();
+    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { idleTimeoutS })).status).toBe(200);
     const session = await t.call('POST', `/api/v1/instances/${id}/sessions`);
     expect(session.status).toBe(201);
     for (const ms of [0, 45_000, 90_000]) {
@@ -87,14 +88,18 @@ describe('prepaid runtime boundaries', () => {
       expect(access.deadlineAt?.getTime()).toBe(Date.now() + 60_000);
       const heartbeat = await t.call('POST', `/api/v1/sessions/${session.body.session.id}/heartbeat`, { input: true });
       expect(heartbeat.status).toBe(200);
-      expect(heartbeat.body.reason).toBe('idle');
-      expect(Date.parse(heartbeat.body.sleepAt)).toBeGreaterThan(Date.now() + 60_000);
+      if (idleTimeoutS === 0) expect(heartbeat.body).toEqual({ sleepAt: null });
+      else {
+        expect(heartbeat.body.reason).toBe('idle');
+        expect(Date.parse(heartbeat.body.sleepAt)).toBeGreaterThan(Date.now() + 60_000);
+      }
     }
   });
 
-  it('still reports actual near-term depletion and clears the warning after new credit', async () => {
+  it.each([600, 0])('still reports actual depletion and clears the warning after credit with timeout %s', async (idleTimeoutS) => {
     await credit(10_000_000);
     const id = await create(false); await meter();
+    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { idleTimeoutS })).status).toBe(200);
     const session = await t.call('POST', `/api/v1/instances/${id}/sessions`);
     expect(session.status).toBe(201);
     await credit(1_000 - (await prepaidBalance(db(), userId)).availableMicros);
@@ -110,7 +115,21 @@ describe('prepaid runtime boundaries', () => {
     expect(await prepaidAccess(db(), userId, id)).toMatchObject({ allowed: false, reason: 'balance' });
     await credit(10_000_000);
     expect(await t.call('POST', `/api/v1/sessions/${session.body.session.id}/heartbeat`, { input: true }))
-      .toMatchObject({ status: 200, body: { reason: 'idle' } });
+      .toMatchObject({ status: 200, body: idleTimeoutS === 0 ? { sleepAt: null } : { reason: 'idle' } });
+  });
+
+  it('still ends the free trial when inactivity sleep is disabled', async () => {
+    const id = await create(); await meter();
+    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { idleTimeoutS: 0 })).status).toBe(200);
+    const session = await t.call('POST', `/api/v1/instances/${id}/sessions`);
+    expect(session.status).toBe(201);
+    advance(15_000);
+    expect(await t.call('POST', `/api/v1/sessions/${session.body.session.id}/heartbeat`, { input: false }))
+      .toMatchObject({ status: 200, body: { reason: 'trial', sleepAt: new Date(START + 600_000).toISOString() } });
+    advance(600_000);
+    expect((await t.call('POST', `/api/v1/sessions/${session.body.session.id}/heartbeat`, { input: false })).status).toBe(402);
+    await meter();
+    expect(record(id)).toMatchObject({ state: 'ended', milliseconds: 600_000 });
   });
 
   it('defaults a missing billing flag to prepaid rather than silently enabling free paid browsers', async () => {

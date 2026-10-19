@@ -4,7 +4,7 @@
  * RPC entrypoint of this Worker, reachable only through the gateway's service binding, never from
  * the internet.
  */
-import { AgentFrame, type GatewayToAgent, type ViewerTokenClaims } from '@cloudbrowser/contracts';
+import { AgentFrame, NEVER_SLEEP_TIMEOUT_S, type GatewayToAgent, type ViewerTokenClaims } from '@cloudbrowser/contracts';
 import { createDb, eventRow, schema, sha256Hex, unwrapArchiveKey, type Db } from '@cloudbrowser/db';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Env } from './env.js';
@@ -120,7 +120,7 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
         const [health] = await db.select().from(instanceHealth).where(eq(instanceHealth.instanceId, instanceId));
         const lastInputAt = typeof d.lastInputAt === 'string' && !Number.isNaN(Date.parse(d.lastInputAt)) ? new Date(d.lastInputAt) : null;
         const viewers = typeof d.viewers === 'number' ? d.viewers : 0;
-        const inputInterval = Math.min(60_000, inst.idleTimeoutS * 500);
+        const inputInterval = inst.idleTimeoutS === NEVER_SLEEP_TIMEOUT_S ? 60_000 : Math.min(60_000, inst.idleTimeoutS * 500);
         // Transport heartbeats remain frequent; persist only once a minute or on a viewer/input
         // transition. Short idle timeouts keep an appropriately shorter input reporting interval.
         const inputDue = lastInputAt && lastInputAt.getTime() - (health?.lastInputAt?.getTime() ?? 0) >= inputInterval;

@@ -1,6 +1,7 @@
+import { NEVER_SLEEP_TIMEOUT_S } from '@cloudbrowser/contracts';
 import { settleRunningStatements, eventRow, operationRow, raiseAlert, reservedTotalSql, schema } from '@cloudbrowser/db';
 import type { ExecutorKind } from '@cloudbrowser/executors';
-import { and, asc, eq, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
 import { placementRef, readContext, type EngineDeps } from './context.js';
 import { runOperation } from './runner.js';
 
@@ -42,6 +43,7 @@ export async function requestStop(deps: EngineDeps, inst: { id: string; userId: 
   // Recheck the reason with the stop admission: inventory or billing reads can race a wake,
   // top-up or trial conversion. Aborting the batch also prevents a stray unfinished operation.
   const reasonStillApplies = reason === 'intent_reconcile' ? sql`${browserInstances.desiredState} = 'stopped'`
+    : reason === 'idle' ? sql`${browserInstances.idleTimeoutS} <> ${NEVER_SLEEP_TIMEOUT_S}`
     : reason === 'trial' ? sql`${browserInstances.trialState} = 'ended'`
     : reason === 'frozen' ? sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${inst.userId} AND ${billingAccounts.frozenAt} IS NOT NULL)`
     : reason === 'balance' ? sql`(${browserInstances.trialState} IS NULL OR ${browserInstances.trialState} = 'converted') AND (
@@ -83,7 +85,7 @@ export async function idleStops(deps: EngineDeps): Promise<string[]> {
     })
     .from(browserInstances)
     .leftJoin(instanceHealth, eq(instanceHealth.instanceId, browserInstances.id))
-    .where(eq(browserInstances.status, 'running'));
+    .where(and(eq(browserInstances.status, 'running'), ne(browserInstances.idleTimeoutS, NEVER_SLEEP_TIMEOUT_S)));
 
   const busy = new Set(
     (

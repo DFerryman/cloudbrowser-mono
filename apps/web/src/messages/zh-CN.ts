@@ -205,6 +205,7 @@ export const zhCN: Messages = {
   'settings.behavior': '行为',
   'settings.autoSleep': '无操作后自动休眠',
   'settings.minutes': '{n} 分钟',
+  'settings.neverSleep': '永不休眠',
   'settings.name': '名称',
   'settings.save': '保存',
   'settings.saved': '已保存',

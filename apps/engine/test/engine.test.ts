@@ -337,6 +337,26 @@ describe('lifecycle', () => {
     expect((await w.instance()).status).toBe('sleeping');
   });
 
+  it('keeps never-sleep browsers running until inactivity sleep is enabled again', async () => {
+    await w.db.update(browserInstances).set({ idleTimeoutS: 0 }).where(eq(browserInstances.id, 'inst1'));
+    w.advance(30 * 24 * 60 * 60_000);
+    expect(await idleStops(w.deps())).toEqual([]);
+    // Disabling sleep after the scheduler's read must also cancel its stale admission.
+    expect(await requestStop(w.deps(), { id: 'inst1', userId: 'u1' }, 'idle')).toBe(false);
+    expect((await w.instance()).status).toBe('running');
+    expect(await w.db.select().from(operations).where(eq(operations.kind, 'stop'))).toEqual([]);
+    await w.db.update(browserInstances).set({ idleTimeoutS: 600 }).where(eq(browserInstances.id, 'inst1'));
+    expect(await idleStops(w.deps())).toEqual(['inst1']);
+  });
+
+  it('still allows a never-sleep browser to be stopped manually', async () => {
+    await w.db.update(browserInstances).set({ idleTimeoutS: 0 }).where(eq(browserInstances.id, 'inst1'));
+    expect(await requestStop(w.deps(), { id: 'inst1', userId: 'u1' }, 'manual')).toBe(true);
+    const [op] = await w.db.select().from(operations).where(eq(operations.kind, 'stop'));
+    expect(await w.settle(op!.id)).toEqual({ state: 'succeeded' });
+    expect((await w.instance()).status).toBe('sleeping');
+  });
+
   it('pauses the network when a second public address appears', async () => {
     const p = (await w.placement())!;
     await w.executor('runtime').injectExtraPublicAddress(p.networkId!, '192.0.2.99');

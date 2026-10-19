@@ -26,7 +26,9 @@ export type InstanceStatus = z.infer<typeof InstanceStatus>;
 export const DesiredState = z.enum(['running', 'stopped', 'deleted']);
 export type DesiredState = z.infer<typeof DesiredState>;
 
-export const IDLE_TIMEOUT_OPTIONS_S = [300, 600, 900, 1800, 3600] as const;
+/** Zero disables inactivity sleep; billing and trial limits still apply. */
+export const NEVER_SLEEP_TIMEOUT_S = 0;
+export const IDLE_TIMEOUT_OPTIONS_S = [300, 600, 900, 1800, 3600, NEVER_SLEEP_TIMEOUT_S] as const;
 export const DEFAULT_IDLE_TIMEOUT_S = 600;
 
 export const SCREEN_SIZES = [
@@ -72,6 +74,7 @@ export const Instance = z.object({
   /** Short reason for failed / needs_attention / provider_issue states. */
   statusReason: z.string().nullable(),
   desiredState: DesiredState,
+  /** Inactivity timeout in seconds; zero means never sleep because of inactivity. */
   idleTimeoutS: z.number().int(),
   screen: ScreenSize,
   /**
@@ -122,7 +125,7 @@ export type CreateInstanceBody = z.infer<typeof CreateInstanceBody>;
 export const UpdateInstanceBody = z
   .object({
     name: InstanceName.optional(),
-    idleTimeoutS: z.number().int().min(60).max(3600).optional(),
+    idleTimeoutS: z.union([z.literal(NEVER_SLEEP_TIMEOUT_S), z.number().int().min(60).max(3600)]).optional(),
     screen: ScreenSize.optional(),
     priceVersion: PriceVersion.optional(),
   })

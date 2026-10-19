@@ -1,5 +1,5 @@
 import { useRegionInfo } from './hooks.js';
-import { IDLE_TIMEOUT_OPTIONS_S } from '@cloudbrowser/contracts';
+import { IDLE_TIMEOUT_OPTIONS_S, NEVER_SLEEP_TIMEOUT_S } from '@cloudbrowser/contracts';
 import { Button, cn, Input, Label, Pagination, Section, Select, useToast } from '@cloudbrowser/ui';
 import { ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
@@ -99,8 +99,8 @@ export function SettingsPage() {
               <Label htmlFor="idle">{t('settings.autoSleep')}</Label>
               <Select id="idle" value={i.idleTimeoutS} onChange={(e) => save({ idleTimeoutS: Number(e.target.value) })}>
                 {IDLE_TIMEOUT_OPTIONS_S.map((s) => (
-                  <option key={s} value={s} disabled={s > maxIdle}>
-                    {t('settings.minutes', { n: s / 60 })}
+                  <option key={s} value={s} disabled={s !== NEVER_SLEEP_TIMEOUT_S && s > maxIdle}>
+                    {s === NEVER_SLEEP_TIMEOUT_S ? t('settings.neverSleep') : t('settings.minutes', { n: s / 60 })}
                   </option>
                 ))}
               </Select>

@@ -203,6 +203,7 @@ export const en = {
   'settings.behavior': 'Behavior',
   'settings.autoSleep': 'Auto-sleep after',
   'settings.minutes': '{n} min',
+  'settings.neverSleep': 'Never sleep',
   'settings.name': 'Name',
   'settings.save': 'Save',
   'settings.saved': 'Saved',

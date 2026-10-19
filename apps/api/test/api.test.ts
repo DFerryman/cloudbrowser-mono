@@ -95,11 +95,33 @@ describe('browsers', () => {
     expect(list.body).toHaveLength(1);
     const inst = list.body[0];
     expect(inst.status).toBe('running');
+    expect(inst.idleTimeoutS).toBe(600);
     expect(inst.ipAddress).toMatch(/^203\.0\.113\./);
     expect(inst.lastIpCheck.ok).toBe(true);
 
     const op = await t.call('GET', `/api/v1/operations/${a.body.operationId}`);
     expect(op.body.status).toBe('succeeded');
+  });
+
+  it('saves never sleep and can restore the 10-minute inactivity timeout', async () => {
+    const created = await t.call('POST', '/api/v1/instances', { name: 'Always available', regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': 'never-sleep' });
+    expect(created.status).toBe(202);
+    await t.settle();
+    const path = `/api/v1/instances/${created.body.instanceId}`;
+    expect(await t.call('PATCH', path, { idleTimeoutS: 0 })).toMatchObject({ status: 200, body: { idleTimeoutS: 0 } });
+    expect((await t.call('GET', path)).body.idleTimeoutS).toBe(0);
+    const opened = await t.call('POST', `${path}/sessions`);
+    expect(opened.status).toBe(201);
+    const heartbeat = () => t.call('POST', `/api/v1/sessions/${opened.body.session.id}/heartbeat`, { input: false });
+    expect(await heartbeat()).toMatchObject({ status: 200, body: { sleepAt: null } });
+    for (const idleTimeoutS of [-1, 1, 60, 599, 3601]) {
+      expect(await t.call('PATCH', path, { idleTimeoutS })).toMatchObject({ status: 400, body: { type: 'validation_failed' } });
+    }
+    expect(await t.call('PATCH', path, { idleTimeoutS: 3600 })).toMatchObject({ status: 403, body: { type: 'plan_limit' } });
+    expect(await t.call('PATCH', path, { idleTimeoutS: 600 })).toMatchObject({ status: 200, body: { idleTimeoutS: 600 } });
+    const resumed = await heartbeat();
+    expect(resumed).toMatchObject({ status: 200, body: { reason: 'idle' } });
+    expect(Date.parse(resumed.body.sleepAt)).toBeGreaterThan(Date.now() + 590_000);
   });
 
   it('lets a user own three browsers by default and rejects a fourth', async () => {

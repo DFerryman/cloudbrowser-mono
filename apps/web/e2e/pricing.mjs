@@ -30,7 +30,7 @@ const instance = {
 const results = [];
 
 async function fixture({ trial = false, failed = false, noPrice = false, width = 1365, height = 1024, sizeGb = 10, totalBytes, status = 'sleeping', purgeAfter = null,
-  balanceMicros = trial ? 0 : 10_000_000, reservedMicros = 0, availableMicros = Math.max(0, balanceMicros - reservedMicros), mode = 'prepaid', trialEligible = false, trialSeconds = 600, busy = false, legacySnapshots = false, rootVolumeGb = 16, locale = 'en-US', maxBrowsers = 10 } = {}) {
+  balanceMicros = trial ? 0 : 10_000_000, reservedMicros = 0, availableMicros = Math.max(0, balanceMicros - reservedMicros), mode = 'prepaid', trialEligible = false, trialSeconds = 600, busy = false, legacySnapshots = false, rootVolumeGb = 16, locale = 'en-US', maxBrowsers = 10, idleTimeoutMaxS = 3600 } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, locale, hasTouch: width === 820 });
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
@@ -67,7 +67,7 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
         } else body = { instanceId: 'new-browser', operationId: 'fixture-operation' };
       } else if (url.pathname === '/api/v1/me') body = {
         user: { id: 'fixture-user', name: 'Test user', email: 'fixture@example.test' },
-        entitlements: { billing: 'prepaid', maxBrowsers, maxRunning: 10, idleTimeoutMaxS: 3600, maxStorageGb: 100 },
+        entitlements: { billing: 'prepaid', maxBrowsers, maxRunning: 10, idleTimeoutMaxS, maxStorageGb: 100 },
         usage: { browsers: failed ? 0 : 1, running: 0 },
       };
       else if (url.pathname === '/api/v1/regions') body = [{ id: 'syd1', name: 'Sydney', country: 'AU', city: 'Sydney', timezone: 'Australia/Sydney', enabled: true, acceptingNew: state.stockAvailable, probeUrl: null,
@@ -126,6 +126,33 @@ async function rejected(f, path, version = 'quote-1') {
 }
 
 try {
+  for (const locale of ['en-US', 'zh-CN']) {
+    const f = await fixture({ locale, width: locale === 'zh-CN' ? 390 : 1365, idleTimeoutMaxS: 1800 });
+    const label = locale === 'zh-CN' ? '无操作后自动休眠' : 'Auto-sleep after';
+    const never = locale === 'zh-CN' ? '永不休眠' : 'Never sleep';
+    await f.page.goto(`${origin}/browsers/${instance.id}/settings`);
+    const timeout = f.page.getByLabel(label, { exact: true });
+    await timeout.waitFor();
+    assert.equal(await timeout.inputValue(), '600', 'The default remains ten minutes');
+    assert.equal(await timeout.locator('option').last().textContent(), never, 'Never sleep is the last option');
+    assert.equal(await timeout.locator('option[value="3600"]').isDisabled(), true, 'Finite plan limits still apply');
+    assert.equal(await timeout.locator('option[value="0"]').isDisabled(), false);
+    let saved = f.page.waitForResponse((r) => r.request().method() === 'PATCH');
+    await timeout.selectOption('0');
+    assert.equal((await saved).status(), 200);
+    assert.deepEqual(f.state.requests.at(-1).body, { idleTimeoutS: 0 });
+    await f.page.reload();
+    await timeout.waitFor();
+    assert.equal(await timeout.inputValue(), '0', 'Never sleep stays selected after reload');
+    saved = f.page.waitForResponse((r) => r.request().method() === 'PATCH');
+    await timeout.selectOption('600');
+    assert.equal((await saved).status(), 200);
+    await f.page.reload();
+    await timeout.waitFor();
+    assert.equal(await timeout.inputValue(), '600', 'Ten-minute sleep can be restored');
+    await finish(f, `never sleep is last, saves across reloads, and can return to ten minutes in ${locale}`);
+  }
+
   {
     const message = '浏览器数量已达上限，请先删除一个浏览器再创建。';
     const limited = await fixture({ locale: 'zh-CN', maxBrowsers: 2 });
