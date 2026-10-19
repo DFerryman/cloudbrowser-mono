@@ -39,6 +39,21 @@ describe('public pages', () => {
   it('accepts no writes', async () => {
     expect((await t.call('POST', '/api/public/status', {})).status).toBe(404);
   });
+
+  it('uses the five-minute AWS catalog heartbeat instead of treating hourly quota snapshots as stale', async () => {
+    const now = Date.now();
+    t.d1.sqlite.prepare(`INSERT INTO quota_snapshots (executor,region,metric,used,\"limit\",taken_at) VALUES ('aws-ec2','ap-northeast-1','vcpus',0,10,?)`).run(now - 55 * 60_000);
+    t.d1.sqlite.prepare('UPDATE aws_provider_state SET catalog_at=? WHERE id=1').run(now - 5 * 60_000);
+    const automation = async () => (await t.call('GET', '/api/public/status')).body.components.find((c: { id: string }) => c.id === 'automation').status;
+    expect(await automation()).toBe('operational');
+    t.d1.sqlite.prepare('UPDATE aws_provider_state SET catalog_at=? WHERE id=1').run(now - 31 * 60_000);
+    expect(await automation()).toBe('degraded');
+    // Without the newer AWS heartbeat, the hourly cadence still gets a 30-minute grace period.
+    t.d1.sqlite.exec('UPDATE aws_provider_state SET catalog_at=NULL WHERE id=1');
+    expect(await automation()).toBe('operational');
+    t.d1.sqlite.prepare('UPDATE quota_snapshots SET taken_at=?').run(now - 91 * 60_000);
+    expect(await automation()).toBe('degraded');
+  });
 });
 
 describe('paging', () => {
