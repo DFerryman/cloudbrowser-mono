@@ -6,7 +6,7 @@
 import { AwsClient } from 'aws4fetch';
 import { ExecutorError, type ErrorClass } from '../executor.js';
 import { parseXml, text, type XmlNode } from './xml.js';
-import type { AwsCredentialProvider } from './authorization.js';
+import { SESSION_EXPIRED, type AwsCredentialProvider } from './authorization.js';
 
 export type Params = Record<string, string | number | boolean | undefined>;
 
@@ -58,6 +58,7 @@ const RETRYABLE = new Set([
   'DependencyViolation',
   'InvalidIPAddress.InUse',
   'IncorrectModificationState', // a volume modification is still in progress
+  ...SESSION_EXPIRED, // AWS did nothing; a renewed session can try again
 ]);
 
 export function classify(code: string, status: number): ErrorClass {
@@ -114,7 +115,14 @@ export class Ec2Client {
   constructor(private readonly opts: ClientOptions) {}
 
   private async signer(service: string, region: string) {
-    const credentials = this.opts.credentials ? await this.opts.credentials() : this.opts;
+    let credentials: Pick<ClientOptions, 'accessKeyId' | 'secretAccessKey' | 'sessionToken'>;
+    try {
+      credentials = this.opts.credentials ? await this.opts.credentials() : this.opts;
+    } catch (e) {
+      // No request was sent, so nothing happened at AWS. A role AWS refuses needs an operator.
+      const message = (e as Error).message;
+      throw new ExecutorError(/AccessDenied|InvalidClientTokenId|SignatureDoesNotMatch|invalid credentials/.test(message) ? 'forbidden' : 'retryable', `AWS session renewal failed: ${message}`);
+    }
     const key = `${service}/${region}/${credentials.accessKeyId}`;
     let s = this.signers.get(key);
     if (!s) {
@@ -137,6 +145,17 @@ export class Ec2Client {
    * have happened is `unknown_outcome` (look up before retrying); a read is just `retryable`.
    */
   async call(region: string, action: string, params: Params, deadline: number, mutating: boolean, assertActive?: () => Promise<void>): Promise<XmlNode> {
+    try {
+      return await this.send(region, action, params, deadline, mutating, assertActive);
+    } catch (e) {
+      // AWS refused the session before acting, even for a create: renew it once and send again.
+      if (!(e instanceof Ec2Error) || !SESSION_EXPIRED.has(e.code) || !this.opts.credentials?.invalidate) throw e;
+      this.opts.credentials.invalidate();
+      return this.send(region, action, params, deadline, mutating, assertActive);
+    }
+  }
+
+  private async send(region: string, action: string, params: Params, deadline: number, mutating: boolean, assertActive?: () => Promise<void>): Promise<XmlNode> {
     await assertActive?.();
     const body = new URLSearchParams({ Action: action, Version: '2016-11-15' });
     for (const [k, v] of Object.entries(params)) if (v !== undefined) body.set(k, String(v));
@@ -179,8 +198,8 @@ export class Ec2Client {
 
   /** Service Quotas (JSON 1.1). Returns null when the quota cannot be read. */
   async serviceQuota(region: string, serviceCode: string, quotaCode: string, deadline: number): Promise<number | null> {
-    const signer = await this.signer('servicequotas', region);
     try {
+      const signer = await this.signer('servicequotas', region);
       const req = await signer.sign(this.url('servicequotas', region), {
         method: 'POST',
         headers: { 'content-type': 'application/x-amz-json-1.1', 'x-amz-target': 'ServiceQuotasV20190624.GetServiceQuota' },

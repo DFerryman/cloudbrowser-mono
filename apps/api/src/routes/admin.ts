@@ -4,7 +4,7 @@
  * written to `audit_log` with the admin's stable Access subject and email. Internal:
  * not part of the public OpenAPI document.
  */
-import { AwsProviderSettings, OPERATION_STEPS, PricingSettings, UsageItem, costRates, customerRates, type OperationKind } from '@cloudbrowser/contracts';
+import { OPERATION_STEPS, PricingSettings, UsageItem, costRates, customerRates, type OperationKind } from '@cloudbrowser/contracts';
 import { awsInventory, blocksRegion, launchHealthByRegion, launchHealthFor, launchVerifiedAt, newId, openProviderIssue, priceSheets, pricingSettings, reopenRegion, schema, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, isNotNull, isNull, like, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
@@ -63,12 +63,11 @@ adminRoute.get('/session', (c) => c.json({ email: c.get('user').email }));
 
 adminRoute.get('/aws-provider', async (c) => {
   const db=c.get('db');
-  const [settings]=await db.select().from(schema.awsProviderSettings);
   const [state]=await db.select().from(schema.awsProviderState);
   const inventory=await awsInventory(db);
   const rows=await db.select().from(schema.awsProviderRegions).innerJoin(regions,eq(regions.id,schema.awsProviderRegions.regionId));
   const sheets=new Map((await db.select().from(providerPrices)).map((r)=>[r.regionId,r]));
-  const [commitments]=await db.all<{n:number;micros:number}>(sql`SELECT COUNT(*) n, COALESCE(SUM(monthly_micros),0) micros FROM aws_browser_commitments`);
+  const held=new Map((await db.all<{region_id:string;n:number}>(sql`SELECT region_id, COUNT(*) n FROM aws_browser_commitments GROUP BY region_id`)).map((r)=>[r.region_id,Number(r.n)]));
   const health=await launchHealthByRegion(db);
   const now=new Date();
   const launch=(regionId:string)=>{
@@ -76,7 +75,7 @@ adminRoute.get('/aws-provider', async (c) => {
     const issue=openProviderIssue(rows,now);
     return {verifiedAt:launchVerifiedAt(rows),issue:issue?{at:issue.lastFailureAt,class:issue.lastFailureClass,message:issue.lastFailure,zone:issue.zone||null,blocking:blocksRegion(issue)}:null};
   };
-  return c.json({settings,state,inventorySummary:{existingBrowsers:Number(commitments?.n ?? 0),committedMicros:Number(commitments?.micros ?? 0)},regions:rows.map((r)=>({...r.aws_provider_regions,name:r.regions.name,enabled:r.regions.enabled,inventory:inventory.get(r.regions.id),price:{fetchedAt:sheets.get(r.regions.id)?.fetchedAt,lastError:sheets.get(r.regions.id)?.lastError},launch:launch(r.regions.id),config:undefined}))});
+  return c.json({state,regions:rows.map((r)=>({...r.aws_provider_regions,name:r.regions.name,enabled:r.regions.enabled,inventory:inventory.get(r.regions.id),held:held.get(r.regions.id) ?? 0,price:{fetchedAt:sheets.get(r.regions.id)?.fetchedAt,lastError:sheets.get(r.regions.id)?.lastError},launch:launch(r.regions.id),config:undefined}))});
 });
 // After the cause of a provider failure is fixed (e.g. an SCP): new browsers may be created
 // there again, and the next create shows whether the fix worked.
@@ -88,16 +87,6 @@ adminRoute.post('/aws-provider/regions/:id/reopen',async(c)=>{
   if (!openProviderIssue(before,new Date())) throw problem(409,'invalid_state','This region has no open provider failure.');
   await db.batch([reopenRegion(db,regionId),audit(db,c,'aws-provider.region.reopen',`region:${regionId}`,{before,reason})]);
   return c.json({reopened:true});
-});
-adminRoute.put('/aws-provider/settings',async(c)=>{
-  const {reason,...settings}=await body(c,AwsProviderSettings.extend({reason:z.string().trim().min(3).max(500)}));
-  const db=c.get('db');
-  const [before]=await db.select().from(schema.awsProviderSettings);
-  await db.batch([
-    db.update(schema.awsProviderSettings).set({...settings,updatedAt:new Date(),updatedBy:actor(c)}).where(eq(schema.awsProviderSettings.id,1)),
-    audit(db,c,'aws-provider.settings','aws-provider',{before,after:settings,reason}),
-  ]);
-  return c.json({saved:true});
 });
 adminRoute.post('/aws-provider/refresh',async(c)=>{
   if (!c.env.AWS_PROVIDER) throw problem(503,'internal','AWS Provider service is not configured.');
@@ -116,14 +105,6 @@ adminRoute.get('/overview', async (c) => {
   const now = Date.now();
   const byStatus = await db.select({ status: browserInstances.status, n: sql<number>`count(*)` }).from(browserInstances).groupBy(browserInstances.status);
   const flags = await db.select().from(controlFlags);
-  const [spend] = await db.select().from(spendSnapshots).orderBy(desc(spendSnapshots.takenAt)).limit(1);
-  const [budget] = await db.select().from(caps).where(and(eq(caps.scope, 'global'), eq(caps.metric, 'spend_budget_cents')));
-  const quotas = await db.select().from(quotaSnapshots).orderBy(desc(quotaSnapshots.takenAt)).limit(30);
-  const latestQuota = new Map<string, (typeof quotas)[number]>();
-  for (const q of quotas) {
-    const k = `${q.executor}/${q.region}/${q.metric}`;
-    if (!latestQuota.has(k)) latestQuota.set(k, q);
-  }
   return c.json({
     instances: Object.fromEntries(byStatus.map((r) => [r.status, Number(r.n)])),
     users: await count(db, db.select({ n: sql<number>`count(*)` }).from(user)),
@@ -138,8 +119,6 @@ adminRoute.get('/overview', async (c) => {
       ),
     },
     flags: Object.fromEntries(flags.map((f) => [f.key, { value: f.value, reason: f.reason, updatedAt: f.updatedAt.toISOString() }])),
-    spend: spend ? { projectedCents: spend.projectedCents, budgetCents: budget?.limit ?? null, takenAt: spend.takenAt.toISOString() } : null,
-    quotas: [...latestQuota.values()].map((q) => ({ executor: q.executor, region: q.region, metric: q.metric, limit: q.limit, used: q.used })),
     findingsOpen: await count(db, db.select({ n: sql<number>`count(*)` }).from(driftFindings).where(eq(driftFindings.status, 'open'))),
     alertsOpen: await count(db, db.select({ n: sql<number>`count(*)` }).from(alerts).where(isNull(alerts.acknowledgedAt))),
     webhooksPending: await count(db, db.select({ n: sql<number>`count(*)` }).from(webhookEvents).where(isNull(webhookEvents.processedAt))),
@@ -421,6 +400,7 @@ adminRoute.put('/caps', async (c) => {
   const { scope, metric, limit } = await body(c, CapBody);
   if (metric === 'creates_per_day') throw problem(400, 'validation_failed', 'Daily creation limits are no longer supported. Set the instances limit instead.');
   if (limit === undefined) throw problem(400, 'validation_failed', 'limit is required');
+  if (metric === 'running' && scope.startsWith('user:')) throw problem(400, 'validation_failed', 'Users have one limit: instances. Every browser they own may run at once.');
   const [before] = await db.select().from(caps).where(and(eq(caps.scope, scope), eq(caps.metric, metric)));
   await db.insert(caps).values({ scope, metric, limit }).onConflictDoUpdate({ target: [caps.scope, caps.metric], set: { limit } });
   await audit(db, c, 'cap.set', `cap:${scope}/${metric}`, { from: before?.limit ?? null, to: limit });

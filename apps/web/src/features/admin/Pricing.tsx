@@ -2,22 +2,24 @@ import { Button, Input, Label, useToast } from '@cloudbrowser/ui';
 import { RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { post, put, usd, useAdmin, useAdminAction, when, type PricingOverview } from './data.js';
+import { useT, type AdminKey } from './i18n.js';
 import { Mono, PageTitle, Pill, ReasonDialog, Table, Tile } from './ui.js';
 
-const ITEMS = [
-  ['compute', 'Running (per hour)'],
-  ['ip', 'Dedicated IP (per hour)'],
-  ['storage', 'Storage (per GB-month)'],
-  ['transfer', 'Data out (per GB)'],
-] as const;
+const ITEMS: [keyof NonNullable<PricingOverview['regions'][number]['cost']>, AdminKey][] = [
+  ['compute', 'item.compute'],
+  ['ip', 'item.ip'],
+  ['storage', 'item.storage'],
+  ['transfer', 'item.transfer'],
+];
 /** Usage rows: every item, so they add up to the totals. Snapshots are internal recovery costs, never charged. */
-const USAGE_ROWS = [...ITEMS.map(([key, label]) => [key, label.replace(/ \(.*\)/, '')] as const), ['snapshot', 'Snapshots (internal, not charged)'] as const];
+const USAGE_ROWS: [string, AdminKey][] = [...ITEMS, ['snapshot', 'item.snapshot']];
 
 /**
- * Prices and margin (page 6): AWS cost per region from the AWS Price List API, the customer price
+ * Prices and margin: AWS cost per region from the AWS Price List API, the customer price
  * (cost × markup), and this month's metered revenue against its AWS cost. Every change is audited.
  */
 export function PricingPage() {
+  const { t, errorText } = useT();
   const toast = useToast();
   const data = useAdmin<PricingOverview>('/pricing');
   const save = useAdminAction((v: PricingOverview['settings'] & { reason: string }) => put('/pricing/settings', v));
@@ -27,60 +29,44 @@ export function PricingPage() {
   useEffect(() => {
     if (data.data && !draft) setDraft(data.data.settings);
   }, [data.data, draft]);
-  if (!data.data || !draft) return <p className="text-sm text-muted">Loading…</p>;
+  if (!data.data || !draft) return <p className="text-sm text-muted">{t('common.loading')}</p>;
   const d = data.data;
   const mo = d.month;
   const marginPct = mo.revenueMicros > 0 ? Math.round((mo.grossMarginMicros / mo.revenueMicros) * 100) : null;
-  const field = (key: keyof PricingOverview['settings'], label: string, scale = 1, step = '1') => (
+  const field = (key: keyof PricingOverview['settings'], label: AdminKey, scale = 1, step = '1') => (
     <div>
-      <Label htmlFor={key}>{label}</Label>
-      <Input
-        id={key}
-        type="number"
-        step={step}
-        value={draft[key] / scale}
-        onChange={(e) => setDraft({ ...draft, [key]: Math.round(Number(e.target.value) * scale) })}
-        className="w-36"
-      />
+      <Label htmlFor={key}>{t(label)}</Label>
+      <Input id={key} type="number" step={step} value={draft[key] / scale} onChange={(e) => setDraft({ ...draft, [key]: Math.round(Number(e.target.value) * scale) })} className="w-36" />
     </div>
   );
 
   return (
     <div className="space-y-6">
-      <PageTitle title="Pricing & margin">
-        <Button disabled={refresh.isPending} onClick={() => refresh.mutate(undefined, { onSuccess: () => toast('Prices refreshed from AWS'), onError: (e) => toast((e as Error).message, 'error') })}>
-          <RefreshCw /> Refresh prices now
+      <PageTitle title={t('nav.pricing')}>
+        <Button disabled={refresh.isPending} onClick={() => refresh.mutate(undefined, { onSuccess: () => toast(t('pricing.refreshed')), onError: (e) => toast(errorText(e), 'error') })}>
+          <RefreshCw /> {t('pricing.refresh')}
         </Button>
       </PageTitle>
 
       <section>
-        <h2 className="mb-2 text-sm font-medium">This month ({mo.month}), metered usage</h2>
+        <h2 className="mb-2 text-sm font-medium">{t('pricing.month', { month: mo.month })}</h2>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Tile label="Charged to customers" value={usd(mo.revenueMicros)} />
-          <Tile label="Est. AWS cost of metered usage" value={usd(mo.costMicros)} />
-          <Tile label={`Gross margin${marginPct !== null ? ` (${marginPct}%)` : ''}`} value={usd(mo.grossMarginMicros)} tone={mo.grossMarginMicros < 0 ? 'bad' : undefined} />
-          <Tile label={`Top-ups credited (${mo.topups})`} value={usd(mo.topupMicros)} />
+          <Tile label={t('pricing.charged')} value={usd(mo.revenueMicros)} />
+          <Tile label={t('pricing.cost')} value={usd(mo.costMicros)} />
+          <Tile label={`${t('pricing.margin')}${marginPct !== null ? ` (${marginPct}%)` : ''}`} value={usd(mo.grossMarginMicros)} tone={mo.grossMarginMicros < 0 ? 'bad' : undefined} />
+          <Tile label={t('pricing.topups', { n: mo.topups })} value={usd(mo.topupMicros)} />
+          <Tile label={t('pricing.fees')} value={usd(mo.estimatedFeesMicros)} />
+          <Tile label={t('pricing.refunds')} value={usd(mo.refundMicros)} tone={mo.refundMicros > 0 ? 'warn' : undefined} />
+          <Tile label={t('pricing.credits')} value={usd(mo.creditMicros)} />
         </div>
-        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Tile label={`Est. payment fees (on ${usd(mo.topupGrossMicros)} paid incl. tax)`} value={usd(mo.estimatedFeesMicros)} />
-          <Tile label="Refunds and disputes" value={usd(mo.refundMicros)} tone={mo.refundMicros > 0 ? 'warn' : undefined} />
-          <Tile label="Credits granted" value={usd(mo.creditMicros)} />
-          <Tile label="AWS projected (all resources)" value={mo.projectedAwsCents !== null ? `$${(mo.projectedAwsCents / 100).toFixed(2)}` : '—'} />
-        </div>
-        <p className="mt-2 text-xs text-muted">
-          Costs use AWS public unit prices and platform usage, not an AWS bill. Free-tier allowances, credits and discounts are not reconciled.
-          Charged is what was taken from balances; costs also include free trials and browsers being deleted, which are metered but never charged.
-          AWS projected (from the reconciler) also includes resources not charged to anyone: browsers being created,
-          resources awaiting cleanup, old IPs kept 30 days after a change, and internal recovery resources. Outstanding balances: {usd(d.balances.totalMicros)} (of which{' '}
-          {usd(d.balances.negativeMicros)} below zero).
-        </p>
+        <p className="mt-2 text-xs text-muted">{t('pricing.note', { total: usd(d.balances.totalMicros), negative: usd(d.balances.negativeMicros) })}</p>
         <Table
           rows={[
-            ...USAGE_ROWS.map(([key, label]) => ({ key, label, ...(mo.byItem[key] ?? { revenueMicros: 0, costMicros: 0 }) })),
-            { key: 'total', label: 'Total', revenueMicros: mo.revenueMicros, costMicros: mo.costMicros },
+            ...USAGE_ROWS.map(([key, label]) => ({ key, label: t(label).replace(/[（(].*[)）]$/, '').trim(), ...(mo.byItem[key] ?? { revenueMicros: 0, costMicros: 0 }) })),
+            { key: 'total', label: t('pricing.total'), revenueMicros: mo.revenueMicros, costMicros: mo.costMicros },
           ]}
           rowKey={(r) => r.key}
-          columns={['Item', 'Charged', 'Est. AWS cost', 'Est. margin']}
+          columns={[t('col.item'), t('col.charged'), t('col.awsCost'), t('col.margin')]}
           cells={(r) => {
             const strong = (v: string) => (r.key === 'total' ? <span className="font-semibold">{v}</span> : v);
             return [strong(r.label), strong(usd(r.revenueMicros)), strong(usd(r.costMicros)), strong(usd(r.revenueMicros - r.costMicros))];
@@ -89,7 +75,7 @@ export function PricingPage() {
       </section>
 
       <section>
-        <h2 className="mb-2 text-sm font-medium">Customer price settings</h2>
+        <h2 className="mb-2 text-sm font-medium">{t('pricing.settings')}</h2>
         <form
           className="flex flex-wrap items-end gap-3"
           onSubmit={(e) => {
@@ -97,33 +83,30 @@ export function PricingPage() {
             setConfirm(true);
           }}
         >
-          {field('markupPercent', 'Markup (% of AWS cost)')}
-          {field('minBalanceMicros', 'Min. balance to create/wake ($)', 1_000_000, '0.01')}
-          {field('lowBalanceMicros', 'Low-balance warning ($)', 1_000_000, '0.01')}
-          {field('paymentFeeBps', 'Payment fee (%)', 100, '0.01')}
-          {field('paymentFeeFixedCents', 'Payment fee per top-up ($)', 100, '0.01')}
+          {field('markupPercent', 'pricing.markup')}
+          {field('minBalanceMicros', 'pricing.minBalance', 1_000_000, '0.01')}
+          {field('lowBalanceMicros', 'pricing.lowBalance', 1_000_000, '0.01')}
+          {field('paymentFeeBps', 'pricing.feePct', 100, '0.01')}
+          {field('paymentFeeFixedCents', 'pricing.feeFixed', 100, '0.01')}
           <Button type="submit" variant="primary" disabled={save.isPending || JSON.stringify(draft) === JSON.stringify(d.settings)}>
-            Save
+            {t('common.save')}
           </Button>
         </form>
-        <p className="mt-2 text-xs text-muted">
-          Customer price = AWS cost × markup ÷ 100 (at least 100%). Changes apply to usage from now on; past usage keeps the price it was charged at. Payment fees
-          are only used for the margin estimate above.
-        </p>
+        <p className="mt-2 text-xs text-muted">{t('pricing.settingsNote')}</p>
       </section>
 
       <section>
-        <h2 className="mb-2 text-sm font-medium">AWS cost → customer price, per region</h2>
+        <h2 className="mb-2 text-sm font-medium">{t('pricing.perRegion')}</h2>
         <Table
           rows={d.regions}
           rowKey={(r) => r.regionId}
-          columns={['Region', ...ITEMS.map(([, label]) => label), 'Prices from']}
+          columns={[t('col.region'), ...ITEMS.map(([, label]) => t(label)), t('col.pricesFrom')]}
           cells={(r) => [
             <span>
-              {r.name} {r.enabled ? null : <Pill>disabled</Pill>}
+              {r.name} {r.enabled ? null : <Pill>{t('pricing.disabled')}</Pill>}
               <br />
               <Mono>
-                {r.executor} · {r.providerRegion}
+                {r.providerRegion}
                 {r.sheet ? ` · ${r.sheet.instanceType}` : ''}
               </Mono>
             </span>,
@@ -137,33 +120,24 @@ export function PricingPage() {
               ),
             ),
             <span className="text-xs">
-              {r.sheet ? (r.sheet.source === 'simulated' ? <Pill>simulated</Pill> : <Pill tone="ok">AWS Price List</Pill>) : <Pill tone="bad">no prices</Pill>}
+              {r.sheet ? r.sheet.source === 'simulated' ? <Pill>{t('pricing.simulated')}</Pill> : <Pill tone="ok">{t('pricing.priceList')}</Pill> : <Pill tone="bad">{t('pricing.noPrices')}</Pill>}
               <br />
               {when(r.fetchedAt)}
-              {r.lastError ? (
-                <>
-                  <br />
-                  <span className="text-error">
-                    {when(r.lastErrorAt)}: {r.lastError}
-                  </span>
-                </>
-              ) : null}
+              {r.lastError ? <span className="block text-error">{when(r.lastErrorAt)}: {r.lastError}</span> : null}
             </span>,
           ]}
         />
-        <p className="mt-2 text-xs text-muted">The engine reads prices again when they are older than 12 hours; browsers cannot be created in a region without prices.</p>
+        <p className="mt-2 text-xs text-muted">{t('pricing.regionNote')}</p>
       </section>
 
       <ReasonDialog
         open={confirm}
-        title="Change customer prices"
-        description={`Markup ${d.settings.markupPercent}% → ${draft.markupPercent}%. Users see the new prices at once; anything they had open is refused with “prices changed” until they review it.`}
-        confirm="Save"
+        title={t('pricing.confirmTitle')}
+        description={t('pricing.confirmHelp', { from: d.settings.markupPercent, to: draft.markupPercent })}
+        confirm={t('common.save')}
         busy={save.isPending}
         onClose={() => setConfirm(false)}
-        onConfirm={(reason) =>
-          save.mutate({ ...draft, reason }, { onSuccess: () => setConfirm(false), onError: (e) => toast((e as Error).message, 'error') })
-        }
+        onConfirm={(reason) => save.mutate({ ...draft, reason }, { onSuccess: () => setConfirm(false), onError: (e) => toast(errorText(e), 'error') })}
       />
     </div>
   );

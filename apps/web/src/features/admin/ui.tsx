@@ -1,5 +1,6 @@
 import { Button, cn, Dialog, Input, Label, Pagination, usePaged } from '@cloudbrowser/ui';
 import { useState, type ReactNode } from 'react';
+import { useT } from './i18n.js';
 
 /**
  * Compact table for the console. `cells` returns one node per column. Rows already in memory are
@@ -9,7 +10,7 @@ export function Table<T>({
   rows: all,
   columns,
   cells,
-  empty = 'Nothing here.',
+  empty,
   onRow,
   rowKey,
   pageSize = 25,
@@ -24,10 +25,11 @@ export function Table<T>({
   pageSize?: number;
   pager?: { page: number; hasMore: boolean; onPage: (page: number) => void };
 }) {
+  const { t } = useT();
   const local = usePaged(pager ? undefined : all, pageSize);
   const rows = pager ? all : all && local.rows;
-  if (!rows) return <p className="py-6 text-sm text-muted">Loading…</p>;
-  if (!rows.length && !(pager && pager.page > 0)) return <p className="py-6 text-sm text-muted">{empty}</p>;
+  if (!rows) return <p className="py-6 text-sm text-muted">{t('common.loading')}</p>;
+  if (!rows.length && !(pager && pager.page > 0)) return <p className="py-6 text-sm text-muted">{empty ?? t('common.empty')}</p>;
   return (
     <div>
     <div className="overflow-x-auto rounded-[var(--radius-card)] border border-border">
@@ -55,9 +57,9 @@ export function Table<T>({
       </table>
     </div>
     {pager ? (
-      <Pagination page={pager.page} hasMore={pager.hasMore} onPage={pager.onPage} labels={{ previous: 'Previous', next: 'Next', page: 'Page {page}' }} />
+      <Pagination page={pager.page} hasMore={pager.hasMore} onPage={pager.onPage} labels={{ previous: t('common.previous'), next: t('common.next'), page: t('common.page') }} />
     ) : (
-      <Pagination page={local.page} pages={local.pages} onPage={local.setPage} labels={{ previous: 'Previous', next: 'Next', page: `Page {page} of {pages} · ${all!.length} rows` }} />
+      <Pagination page={local.page} pages={local.pages} onPage={local.setPage} labels={{ previous: t('common.previous'), next: t('common.next'), page: t('common.pageOf', { rows: all!.length }) }} />
     )}
     </div>
   );
@@ -126,6 +128,7 @@ export function ReasonDialog({
   /** Extra fields shown above the reason. */
   children?: ReactNode;
 }) {
+  const { t } = useT();
   const [reason, setReason] = useState('');
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()} title={title} description={description}>
@@ -136,10 +139,10 @@ export function ReasonDialog({
         }}
       >
         {children}
-        <Label htmlFor="reason">Reason (kept in the audit log)</Label>
-        <Input id="reason" autoFocus value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. abuse report #123, incident 7" />
+        <Label htmlFor="reason">{t('common.reason')}</Label>
+        <Input id="reason" autoFocus value={reason} onChange={(e) => setReason(e.target.value)} placeholder={t('common.reasonPlaceholder')} />
         <div className="mt-4 flex justify-end gap-2">
-          <Button onClick={onClose}>Cancel</Button>
+          <Button onClick={onClose}>{t('common.cancel')}</Button>
           <Button type="submit" variant={danger ? 'danger' : 'primary'} disabled={reason.trim().length < 3 || busy}>
             {confirm}
           </Button>
@@ -156,4 +159,10 @@ export function PageTitle({ title, children }: { title: string; children?: React
       {children}
     </div>
   );
+}
+
+/** A status, kind or severity as a translated, coloured pill. */
+export function StatusPill({ value, tone }: { value: string; tone?: 'ok' | 'warn' | 'bad' | 'muted' }) {
+  const { term } = useT();
+  return <Pill tone={tone ?? statusTone(value)}>{term(value)}</Pill>;
 }

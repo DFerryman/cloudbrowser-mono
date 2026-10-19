@@ -223,18 +223,17 @@ export async function snapshotQuotasAndSpend(deps: ReconcilerDeps) {
     .from(browserInstances)
     .where(inArray(browserInstances.status, ['running', 'starting', 'creating']));
   const daysInMonth = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 0)).getUTCDate();
-  const [policy]=await db.select().from(schema.awsProviderSettings);
-  const runningHoursCents = Math.round(running * (policy?.estimatedHoursPerDay ?? 24) * daysInMonth * vmHourCents);
+  const runningHoursCents = Math.round(running * 24 * daysInMonth * vmHourCents);
   const month = at.toISOString().slice(0, 7);
   const projectedCents = Number(cents) + runningHoursCents;
   await db.insert(spendSnapshots).values({ month, activeMonthlyCents: Number(cents), runningHoursCents, projectedCents, takenAt: at });
 
-  // Spend guard thresholds (page 10): alert at 80% of the budget; at 100% creates are refused.
+  // Spend alerts: at 80% and 100% of the budget. They inform operators; they never limit creation.
   const [budget] = await db.select().from(caps).where(and(eq(caps.scope, 'global'), eq(caps.metric, 'spend_budget_cents')));
   if (budget && budget.limit > 0) {
     const pct = Math.round((projectedCents / budget.limit) * 100);
     if (pct >= 100) {
-      await raiseAlert(db, { source: 'reconciler', severity: 'critical', title: `Spend guard active: projected ${pct}% of the monthly budget`, detail: { projectedCents, budgetCents: budget.limit }, dedupeKey: `spend100:${month}` }, at);
+      await raiseAlert(db, { source: 'reconciler', severity: 'critical', title: `Projected spend at ${pct}% of the monthly budget`, detail: { projectedCents, budgetCents: budget.limit }, dedupeKey: `spend100:${month}` }, at);
     } else if (pct >= 80) {
       await raiseAlert(db, { source: 'reconciler', severity: 'warning', title: `Projected spend at ${pct}% of the monthly budget`, detail: { projectedCents, budgetCents: budget.limit }, dedupeKey: `spend80:${month}` }, at);
     }

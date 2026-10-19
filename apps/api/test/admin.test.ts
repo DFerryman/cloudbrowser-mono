@@ -24,18 +24,11 @@ const quote = async (regionId = 'tyo1') => (await t.call('GET', '/api/v1/pricing
 let token: string;
 const callAdmin = (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => adminCall(t, token, method, path, body, headers);
 
-it('audits shared AWS inventory policy changes and validates the running-time assumption',async()=>{
+it('shows AWS inventory per region without any budget policy',async()=>{
   const initial=await callAdmin('GET','/api/v1/admin/aws-provider');
   expect(initial.status).toBe(200);
-  expect(initial.body.settings.estimatedHoursPerDay).toBe(24);
-  expect(initial.body.inventorySummary).toEqual({existingBrowsers:0,committedMicros:0});
-  const policy={inventoryMode:'budget',monthlyBudgetMicros:200_000_000,estimatedHoursPerDay:24,reason:'Set the shared project inventory budget'};
-  expect((await callAdmin('PUT','/api/v1/admin/aws-provider/settings',{...policy,estimatedHoursPerDay:25})).status).toBe(400);
-  expect((await callAdmin('PUT','/api/v1/admin/aws-provider/settings',policy)).status).toBe(200);
-  const saved=await callAdmin('GET','/api/v1/admin/aws-provider');
-  expect(saved.body.settings.monthlyBudgetMicros).toBe(200_000_000);
-  const audit=t.d1.sqlite.prepare("SELECT detail FROM audit_log WHERE action='aws-provider.settings'").get() as {detail:string};
-  expect(JSON.parse(audit.detail)).toMatchObject({after:{monthlyBudgetMicros:200_000_000},reason:policy.reason,email:ADMIN_EMAIL});
+  expect(initial.body.settings).toBeUndefined();
+  expect((await callAdmin('PUT','/api/v1/admin/aws-provider/settings',{inventoryMode:'quota',reason:'Old endpoint'})).status).toBe(404);
 });
 
 it('shows which regions launched or are blocked, and reopens a blocked region with an audited reason',async()=>{

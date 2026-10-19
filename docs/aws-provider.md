@@ -17,7 +17,6 @@ and errors. Changes to inventory policy require a reason and are audited.
 | Consumed IPs, CPU, storage, interfaces | Paginated EC2 describe APIs, including non-project resources | Every 5 minutes |
 | Unit prices | AWS Price List GetProducts, including historical machine types | Every 12 hours or manual refresh |
 | Organization / linked accounts / gross cost | Organizations and Cost Explorer | Every 6 hours or manual refresh |
-| Account budget | AWS Budgets DescribeBudgets (`budgets:ViewBudget`), member account role | Every 6 hours or manual refresh |
 | Credits | Billing GetCredits, using the management role | Every 6 hours or manual refresh |
 
 Workers use a bounded, request-scoped client pool. Synchronizations take a D1 lease; manual
@@ -30,42 +29,34 @@ and enabling opt-in regions are infrastructure actions, not read-only API discov
 without a network, compatible offered machine, readable quotas or current prices has no inventory.
 Legacy simulator regions and immutable existing browser placements are not rewritten.
 
-## Inventory and budget semantics
+## Inventory semantics
 
-Inventory is a conservative project admission estimate, not AWS physical spare-server capacity.
-Each region is bounded by available Elastic IPs, Standard On-Demand vCPUs, gp3 GiB, regional ENIs
-and subnet addresses. Existing project browsers reserve resources even while asleep; foreign and
-orphan AWS resources consume quota. Local pending creates are counted before AWS reports them.
+Inventory is how many more browsers AWS can allocate to this account in a region: the smallest
+room under Elastic IPs, Standard On-Demand vCPUs, gp3 GiB, regional ENIs and subnet addresses,
+divided by what one browser needs, minus the browsers that hold a slot. It is not limited by any
+budget or by spend (migration 0018 removed the budget policy). Existing project browsers hold
+their slot even while asleep, so they can always wake; foreign and orphan AWS resources consume
+quota. Local pending creates are counted before AWS reports them. AWS physical capacity is only
+known at launch (see launch outcomes below).
 
-`aws_region_inventory` is both the public stock calculation and the source of transactional
-creation triggers. The regional slot and shared budget are rechecked inside the same D1 batch as
-the browser, operation, customer deposit and idempotency record. Two regions cannot independently
-spend the same last budget slot. A larger per-user default disk reserves its actual extra cost.
+`aws_region_inventory` is both the public stock calculation and the source of the transactional
+creation trigger `aws_inventory_create_guard`. D1 runs one transaction at a time, and the regional
+slot is rechecked inside the same batch as the browser, operation, customer deposit and
+idempotency record. When two people take the last slot at once, both may pass the earlier checks,
+but the second transaction sees the first browser and is refused: nothing of it is written (no
+deposit, operation or idempotency record), the API answers `409 region_unavailable` with
+`limit: no_stock`, and the create dialog refreshes the region list.
 
-Budget mode uses:
-
-```
-remaining = project monthly budget - AWS month-to-date cost - current browser commitments
-available(region) = min(quota room, floor(remaining / estimated new-browser monthly cost))
-```
-
-Estimates reserve a full calendar month of compute (24 hours/day initially), public IP and disk
-for every browser; this intentionally overlaps month-to-date spend. Credits never increase the
-budget. A console budget override applies immediately; otherwise a single unfiltered monthly
-USD COST budget from AWS is used. Missing or ambiguous AWS budgets do not imply unlimited money.
-Traffic is variable and AWS billing is delayed, so an estimate cannot guarantee a final bill.
-
-Quota observations expire after 20 minutes. Budget observations expire after 26 hours and cannot
-cross into a new calendar month. New purchases stop after 48 hours without a good price refresh;
-existing usage retains the last known price. Failed creates hold inventory until the reaper
-confirms provider cleanup; retained/deleting browsers hold it until purge. Each browser still
-obeys the existing per-user limits and prepaid requirements.
+Quota observations expire after 20 minutes. New purchases stop after 48 hours without a good
+price refresh; existing usage retains the last known price. Failed creates hold inventory until
+the reaper confirms provider cleanup; retained/deleting browsers hold it until purge. Each browser
+still obeys the per-user browser limit and prepaid requirements.
 
 ## What users see before creating
 
 AWS publishes no live on-demand capacity, so the region list combines what is known:
 
-- **Inventory** (above): no room under quotas or budget makes a region *Unavailable*.
+- **Inventory** (above): no room under AWS quotas makes a region *Unavailable*.
 - **Launch outcomes** (`launch_health`, written by the engine per region and zone): a capacity
   shortage in the last 30 minutes with no successful launch since makes the region *Limited*. A VM
   or disk the provider itself failed makes it *Unavailable*:
@@ -101,14 +92,21 @@ assume only its own role, with an ExternalId restricted in the role trust policy
 |---|---|
 | Engine | `nevazu-provider-runtime`: tagged browser creation/start/stop, explicit delete deny |
 | Reaper | `nevazu-provider-reaper`: tagged cleanup, explicit creation deny |
-| Reconciler | `nevazu-provider-reader`: EC2 describe, quota/price/metadata and own account budget reads |
+| Reconciler | `nevazu-provider-reader`: EC2 describe, quota/price/metadata reads |
 | Reconciler organization view | `nevazu-provider-management`: organization, cost and credit reads |
 
 Configure `AWS_ROLE_ARN` and `AWS_ROLE_EXTERNAL_ID` on each deployment, plus
 `AWS_MANAGEMENT_ROLE_ARN` / `AWS_MANAGEMENT_EXTERNAL_ID` on the reconciler. Keep these in Worker
-secrets; the API and browser never receive credentials. STS sessions last one hour and refresh
-five minutes before expiry. Concurrent requests coalesce. A failed refresh never falls back to
-expired session credentials. Revoked authorization is recorded as an error and requires repair.
+secrets; the API and browser never receive credentials. STS sessions last one hour and renew
+automatically five minutes before expiry; one session per isolate is shared by every invocation
+and concurrent callers share one STS request. STS throttling, outages and network errors are
+retried (three attempts, backing off); if renewal still fails, a session with more than a minute
+left keeps being used, and an expired one never is. When AWS rejects a request's session
+(`ExpiredToken`, `RequestExpired`), the session is renewed and the request sent once more; AWS did
+nothing with the rejected request, so this is safe for creates too. A failed renewal is reported
+as retryable (nothing was sent), or as forbidden when STS refuses the role. Revoked authorization
+is recorded as an error and requires repair. The console's AWS page shows each role session's
+expiry.
 
 The bootstrap IAM keys have no automatic AWS expiration/rotation. Operators must rotate them in
 Worker secrets. Changing the key or role takes effect on the next Worker invocation. CLI/console

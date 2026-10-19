@@ -1,6 +1,6 @@
 import { ExecutorError, type CredentialMode, type Executor, type ExecutorKind } from './executor.js';
 import { AwsExecutor, type AwsRegionConfig } from './aws/aws-executor.js';
-import { assumeRoleCredentials } from './aws/authorization.js';
+import { assumeRoleCredentials, type AwsCredentialProvider } from './aws/authorization.js';
 import { FakeExecutor, type FaultPlan } from './fake/fake-executor.js';
 import { D1FakeStore } from './fake/store.js';
 
@@ -52,6 +52,23 @@ function faultsFromEnv(raw: string | undefined): FaultPlan | undefined {
   };
 }
 
+const sessions = new Map<string, AwsCredentialProvider>();
+/**
+ * One STS session per isolate for each key and role, shared by every invocation, so a busy queue
+ * does not call AssumeRole per message. New secrets (a rotated key, another role) get their own.
+ */
+function roleSession(accessKeyId: string, secretAccessKey: string, arn: string, externalId: string | undefined) {
+  const key = JSON.stringify([accessKeyId, secretAccessKey, arn, externalId ?? null]);
+  let provider = sessions.get(key);
+  if (!provider) {
+    provider = assumeRoleCredentials({ accessKeyId, secretAccessKey }, { arn, externalId });
+    // Old secrets stop being used after a rotation; keep only a few.
+    if (sessions.size >= 4) sessions.delete(sessions.keys().next().value!);
+    sessions.set(key, provider);
+  }
+  return provider;
+}
+
 /** Each process builds its executors with its own credential mode. */
 export function createExecutor(kind: ExecutorKind, mode: CredentialMode, env: ExecutorEnv): Executor {
   switch (kind) {
@@ -72,7 +89,7 @@ export function createExecutor(kind: ExecutorKind, mode: CredentialMode, env: Ex
         mode,
         accessKeyId: env.AWS_ACCESS_KEY_ID,
         secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
-        credentials: env.AWS_ROLE_ARN ? assumeRoleCredentials({ accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY }, { arn: env.AWS_ROLE_ARN, externalId: env.AWS_ROLE_EXTERNAL_ID }) : undefined,
+        credentials: env.AWS_ROLE_ARN ? roleSession(env.AWS_ACCESS_KEY_ID, env.AWS_SECRET_ACCESS_KEY, env.AWS_ROLE_ARN, env.AWS_ROLE_EXTERNAL_ID) : undefined,
         regions: env.AWS_REGIONS ? awsRegions(env.AWS_REGIONS) : {},
         regionConfigResolver: env.AWS_REGION_CONFIG_RESOLVER,
         appUrl: env.APP_URL ?? '',

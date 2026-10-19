@@ -1,7 +1,7 @@
 /**
  * Whether a region can take a new browser, and what the user should know before choosing it.
  * AWS publishes no live on-demand capacity, so this combines what can be known: the operator's
- * switches, the inventory left under quotas and budget, and how recent launches there went
+ * switches, the inventory AWS quotas still allow, and how recent launches there went
  * (a capacity shortage, or a provider failure such as an encryption key the account may not use).
  */
 import { AWS_REGION_FACTS, awsLatencyProbeUrl, estimateRttMs, type Region } from '@cloudbrowser/contracts';
@@ -11,7 +11,7 @@ import { regionAcceptingNew } from './limits.js';
 
 export function availabilityOf(input: {
   enabled: boolean;
-  /** Room under the region cap, quotas and budget. */
+  /** Room under the region cap and AWS quotas. */
   acceptingNew: boolean;
   /** Browsers the inventory still allows; null when the region has no inventory. */
   stock: number | null;
@@ -67,7 +67,7 @@ export async function regionViews(db: Db, from: { lat: number; lon: number } | n
         available: inventory.available,
         checkedAt: inventory.checked_at ? new Date(inventory.checked_at).toISOString() : null,
         status: inventory.availability === 'ready' ? 'ready' as const : 'unavailable' as const,
-        constraint: inventory.availability === 'ready' ? (inventory.inventory_mode === 'budget' ? 'quota_and_budget' : 'quota') : 'sync_unavailable',
+        constraint: inventory.availability === 'ready' ? 'quota' : 'sync_unavailable',
       } } : {}),
       probeUrl: r.probeUrl ?? (r.executor === 'aws-ec2' ? awsLatencyProbeUrl(r.providerRegion) : null),
       area: facts?.area ?? null,

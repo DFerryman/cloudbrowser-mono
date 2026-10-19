@@ -25,8 +25,7 @@ const browser = await playwright.chromium.launch({ headless: true, executablePat
 const results = [];
 const mime = { '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.json': 'application/json' };
 const overview = {
-  instances: {}, users: 0, operations: { unfinished: 0, failed24h: 0 }, flags: {}, spend: null,
-  quotas: [], findingsOpen: 0, alertsOpen: 0, webhooksPending: 0,
+  instances: {}, users: 0, operations: { unfinished: 0, failed24h: 0 }, flags: {}, findingsOpen: 0, alertsOpen: 0, webhooksPending: 0,
 };
 
 async function fixture(mode = 'allowed') {
@@ -64,15 +63,13 @@ async function fixture(mode = 'allowed') {
           refundMicros: 0, creditMicros: 0, estimatedFeesMicros: 0, projectedAwsCents: null }, balances: { totalMicros: 0, negativeMicros: 0 },
       };
       else if (url.pathname === '/api/v1/admin/aws-provider') body = {
-        settings: { inventoryMode: 'budget', monthlyBudgetMicros: mode === 'budget-empty' ? 50_000_000 : 200_000_000, estimatedHoursPerDay: 24 },
-        inventorySummary: { existingBrowsers: 1, committedMicros: 87_920_000 },
         state: { accountId: '123456789012', managementAccountId: '210987654321', organizationId: 'o-test',
-          connection: { runtimeAuthorization: 'sts-assume-role', automaticSessionRefresh: true, baseCredentialRotation: 'operator-managed' },
-          billing: { month: '2026-10', spendMicros: 5_000_000, budgetMicros: 50_000_000, estimated: true, accounts: [], credits: [], auxiliaryErrors: {} },
+          connection: { runtimeAuthorization: 'sts-assume-role', sessionExpiresAt: new Date(Date.now() + 3_000_000).toISOString(), managementAuthorization: 'not-configured' },
+          billing: { month: '2026-10', spendMicros: 5_000_000, estimated: true, accounts: [], credits: [], auxiliaryErrors: {} },
           billingAt: new Date().toISOString(), catalogAt: new Date().toISOString(), lastError: null },
         regions: [{ regionId: 'eu-central-1', providerRegion: 'eu-central-1', name: 'Europe (Frankfurt)', optInStatus: 'opt-in-not-required', status: 'ready',
           quotas: [{ metric: 'static_ips', used: 1, limit: 5 }], checkedAt: new Date().toISOString(), price: { fetchedAt: new Date().toISOString(), lastError: null },
-          inventory: { available: mode === 'budget-empty' ? 0 : 3, quota_available: 4, monthly_unit_micros: 60_000_000, budget_remaining_micros: 195_000_000, availability: 'ready' } }],
+          inventory: { available: 3, quota_available: 3, availability: 'ready' }, held: 1 }],
       };
       // The lookalike-host case is an ordinary signed-out app. Every ordinary v1 endpoint is
       // protected, including the billing query mounted alongside /me. Returning an arbitrary
@@ -101,14 +98,22 @@ const finish = async (f, name) => { verifyErrors(f); results.push(name); await f
 try {
   const f = await fixture();
   await f.page.goto(admin.origin);
-  await f.page.getByRole('heading', { name: 'Overview', exact: true }).waitFor();
+  // Chinese by default.
+  await f.page.getByRole('heading', { name: '概览', exact: true }).waitFor();
   noOrdinaryLogin(f);
   assert.ok(f.requests.some((r) => r.path === '/api/v1/admin/session'));
   const links = await f.page.locator('nav a').evaluateAll((nodes) => nodes.map((node) => ({ text: node.textContent, href: node.getAttribute('href') })));
-  assert.deepEqual(links.map((link) => link.href), ['/', '/alerts', '/operations', '/browsers', '/users', '/pricing', '/aws-provider', '/ledger', '/findings', '/limits', '/audit']);
-  await f.page.getByRole('link', { name: 'Alerts', exact: true }).click();
+  assert.deepEqual(links.map((link) => link.href), ['/', '/alerts', '/operations', '/browsers', '/users', '/aws-provider', '/pricing', '/findings', '/limits', '/audit']);
+  await f.page.getByRole('link', { name: '告警', exact: true }).click();
   await f.page.waitForURL(`${admin.origin}/alerts`);
+  await f.page.getByRole('heading', { name: '告警', exact: true }).waitFor();
+  // English on request, remembered for the next visit.
+  await f.page.getByRole('button', { name: 'English' }).click();
   await f.page.getByRole('heading', { name: 'Alerts', exact: true }).waitFor();
+  await f.page.reload();
+  await f.page.getByRole('heading', { name: 'Alerts', exact: true }).waitFor();
+  await f.page.getByRole('button', { name: '中文' }).click();
+  await f.page.getByRole('heading', { name: '告警', exact: true }).waitFor();
   assert.ok(f.requests.some((r) => r.path === '/api/v1/admin/alerts'));
   assert.ok(await f.page.locator('a[href="/cdn-cgi/access/logout"]').count(), 'Console exposes an Access logout link');
   noOrdinaryLogin(f);
@@ -116,32 +121,26 @@ try {
 
   const deep = await fixture();
   await deep.page.goto(`${admin.origin}/operations`);
-  await deep.page.getByRole('heading', { name: 'Operations', exact: true }).waitFor();
+  await deep.page.getByRole('heading', { name: '操作', exact: true }).waitFor();
   noOrdinaryLogin(deep);
   await finish(deep, 'dedicated host deep links load the console directly');
 
   const pricing = await fixture();
   await pricing.page.goto(`${admin.origin}/pricing`);
-  await pricing.page.getByRole('heading', { name: 'Pricing & margin', exact: true }).waitFor();
-  await pricing.page.getByLabel('Markup (% of AWS cost)', { exact: true }).waitFor();
+  await pricing.page.getByRole('heading', { name: '定价与毛利', exact: true }).waitFor();
+  await pricing.page.getByLabel('加价（AWS 成本的 %）', { exact: true }).waitFor();
   noOrdinaryLogin(pricing);
   await finish(pricing, 'pricing deep link stays inside the Access-protected console');
 
   const provider = await fixture();
   await provider.page.goto(`${admin.origin}/aws-provider`);
-  await provider.page.getByRole('heading', { name: 'AWS Provider', exact: true }).waitFor();
+  await provider.page.getByRole('heading', { name: 'AWS', exact: true }).waitFor();
   await provider.page.getByText('Europe (Frankfurt)', { exact: false }).first().waitFor();
-  assert.equal(await provider.page.getByLabel('Estimated running hours/day').inputValue(), '24');
-  assert.equal(await provider.page.getByLabel('Project budget (USD/month)').inputValue(), '200');
   await provider.page.getByText('static_ips: 1 / 5', { exact: true }).waitFor();
+  await provider.page.getByText(/到期前 5 分钟自动续期/).waitFor();
+  assert.equal(await provider.page.getByText(/预算|budget/i).count(), 0, 'Inventory has no budget policy');
   noOrdinaryLogin(provider);
-  await finish(provider, 'AWS Provider displays dynamic regions, quota inventory, budget policy and session renewal status');
-
-  const budgetEmpty = await fixture('budget-empty');
-  await budgetEmpty.page.goto(`${admin.origin}/aws-provider`);
-  await budgetEmpty.page.getByRole('status').filter({ hasText: 'New browser inventory is limited by the project budget' }).waitFor();
-  await budgetEmpty.page.getByText('Estimated existing commitments (1 browser)', { exact: true }).waitFor();
-  await finish(budgetEmpty, 'operator console distinguishes budget reservations from billed cost and explains zero stock');
+  await finish(provider, 'AWS page shows what AWS can allocate per region and session renewal, with no budget policy');
 
   for (const [legacy, target] of [
     ['/admin?from=legacy#overview', '/?from=legacy#overview'],
@@ -150,7 +149,7 @@ try {
     const old = await fixture();
     await old.page.goto(app.origin + legacy);
     await old.page.waitForURL(admin.origin + target);
-    await old.page.getByText('Signed in as operator@example.test', { exact: true }).waitFor();
+    await old.page.getByText('当前登录：operator@example.test', { exact: true }).waitFor();
     assert.equal(old.requests.some((r) => r.host === app.host && r.path.startsWith('/api/v1/admin/')), false);
     noOrdinaryLogin(old);
     await finish(old, `legacy ${legacy.split('?')[0]} redirects to dedicated host with query and fragment`);
@@ -159,7 +158,7 @@ try {
   for (const mode of ['unauthenticated', 'redirect']) {
     const expired = await fixture(mode);
     await expired.page.goto(admin.origin);
-    const login = expired.page.getByRole('link', { name: 'Sign in with email', exact: true });
+    const login = expired.page.getByRole('link', { name: '使用邮箱登录', exact: true });
     await login.waitFor();
     assert.equal(await login.getAttribute('href'), admin.href, 'Explicit sign-in must navigate to the protected application root');
     await expired.page.locator('a[href="/cdn-cgi/access/logout"]').waitFor();
@@ -175,9 +174,9 @@ try {
 
   const denied = await fixture('forbidden');
   await denied.page.goto(admin.origin);
-  await denied.page.getByText(/Access denied\. Your email is not authorized/i).waitFor();
+  await denied.page.getByText(/拒绝访问：你的邮箱未被授权/).waitFor();
   await denied.page.locator('a[href="/cdn-cgi/access/logout"]').waitFor();
-  assert.equal(await denied.page.getByRole('link', { name: 'Sign in with email', exact: true }).count(), 0);
+  assert.equal(await denied.page.getByRole('link', { name: '使用邮箱登录', exact: true }).count(), 0);
   assert.equal(denied.requests.some((r) => r.path.startsWith('/cdn-cgi/access/')), false);
   assert.equal(denied.requests.filter((r) => r.navigation).length, 1);
   noOrdinaryLogin(denied);

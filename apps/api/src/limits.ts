@@ -4,7 +4,7 @@ import { and, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 import { storageLimits } from './pricing.js';
 import { problem } from './problem.js';
 
-const { caps, browserInstances, operations, controlFlags, spendSnapshots, quotaSnapshots, regions, billingAccounts, browserReservations } = schema;
+const { caps, browserInstances, operations, controlFlags, quotaSnapshots, regions, billingAccounts, browserReservations } = schema;
 
 /** Statuses that hold a browser slot (a dedicated IP and a volume). */
 const HOLDS_SLOT = sql`${browserInstances.status} NOT IN ('purged', 'failed', 'deleting')`;
@@ -28,7 +28,8 @@ export async function entitlementsFor(db: Db, userId: string): Promise<Entitleme
   return {
     billing: (await billingRequired(db)) ? 'prepaid' : 'pilot',
     maxBrowsers: c.get('instances') ?? 0,
-    maxRunning: c.get('running') ?? 0,
+    // Every browser a user owns may run at once; there is no separate running limit.
+    maxRunning: c.get('instances') ?? 0,
     idleTimeoutMaxS: c.get('idle_timeout_max_s') ?? 1800,
     maxStorageGb: (await storageLimits(db, userId)).maxGb,
   };
@@ -141,7 +142,7 @@ async function checkRegionRoom(db: Db, regionId: string) {
   }
   const inventory = (await awsInventory(db)).get(regionId);
   if (inventory) {
-    if (inventory.available < 1) throw problem(409, 'region_unavailable', 'No inventory is currently available in this region.');
+    if (inventory.available < 1) throw problem(409, 'region_unavailable', 'AWS has no room for another browser in this region right now. Choose another region.', { limit: 'no_stock' });
     return;
   }
   const regionCaps = await capsFor(db, [`region:${regionId}`]);
@@ -164,7 +165,7 @@ async function checkRegionRoom(db: Db, regionId: string) {
 
 /**
  * Bounded before created (page 10, rule 5): plan, region and global caps, provider quota headroom,
- * the spend guard and the circuit breaker are all checked before a create is admitted.
+ * and the circuit breaker are all checked before a create is admitted. Spend never limits it.
  */
 export async function admitCreate(db: Db, userId: string, regionId: string, now: Date, opts: { trial?: boolean } = {}) {
   await requireUnfrozen(db, userId);
@@ -173,16 +174,6 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
 
   const global = await capsFor(db, ['global']);
   const providerManaged = (await awsInventory(db)).has(regionId);
-  const [spend] = await db
-    .select()
-    .from(spendSnapshots)
-    .where(eq(spendSnapshots.month, now.toISOString().slice(0, 7)))
-    .orderBy(desc(spendSnapshots.takenAt))
-    .limit(1);
-  const budget = global.get('spend_budget_cents');
-  if (!providerManaged && spend && budget !== undefined && spend.projectedCents >= budget) {
-    throw problem(503, 'spend_guard_active', 'New browsers are temporarily unavailable.');
-  }
 
   const c = await userCaps(db, userId);
   const u = await usage(db, userId);
@@ -207,7 +198,7 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
   }
 }
 
-/** Running caps, checked before every start (page 10). */
+/** Before every start: suspension, balance, and the legacy region and global running caps. */
 export async function admitStart(db: Db, userId: string, instanceId: string, regionId: string) {
   await requireUnfrozen(db, userId);
   const [inst] = await db
@@ -215,10 +206,6 @@ export async function admitStart(db: Db, userId: string, instanceId: string, reg
     .from(browserInstances)
     .where(eq(browserInstances.id, instanceId));
   if (inst?.suspendedAt) throw problem(403, 'suspended', 'This browser is suspended. Contact support.');
-  const c = await userCaps(db, userId);
-  if ((c.get('running') ?? 0) === 0) {
-    throw problem(403, 'plan_limit', 'Your account cannot run browsers right now. Contact support; data and IPs are kept.', { limit: 'running_disabled' });
-  }
   if (inst && isTrial(inst) && inst.trialState === 'active' && trialSecondsLeft(inst) > 0) {
     // Free trial minutes left: waking is free.
   } else if (inst && isTrial(inst)) {
@@ -229,13 +216,6 @@ export async function admitStart(db: Db, userId: string, instanceId: string, reg
   }
 
   const others = and(ne(browserInstances.id, instanceId), inArray(browserInstances.status, RUNNING_STATUSES));
-  const mine = await count(db, and(eq(browserInstances.userId, userId), others));
-  if (mine >= (c.get('running') ?? 0)) {
-    const n = c.get('running') ?? 0;
-    throw problem(403, 'plan_limit', `Your account can run ${n} browser${n === 1 ? '' : 's'} at a time. Put another browser to sleep, then try again.`, {
-      limit: 'running',
-    });
-  }
   const regionCaps = await capsFor(db, [`region:${regionId}`]);
   const providerManaged = (await awsInventory(db)).has(regionId);
   if (!providerManaged && (await count(db, and(eq(browserInstances.regionId, regionId), others))) >= (regionCaps.get('running') ?? Infinity)) {

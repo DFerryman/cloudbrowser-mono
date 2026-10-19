@@ -21,7 +21,7 @@ describe('auth', () => {
     const me = await t.call('GET', '/api/v1/me');
     expect(me.status).toBe(200);
     expect(me.body.user.email).toBe('pilot@example.com');
-    expect(me.body.entitlements.maxBrowsers).toBe(2);
+    expect(me.body.entitlements.maxBrowsers).toBe(3);
     expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM caps WHERE metric = 'creates_per_day'").get()).toEqual({ n: 0 });
   });
 
@@ -102,32 +102,52 @@ describe('browsers', () => {
     expect(op.body.status).toBe('succeeded');
   });
 
-  it('keeps the original two-browser account limit and rejects a third', async () => {
-    for (const k of ['a', 'b']) {
+  it('lets a user own three browsers by default and rejects a fourth', async () => {
+    for (const k of ['a', 'b', 'c']) {
       const created = await t.call('POST', '/api/v1/instances', { name: k, regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': k });
       expect(created.status).toBe(202);
     }
     await t.settle();
-    expect((await t.call('GET', '/api/v1/me')).body.usage.browsers).toBe(2);
-    const third = await t.call('POST', '/api/v1/instances', { name: 'c', regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': 'c' });
-    expect(third).toMatchObject({ status: 403, body: { type: 'plan_limit', limit: 'instances' } });
+    expect((await t.call('GET', '/api/v1/me')).body).toMatchObject({ usage: { browsers: 3 }, entitlements: { maxBrowsers: 3, maxRunning: 3 } });
+    const fourth = await t.call('POST', '/api/v1/instances', { name: 'd', regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': 'd' });
+    expect(fourth).toMatchObject({ status: 403, body: { type: 'plan_limit', limit: 'instances' } });
   });
 
-  it('wakes one browser at a time under the default running limit, and says how to wake another', async () => {
+  it('runs every browser a user owns at the same time: there is no separate running limit', async () => {
     const ids: string[] = [];
-    for (const k of ['a', 'b']) {
+    for (const k of ['a', 'b', 'c']) {
       ids.push((await t.call('POST', '/api/v1/instances', { name: k, regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': k })).body.instanceId);
       await t.settle();
       await t.call('POST', `/api/v1/instances/${ids.at(-1)}/stop`, undefined, { 'idempotency-key': `stop-${k}` });
       await t.settle();
     }
-    expect((await t.call('POST', `/api/v1/instances/${ids[0]}/start`, undefined, { 'idempotency-key': 'start-a' })).status).toBe(202);
+    for (const id of ids) expect((await t.call('POST', `/api/v1/instances/${id}/start`, undefined, { 'idempotency-key': `start-${id}` })).status).toBe(202);
     await t.settle();
-    const second = await t.call('POST', `/api/v1/instances/${ids[1]}/start`, undefined, { 'idempotency-key': 'start-b' });
-    expect(second).toMatchObject({ status: 403, body: { type: 'plan_limit', limit: 'running', detail: 'Your account can run 1 browser at a time. Put another browser to sleep, then try again.' } });
-    await t.call('POST', `/api/v1/instances/${ids[0]}/stop`, undefined, { 'idempotency-key': 'stop-a2' });
-    await t.settle();
-    expect((await t.call('POST', `/api/v1/instances/${ids[1]}/start`, undefined, { 'idempotency-key': 'start-b2' })).status).toBe(202);
+    const list = (await t.call('GET', '/api/v1/instances')).body as { status: string }[];
+    expect(list.map((i) => i.status)).toEqual(['running', 'running', 'running']);
+  });
+
+  it('keeps the browser limit when one user sends creates at the same moment', async () => {
+    t.d1.sqlite.exec(`UPDATE caps SET "limit" = 1 WHERE scope = 'user:default' AND metric = 'instances'`);
+    const version = await quote();
+    // Both requests pass admission before either transaction commits, as two Workers would.
+    const batch = t.d1.batch.bind(t.d1);
+    let arrived = 0;
+    let release = () => {};
+    const both = new Promise<void>((r) => (release = r));
+    let queue: Promise<unknown> = Promise.resolve();
+    t.d1.batch = (async (stmts: never) => {
+      if (++arrived === 2) release();
+      await Promise.race([both, new Promise((r) => setTimeout(r, 2000))]);
+      const run = queue.then(() => batch(stmts));
+      queue = run.catch(() => {});
+      return run;
+    }) as never;
+    const results = await Promise.all(['x', 'y'].map((k) => t.call('POST', '/api/v1/instances', { name: k, regionId: 'tyo1', storageGb: 10, priceVersion: version }, { 'idempotency-key': k })));
+    t.d1.batch = batch;
+    expect(results.map((r) => r.status).sort()).toEqual([202, 403]);
+    expect(results.find((r) => r.status === 403)!.body).toMatchObject({ type: 'plan_limit', limit: 'instances' });
+    expect(t.d1.sqlite.prepare('SELECT COUNT(*) n FROM browser_instances').get()).toEqual({ n: 1 });
   });
 
   it('allows replacement browsers regardless of daily create history or obsolete daily-cap settings', async () => {
@@ -148,7 +168,7 @@ describe('browsers', () => {
     await t.call('POST', `/api/v1/instances/${first.body.instanceId}/stop`, undefined, { 'idempotency-key': 'daily-stop' });
     await t.settle();
     const before = await t.call('GET', '/api/v1/me');
-    expect(before.body).toMatchObject({ usage: { browsers: 1 }, entitlements: { maxBrowsers: 2 } });
+    expect(before.body).toMatchObject({ usage: { browsers: 1 }, entitlements: { maxBrowsers: 3 } });
 
     const second = await t.call('POST', '/api/v1/instances', body, { 'idempotency-key': 'daily-second' });
     expect(second.status).toBe(202);

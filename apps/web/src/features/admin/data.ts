@@ -113,8 +113,6 @@ export type Overview = {
   users: number;
   operations: { unfinished: number; failed24h: number };
   flags: Record<string, { value: string; reason: string | null; updatedAt: string }>;
-  spend: { projectedCents: number; budgetCents: number | null; takenAt: string } | null;
-  quotas: { executor: string; region: string; metric: string; limit: number; used: number }[];
   findingsOpen: number;
   alertsOpen: number;
   webhooksPending: number;
@@ -223,7 +221,9 @@ export type PricingOverview = {
   balances: { totalMicros: number; negativeMicros: number };
 };
 
-export const when = (iso: unknown) => (typeof iso === 'string' && iso ? new Date(iso).toLocaleString() : '—');
-export const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
+let timeLocale = 'zh-CN';
+/** Dates follow the console's language (see i18n.tsx). */
+export const setAdminLocale = (locale: string) => void (timeLocale = locale);
+export const when = (iso: unknown) => (typeof iso === 'string' && iso ? new Date(iso).toLocaleString(timeLocale) : '—');
 /** Micro-dollars, with enough digits for per-unit rates. */
 export const usd = (micros: number) => formatMoney(micros, 'en-US');

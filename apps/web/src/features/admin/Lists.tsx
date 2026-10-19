@@ -1,44 +1,46 @@
 import { Button, Dialog, Input, Label, Select, useToast } from '@cloudbrowser/ui';
 import { useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
 import { ADMIN_PAGE, post, usd, useAdmin, useAdminAction, useAdminPage, when, type AlertRow, type OperationRow, type Row, type UserRow } from './data.js';
-import { Json, Mono, PageTitle, Pill, ReasonDialog, statusTone, Table } from './ui.js';
+import { useT } from './i18n.js';
+import { Json, Mono, PageTitle, Pill, ReasonDialog, StatusPill, Table } from './ui.js';
 
 export function AlertsPage() {
+  const { t, term } = useT();
   const [open, setOpen] = useState(true);
   const alerts = useAdminPage<AlertRow>(`/alerts?open=${open ? 1 : 0}`, ADMIN_PAGE.alerts, { refetchInterval: 30_000 });
   const ack = useAdminAction((id: number) => post(`/alerts/${id}/ack`));
   return (
     <div>
-      <PageTitle title="Alerts">
+      <PageTitle title={t('nav.alerts')}>
         <Select value={open ? 'open' : 'all'} onChange={(e) => setOpen(e.target.value === 'open')} className="w-40">
-          <option value="open">Open</option>
-          <option value="all">All</option>
+          <option value="open">{t('common.open')}</option>
+          <option value="all">{t('common.all')}</option>
         </Select>
       </PageTitle>
-      <p className="mb-3 text-xs text-muted">New alerts are sent to the alert emails and the chat webhook every 5 minutes. Acknowledge once handled (runbooks: page 7).</p>
+      <p className="mb-3 text-xs text-muted">{t('alerts.note')}</p>
       <Table
         rows={alerts.rows}
         pager={alerts.pager}
         rowKey={(a) => a.id}
-        columns={['When', 'Severity', 'Source', 'Alert', 'Detail', 'Sent', '']}
-        empty="No open alerts."
+        columns={[t('col.when'), t('col.severity'), t('col.source'), t('col.alert'), t('col.detail'), t('col.sent'), '']}
+        empty={t('alerts.empty')}
         cells={(a) => [
           when(a.createdAt),
-          <Pill tone={a.severity === 'critical' ? 'bad' : a.severity === 'warning' ? 'warn' : 'muted'}>{a.severity}</Pill>,
-          a.source,
+          <StatusPill value={a.severity} tone={a.severity === 'critical' ? 'bad' : a.severity === 'warning' ? 'warn' : 'muted'} />,
+          term(a.source),
           a.title,
           <Json value={a.detail} />,
-          a.sentAt ? when(a.sentAt) : <span className="text-muted">pending</span>,
+          a.sentAt ? when(a.sentAt) : <span className="text-muted">{t('alerts.pending')}</span>,
           a.acknowledgedAt ? (
             <span className="text-xs text-muted">
-              ack {when(a.acknowledgedAt)}
+              {t('alerts.acked', { when: when(a.acknowledgedAt) })}
               <br />
               {a.acknowledgedBy}
             </span>
           ) : (
             <Button size="sm" disabled={ack.isPending} onClick={() => ack.mutate(a.id)}>
-              Acknowledge
+              {t('alerts.ack')}
             </Button>
           ),
         ]}
@@ -47,24 +49,29 @@ export function AlertsPage() {
   );
 }
 
+const KINDS = ['create', 'start', 'stop', 'recover', 'restore', 'resize_volume', 'delete', 'undelete', 'purge'];
+
 export function OperationsPage() {
+  const { t, term } = useT();
   const [status, setStatus] = useState('unfinished');
   const [kind, setKind] = useState('');
   const ops = useAdminPage<OperationRow>(`/operations?status=${status}${kind ? `&kind=${kind}` : ''}`, ADMIN_PAGE.operations, { refetchInterval: 15_000 });
   const [open, setOpen] = useState<string | null>(null);
   return (
     <div>
-      <PageTitle title="Operations">
+      <PageTitle title={t('nav.operations')}>
         <div className="flex gap-2">
           <Select value={status} onChange={(e) => setStatus(e.target.value)} className="w-36">
-            <option value="unfinished">Unfinished</option>
-            <option value="failed">Failed</option>
-            <option value="all">All</option>
+            <option value="unfinished">{t('ops.unfinished')}</option>
+            <option value="failed">{t('ops.failed')}</option>
+            <option value="all">{t('common.all')}</option>
           </Select>
           <Select value={kind} onChange={(e) => setKind(e.target.value)} className="w-36">
-            <option value="">Any kind</option>
-            {['create', 'start', 'stop', 'recover', 'restore', 'change_ip', 'delete', 'undelete', 'purge'].map((k) => (
-              <option key={k}>{k}</option>
+            <option value="">{t('common.anyKind')}</option>
+            {KINDS.map((k) => (
+              <option key={k} value={k}>
+                {term(k)}
+              </option>
             ))}
           </Select>
         </div>
@@ -74,11 +81,11 @@ export function OperationsPage() {
         pager={ops.pager}
         rowKey={(o) => o.id}
         onRow={(o) => setOpen(o.id)}
-        columns={['Created', 'Kind', 'Status', 'Step', 'Attempt', 'Browser', 'User', 'Error']}
+        columns={[t('col.created'), t('col.kind'), t('col.status'), t('col.step'), t('col.attempt'), t('col.browser'), t('col.user'), t('col.error')]}
         cells={(o) => [
           when(o.createdAt),
-          o.kind,
-          <Pill tone={statusTone(o.status === 'running' ? 'running_op' : o.status)}>{o.status}</Pill>,
+          term(o.kind),
+          <StatusPill value={o.status} tone={o.status === 'running' ? 'warn' : undefined} />,
           o.step ?? '—',
           o.attempt,
           <Link to={`/browsers/${o.instanceId}`} onClick={(e) => e.stopPropagation()} className="text-accent hover:underline">
@@ -90,7 +97,7 @@ export function OperationsPage() {
               {o.errorClass}: {o.error}
             </span>
           ) : o.notBefore && !o.finishedAt ? (
-            <span className="text-muted">next try {when(o.notBefore)}</span>
+            <span className="text-muted">{t('ops.nextTry', { when: when(o.notBefore) })}</span>
           ) : (
             '—'
           ),
@@ -101,82 +108,36 @@ export function OperationsPage() {
   );
 }
 
-/** One operation with its write-ahead step journal (page 10). */
+/** One operation with its write-ahead step journal. */
 export function OperationDialog({ id, onClose }: { id: string | null; onClose: () => void }) {
+  const { t, term } = useT();
   const detail = useAdmin<{ operation: Row; steps: Row[] }>(`/operations/${id ?? ''}`, { enabled: id !== null });
   const op = id ? detail.data?.operation : undefined;
   return (
-    <Dialog open={id !== null} onOpenChange={(o) => !o && onClose()} title={op ? `${String(op.kind)} · ${String(op.status)}` : 'Operation'}>
+    <Dialog open={id !== null} onOpenChange={(o) => !o && onClose()} title={op ? `${term(String(op.kind))} · ${term(String(op.status))}` : t('ops.dialog')}>
       {op ? (
         <div className="space-y-3 text-sm">
           <p>
             <Mono>{String(op.id)}</Mono>
           </p>
-          <Json value={{ params: op.params, attempt: op.attempt, error: op.error, errorClass: op.errorClass, lease: op.leaseOwner, deadline: op.deadlineAt }} />
-          <h3 className="font-medium">Step journal</h3>
+          <Json value={{ params: op.params, attempt: op.attempt, error: op.error, errorClass: op.errorClass }} />
+          <h3 className="font-medium">{t('ops.journal')}</h3>
           <Table
             rows={detail.data!.steps}
             rowKey={(s) => String(s.step)}
-            columns={['Step', 'Status', 'Attempts', 'Result']}
-            cells={(s) => [String(s.step), <Pill tone={statusTone(String(s.status))}>{String(s.status)}</Pill>, String(s.attempts ?? ''), <Json value={s.result} />]}
+            columns={[t('col.step'), t('col.status'), t('col.attempts'), t('col.result')]}
+            cells={(s) => [String(s.step), <StatusPill value={String(s.status)} />, String(s.attempts ?? ''), <Json value={s.result} />]}
           />
         </div>
       ) : (
-        <p className="text-sm text-muted">Loading…</p>
+        <p className="text-sm text-muted">{t('common.loading')}</p>
       )}
     </Dialog>
   );
 }
 
-export function LedgerPage() {
-  const [state, setState] = useState('active');
-  const [kind, setKind] = useState('');
-  const rows = useAdminPage<Row>(`/ledger?state=${state}${kind ? `&kind=${kind}` : ''}`, ADMIN_PAGE.ledger);
-  return (
-    <div>
-      <PageTitle title="Ledger">
-        <div className="flex gap-2">
-          <Select value={state} onChange={(e) => setState(e.target.value)} className="w-36">
-            {['active', 'pending', 'superseded', 'rejected', 'deleting', 'deleted'].map((s) => (
-              <option key={s}>{s}</option>
-            ))}
-          </Select>
-          <Select value={kind} onChange={(e) => setKind(e.target.value)} className="w-40">
-            <option value="">Any kind</option>
-            {['vm', 'volume', 'network_interface', 'ip', 'snapshot'].map((k) => (
-              <option key={k}>{k}</option>
-            ))}
-          </Select>
-        </div>
-      </PageTitle>
-      <p className="mb-3 text-xs text-muted">Every billable provider resource (page 10). The reconciler compares this with the provider every 5 minutes.</p>
-      <Table
-        rows={rows.rows}
-        pager={rows.pager}
-        rowKey={(r) => String(r.id)}
-        columns={['Kind', 'Provider id', 'Region / zone', 'State', 'Browser', 'Cost / month', 'First seen', 'Release after']}
-        cells={(r) => [
-          String(r.kind),
-          <Mono>{String(r.providerId ?? '—')}{r.address ? ` (${String(r.address)})` : ''}</Mono>,
-          `${String(r.region)}${r.zone ? ` / ${String(r.zone)}` : ''}`,
-          <Pill tone={statusTone(String(r.state))}>{String(r.state)}</Pill>,
-          r.instanceId ? (
-            <Link to={`/browsers/${String(r.instanceId)}`} className="text-accent hover:underline">
-              <Mono>{String(r.instanceId)}</Mono>
-            </Link>
-          ) : (
-            '—'
-          ),
-          `$${(Number(r.monthlyCostEstimate) / 100).toFixed(2)}`,
-          when(r.firstSeenAt),
-          when(r.releaseAfter),
-        ]}
-      />
-    </div>
-  );
-}
-
 export function FindingsPage() {
+  const { t, errorText } = useT();
   const toast = useToast();
   const [status, setStatus] = useState('open');
   const rows = useAdminPage<Row>(`/findings?status=${status}`, ADMIN_PAGE.findings);
@@ -184,26 +145,23 @@ export function FindingsPage() {
   const resolve = useAdminAction((v: { id: string; note: string }) => post(`/findings/${v.id}/resolve`, { note: v.note }));
   return (
     <div>
-      <PageTitle title="Findings">
+      <PageTitle title={t('nav.findings')}>
         <Select value={status} onChange={(e) => setStatus(e.target.value)} className="w-36">
-          <option value="open">Open</option>
-          <option value="resolved">Resolved</option>
-          <option value="all">All</option>
+          <option value="open">{t('common.open')}</option>
+          <option value="resolved">{t('findings.resolved')}</option>
+          <option value="all">{t('common.all')}</option>
         </Select>
       </PageTitle>
-      <p className="mb-3 text-xs text-muted">
-        Drift between the ledger and the provider. Orphans are stopped and tagged; the reaper removes them after 24 h only if they never served a user. Missing resources need
-        a decision.
-      </p>
+      <p className="mb-3 text-xs text-muted">{t('findings.note')}</p>
       <Table
         rows={rows.rows}
         pager={rows.pager}
         rowKey={(r) => String(r.id)}
-        columns={['When', 'Kind', 'Resource', 'Where', 'Browser', 'Detail', '']}
-        empty="No findings."
+        columns={[t('col.when'), t('col.kind'), t('col.resource'), t('col.where'), t('col.browser'), t('col.detail'), '']}
+        empty={t('findings.empty')}
         cells={(r) => [
           when(r.createdAt),
-          <Pill tone={statusTone(String(r.kind))}>{String(r.kind)}</Pill>,
+          <StatusPill value={String(r.kind)} />,
           <Mono>
             {String(r.resourceKind ?? '')} {String(r.providerId)}
           </Mono>,
@@ -218,29 +176,28 @@ export function FindingsPage() {
           String(r.detail ?? ''),
           r.status === 'open' ? (
             <Button size="sm" onClick={() => setResolving(String(r.id))}>
-              Resolve
+              {t('findings.resolve')}
             </Button>
           ) : (
-            <span className="text-xs text-muted">resolved {when(r.resolvedAt)}</span>
+            <span className="text-xs text-muted">{t('findings.resolvedAt', { when: when(r.resolvedAt) })}</span>
           ),
         ]}
       />
       <ReasonDialog
         open={resolving !== null}
-        title="Resolve finding"
-        description="Say what was done, e.g. removed by the reaper or adopted."
-        confirm="Resolve"
+        title={t('findings.resolveTitle')}
+        description={t('findings.resolveHelp')}
+        confirm={t('findings.resolve')}
         busy={resolve.isPending}
         onClose={() => setResolving(null)}
-        onConfirm={(note) =>
-          resolving && resolve.mutate({ id: resolving, note }, { onSuccess: () => setResolving(null), onError: (e) => toast((e as Error).message, 'error') })
-        }
+        onConfirm={(note) => resolving && resolve.mutate({ id: resolving, note }, { onSuccess: () => setResolving(null), onError: (e) => toast(errorText(e), 'error') })}
       />
     </div>
   );
 }
 
 export function UsersPage() {
+  const { t, errorText } = useT();
   const toast = useToast();
   const [q, setQ] = useState('');
   const [query, setQuery] = useState('');
@@ -254,9 +211,10 @@ export function UsersPage() {
   const reset2fa = useAdminAction((v: { id: string; reason: string }) => post(`/users/${v.id}/reset-two-factor`, { reason: v.reason }));
   const grant = useAdminAction((v: { id: string; amountMicros: number; reason: string }) => post(`/users/${v.id}/credit`, { amountMicros: v.amountMicros, reason: v.reason }));
   const thaw = useAdminAction((v: { id: string; reason: string }) => post(`/users/${v.id}/unfreeze`, { reason: v.reason }));
+  const failed = (e: unknown) => toast(errorText(e), 'error');
   return (
     <div>
-      <PageTitle title="Users">
+      <PageTitle title={t('nav.users')}>
         <form
           className="flex gap-2"
           onSubmit={(e) => {
@@ -264,122 +222,116 @@ export function UsersPage() {
             setQuery(q.trim());
           }}
         >
-          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Email or user id" className="w-64" />
-          <Button type="submit">Search</Button>
+          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('users.searchPlaceholder')} className="w-64" />
+          <Button type="submit">{t('common.search')}</Button>
         </form>
       </PageTitle>
       <Table
         rows={users.rows}
         pager={users.pager}
         rowKey={(u) => u.id}
-        columns={['Email', 'Joined', 'Balance', 'Browsers', 'Kill switch']}
+        columns={[t('col.email'), t('col.joined'), t('col.balance'), t('col.browsers'), t('col.killSwitch')]}
         cells={(u) => [
           <span>
-            {u.email} {u.admin ? <Pill>staff</Pill> : null} {u.twoFactorEnabled ? <Pill tone="ok">2FA</Pill> : null}
+            {u.email} {u.admin ? <Pill>{t('users.staff')}</Pill> : null} {u.twoFactorEnabled ? <Pill tone="ok">2FA</Pill> : null}
             <br />
             <Mono>{u.id}</Mono>
             {u.twoFactorEnabled ? (
               <Button size="sm" variant="ghost" className="ml-1" onClick={() => setResetTwoFactor(u)}>
-                Reset 2FA
+                {t('users.reset2fa')}
               </Button>
             ) : null}
           </span>,
           when(u.createdAt),
           <span className="flex flex-wrap items-center gap-1.5">
-            <span className="tabular-nums" title="Total = available + held seven-day deposits">
+            <span className="tabular-nums" title={t('users.balanceHint')}>
               <span className={u.balanceMicros < 0 ? 'text-error' : undefined}>{usd(u.balanceMicros)}</span>
-              <span className="block text-xs text-muted">
-                {usd(u.availableMicros)} available · {usd(u.reservedMicros)} held
-              </span>
+              <span className="block text-xs text-muted">{t('users.balanceSplit', { available: usd(u.availableMicros), held: usd(u.reservedMicros) })}</span>
             </span>
-            {u.frozenAt ? <Pill tone="bad">frozen</Pill> : u.exhaustedAt ? <Pill tone="warn">ran out</Pill> : null}
+            {u.frozenAt ? <Pill tone="bad">{t('users.frozen')}</Pill> : u.exhaustedAt ? <Pill tone="warn">{t('users.ranOut')}</Pill> : null}
             <Button size="sm" variant="ghost" onClick={() => setCredit(u)}>
-              Credit
+              {t('users.credit')}
             </Button>
             {u.frozenAt ? (
               <Button size="sm" variant="ghost" onClick={() => setUnfreeze(u)}>
-                Unfreeze
+                {t('users.unfreeze')}
               </Button>
             ) : null}
           </span>,
           <Link to={`/browsers?q=${encodeURIComponent(u.email)}`} className="text-accent hover:underline">
             {u.browsers}
-            {u.suspended ? ` (${u.suspended} suspended)` : ''}
+            {u.suspended ? t('users.suspendedCount', { n: u.suspended }) : ''}
           </Link>,
           u.suspended ? (
             <Button size="sm" onClick={() => setPending({ user: u, action: 'unsuspend' })}>
-              Release all
+              {t('users.releaseAll')}
             </Button>
           ) : (
             <Button size="sm" variant="danger" disabled={!u.browsers} onClick={() => setPending({ user: u, action: 'suspend' })}>
-              Suspend all
+              {t('users.suspendAll')}
             </Button>
           ),
         ]}
       />
       <ReasonDialog
         open={pending !== null}
-        title={pending ? `${pending.action === 'suspend' ? 'Suspend' : 'Release'} every browser of ${pending.user.email}` : ''}
-        description={pending?.action === 'suspend' ? 'They go to sleep within a minute and cannot start. Data and IPs are kept.' : undefined}
-        confirm={pending?.action === 'suspend' ? 'Suspend all' : 'Release all'}
+        title={pending ? t(pending.action === 'suspend' ? 'users.suspendTitle' : 'users.releaseTitle', { email: pending.user.email }) : ''}
+        description={pending?.action === 'suspend' ? t('users.suspendHelp') : undefined}
+        confirm={t(pending?.action === 'suspend' ? 'users.suspendAll' : 'users.releaseAll')}
         danger={pending?.action === 'suspend'}
         busy={act.isPending}
         onClose={() => setPending(null)}
-        onConfirm={(reason) =>
-          pending &&
-          act.mutate(
-            { id: pending.user.id, action: pending.action, reason },
-            { onSuccess: () => setPending(null), onError: (e) => toast((e as Error).message, 'error') },
-          )
-        }
+        onConfirm={(reason) => pending && act.mutate({ id: pending.user.id, action: pending.action, reason }, { onSuccess: () => setPending(null), onError: failed })}
       />
       <ReasonDialog
         open={credit !== null}
-        title={credit ? `Credit or debit ${credit.email}` : ''}
-        description="Adds the amount below (USD; negative to take away) to the prepaid balance. It shows as a credit from us in the user's history."
-        confirm="Apply"
+        title={credit ? t('users.creditTitle', { email: credit.email }) : ''}
+        description={t('users.creditHelp')}
+        confirm={t('users.apply')}
         busy={grant.isPending}
         onClose={() => setCredit(null)}
         onConfirm={(reason) => {
           const micros = Math.round(Number(amount) * 1_000_000);
           if (!credit || !Number.isFinite(micros) || micros === 0) return;
-          grant.mutate({ id: credit.id, amountMicros: micros, reason }, { onSuccess: () => setCredit(null), onError: (e) => toast((e as Error).message, 'error') });
+          grant.mutate({ id: credit.id, amountMicros: micros, reason }, { onSuccess: () => setCredit(null), onError: failed });
         }}
       >
-        <Label htmlFor="credit-amount">Amount (USD)</Label>
+        <Label htmlFor="credit-amount">{t('users.amount')}</Label>
         <Input id="credit-amount" type="number" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} className="mb-3 w-40" />
       </ReasonDialog>
       <ReasonDialog
         open={resetTwoFactor !== null}
-        title={resetTwoFactor ? `Reset two-factor sign-in for ${resetTwoFactor.email}` : ''}
-        description="For a user who lost their authenticator app and backup codes. Confirm who they are first (for example, from their sign-in email and recent payments). Their next sign-in needs only the email code, and they can set up a new authenticator."
-        confirm="Reset 2FA"
+        title={resetTwoFactor ? t('users.resetTitle', { email: resetTwoFactor.email }) : ''}
+        description={t('users.resetHelp')}
+        confirm={t('users.reset2fa')}
         danger
         busy={reset2fa.isPending}
         onClose={() => setResetTwoFactor(null)}
-        onConfirm={(reason) => resetTwoFactor && reset2fa.mutate({ id: resetTwoFactor.id, reason }, { onSuccess: () => setResetTwoFactor(null), onError: (e) => toast((e as Error).message, 'error') })}
+        onConfirm={(reason) => resetTwoFactor && reset2fa.mutate({ id: resetTwoFactor.id, reason }, { onSuccess: () => setResetTwoFactor(null), onError: failed })}
       />
       <ReasonDialog
         open={unfreeze !== null}
-        title={unfreeze ? `Unfreeze ${unfreeze.email}` : ''}
-        description="Lifts the hold placed after a payment dispute. The user can create and wake browsers again if their balance allows."
-        confirm="Unfreeze"
+        title={unfreeze ? t('users.unfreezeTitle', { email: unfreeze.email }) : ''}
+        description={t('users.unfreezeHelp')}
+        confirm={t('users.unfreeze')}
         busy={thaw.isPending}
         onClose={() => setUnfreeze(null)}
-        onConfirm={(reason) => unfreeze && thaw.mutate({ id: unfreeze.id, reason }, { onSuccess: () => setUnfreeze(null), onError: (e) => toast((e as Error).message, 'error') })}
+        onConfirm={(reason) => unfreeze && thaw.mutate({ id: unfreeze.id, reason }, { onSuccess: () => setUnfreeze(null), onError: failed })}
       />
     </div>
   );
 }
 
 export function AuditPage() {
-  const [target, setTarget] = useState('');
+  const { t } = useT();
+  const [params] = useSearchParams();
+  const [target, setTarget] = useState(params.get('target') ?? '');
   const [actor, setActor] = useState('');
-  const [filters, setFilters] = useState({ target: '', actor: '' });
+  const [filters, setFilters] = useState({ target: params.get('target') ?? '', actor: '' });
   const rows = useAdminPage<Row>(`/audit?target=${encodeURIComponent(filters.target)}&actor=${encodeURIComponent(filters.actor)}`, ADMIN_PAGE.audit);
   return (
     <div>
-      <PageTitle title="Audit log">
+      <PageTitle title={t('nav.audit')}>
         <form
           className="flex flex-wrap gap-2"
           onSubmit={(e) => {
@@ -387,16 +339,16 @@ export function AuditPage() {
             setFilters({ target: target.trim(), actor: actor.trim() });
           }}
         >
-          <Input value={target} onChange={(e) => setTarget(e.target.value)} placeholder="Target, e.g. instance:01J…" className="w-56" />
-          <Input value={actor} onChange={(e) => setActor(e.target.value)} placeholder="Actor prefix, e.g. admin:" className="w-44" />
-          <Button type="submit">Filter</Button>
+          <Input value={target} onChange={(e) => setTarget(e.target.value)} placeholder={t('audit.target')} className="w-56" />
+          <Input value={actor} onChange={(e) => setActor(e.target.value)} placeholder={t('audit.actor')} className="w-44" />
+          <Button type="submit">{t('common.filter')}</Button>
         </form>
       </PageTitle>
       <Table
         rows={rows.rows}
         pager={rows.pager}
         rowKey={(r) => String(r.id)}
-        columns={['When', 'Actor', 'Action', 'Target', 'Detail']}
+        columns={[t('col.when'), t('col.actor'), t('col.action'), t('col.target'), t('col.detail')]}
         cells={(r) => [when(r.createdAt), <Mono>{String(r.actor)}</Mono>, String(r.action), <Mono>{String(r.target)}</Mono>, <Json value={r.detail} />]}
       />
     </div>

@@ -22,7 +22,7 @@ import {
   type Rates,
   type UsageItem,
 } from '@cloudbrowser/contracts';
-import { billingRequired, prepaidAccess, prepaidBalance, reservedTotalSql, newId, eventRow, operationRow, priceSheets, pricingSettings, raiseAlert, schema, usageDay, userCaps } from '@cloudbrowser/db';
+import { billingRequired, prepaidAccess, prepaidBalance, reservedTotalSql, newId, eventRow, operationRow, priceSheets, pricingSettings, raiseAlert, schema, usageDay } from '@cloudbrowser/db';
 import { and, eq, gt, inArray, isNotNull, isNull, lte, notInArray, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import type { EngineDeps } from './context.js';
@@ -200,9 +200,8 @@ async function enforce(deps: EngineDeps, prepaid: boolean, now: Date): Promise<n
         deps.notify(userId);
       }
     }
-    const cap = ((await userCaps(db, userId)).get('running') ?? 0) === 0;
     for (const inst of all.filter((r) => r.userId === userId)) {
-      let reason: string | null = account.frozenAt ? 'frozen' : inst.suspendedAt ? 'suspended' : cap ? 'plan' : null;
+      let reason: string | null = account.frozenAt ? 'frozen' : inst.suspendedAt ? 'suspended' : null;
       const access = await prepaidAccess(db, userId, inst.id, now);
       if (!reason && access.reason === 'trial') {
         reason = 'trial';

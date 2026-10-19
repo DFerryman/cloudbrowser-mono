@@ -60,12 +60,10 @@ network-only template is `infra/aws/regional-network.json`; it creates no VM, IP
 gateway or IAM resources. AWS opt-in regions stay unavailable until enabled in the account and
 prepared with a regional network.
 
-For AWS Provider regions, live AWS quotas and the configured shared budget replace legacy fixed
-regional/global instance caps. Per-user browser/running limits, prepaid balances, immutable
-placements and the create/delete credential separation still apply. Inventory defaults to a
-conservative 24 running hours/day; operators can choose quota-only inventory or set a project
-monthly budget in the console. AWS Budgets is a notification service; this application separately
-checks its budget policy atomically at admission.
+For AWS Provider regions, what AWS can allocate under the account's live quotas replaces legacy
+fixed regional/global instance caps; a budget never limits it. The per-user browser limit, prepaid
+balances, immutable placements and the create/delete credential separation still apply. AWS
+Budgets alerts, if configured, remain notifications only.
 
 The remainder of this runbook documents initial bootstrap and legacy single-region installations.
 Do not rerun its old single-region settings over an active dynamic Provider deployment.

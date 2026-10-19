@@ -617,11 +617,6 @@ export const providerPrices = sqliteTable('provider_prices', {
 });
 
 /** AWS observations; credentials stay in Worker secrets, never in D1 or admin responses. */
-export const awsProviderSettings = sqliteTable('aws_provider_settings', {
-  id: integer('id').primaryKey(), inventoryMode: text('inventory_mode').notNull(),
-  monthlyBudgetMicros: integer('monthly_budget_micros'), estimatedHoursPerDay: real('estimated_hours_per_day').notNull(),
-  updatedAt: ts('updated_at').notNull(), updatedBy: text('updated_by'),
-});
 export const awsProviderState = sqliteTable('aws_provider_state', {
   id: integer('id').primaryKey(), accountId: text('account_id'), managementAccountId: text('management_account_id'), organizationId: text('organization_id'),
   connection: json<Record<string, unknown>>('connection'), billing: json<Record<string, unknown>>('billing'),

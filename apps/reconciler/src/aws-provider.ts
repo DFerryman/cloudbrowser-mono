@@ -4,7 +4,6 @@ import { createDb, schema, type Db } from '@cloudbrowser/db';
 import { AwsApi, AwsExecutor, DEFAULT_INSTANCE_TYPES, Ec2Client, assumeRoleCredentials, xmlItems, xmlText, type AwsCredentials, type AwsRegionConfig, type XmlNode } from '@cloudbrowser/executors';
 import { and, eq, sql } from 'drizzle-orm';
 import type { Env } from './index.js';
-import { projectBudgetMicros } from './budget.js';
 
 const { awsProviderState: state, awsProviderRegions: catalog, regions, providerPrices } = schema;
 const usdMicros = (usd: unknown) => {
@@ -42,7 +41,7 @@ export async function syncAwsProvider(env: Env, force = false) {
 
     // Refresh billing separately: a Cost Explorer delay must not hide regional quota observations.
     if (managementCredentials && (force || !claimed.billingAt || now.getTime()-claimed.billingAt.getTime() >= 6*3_600_000)) {
-      try { await syncBilling(db, new AwsApi(managementCredentials), api, accountId, now); }
+      try { await syncBilling(db, new AwsApi(managementCredentials), accountId, now); }
       catch (e) {
         await db.update(state).set({ lastError: errorText(e), lastErrorAt: now }).where(eq(state.id,1));
       }
@@ -174,7 +173,7 @@ async function syncRegion(db: Db, env: Env, ec2: Ec2Client, credentials: () => P
   await db.update(catalog).set({config:config as unknown as Record<string,unknown>,quotas,capacity:Math.max(0,capacity),checkedAt:now,status:'ready',lastError:null}).where(eq(catalog.regionId,regionId));
 }
 
-async function syncBilling(db: Db, api: AwsApi, memberApi: AwsApi, accountId: string, now: Date) {
+async function syncBilling(db: Db, api: AwsApi, accountId: string, now: Date) {
   const org=await api.call<{Organization:{Id:string;MasterAccountId?:string;ManagementAccountId?:string}}>('organizations','us-east-1','AWSOrganizationsV20161128.DescribeOrganization',{});
   const managementAccountId=org.Organization.ManagementAccountId ?? org.Organization.MasterAccountId!;
   const accounts:Record<string,unknown>[]=[];let token:string|undefined;
@@ -194,12 +193,7 @@ async function syncBilling(db: Db, api: AwsApi, memberApi: AwsApi, accountId: st
     for (const period of page.ResultsByTime??[]) {estimated ||= period.Estimated;for(const g of period.Groups??[]) {if(g.Metrics.UnblendedCost.Unit!=='USD') throw new Error('AWS billing currency is not USD');const cost=usdMicros(g.Metrics.UnblendedCost.Amount);organizationSpendMicros+=cost;byAccount[g.Keys[0]!]=(byAccount[g.Keys[0]!]??0)+cost;if(g.Keys[0]===accountId){spendMicros+=cost;byRegion[g.Keys[1]??'global']=(byRegion[g.Keys[1]??'global']??0)+cost;}}}
     token=page.NextPageToken;
   }while(token);
-  const budgets:Record<string,unknown>[]=[];const auxiliaryErrors:Record<string,string>={};
-  try {
-    token=undefined;
-    do {const page:{Budgets?:Record<string,unknown>[];NextToken?:string}=await memberApi.call('budgets','us-east-1','AWSBudgetServiceGateway.DescribeBudgets',{AccountId:accountId,...(token?{NextToken:token}:{})});budgets.push(...page.Budgets??[]);token=page.NextToken;}while(token);
-  }catch(e){auxiliaryErrors.budgets=errorText(e);}
-  const budgetMicros=projectBudgetMicros(budgets);
+  const auxiliaryErrors:Record<string,string>={};
   let credits:unknown=null;
   try {
     const raw=await api.call<{credits?:Record<string,unknown>[],nextToken?:string}>('billing','us-east-1','AWSBilling.GetCredits', {accountId:managementAccountId,startDate:Date.parse(`${start}T00:00:00Z`)/1000,payerAccountFlag:true});
@@ -208,5 +202,5 @@ async function syncBilling(db: Db, api: AwsApi, memberApi: AwsApi, accountId: st
   } catch(e){auxiliaryErrors.credits=errorText(e);}
   const session=await api.credentials();
   const [previous]=await db.select().from(state).where(eq(state.id,1));
-  await db.update(state).set({managementAccountId,organizationId:org.Organization.Id,billingAt:now,connection:{...previous?.connection,managementSessionExpiresAt:session.expiration ? new Date(session.expiration).toISOString():null,managementCheckedAt:now.toISOString()},billing:{month,spendMicros,byRegion,byAccount,organizationSpendMicros,estimated,accounts,budgets,budgetMicros,credits,auxiliaryErrors,through:today},lastError:null,lastErrorAt:null}).where(eq(state.id,1));
+  await db.update(state).set({managementAccountId,organizationId:org.Organization.Id,billingAt:now,connection:{...previous?.connection,managementSessionExpiresAt:session.expiration ? new Date(session.expiration).toISOString():null,managementCheckedAt:now.toISOString()},billing:{month,spendMicros,byRegion,byAccount,organizationSpendMicros,estimated,accounts,credits,auxiliaryErrors,through:today},lastError:null,lastErrorAt:null}).where(eq(state.id,1));
 }
