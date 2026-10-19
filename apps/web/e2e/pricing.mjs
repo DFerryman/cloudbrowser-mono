@@ -60,6 +60,10 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
           state.reject = false;
           status = 409;
           body = { type: 'price_changed', title: 'Prices changed', detail: 'Prices changed. Review the new price and try again.', status };
+        } else if (request.method() === 'PATCH' && url.pathname === `/api/v1/instances/${i.id}`) {
+          // Settings save like the API: the browser keeps them and returns itself.
+          Object.assign(i, entry.body);
+          body = i;
         } else body = { instanceId: 'new-browser', operationId: 'fixture-operation' };
       } else if (url.pathname === '/api/v1/me') body = {
         user: { id: 'fixture-user', name: 'Test user', email: 'fixture@example.test' },
@@ -267,8 +271,8 @@ try {
   assert.equal(noStock.state.requests.length, 0);
   noStock.state.stockAvailable = true;
   await noStock.page.reload();
-  await noStock.page.getByRole('button', { name: 'Create browser', exact: true }).waitFor();
-  assert.equal(await noStock.page.getByRole('button', { name: 'Create browser', exact: true }).isEnabled(), true);
+  // Enabled once the new inventory and prices are loaded.
+  await noStock.page.locator('button:enabled', { hasText: 'Create browser' }).waitFor();
   await finish(noStock, 'no inventory disables creation with a clear message and new inventory restores the action');
 
   for (const action of ['storage', 'ip']) {
@@ -297,8 +301,12 @@ try {
     assert.equal(await picture.page.getByRole('checkbox', { name: /Adjust to my connection/ }).isChecked(), true);
     assert.equal(await picture.page.getByText('Screen size', { exact: true }).count(), 0, 'The old screen size option never took effect and is gone');
     await select.selectOption('medium');
-    await picture.page.getByRole('checkbox', { name: /Adjust to my connection/ }).uncheck();
+    await picture.page.waitForFunction(() => document.querySelector('#picture')?.value === 'medium');
+    // The cache update is asynchronous; wait for the new state rather than expecting it synchronously.
+    await picture.page.getByRole('checkbox', { name: /Adjust to my connection/ }).click();
+    await picture.page.waitForFunction(() => !document.querySelector('input[type=checkbox]')?.checked);
     await picture.page.waitForTimeout(300);
+    assert.equal(await select.inputValue(), 'medium', 'The saved setting stays shown after the refetch');
     assert.deepEqual(picture.state.requests.map((r) => [r.method, r.body]), [['PATCH', { videoQuality: 'medium' }], ['PATCH', { videoAuto: false }]]);
     if (process.env.SHOT_DIR) await picture.page.screenshot({ path: `${process.env.SHOT_DIR}/picture-settings.png` });
     await finish(picture, 'picture resolution and connection adjustment are browser settings that save at once');

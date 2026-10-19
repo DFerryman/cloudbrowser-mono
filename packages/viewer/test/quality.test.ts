@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { QualityController, type QualitySample } from '../src/quality.js';
 
-const good = (at: number, fps = 25): QualitySample => ({ at, fps, lossRate: 0, freezes: 0, rttMs: 40 });
-const bad = (at: number): QualitySample => ({ at, fps: 6, lossRate: 0.12, freezes: 1, rttMs: 420 });
+const good = (at: number, fps: number | null = 25): QualitySample => ({ at, stalled: false, fps, lossRate: 0, freezes: 0, rttMs: 40 });
+const bad = (at: number): QualitySample => ({ at, stalled: false, fps: 6, lossRate: 0.12, freezes: 1, rttMs: 420 });
 
 /** Feeds a reading every 2 s from `from` (ms) and returns every switch made. */
 function run(c: QualityController, from: number, seconds: number, sample: (at: number) => QualitySample) {
@@ -48,6 +48,21 @@ describe('picture quality controller', () => {
     expect(run(low, 10_000, 20, (at) => good(at, 15))).toEqual([]);
   });
 
+  it('treats a missing frame rate as unknown, but no packets at all as trouble', () => {
+    const c = new QualityController('full', 0);
+    expect(run(c, 10_000, 60, (at) => good(at, null))).toEqual([]);
+    expect(run(c, 70_000, 6, (at) => ({ ...good(at, null), stalled: true }))).toEqual([[72_000 / 1000, 'high']]);
+  });
+
+  it('accepts a longer path as the new normal after a minute', () => {
+    const c = new QualityController('full', 0);
+    run(c, 10_000, 20, good);
+    // The network changes to one with 330 ms round trips: one step down, then the baseline moves.
+    const switches = run(c, 30_000, 240, (at) => ({ ...good(at), rttMs: 330 }));
+    expect(switches[0]).toEqual([32, 'high']);
+    expect(switches.at(-1)![1]).toBe('full');
+  });
+
   it('returns one level at a time after a quiet period, never above the setting', () => {
     const c = new QualityController('high', 0, 'low');
     expect(c.quality).toBe('low');
@@ -85,5 +100,14 @@ describe('pointer mapping', () => {
     expect(toRemotePoint(800, 50, box, { width: 960, height: 540 }, screen)).toBeNull();
     // Before neko reports its screen, the video's own pixels are used.
     expect(toRemotePoint(800, 550, box, { width: 1920, height: 1080 }, null)).toEqual({ x: 960, y: 540 });
+  });
+});
+
+describe('pointer mapping during a resize', () => {
+  it('maps to the frames on screen while they still have the old shape', async () => {
+    const { toRemotePoint } = await import('../src/mapping.js');
+    const box = { left: 0, top: 0, width: 1600, height: 900 };
+    // neko already reports 1280×1024 while 1920×1080 frames are still shown.
+    expect(toRemotePoint(800, 450, box, { width: 1920, height: 1080 }, { width: 1280, height: 1024 })).toEqual({ x: 960, y: 540 });
   });
 });

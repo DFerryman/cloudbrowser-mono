@@ -1,5 +1,6 @@
 import {
   ExecutorError,
+  NoLaunchCandidate,
   type BindingCheck,
   type Capabilities,
   type CredentialMode,
@@ -312,7 +313,7 @@ export class FakeExecutor implements Executor {
             typeof price !== 'number' || !Number.isFinite(price) || price < 0) {
           throw new ExecutorError('invalid', 'A valid confirmed VM hourly price and current provider price are required.');
         }
-        if (price > spec.maxVmHour) throw new ExecutorError('capacity', 'No launch candidate fits the confirmed VM hourly price.');
+        if (price > spec.maxVmHour) throw new NoLaunchCandidate('price', 'No launch candidate fits the confirmed VM hourly price.');
       }
       const rec = await this.createOnce(
         ctx,

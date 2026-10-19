@@ -9,7 +9,9 @@ export interface VideoPreference {
 /** One reading of the receiving side (every 2 s), as changes since the previous reading. */
 export interface QualitySample {
   at: number;
-  /** Frames decoded per second; null when none were. */
+  /** No video packets arrived since the previous reading. */
+  stalled: boolean;
+  /** Frames decoded per second; null when the browser does not report it. */
   fps: number | null;
   /** Share of video packets lost since the previous reading, 0–1. */
   lossRate: number;
@@ -30,8 +32,13 @@ const PROBATION_MS = 20_000;
 const MAX_UPGRADE_WAIT_MS = 120_000;
 const LOSS_LIMIT = 0.05;
 const FPS_SHARE = 0.6;
-/** Queueing on a saturated link shows as round trips well above the best one seen. */
+/** Queueing on a saturated link shows as round trips well above the best recent one. */
 const RTT_RISE_MS = 250;
+/**
+ * The best round trip is taken over the last minute of readings, so a path that simply got
+ * longer (another network, another relay) becomes the new normal instead of looking congested.
+ */
+const RTT_WINDOW = 30;
 
 /**
  * Chooses the live view's picture level from what the viewer receives. neko 3.0.8's own
@@ -48,7 +55,7 @@ export class QualityController {
   private settleUntil: number;
   private upgradeWait = UPGRADE_AFTER_MS;
   private lastUpgradeAt: number | null = null;
-  private bestRtt = Infinity;
+  private rtts: number[] = [];
 
   constructor(maxQuality: VideoQuality, now: number, current: VideoQuality = maxQuality) {
     this.max = VIDEO_QUALITIES.indexOf(maxQuality);
@@ -62,6 +69,7 @@ export class QualityController {
 
   /** The stream restarted (a new connection): give it time before judging it. */
   restart(now: number) {
+    this.rtts = [];
     this.bad = 0;
     this.goodSince = null;
     this.settleUntil = now + SETTLE_MS;
@@ -69,11 +77,12 @@ export class QualityController {
 
   /** Returns the level to switch to, or null to stay. */
   observe(s: QualitySample): VideoQuality | null {
-    if (s.rttMs !== null) this.bestRtt = Math.min(this.bestRtt, s.rttMs);
+    const bestRtt = this.rtts.length ? Math.min(...this.rtts) : null;
+    if (s.rttMs !== null) this.rtts = [...this.rtts, s.rttMs].slice(-RTT_WINDOW);
     if (s.at < this.settleUntil) return null;
     const expected = EXPECTED_FPS[this.quality];
-    const struggling = s.lossRate > LOSS_LIMIT || s.freezes > 0 || s.fps === null || s.fps < expected * FPS_SHARE
-      || (s.rttMs !== null && Number.isFinite(this.bestRtt) && s.rttMs > this.bestRtt + RTT_RISE_MS);
+    const struggling = s.stalled || s.lossRate > LOSS_LIMIT || s.freezes > 0 || (s.fps !== null && s.fps < expected * FPS_SHARE)
+      || (s.rttMs !== null && bestRtt !== null && s.rttMs > bestRtt + RTT_RISE_MS);
     if (struggling) {
       this.goodSince = null;
       if (++this.bad < BAD_READINGS || this.level === VIDEO_QUALITIES.length - 1) return null;

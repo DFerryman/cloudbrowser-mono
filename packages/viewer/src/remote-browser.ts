@@ -103,7 +103,7 @@ export class RemoteBrowser {
   private videoId: VideoQuality | null = null;
   /** neko's videos (system/init). Browsers on an image older than the quality ladder offer one. */
   private offeredVideos: string[] = [];
-  private counters: { lost: number; received: number; freezes: number } | null = null;
+  private counters: { lost: number; received: number; freezes: number; frames: number; at: number } | null = null;
 
   constructor(private readonly opts: RemoteBrowserOptions) {
     this.video = opts.video ?? { quality: 'full', auto: true };
@@ -754,15 +754,20 @@ export class RemoteBrowser {
     }, this.opts.statsIntervalMs ?? 2000);
   }
 
-  private adapt(stats: ViewerStats, counters: { lost: number; received: number; freezes: number }) {
+  private adapt(stats: ViewerStats, counters: { lost: number; received: number; freezes: number; frames: number }) {
     const before = this.counters;
-    this.counters = counters;
+    const at = Date.now();
+    this.counters = { ...counters, at };
     if (!this.qualityController || !before || this.state !== 'live' || !this.levelsOffered) return;
     const lost = Math.max(0, counters.lost - before.lost);
     const received = Math.max(0, counters.received - before.received);
+    const seconds = (at - before.at) / 1000;
+    // Some browsers omit framesPerSecond; decoded frames over the interval say the same.
+    const decodedFps = seconds > 0 && counters.frames > 0 ? (counters.frames - before.frames) / seconds : null;
     const next = this.qualityController.observe({
-      at: Date.now(),
-      fps: received > 0 ? stats.fps : null,
+      at,
+      stalled: received === 0,
+      fps: stats.fps ?? decodedFps,
       lossRate: lost + received > 0 ? lost / (lost + received) : 0,
       freezes: Math.max(0, counters.freezes - before.freezes),
       rttMs: stats.rttMs,

@@ -16,8 +16,11 @@ export function toRemotePoint(
   const ox = box.left + (box.width - vw * scale) / 2;
   const oy = box.top + (box.height - vh * scale) / 2;
   if (scale <= 0 || clientX < ox || clientY < oy || clientX >= ox + vw * scale || clientY >= oy + vh * scale) return null;
-  const width = screen?.width ?? vw;
-  const height = screen?.height ?? vh;
+  // A picture level keeps the screen's shape. Right after a resize the old frames may still
+  // show while neko already reports the new screen: map to what is on screen then.
+  const sameShape = screen && Math.abs(screen.width / screen.height - vw / vh) < 0.02;
+  const width = sameShape ? screen.width : vw;
+  const height = sameShape ? screen.height : vh;
   return {
     x: Math.min(((clientX - ox) / (vw * scale)) * width, width - 1),
     y: Math.min(((clientY - oy) / (vh * scale)) * height, height - 1),

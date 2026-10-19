@@ -39,21 +39,45 @@ export class ExecutorError extends Error {
 }
 
 /**
- * The provider accepted a launch, but the VM ended before it ran (AWS: terminated while pending,
- * with a state reason). Retrying with the same idempotency token would only return the same
- * dead VM, so the caller must use a new token for the next launch.
+ * The provider accepted a create, then failed the resource itself (AWS: an encrypted volume that
+ * goes to `error`, a VM terminated while pending). It is gone, and the same idempotency token
+ * would only return it again. Unlike a refused request, this is the provider's own verdict on
+ * the region, e.g. an unusable EBS encryption key.
  */
-export class LaunchFailed extends ExecutorError {
+export class ProviderFailed extends ExecutorError {
   constructor(
     errorClass: ErrorClass,
-    readonly vmId: string,
+    readonly resourceId: string,
     readonly zone: string | null,
     /** Provider reason code, e.g. `Server.InsufficientInstanceCapacity`. */
     readonly reasonCode: string | null,
     message: string,
   ) {
     super(errorClass, message);
+    this.name = 'ProviderFailed';
+  }
+}
+
+/** A VM that ended before it ran; the caller must use a new token for the next launch. */
+export class LaunchFailed extends ProviderFailed {
+  constructor(...args: ConstructorParameters<typeof ProviderFailed>) {
+    super(...args);
     this.name = 'LaunchFailed';
+  }
+
+  get vmId() {
+    return this.resourceId;
+  }
+}
+
+/**
+ * No allowed machine type can be launched here: none fits the confirmed price, or the zone
+ * offers none. Waited out like capacity, but it says nothing about AWS capacity.
+ */
+export class NoLaunchCandidate extends ExecutorError {
+  constructor(readonly reason: 'price' | 'zone', message: string) {
+    super('capacity', message);
+    this.name = 'NoLaunchCandidate';
   }
 }
 

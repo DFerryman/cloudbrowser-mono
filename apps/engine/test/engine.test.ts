@@ -992,11 +992,52 @@ describe('on the aws-ec2 executor', () => {
     expect(ec2.calls.length).toBe(calls);
   });
 
+  it('does not record a price-cap refusal as a capacity shortage or move zones for it', async () => {
+    const ec2 = await onEc2();
+    // The quote the user confirmed is below every machine's current price.
+    const op = operationRow({ instanceId: 'inst1', userId: 'u1', kind: 'create', params: { storageGb: 10, maxVmHour: 0.01 }, now: w.clock });
+    await w.newInstance();
+    await w.db.update(operations).set({ params: op.params }).where(eq(operations.instanceId, 'inst1'));
+    const [created] = await w.db.select().from(operations).where(eq(operations.instanceId, 'inst1'));
+    await runOperation(w.deps(), created!.id);
+    expect(await health()).toEqual([]);
+    expect([...ec2.enis.values()].map((e) => e.az)).toEqual(['ap-northeast-1a']);
+    expect(ec2.calls.some((c) => c.action === 'RunInstances')).toBe(false);
+  });
+
+  it('moves to another zone on a disk shortage, and tries a zone again once every zone was short for a while', async () => {
+    const ec2 = await onEc2();
+    const azOf = (eni: string) => ec2.enis.get(eni)?.az;
+    let shortZones = new Set(['ap-northeast-1a', 'ap-northeast-1c']);
+    ec2.fail = (a, p) => {
+      if (a === 'CreateVolume' && p.AvailabilityZone === 'ap-northeast-1a' && shortZones.has('ap-northeast-1a')) return { code: 'InsufficientVolumeCapacity', status: 500 };
+      if (a === 'RunInstances' && shortZones.has(azOf(p['NetworkInterface.1.NetworkInterfaceId']!)!)) return { code: 'InsufficientInstanceCapacity', status: 500 };
+      return null;
+    };
+    const opId = await w.newInstance();
+    // a: no disk; c: no machine; then it waits in c.
+    let r = await runOperation(w.deps(), opId);
+    expect(r).toMatchObject({ state: 'deferred' });
+    expect((await w.instance()).status).toBe('waiting_capacity');
+    expect([...ec2.volumes.values()].filter((v) => v.tags['cb:kind'] === 'volume').map((v) => v.az)).toEqual(['ap-northeast-1c']);
+    // Zone a recovers; after five minutes the create tries it again instead of staying in c.
+    shortZones = new Set(['ap-northeast-1c']);
+    w.advance(6 * 60_000);
+    expect(await w.settle(opId)).toEqual({ state: 'succeeded' });
+    expect((await w.placement())!.zone).toBe('ap-northeast-1a');
+  });
+
   it('relaunches with a new token after a VM ended during launch for a transient reason', async () => {
     const ec2 = await onEc2();
     let dies = 1;
     ec2.launchFailure = () => (dies-- > 0 ? { code: 'Server.InternalError', message: 'Internal error on launch' } : null);
-    expect(await w.settle(await w.newInstance())).toEqual({ state: 'succeeded' });
+    const opId = await w.newInstance();
+    expect(await runOperation(w.deps(), opId)).toMatchObject({ state: 'deferred' });
+    // The relaunch comes after the bootstrap's original 15 minutes (still within the create deadline).
+    w.advance(16 * 60_000);
+    expect(await w.settle(opId)).toEqual({ state: 'succeeded' });
+    const [cred] = await w.db.select().from(schema.agentCredentials).where(eq(schema.agentCredentials.instanceId, 'inst1'));
+    expect(cred!.bootstrapExpiresAt!.getTime()).toBeGreaterThan(w.clock.getTime());
     expect(ec2.instances.size).toBe(2);
     const p = (await w.placement())!;
     expect(ec2.instances.get(p.vmId!)?.state).toBe('running');

@@ -125,8 +125,14 @@ async function runOwnedOperation(deps: EngineDeps, operationId: string): Promise
       if (op.params?.[key] === undefined && source.params?.[key] !== undefined) op.params = { ...op.params, [key]: source.params[key] };
     }
     const saved = await db.select().from(operationSteps).where(and(eq(operationSteps.operationId, resumeFrom), eq(operationSteps.status, 'succeeded')));
+    // Once this resumed create moved zones or relaunched, the saved creation's interface, disk
+    // and VM belong to the old attempt: never bring them back in place of the new one.
+    const attempt = (p: Record<string, unknown> | null | undefined, key: string) => Number(p?.[key] ?? 0);
+    const moved = attempt(op.params, 'zoneAttempt') !== attempt(source.params, 'zoneAttempt');
+    const relaunched = moved || attempt(op.params, 'launch') !== attempt(source.params, 'launch');
+    const stale = (step: string) => (moved && ['create_nic', 'create_volume'].includes(step)) || (relaunched && step === 'create_vm');
     // Refresh bootstrap validity and agent verification; the resumed VM must authenticate after this wake.
-    for (const row of saved) if (['allocate_ip', 'screen_ip', 'create_nic', 'create_volume', 'create_vm'].includes(row.step) && !journal.some((j) => j.step === row.step)) journal.push(row);
+    for (const row of saved) if (['allocate_ip', 'screen_ip', 'create_nic', 'create_volume', 'create_vm'].includes(row.step) && !stale(row.step) && !journal.some((j) => j.step === row.step)) journal.push(row);
   }
   const done = new Map(journal.map((j) => [j.step, j]));
 

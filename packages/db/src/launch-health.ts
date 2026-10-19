@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import type { Db } from './index.js';
 import { launchHealth } from './schema.js';
 
@@ -22,10 +23,19 @@ export async function launchHealthByRegion(db: Db): Promise<Map<string, LaunchHe
   return out;
 }
 
+/** One region's rows (a few zones), for admission and zone choice. */
+export async function launchHealthFor(db: Db, regionId: string): Promise<LaunchHealthRow[]> {
+  return db.select().from(launchHealth).where(eq(launchHealth.regionId, regionId));
+}
+
 /** Capacity was short in this zone recently, and no launch has succeeded there since. */
 export const CAPACITY_MEMORY_MS = 30 * 60_000;
-/** A launch failure that is not about capacity (a broken key, a permission, a quota) blocks the region this long unless a launch succeeds. */
-export const PROVIDER_ISSUE_MEMORY_MS = 6 * 3_600_000;
+/**
+ * After the provider itself failed a VM or disk here (e.g. an unusable EBS key), new browsers are
+ * refused this long; then the next create is let through as a probe, so a fix is picked up
+ * without operator action. Deleting the region's launch_health rows lifts it at once.
+ */
+export const PROVIDER_ISSUE_MEMORY_MS = 30 * 60_000;
 
 export function recentCapacityAt(row: LaunchHealthRow | undefined, now: Date): number {
   const at = row?.lastCapacityAt?.getTime() ?? 0;

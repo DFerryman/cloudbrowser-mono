@@ -1,7 +1,7 @@
 import { ProviderPriceSheet, TRIAL, resourceMonthlyCostCents } from '@cloudbrowser/contracts';
-import { eventRow, launchHealthByRegion, newArchiveKey, newId, raiseAlert, recentCapacityAt, recordLaunch, schema, settleRunningStatements, sha256Hex, userCaps, type Db } from '@cloudbrowser/db';
-import { ExecutorError, LaunchFailed, type ExecutorKind, type ResourceKind, type VmRef } from '@cloudbrowser/executors';
-import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
+import { eventRow, launchHealthFor, newArchiveKey, newId, raiseAlert, recentCapacityAt, recordLaunch, schema, settleRunningStatements, sha256Hex, userCaps, type Db } from '@cloudbrowser/db';
+import { ExecutorError, LaunchFailed, NoLaunchCandidate, ProviderFailed, type ExecutorKind, type ResourceKind, type VmRef } from '@cloudbrowser/executors';
+import { and, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import {
   placementRef,
   readContext,
@@ -142,7 +142,7 @@ async function saveParams(env: StepEnv, patch: Record<string, unknown>) {
 
 /** Zones ordered for a new VM: no recent capacity shortage first, otherwise configuration order. */
 async function zonesByHealth(env: StepEnv, zones: string[]): Promise<string[]> {
-  const rows = (await launchHealthByRegion(env.deps.db)).get(env.region.id) ?? [];
+  const rows = await launchHealthFor(env.deps.db, env.region.id);
   const health = new Map(rows.map((r) => [r.zone, r]));
   const now = env.deps.now();
   return zones.map((z, i) => ({ z, i, at: recentCapacityAt(health.get(z), now) })).sort((a, b) => a.at - b.at || a.i - b.i).map((x) => x.z);
@@ -150,23 +150,33 @@ async function zonesByHealth(env: StepEnv, zones: string[]): Promise<string[]> {
 
 /**
  * What a failed launch teaches. A VM that EC2 terminated during launch is gone and the next
- * launch needs its own token; a capacity shortage steers later browsers to other zones; any
- * other provider failure (an unusable EBS key, a permission, a quota) marks the region as having
- * a provider issue, so new browsers are refused there until a launch succeeds.
+ * launch needs its own token. A capacity shortage steers later browsers to other zones. A VM or
+ * disk the provider itself failed for a reason that repeats (an unusable EBS key, a volume limit)
+ * pauses new browsers in the region for a while. Errors from our own configuration or a refused
+ * request teach nothing about the region.
  */
-async function learnFromLaunch(env: StepEnv, e: unknown, zone: string, vmToken: string) {
+async function learnFromLaunch(env: StepEnv, e: unknown, zone: string, token: string) {
   if (!(e instanceof ExecutorError)) return;
   const { db, now } = env.deps;
   if (e instanceof LaunchFailed) {
+    // EC2 terminated it, so the ledger row closes with its id (a failed volume is left to the
+    // reaper's lookup: EBS may keep it in `error` for a while).
     await db.update(resources).set({ providerId: e.vmId, state: 'deleted', deletedAt: now() })
-      .where(and(eq(resources.requestToken, vmToken), isNull(resources.providerId), operationFence(env)));
+      .where(and(eq(resources.requestToken, token), isNull(resources.providerId), operationFence(env)));
     await saveParams(env, { launch: counter(env.op.params?.launch) + 1 });
   }
-  if (e.errorClass === 'capacity') await recordLaunch(db, env.region.id, zone, { kind: 'capacity' }, now());
-  else if (e.errorClass === 'invalid' || e.errorClass === 'forbidden' || e.errorClass === 'quota') {
+  if (e.errorClass === 'capacity' && !(e instanceof NoLaunchCandidate)) await recordLaunch(db, env.region.id, zone, { kind: 'capacity' }, now());
+  else if (e instanceof ProviderFailed && (e.errorClass === 'invalid' || e.errorClass === 'quota')) {
     await recordLaunch(db, env.region.id, zone, { kind: 'failure', errorClass: e.errorClass, message: e.message }, now());
   }
 }
+
+/** Whether another zone may help: a real shortage, or no allowed machine offered in this zone. */
+const zoneMayHelp = (e: unknown) =>
+  e instanceof ExecutorError && e.errorClass === 'capacity' && (!(e instanceof NoLaunchCandidate) || e.reason === 'zone');
+
+/** After every zone was short, another is tried again once its shortage is this old. */
+const ZONE_RETRY_MS = 5 * 60_000;
 
 /**
  * Capacity shortages are usually limited to one zone. A new browser has no data yet, so its
@@ -174,9 +184,16 @@ async function learnFromLaunch(env: StepEnv, e: unknown, zone: string, vmToken: 
  * not tried; the static IP moves with it. Returns when every zone was tried.
  */
 async function moveCreateToAnotherZone(env: StepEnv, zone: string) {
-  const tried = [...new Set([...strings(env.op.params?.avoidZones), zone])];
-  if (!env.executor.zones(env.region.providerRegion).some((z) => !tried.includes(z))) return;
   const { db, now } = env.deps;
+  const zones = env.executor.zones(env.region.providerRegion);
+  let tried = [...new Set([...strings(env.op.params?.avoidZones), zone])];
+  if (!zones.some((z) => !tried.includes(z))) {
+    // Every zone was short. Start over in one whose shortage has had time to clear, never
+    // more often than that, since each move leaves an interface and a disk to release.
+    const health = new Map((await launchHealthFor(db, env.region.id)).map((r) => [r.zone, r]));
+    if (!zones.some((z) => z !== zone && (health.get(z)?.lastCapacityAt?.getTime() ?? 0) < now().getTime() - ZONE_RETRY_MS)) return;
+    tried = [zone];
+  }
   const tokens = [env.ctx('create_nic', attemptSuffix(env, 'create_nic')).token, env.ctx('create_volume', attemptSuffix(env, 'create_volume')).token];
   await db.batch([
     db.update(resources).set({ state: 'superseded', releaseAfter: now() })
@@ -474,6 +491,7 @@ async function createVolume(env: StepEnv): Promise<StepOutcome> {
     vol = await env.executor.ensureVolume(ctx, env.region.providerRegion, zone, sizeGb);
   } catch (e) {
     await learnFromLaunch(env, e, zone, ctx.token);
+    if (zoneMayHelp(e)) await moveCreateToAnotherZone(env, zone);
     throw e;
   }
   await ledgerActive(env, ctx.token, vol.volumeId, vol.zone);
@@ -512,12 +530,24 @@ async function issueBootstrapFor(env: StepEnv, generation: number): Promise<Step
   return { result: { expiresAt: expiresAt.toISOString() } };
 }
 
+/**
+ * A launch after a capacity wait or a relaunch may come after the bootstrap's 15 minutes. The
+ * token is the same for the whole create; keep an unredeemed one valid for the VM about to start.
+ */
+async function keepBootstrapValid(env: StepEnv, generation: number) {
+  await env.deps.db.update(agentCredentials)
+    .set({ bootstrapExpiresAt: new Date(env.deps.now().getTime() + 15 * 60_000) })
+    .where(and(eq(agentCredentials.instanceId, env.instance.id), eq(agentCredentials.generation, generation),
+      isNotNull(agentCredentials.bootstrapHash), isNull(agentCredentials.credentialHash), operationFence(env)));
+}
+
 async function createVm(env: StepEnv): Promise<StepOutcome> {
   const ip = result<{ allocationId: string; address: string }>(env, 'allocate_ip');
   const { nicId, zone } = result<{ nicId: string; zone: string }>(env, 'create_nic');
   const { volumeId } = result<{ volumeId: string }>(env, 'create_volume');
   const ctx = env.ctx('create_vm', attemptSuffix(env, 'create_vm'));
   await ledgerPending(env, 'vm', ctx.token, 1, zone);
+  await keepBootstrapValid(env, 1);
   let vm: VmRef;
   try {
     vm = await env.executor.ensureVm(ctx, env.region.providerRegion, {
@@ -532,7 +562,7 @@ async function createVm(env: StepEnv): Promise<StepOutcome> {
     });
   } catch (e) {
     await learnFromLaunch(env, e, zone, ctx.token);
-    if (e instanceof ExecutorError && e.errorClass === 'capacity') await moveCreateToAnotherZone(env, zone);
+    if (zoneMayHelp(e)) await moveCreateToAnotherZone(env, zone);
     throw e;
   }
   await recordLaunch(env.deps.db, env.region.id, vm.zone, { kind: 'success' }, env.deps.now());
@@ -999,6 +1029,7 @@ async function recoverVm(env: StepEnv): Promise<StepOutcome> {
   const { volumeId } = result<{ volumeId: string }>(env, 'restore_volume');
   const ctx = env.ctx('create_vm', attemptSuffix(env, 'create_vm'));
   await ledgerPending(env, 'vm', ctx.token, plan.generation, plan.zone);
+  await keepBootstrapValid(env, plan.generation);
   let vm: VmRef;
   try {
     vm = await env.executor.ensureVm(ctx, p.providerRegion, {

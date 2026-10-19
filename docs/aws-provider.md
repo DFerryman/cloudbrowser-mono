@@ -67,9 +67,11 @@ AWS publishes no live on-demand capacity, so the region list combines what is kn
 
 - **Inventory** (above): no room under quotas or budget makes a region *Unavailable*.
 - **Launch outcomes** (`launch_health`, written by the engine per region and zone): a capacity
-  shortage in the last 30 minutes with no successful launch since makes the region *Limited*; a
-  launch failure that repeats (an unusable EBS key, a permission, a quota) makes it *Unavailable*
-  and admission refuses it for 6 hours or until a launch there succeeds. New browsers start in the
+  shortage in the last 30 minutes with no successful launch since makes the region *Limited*; a VM
+  or disk the provider itself failed (EC2 terminated it while pending, or EBS failed the volume,
+  e.g. an unusable KMS key) makes it *Unavailable*. Admission then refuses the region for 30
+  minutes; the next create after that is the probe (deleting the region's `launch_health` rows
+  lifts the pause at once). Errors from our own configuration never pause a region. New browsers start in the
   zone without a recent shortage and move to another zone on a capacity error.
 - **Latency**: the browser times `https://dynamodb.<region>.amazonaws.com/ping` (allowed in the
   CSP) and shows a distance estimate from Cloudflare's approximate location until it has measured.

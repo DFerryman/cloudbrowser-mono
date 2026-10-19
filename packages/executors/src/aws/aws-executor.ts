@@ -10,6 +10,8 @@
 import {
   ExecutorError,
   LaunchFailed,
+  NoLaunchCandidate,
+  ProviderFailed,
   type BindingCheck,
   type ErrorClass,
   type Capabilities,
@@ -438,7 +440,7 @@ export class AwsExecutor implements Executor {
       seen ||= !!v;
       // Not visible yet right after CreateVolume is normal; gone after being seen is a failure.
       if (status === 'creating' || (!v && !seen && Date.now() - since < VISIBILITY_GRACE_MS)) return null;
-      throw new ExecutorError('invalid', `EBS could not create volume ${volumeId} in ${region} (${v ? status : 'it disappeared'}). Check that the EBS encryption key is usable there.`);
+      throw new ProviderFailed('invalid', volumeId, text(v ?? undefined, 'availabilityZone') ?? null, null, `EBS could not create volume ${volumeId} in ${region} (${v ? status : 'it disappeared'}). Check that the EBS encryption key is usable there.`);
     });
   }
 
@@ -467,13 +469,13 @@ export class AwsExecutor implements Executor {
           }
         }
         types = types.filter(({ type }) => spec.instanceTypePrices![type]! <= cap);
-        if (!types.length) throw new ExecutorError('capacity', 'No launch candidate fits the confirmed VM hourly price.');
+        if (!types.length) throw new NoLaunchCandidate('price', 'No launch candidate fits the confirmed VM hourly price.');
       }
       // A type this zone does not offer fails with Unsupported; skip it instead of asking.
       const zoneTypes = cfg.zoneInstanceTypes?.[spec.zone];
       if (zoneTypes) {
         types = types.filter(({ type }) => zoneTypes.includes(type));
-        if (!types.length) throw new ExecutorError('capacity', `No allowed machine type is offered in ${spec.zone}.`);
+        if (!types.length) throw new NoLaunchCandidate('zone', `No allowed machine type is offered in ${spec.zone}.`);
       }
       const ami = cfg.ami ?? (await this.latestUbuntu(ctx, region));
       const userData = bootstrapScript({

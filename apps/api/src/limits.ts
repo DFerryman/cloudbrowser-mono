@@ -1,5 +1,5 @@
 import { MICROS_PER_USD, TRIAL, type Entitlements } from '@cloudbrowser/contracts';
-import { awsInventory, billingRequired, convertTrialStatements, launchHealthByRegion, openProviderIssue, prepaidBalance, reservationQuote, reservationWrite, pricingSettings, schema, userCaps as sharedUserCaps, type Db } from '@cloudbrowser/db';
+import { awsInventory, billingRequired, convertTrialStatements, launchHealthFor, openProviderIssue, prepaidBalance, reservationQuote, reservationWrite, pricingSettings, schema, userCaps as sharedUserCaps, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, ne, notInArray, sql } from 'drizzle-orm';
 import { storageLimits } from './pricing.js';
 import { problem } from './problem.js';
@@ -131,9 +131,9 @@ export async function regionAcceptingNew(db: Db, regionId: string): Promise<bool
 async function checkRegionRoom(db: Db, regionId: string) {
   const [region] = await db.select().from(regions).where(eq(regions.id, regionId));
   if (!region?.enabled) throw problem(409, 'region_unavailable', 'This region is not available.');
-  // The last launch here failed for a reason that repeats (an unusable EBS key, a permission, a
-  // quota): another browser would fail the same way, so none is accepted until one succeeds.
-  if (openProviderIssue((await launchHealthByRegion(db)).get(regionId) ?? [], new Date())) {
+  // The provider itself just failed a VM or disk here (e.g. an unusable EBS key): another browser
+  // would fail the same way. Refused for a while, then a create is let through as a probe.
+  if (openProviderIssue(await launchHealthFor(db, regionId), new Date())) {
     throw problem(409, 'region_unavailable', 'New browsers are paused in this region while we fix a provider problem. Choose another region or try again later.');
   }
   const inventory = (await awsInventory(db)).get(regionId);

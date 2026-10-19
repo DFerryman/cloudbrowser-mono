@@ -23,4 +23,4 @@ export { awsInventory } from './aws-provider.js';
 export { raiseAlert, type AlertSeverity } from './alerts.js';
 
 export { convertTrialStatements, prepaidBalance, prepaidAccess, reservationQuote, reservationWrite, reservedTotalSql, settleRunningStatements, type ReservationQuote, type PrepaidAccessReason } from './prepaid.js';
-export { recordLaunch, launchHealthByRegion, recentCapacityAt, openProviderIssue, CAPACITY_MEMORY_MS, PROVIDER_ISSUE_MEMORY_MS, type LaunchOutcome, type LaunchHealthRow } from './launch-health.js';
+export { recordLaunch, launchHealthByRegion, launchHealthFor, recentCapacityAt, openProviderIssue, CAPACITY_MEMORY_MS, PROVIDER_ISSUE_MEMORY_MS, type LaunchOutcome, type LaunchHealthRow } from './launch-health.js';

@@ -39,7 +39,7 @@ export async function readStats(pc: RTCPeerConnection, previous: { bytes: number
   const codec = video?.codecId ? all.get(String(video.codecId)) : undefined;
   const elapsed = previous ? (Date.now() - previous.at) / 1000 : 0;
   // Cumulative counters, for the changes the quality controller looks at.
-  const counters = { lost, received, freezes: Number(video?.freezeCount ?? 0) };
+  const counters = { lost, received, freezes: Number(video?.freezeCount ?? 0), frames: Number(video?.framesDecoded ?? 0) };
   const stats: ViewerStats = {
     rttMs: typeof pair?.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : null,
     fps: typeof video?.framesPerSecond === 'number' ? Math.round(video.framesPerSecond) : null,
