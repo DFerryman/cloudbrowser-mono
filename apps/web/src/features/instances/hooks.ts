@@ -65,17 +65,22 @@ export function useCreateInstance() {
 /** Rename and settings edits are reversible, so they update the cache optimistically. */
 export function useUpdateInstance() {
   return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: Partial<Pick<Instance, 'name' | 'idleTimeoutS' | 'screen' | 'locale'>> & { priceVersion?: string } }) =>
+    mutationFn: ({ id, patch }: { id: string; patch: Partial<Pick<Instance, 'name' | 'idleTimeoutS' | 'screen' | 'locale' | 'videoQuality' | 'videoAuto'>> & { priceVersion?: string } }) =>
       api<Instance>('PATCH', `/instances/${id}`, { body: patch }),
     onMutate: async ({ id, patch }) => {
-      await queryClient.cancelQueries({ queryKey: keys.instances });
+      await Promise.all([queryClient.cancelQueries({ queryKey: keys.instances }), queryClient.cancelQueries({ queryKey: keys.instance(id) })]);
       const prev = queryClient.getQueryData<Instance[]>(keys.instances);
+      // The browser's own pages read the single-browser query; update it too, or a control
+      // snaps back until the refetch.
+      const prevOne = queryClient.getQueryData<Instance>(keys.instance(id));
       const { priceVersion: _shown, ...fields } = patch;
       queryClient.setQueryData<Instance[]>(keys.instances, (list) => list?.map((i) => (i.id === id ? { ...i, ...fields } : i)));
-      return { prev };
+      queryClient.setQueryData<Instance>(keys.instance(id), (one) => (one ? { ...one, ...fields } : one));
+      return { prev, prevOne };
     },
-    onError: async (error, _v, ctx) => {
+    onError: async (error, v, ctx) => {
       if (ctx?.prev) queryClient.setQueryData(keys.instances, ctx.prev);
+      if (ctx?.prevOne) queryClient.setQueryData(keys.instance(v.id), ctx.prevOne);
       await refreshChangedPrices(error);
     },
     onSettled: (_d, _e, v) => refresh(v.id),

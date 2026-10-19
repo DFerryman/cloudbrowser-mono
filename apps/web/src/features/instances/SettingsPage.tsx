@@ -1,6 +1,7 @@
 import { useRegionInfo } from './hooks.js';
-import { IDLE_TIMEOUT_OPTIONS_S, SCREEN_SIZES, type BrowserLocale, type Instance, type RegionPricing } from '@cloudbrowser/contracts';
-import { Button, cn, Dialog, Input, Label, Pagination, Section, Select, useToast } from '@cloudbrowser/ui';
+import { IDLE_TIMEOUT_OPTIONS_S, VIDEO_QUALITIES, VIDEO_QUALITY_MAX_KBPS, type BrowserLocale, type Instance, type RegionPricing, type VideoQuality } from '@cloudbrowser/contracts';
+import { Button, cn, Dialog, Hint, Input, Label, Pagination, Section, Select, useToast } from '@cloudbrowser/ui';
+import type { MessageKey } from '../../messages/en.js';
 import { ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
@@ -128,16 +129,6 @@ export function SettingsPage() {
               </Select>
             </div>
             <div>
-              <Label htmlFor="screen">{t('settings.screen')}</Label>
-              <Select id="screen" value={i.screen} onChange={(e) => save({ screen: e.target.value as Instance['screen'] })}>
-                {SCREEN_SIZES.map((s) => (
-                  <option key={s} value={s}>
-                    {s === 'auto' ? t('create.screen.auto') : s.replace('x', ' × ')}
-                  </option>
-                ))}
-              </Select>
-            </div>
-            <div>
               <Label htmlFor="locale">{t('settings.language')}</Label>
               <Select id="locale" value={i.locale} onChange={(e) => save({ locale: e.target.value as BrowserLocale })}>
                 <option value="zh-CN">简体中文</option>
@@ -145,7 +136,25 @@ export function SettingsPage() {
                 <option value="ja-JP">日本語</option>
               </Select>
             </div>
+            <div className="sm:col-span-2">
+              <Label htmlFor="picture">{t('settings.picture')}</Label>
+              <Select id="picture" className="sm:max-w-sm" value={i.videoQuality} onChange={(e) => save({ videoQuality: e.target.value as VideoQuality })}>
+                {VIDEO_QUALITIES.map((q) => (
+                  <option key={q} value={q}>
+                    {t(`settings.picture.${q}` as MessageKey)} · {t('settings.picture.data', { gb: (VIDEO_QUALITY_MAX_KBPS[q] * 3600 / 8 / 1_000_000).toFixed(1) })}
+                  </option>
+                ))}
+              </Select>
+              <label className="mt-2 flex cursor-pointer items-start gap-2 text-sm">
+                <input type="checkbox" className="mt-0.5 size-4 accent-[var(--color-accent)]" checked={i.videoAuto} onChange={(e) => save({ videoAuto: e.target.checked })} />
+                <span>
+                  {t('settings.picture.auto')}
+                  <span className="block text-xs text-subtle">{t('settings.picture.autoHint')}</span>
+                </span>
+              </label>
+            </div>
           </div>
+          <Hint className="mt-3">{t('settings.picture.hint')}</Hint>
         </Section>
 
         <Section title={t('settings.activity')}>

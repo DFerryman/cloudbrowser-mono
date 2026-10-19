@@ -1,5 +1,5 @@
 import { useRegionInfo } from '../instances/hooks.js';
-import type { ConnectInfo, Instance, ViewerSession } from '@cloudbrowser/contracts';
+import type { ConnectInfo, Instance, VideoQuality, ViewerSession } from '@cloudbrowser/contracts';
 import { Button, cn, Menu, MenuItem, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -25,6 +25,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router';
 import { api, ApiError } from '../../lib/api.js';
 import { useI18n } from '../../lib/i18n.js';
+import type { MessageKey } from '../../messages/en.js';
 import { keys, queryClient } from '../../lib/query.js';
 import { CreateProgress } from '../instances/CreateProgress.js';
 import { useInstance, useLifecycle, useVerifyIp } from '../instances/hooks.js';
@@ -83,6 +84,7 @@ export function SessionPage() {
   const viewerRef = useRef<RemoteBrowserHandle>(null);
   const [viewer, setViewer] = useState<{ state: ViewerState; attempt: number }>({ state: 'connecting', attempt: 0 });
   const [stats, setStats] = useState<ViewerStats | null>(null);
+  const [streaming, setStreaming] = useState<VideoQuality | null>(null);
   const [muted, setMuted] = useState(true);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [inputInterrupted, setInputInterrupted] = useState(false);
@@ -379,7 +381,7 @@ export function SessionPage() {
           {i && i.status !== 'running' ? (
             <StatusBadge className="mr-2 hidden text-zinc-300 md:inline-flex" tone={STATUS_TONE[i.status]} label={t(statusKey(i.status))} />
           ) : connect.data?.mode === 'webrtc' && stats ? (
-            <ConnectionIndicator stats={stats} />
+            <ConnectionIndicator stats={stats} picture={streaming ? `${t(`settings.picture.${streaming}` as MessageKey)}${i?.videoAuto ? ` · ${t('settings.picture.autoShort')}` : ''}` : null} />
           ) : connect.data?.mode === 'simulated' ? (
             <span className="mr-2 hidden items-center gap-1.5 text-xs text-zinc-400 md:inline-flex" title={t('session.simulatedHint')}>
               <span className="size-2 rounded-full bg-starting" aria-hidden /> {t('session.simulated')}
@@ -520,6 +522,9 @@ export function SessionPage() {
             }}
             onState={(state, attempt) => setViewer({ state, attempt })}
             onStats={setStats}
+            // The browser's picture setting; a change applies to the open stream.
+            video={{ quality: i.videoQuality, auto: i.videoAuto }}
+            onVideo={setStreaming}
             onInput={() => (hadInput.current = true)}
             onKeyboardChange={setKeyboardOpen}
           />
@@ -532,7 +537,7 @@ export function SessionPage() {
 }
 
 /** ● 32 ms, colored by quality; details on hover (page 5, "Quality telemetry"). */
-function ConnectionIndicator({ stats }: { stats: ViewerStats }) {
+function ConnectionIndicator({ stats, picture }: { stats: ViewerStats; picture: string | null }) {
   const level = qualityLevel(stats);
   const color = { good: 'bg-running', fair: 'bg-starting', poor: 'bg-error', unknown: 'bg-sleeping' }[level];
   const details = [
@@ -543,6 +548,7 @@ function ConnectionIndicator({ stats }: { stats: ViewerStats }) {
     stats.codec,
     stats.transport,
     stats.width && stats.height ? `${stats.width}×${stats.height}` : null,
+    picture,
   ]
     .filter(Boolean)
     .join(' · ');

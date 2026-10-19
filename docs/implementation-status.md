@@ -172,6 +172,17 @@ Cloudflare deployment.
   user's network (an estimate until measured), *Available* / *Limited* / *Unavailable* with the
   reason, the running price and a *Fastest for you* mark; long lists collapse to the nearest five
   with search. Public pricing, status and home pages list the live regions by continent.
+- **Picture resolution and adaptive quality**: the old screen-size setting was stored but never
+  applied. neko now streams a ladder of the same desktop (`full`, `high` 75%, `medium` 50%,
+  `low` 50% at 15 fps, VP8 at 2.0/1.2/0.7/0.35 Mbit/s caps; before, `codec: h264` without pipelines
+  silently fell back to neko's single default VP8 stream). Each browser has a picture resolution
+  and *Adjust to my connection* (default on). The viewer requests the level with `signal/video`
+  and adapts it from its own receive statistics (dropped frames, loss, freezes, growing RTT),
+  because neko 3.0.8's estimator compares bits with bytes. The page layout follows the viewer's
+  size at every level; pointer positions map to the remote screen, not the video's pixels.
+  Verified against the real neko image with the real viewer: throttled to 350 kbit/s it stepped
+  down to `low` within about 20 s and back to `full` about a minute after recovery. Browsers on an
+  older image keep their single stream.
 - **Cron isolation**: each engine cron step (idle stops, metering, trial reclamation, pending
   operations, IP checks, stopped intent) runs even if an earlier one failed, and one browser's
   provider error no longer skips the fail-closed IP check of the others; failures are reported

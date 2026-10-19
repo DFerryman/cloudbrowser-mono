@@ -39,7 +39,19 @@ export const SCREEN_SIZES = [
   '1920x1080',
   '2560x1440',
 ] as const;
+/** Deprecated: never applied. The remote screen follows the viewer's size; see VideoQuality. */
 export const ScreenSize = z.enum(SCREEN_SIZES);
+
+/**
+ * Picture quality of the live view, sharpest first (neko video ids, images/browser/neko.yaml).
+ * Every level shows the same desktop at the same size in the viewer; a lower level is a
+ * downscaled picture: softer, with less data per hour.
+ */
+export const VIDEO_QUALITIES = ['full', 'high', 'medium', 'low'] as const;
+export const VideoQuality = z.enum(VIDEO_QUALITIES);
+export type VideoQuality = z.infer<typeof VideoQuality>;
+/** Most a level sends per second while the screen changes constantly (its encoder's target). */
+export const VIDEO_QUALITY_MAX_KBPS: Record<VideoQuality, number> = { full: 2000, high: 1200, medium: 700, low: 350 };
 
 export const BrowserLocale = z.enum(['zh-CN', 'en-US', 'ja-JP']);
 export type BrowserLocale = z.infer<typeof BrowserLocale>;
@@ -66,6 +78,10 @@ export const Instance = z.object({
   idleTimeoutS: z.number().int(),
   locale: BrowserLocale,
   screen: ScreenSize,
+  /** The sharpest picture the live view uses. */
+  videoQuality: VideoQuality,
+  /** Drop below videoQuality while the connection cannot keep up, and return when it recovers. */
+  videoAuto: z.boolean(),
   /** The dedicated outbound IPv4 address; null until allocated. */
   ipAddress: z.string().nullable(),
   dedicatedSince: z.string().nullable(),
@@ -112,6 +128,8 @@ export const UpdateInstanceBody = z
     idleTimeoutS: z.number().int().min(60).max(3600).optional(),
     screen: ScreenSize.optional(),
     locale: BrowserLocale.optional(),
+    videoQuality: VideoQuality.optional(),
+    videoAuto: z.boolean().optional(),
     priceVersion: PriceVersion.optional(),
   })
   .strict();

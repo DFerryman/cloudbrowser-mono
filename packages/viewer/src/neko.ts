@@ -19,6 +19,8 @@ export const EV = {
   SIGNAL_PROVIDE: 'signal/provide',
   SIGNAL_ANSWER: 'signal/answer',
   SIGNAL_CANDIDATE: 'signal/candidate',
+  /** Which video (quality level) neko streams; sent by either side. */
+  SIGNAL_VIDEO: 'signal/video',
   CONTROL_REQUEST: 'control/request',
   CONTROL_MOVE: 'control/move',
   CONTROL_SCROLL: 'control/scroll',
@@ -37,6 +39,7 @@ export const EV = {
 export interface SignalProvide {
   sdp: string;
   iceservers?: { urls: string[] | string; username?: string; credential?: string }[];
+  video?: { id?: string };
 }
 
 export interface SignalCandidate {

@@ -1,5 +1,7 @@
 import type { GatewayToViewer, IceServer } from '@cloudbrowser/contracts';
+import { VIDEO_QUALITIES, type VideoQuality } from '@cloudbrowser/contracts';
 import { decode, EV, fitScreen, sameScreen, screenOf, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
+import { QualityController, type VideoPreference } from './quality.js';
 import { KEYSYM, keyIdentity, keysymFor, keysymForName, matchingKeyIdentity, unidentifiedKey, type KeyIdentityEvent } from './keyboard.js';
 import { readStats, type ViewerStats } from './stats.js';
 import { ScrollAccumulator } from './scroll.js';
@@ -27,6 +29,10 @@ export interface RemoteBrowserOptions {
   onInputError?: (reason: InputFailure) => void;
   /** Map Cmd → Ctrl and Option → Alt (macOS default, page 5). */
   macToPc?: boolean;
+  /** Picture quality; the sharpest level by default, adapting to the connection. */
+  video?: VideoPreference;
+  /** The level neko streams now, whenever it changes. */
+  onVideo?: (quality: VideoQuality) => void;
   statsIntervalMs?: number;
   /** Maximum time per token fetch or transport/WebRTC handshake before retrying. Defaults to 20 s. */
   connectionTimeoutMs?: number;
@@ -90,8 +96,17 @@ export class RemoteBrowser {
   private lastScreenAt = 0;
   private appliedScreen = '';
   private cursorUrl: string | null = null;
+  private video: VideoPreference;
+  /** Present while the picture adapts to the connection; it outlives reconnects. */
+  private qualityController: QualityController | null = null;
+  /** The level neko reported streaming. */
+  private videoId: VideoQuality | null = null;
+  /** neko's videos (system/init). Browsers on an image older than the quality ladder offer one. */
+  private offeredVideos: string[] = [];
+  private counters: { lost: number; received: number; freezes: number } | null = null;
 
   constructor(private readonly opts: RemoteBrowserOptions) {
+    this.video = opts.video ?? { quality: 'full', auto: true };
     this.inputQueue = new InputQueue({
       transport: () => this.ws,
       ready: () => this.inputReady && !this.stopped,
@@ -114,6 +129,20 @@ export class RemoteBrowser {
 
   get currentState() {
     return this.state;
+  }
+
+  /** The remote desktop in its own pixels; the video may be a downscaled picture of it. */
+  get screenSize(): { width: number; height: number } | null {
+    return this.remoteScreen ? { width: this.remoteScreen.width, height: this.remoteScreen.height } : null;
+  }
+
+  /** A changed setting applies at once to a live stream, without reconnecting. */
+  setVideoPreference(video: VideoPreference) {
+    if (video.quality === this.video.quality && video.auto === this.video.auto) return;
+    this.video = video;
+    const current = this.qualityController?.quality ?? this.videoId ?? video.quality;
+    this.qualityController = video.auto ? new QualityController(video.quality, Date.now(), current) : null;
+    this.selectVideo(this.qualityController?.quality ?? video.quality);
   }
 
   async connect(): Promise<void> {
@@ -468,11 +497,36 @@ export class RemoteBrowser {
     this.pressedButtons.clear();
   }
 
+  /** Picture levels need a browser image with the quality ladder (images/browser/neko.yaml). */
+  private get levelsOffered() {
+    return VIDEO_QUALITIES.every((q) => this.offeredVideos.includes(q));
+  }
+
   private requestSignal(ws: WebSocket) {
     if (this.signalRequested) return;
     this.signalRequested = true;
     this.startConnectionTimer(ws);
-    this.sendNeko({ event: EV.SIGNAL_REQUEST, payload: { video: {}, audio: {} } });
+    if (!this.levelsOffered) {
+      // An older image streams its one video; asking for a level it lacks would get no stream.
+      this.sendNeko({ event: EV.SIGNAL_REQUEST, payload: { video: {}, audio: {} } });
+      return;
+    }
+    // The viewer chooses the level itself (QualityController); neko's estimator stays out.
+    if (this.video.auto) this.qualityController ??= new QualityController(this.video.quality, Date.now());
+    this.qualityController?.restart(Date.now());
+    const id = this.qualityController?.quality ?? this.video.quality;
+    this.sendNeko({ event: EV.SIGNAL_REQUEST, payload: { video: { selector: { id, type: 'exact' }, auto: false }, audio: {} } });
+  }
+
+  private selectVideo(id: VideoQuality) {
+    if (this.state !== 'live' || id === this.videoId || !this.levelsOffered) return;
+    this.sendNeko({ event: EV.SIGNAL_VIDEO, payload: { selector: { id, type: 'exact' }, auto: false } });
+  }
+
+  private videoChanged(id: unknown) {
+    if (typeof id !== 'string' || !(VIDEO_QUALITIES as readonly string[]).includes(id) || id === this.videoId) return;
+    this.videoId = id as VideoQuality;
+    this.opts.onVideo?.(this.videoId);
   }
 
   private onGatewayFrame(raw: unknown, ws: WebSocket) {
@@ -524,10 +578,13 @@ export class RemoteBrowser {
 
   private async onNeko(msg: NekoMessage, ws: WebSocket) {
     switch (msg.event) {
-      case EV.SYSTEM_INIT:
-        this.remoteScreen = screenOf((msg.payload as { screen_size?: unknown } | undefined)?.screen_size) ?? this.remoteScreen;
+      case EV.SYSTEM_INIT: {
+        const init = msg.payload as { screen_size?: unknown; webrtc?: { videos?: unknown } } | undefined;
+        this.remoteScreen = screenOf(init?.screen_size) ?? this.remoteScreen;
+        this.offeredVideos = Array.isArray(init?.webrtc?.videos) ? init.webrtc.videos.filter((v): v is string => typeof v === 'string') : [];
         this.requestSignal(ws);
         return;
+      }
       case EV.SYSTEM_ADMIN: {
         const list = (msg.payload as { screen_sizes_list?: unknown } | undefined)?.screen_sizes_list;
         if (!Array.isArray(list)) return;
@@ -539,7 +596,11 @@ export class RemoteBrowser {
         this.remoteScreen = screenOf(msg.payload) ?? this.remoteScreen;
         return;
       case EV.SIGNAL_PROVIDE:
+        this.videoChanged((msg.payload as unknown as SignalProvide).video?.id);
         await this.answer(msg.payload as unknown as SignalProvide, ws);
+        return;
+      case EV.SIGNAL_VIDEO:
+        this.videoChanged((msg.payload as { id?: unknown } | undefined)?.id);
         return;
       case EV.SIGNAL_CANDIDATE: {
         const c = msg.payload as unknown as SignalCandidate;
@@ -676,14 +737,37 @@ export class RemoteBrowser {
   }
 
   private startStats() {
-    if (this.statsTimer || !this.opts.onStats) return;
+    if (this.statsTimer || (!this.opts.onStats && !this.video.auto)) return;
     let previous: { bytes: number; at: number } | null = null;
+    this.counters = null;
     this.statsTimer = setInterval(async () => {
       if (!this.pc) return;
-      const { stats, bytes } = await readStats(this.pc, previous);
-      previous = { bytes, at: Date.now() };
-      this.opts.onStats?.(stats);
+      let reading: Awaited<ReturnType<typeof readStats>>;
+      try {
+        reading = await readStats(this.pc, previous);
+      } catch {
+        return; // A closing connection; the next one starts its own readings.
+      }
+      previous = { bytes: reading.bytes, at: Date.now() };
+      this.adapt(reading.stats, reading.counters);
+      this.opts.onStats?.(reading.stats);
     }, this.opts.statsIntervalMs ?? 2000);
+  }
+
+  private adapt(stats: ViewerStats, counters: { lost: number; received: number; freezes: number }) {
+    const before = this.counters;
+    this.counters = counters;
+    if (!this.qualityController || !before || this.state !== 'live' || !this.levelsOffered) return;
+    const lost = Math.max(0, counters.lost - before.lost);
+    const received = Math.max(0, counters.received - before.received);
+    const next = this.qualityController.observe({
+      at: Date.now(),
+      fps: received > 0 ? stats.fps : null,
+      lossRate: lost + received > 0 ? lost / (lost + received) : 0,
+      freezes: Math.max(0, counters.freezes - before.freezes),
+      rttMs: stats.rttMs,
+    });
+    if (next) this.selectVideo(next);
   }
 
   private teardownPeer(preserveCandidates = false) {

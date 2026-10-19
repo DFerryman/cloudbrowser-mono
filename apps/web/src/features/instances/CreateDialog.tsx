@@ -1,4 +1,4 @@
-import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, SCREEN_SIZES, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
+import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
 import { Button, cn, Dialog, Hint, Input, Label, Select } from '@cloudbrowser/ui';
 import { DocsLink } from '../../app/DocsLink.js';
 import { AlertCircle, ChevronRight, Gift, Wallet } from 'lucide-react';
@@ -42,7 +42,6 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
   const [name, setName] = useState('');
   const [regionId, setRegionId] = useState<Region['id']>(DEFAULT_REGION);
   const [browserLocale, setBrowserLocale] = useState<BrowserLocale>(UI_TO_BROWSER_LOCALE[locale]);
-  const [screen, setScreen] = useState<(typeof SCREEN_SIZES)[number]>('auto');
   const [advanced, setAdvanced] = useState(false);
   const [plan, setPlan] = useState<Plan>('paid');
   const [error, setError] = useState<string | null>(null);
@@ -53,7 +52,6 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
       if (initialInstance) {
         setRegionId(initialInstance.regionId);
         setBrowserLocale(initialInstance.locale);
-        setScreen(initialInstance.screen);
       }
       setError(null);
     }
@@ -88,7 +86,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    const parsed = CreateInstanceBody.safeParse({ name, regionId, locale: browserLocale, screen, priceVersion: price?.version ?? undefined, storageGb: trial ? b!.trial.storageGb : price?.defaultStorageGb, ...(trial ? { trial: true } : {}) });
+    const parsed = CreateInstanceBody.safeParse({ name, regionId, locale: browserLocale, priceVersion: price?.version ?? undefined, storageGb: trial ? b!.trial.storageGb : price?.defaultStorageGb, ...(trial ? { trial: true } : {}) });
     if (!parsed.success) {
       setError(t('error.validation_failed'));
       return;
@@ -181,7 +179,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
             {t('create.advanced')}
             {!advanced ? (
               <span className="ml-1 truncate font-normal text-muted">
-                · {LANGUAGES.find((l) => l.value === browserLocale)?.label ?? browserLocale} · {screen === 'auto' ? t('create.screen.auto') : screen.replace('x', ' × ')}
+                · {LANGUAGES.find((l) => l.value === browserLocale)?.label ?? browserLocale}
               </span>
             ) : null}
           </button>
@@ -191,16 +189,6 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
                 <Label htmlFor="locale">{t('create.language')}</Label>
                 <Select id="locale" value={browserLocale} onChange={(e) => setBrowserLocale(e.target.value as BrowserLocale)}>
                   {LANGUAGES.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
-                </Select>
-              </div>
-              <div>
-                <Label htmlFor="screen">{t('create.screen')}</Label>
-                <Select id="screen" value={screen} onChange={(e) => setScreen(e.target.value as typeof screen)}>
-                  {SCREEN_SIZES.map((s) => (
-                    <option key={s} value={s}>
-                      {s === 'auto' ? t('create.screen.auto') : s.replace('x', ' × ')}
-                    </option>
-                  ))}
                 </Select>
               </div>
             </div>

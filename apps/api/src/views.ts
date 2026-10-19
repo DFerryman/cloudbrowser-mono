@@ -57,6 +57,8 @@ export async function toInstances(db: Db, rows: InstanceRow[]): Promise<Instance
       idleTimeoutS: r.idleTimeoutS,
       locale: r.locale as Instance['locale'],
       screen: r.screen as Instance['screen'],
+      videoQuality: r.videoQuality as Instance['videoQuality'],
+      videoAuto: r.videoAuto,
       ipAddress: p?.ipAddress ?? null,
       dedicatedSince: iso(ip?.assignedAt),
       lastIpCheck: h?.lastIpCheck ?? null,

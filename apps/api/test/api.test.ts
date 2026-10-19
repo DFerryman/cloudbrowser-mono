@@ -178,6 +178,10 @@ describe('browsers', () => {
     expect((await t.call('PATCH', `/api/v1/instances/${id}`, { regionId: 'usw1' })).status).toBe(400);
     expect((await t.call('PATCH', `/api/v1/instances/${id}`, { idleTimeoutS: 3600 })).body.type).toBe('plan_limit');
     expect((await t.call('PATCH', `/api/v1/instances/${id}`, { name: 'Renamed', idleTimeoutS: 900 })).body.name).toBe('Renamed');
+    // Picture quality: the sharpest level, adapting to the connection, unless changed.
+    expect(inst).toMatchObject({ videoQuality: 'full', videoAuto: true });
+    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { videoQuality: 'medium', videoAuto: false })).body).toMatchObject({ videoQuality: 'medium', videoAuto: false });
+    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { videoQuality: '4k' })).status).toBe(400);
 
     expect((await t.call('POST', `/api/v1/instances/${id}/ip-change-requests`, {}, { 'idempotency-key': 'ip0' })).status).toBe(400);
     expect((await t.call('POST', `/api/v1/instances/${id}/ip-change-requests`, { confirm: true, priceVersion: await quote() }, { 'idempotency-key': 'ip1' })).status).toBe(202);

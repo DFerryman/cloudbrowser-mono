@@ -169,7 +169,7 @@ describe('RemoteBrowser', () => {
 
   function setup(
     iceServers: { urls: string[]; username?: string; credential?: string }[] = [],
-    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'onInputError'> = {},
+    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'onInputError' | 'video' | 'onVideo'> = {},
   ) {
     FakeWS.all = [];
     const getConnectInfo = vi.fn(async () => ({ gatewayUrl: 'wss://gw/v1/stream/i1', token: `tok${getConnectInfo.mock.calls.length}`, iceServers }));
@@ -831,9 +831,47 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
+  it('asks for the picture level from the settings and switches it on a live stream', async () => {
+    const levels: string[] = [];
+    const { b } = setup([], { video: { quality: 'high', auto: false }, onVideo: (q) => levels.push(q) });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init', payload: { screen_size: { width: 1920, height: 1080, rate: 30 }, webrtc: { videos: ['full', 'high', 'medium', 'low'] } } } });
+    expect(ws.neko('signal/request')).toEqual([{ video: { selector: { id: 'high', type: 'exact' }, auto: false }, audio: {} }]);
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp', video: { id: 'high' } } } });
+    await tick();
+    FakePC.last.connect();
+    expect(levels).toEqual(['high']);
+    expect(b.screenSize).toEqual({ width: 1920, height: 1080 });
+
+    // A changed setting applies without reconnecting; neko confirms the level it streams.
+    b.setVideoPreference({ quality: 'medium', auto: false });
+    expect(ws.neko('signal/video')).toEqual([{ selector: { id: 'medium', type: 'exact' }, auto: false }]);
+    ws.push({ t: 'neko', data: { event: 'signal/video', payload: { id: 'medium', auto: false } } });
+    expect(levels).toEqual(['high', 'medium']);
+    b.setVideoPreference({ quality: 'medium', auto: false });
+    expect(ws.neko('signal/video')).toHaveLength(1);
+    b.disconnect();
+  });
+
+  it('streams the one video of an older browser image, without picture levels', async () => {
+    const { b } = setup([], { video: { quality: 'medium', auto: true } });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init', payload: { webrtc: { videos: ['main'] } } } });
+    expect(ws.neko('signal/request')).toEqual([{ video: {}, audio: {} }]);
+    await readyInput(ws);
+    b.setVideoPreference({ quality: 'low', auto: false });
+    expect(ws.neko('signal/video')).toEqual([]);
+    b.disconnect();
+  });
+
   it('cancels the connection deadline once the stream is live', async () => {
     vi.useFakeTimers();
-    const { b, getConnectInfo, states } = setup();
+    // A fixed picture level needs no quality readings, so no timer should remain.
+    const { b, getConnectInfo, states } = setup([], { video: { quality: 'full', auto: false } });
     await b.connect();
     const ws = FakeWS.all[0]!;
     ws.push({ t: 'agent_online' });

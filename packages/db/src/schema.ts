@@ -177,6 +177,8 @@ export const browserInstances = sqliteTable(
     idleTimeoutS: integer('idle_timeout_s').notNull(),
     locale: text('locale').notNull(),
     screen: text('screen').notNull(),
+    videoQuality: text('video_quality').notNull().default('full'),
+    videoAuto: integer('video_auto', { mode: 'boolean' }).notNull().default(true),
     fingerprint: json<Fingerprint>('fingerprint').notNull(),
     lastActiveAt: ts('last_active_at'),
     createdAt: ts('created_at').notNull(),

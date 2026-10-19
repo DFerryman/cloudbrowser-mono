@@ -23,7 +23,7 @@ const zero = { totalMicros: 0, byItem: { compute: 0, ip: 0, storage: 0, snapshot
 const month = new Date().toISOString().slice(0, 7);
 const instance = {
   id: 'browser-fixture', name: 'Quoted browser', regionId: 'syd1', status: 'sleeping', statusReason: null,
-  desiredState: 'stopped', idleTimeoutS: 600, locale: 'en-US', screen: 'auto', ipAddress: '192.0.2.1',
+  desiredState: 'stopped', idleTimeoutS: 600, locale: 'en-US', screen: 'auto', videoQuality: 'full', videoAuto: true, ipAddress: '192.0.2.1',
   dedicatedSince: null, lastIpCheck: null, lastActiveAt: null, createdAt: new Date().toISOString(),
   deletedAt: null, purgeAfter: null, currentOperation: null, storageGb: 10, trial: null,
 };
@@ -240,7 +240,7 @@ try {
     await dialog.getByRole('searchbox').fill('germany');
     assert.deepEqual(await dialog.locator('label:has(input[name=region]) input').evaluateAll((inputs) => inputs.map((i) => i.value)), ['eu-central-1']);
     await dialog.getByRole('searchbox').fill('');
-    await signals.page.screenshot({ path: process.env.SHOT_DIR ? `${process.env.SHOT_DIR}/regions-en.png` : '/dev/null' });
+    if (process.env.SHOT_DIR) await signals.page.screenshot({ path: `${process.env.SHOT_DIR}/regions-en.png` });
     assert.ok(await rows.count() >= 8);
     await dialog.getByRole('button', { name: 'Create browser', exact: true }).click();
     await signals.page.waitForURL('**/browsers');
@@ -254,7 +254,7 @@ try {
     await sheet.getByText('离你最快', { exact: true }).waitFor();
     await sheet.getByText('日本 · 东京', { exact: true }).waitFor();
     await sheet.getByText('AWS 近期容量紧张', { exact: true }).waitFor();
-    await phone.page.screenshot({ path: process.env.SHOT_DIR ? `${process.env.SHOT_DIR}/regions-zh-phone.png` : '/dev/null' });
+    if (process.env.SHOT_DIR) await phone.page.screenshot({ path: `${process.env.SHOT_DIR}/regions-zh-phone.png` });
     await finish(phone, 'Chinese region list fits a phone with localized places and availability');
   }
 
@@ -287,6 +287,21 @@ try {
     await f.page.getByRole('dialog').waitFor({ state: 'hidden' });
     assert.equal(f.state.requests[1].body.priceVersion, 'quote-2');
     await finish(f, `${action} rejects stale quote, closes confirmation, and sends a fresh quote only after explicit reconfirmation`);
+  }
+
+  {
+    const picture = await fixture();
+    await picture.page.goto(`${origin}/browsers/${instance.id}/settings`);
+    const select = picture.page.getByLabel('Picture resolution', { exact: true });
+    assert.equal(await select.inputValue(), 'full');
+    assert.equal(await picture.page.getByRole('checkbox', { name: /Adjust to my connection/ }).isChecked(), true);
+    assert.equal(await picture.page.getByText('Screen size', { exact: true }).count(), 0, 'The old screen size option never took effect and is gone');
+    await select.selectOption('medium');
+    await picture.page.getByRole('checkbox', { name: /Adjust to my connection/ }).uncheck();
+    await picture.page.waitForTimeout(300);
+    assert.deepEqual(picture.state.requests.map((r) => [r.method, r.body]), [['PATCH', { videoQuality: 'medium' }], ['PATCH', { videoAuto: false }]]);
+    if (process.env.SHOT_DIR) await picture.page.screenshot({ path: `${process.env.SHOT_DIR}/picture-settings.png` });
+    await finish(picture, 'picture resolution and connection adjustment are browser settings that save at once');
   }
 
   const trial = await fixture({ trial: true, width: 820 });

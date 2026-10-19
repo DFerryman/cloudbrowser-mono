@@ -1,5 +1,8 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type CSSProperties } from 'react';
 import { isMac } from './keyboard.js';
+import { toRemotePoint } from './mapping.js';
+import type { VideoQuality } from '@cloudbrowser/contracts';
+import type { VideoPreference } from './quality.js';
 import { RemoteBrowser, type ConnectInfo, type ViewerState } from './remote-browser.js';
 import type { ViewerStats } from './stats.js';
 import { TouchGestureController } from './touch.js';
@@ -23,6 +26,10 @@ export interface RemoteBrowserViewProps {
   onInput?: () => void;
   onKeyboardChange?: (open: boolean) => void;
   onInputError?: (reason: InputFailure) => void;
+  /** Picture quality from the browser's settings; changes apply to the live stream. */
+  video?: VideoPreference;
+  /** The level being streamed now. */
+  onVideo?: (quality: VideoQuality) => void;
   muted?: boolean;
   className?: string;
   style?: CSSProperties;
@@ -33,7 +40,7 @@ export interface RemoteBrowserViewProps {
  * textarea that owns the keyboard (so IME composition works), and the remote cursor drawn locally.
  */
 export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserViewProps>(function RemoteBrowserView(
-  { getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError, muted = true, className, style },
+  { getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError, video, onVideo, muted = true, className, style },
   ref,
 ) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -45,8 +52,9 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [touchDevice] = useState(() => typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0);
   const [cursor, setCursor] = useState('default');
-  const callbacks = useRef({ getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError });
-  callbacks.current = { getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError };
+  const callbacks = useRef({ getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError, onVideo });
+  callbacks.current = { getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError, onVideo };
+  const initialVideo = useRef(video);
 
   const updateKeyboard = (open: boolean) => {
     if (keyboardRequested.current === open) return;
@@ -89,6 +97,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         void navigator.clipboard?.writeText(text).catch(() => {});
       },
       macToPc: isMac(),
+      ...(initialVideo.current ? { video: initialVideo.current } : {}),
+      onVideo: (q) => callbacks.current.onVideo?.(q),
     });
     browserRef.current = browser;
     textInputRef.current = new TextInputController({
@@ -109,6 +119,10 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     };
   }, []);
 
+  useEffect(() => {
+    if (video) browserRef.current?.setVideoPreference(video);
+  }, [video?.quality, video?.auto]);
+
   // The remote screen follows the viewport (page 5, "Screen-size policy").
   useEffect(() => {
     const box = boxRef.current;
@@ -127,17 +141,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     const video = videoRef.current;
     if (!box || !video) return;
     const pressedButtons = new Set<number>();
-    /** Client coordinates → remote pixels, accounting for letterboxing (object-fit: contain). */
-    const toRemote = (clientX: number, clientY: number) => {
-      const r = video.getBoundingClientRect();
-      const vw = video.videoWidth || r.width;
-      const vh = video.videoHeight || r.height;
-      const scale = Math.min(r.width / vw, r.height / vh);
-      const ox = r.left + (r.width - vw * scale) / 2;
-      const oy = r.top + (r.height - vh * scale) / 2;
-      if (scale <= 0 || clientX < ox || clientY < oy || clientX >= ox + vw * scale || clientY >= oy + vh * scale) return null;
-      return { x: (clientX - ox) / scale, y: (clientY - oy) / scale };
-    };
+    const toRemote = (clientX: number, clientY: number) =>
+      toRemotePoint(clientX, clientY, video.getBoundingClientRect(), { width: video.videoWidth, height: video.videoHeight }, browserRef.current?.screenSize ?? null);
     const touch = new TouchGestureController({
       mapPoint: toRemote,
       move: (x, y) => browserRef.current?.move(x, y),
