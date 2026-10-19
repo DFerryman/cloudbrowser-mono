@@ -50,7 +50,13 @@ export function makeDeps(env: Env, waitUntil: (p: Promise<unknown>) => void = ()
         // aws-ec2: this deployment's IAM user (runtime for the engine, delete-only for the reaper).
         AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID,
         AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY,
+        AWS_ROLE_ARN: env.AWS_ROLE_ARN,
+        AWS_ROLE_EXTERNAL_ID: env.AWS_ROLE_EXTERNAL_ID,
         AWS_REGIONS: env.AWS_REGIONS,
+        AWS_REGION_CONFIG_RESOLVER: async (region) => {
+          const [row] = await db.select().from(schema.awsProviderRegions).where(eq(schema.awsProviderRegions.providerRegion, region));
+          return row?.config as import('@cloudbrowser/executors').AwsRegionConfig | null;
+        },
         APP_URL: env.APP_URL,
         AGENT_IMAGE: env.AGENT_IMAGE,
         BROWSER_IMAGE: env.BROWSER_IMAGE,

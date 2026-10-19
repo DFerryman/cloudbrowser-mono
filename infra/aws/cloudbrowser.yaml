@@ -107,7 +107,7 @@ Resources:
         - { IpProtocol: icmp, FromPort: -1, ToPort: -1, CidrIp: 0.0.0.0/0 }
       Tags: [{ Key: Name, Value: cloudbrowser-browser }]
 
-  # --- IAM: one user per credential mode (Workers cannot assume roles) ------------------------
+  # --- IAM bootstrap: one user per mode; production assumes the scoped Provider roles ----------
   RuntimePolicy:
     Type: AWS::IAM::ManagedPolicy
     Condition: AccountResources

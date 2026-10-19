@@ -1,4 +1,4 @@
-import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, REGION_INFO, SCREEN_SIZES, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
+import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, SCREEN_SIZES, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
 import { Button, cn, Dialog, Input, Label, Select } from '@cloudbrowser/ui';
 import { AlertCircle, ChevronRight, Gift, Info, Wallet } from 'lucide-react';
 import { useEffect, useId, useState, type FormEvent, type ReactNode } from 'react';
@@ -10,7 +10,7 @@ import { PriceBreakdown, PriceSource } from '../billing/PriceBreakdown.js';
 import { RateRow } from '../billing/RateRow.js';
 import { canSpend, minimumSpendBalance } from '../billing/access.js';
 import { useCreateInstance, useInstances, useMe, useRegions } from './hooks.js';
-import { regionKey } from './status.js';
+
 
 const UI_TO_BROWSER_LOCALE: Record<Locale, BrowserLocale> = { en: 'en-US', 'zh-CN': 'zh-CN' };
 const LANGUAGES: { value: BrowserLocale; label: string }[] = [
@@ -130,10 +130,12 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
     }
   };
 
-  const blocked = create.isPending || pricing.isFetching || pricing.isError || !b || b.frozen || atLimit || needsCredit || !price?.available || !price.version;
+  const regionAvailable = regions.data?.find((r) => r.id === regionId)?.acceptingNew === true;
+  const blocked = create.isPending || pricing.isFetching || pricing.isError || regions.isError || !regionAvailable || !b || b.frozen || atLimit || needsCredit || !price?.available || !price.version;
   const notice = error
     ?? (atLimit && me.data ? t('create.atLimit', { max: me.data.entitlements.maxBrowsers }) : null)
-    ?? (b?.frozen ? t('billing.frozen') : null);
+    ?? (b?.frozen ? t('billing.frozen') : null)
+    ?? (regions.isError ? t('create.regionsFailed') : regions.data && !regionAvailable ? t(regions.data.some((r) => r.acceptingNew) ? 'create.regionUnavailable' : 'create.noInventory') : null);
 
   return (
     <Dialog
@@ -150,7 +152,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
             </p>
           ) : null}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <FundingStatus trial={trial} needsCredit={needsCredit} needed={b ? minimumSpendBalance(b) + reserve : 0} />
+            <CreateSummary pricing={price} trial={trial} needsCredit={needsCredit} needed={b ? minimumSpendBalance(b) + reserve : 0} />
             <div className="flex gap-2 sm:shrink-0">
               <Button className="flex-1 justify-center sm:flex-none" onClick={onClose}>
                 {t('common.cancel')}
@@ -174,7 +176,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
             <div className="grid gap-2 sm:grid-cols-2" role="radiogroup">
               <Choice name="plan" checked={plan === 'trial'} onChange={() => setPlan('trial')} icon={<Gift className="size-4" />}
                 title={t('create.plan.trial')}
-                hint={t('create.plan.trialHint', { minutes: b.trial.minutes, region: t(regionKey(b.trial.regionId)) })} />
+                hint={t('create.plan.trialHint', { minutes: b.trial.minutes, region: regions.data?.find((r) => r.id === b.trial.regionId)?.name ?? b.trial.regionId })} />
               <Choice name="plan" checked={plan === 'paid'} onChange={() => setPlan('paid')} icon={<Wallet className="size-4" />}
                 title={t('create.plan.paid')}
                 hint={t('create.plan.paidHint')} />
@@ -202,7 +204,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
                   checked={regionId === r.id}
                   disabled={disabled}
                   onChange={() => setRegionId(r.id)}
-                  hint={!r.acceptingNew ? t('create.region.unavailable') : trialOnly ? t('create.region.notInTrial') : t(`create.region.${r.id}.hint`)}
+                  hint={!r.acceptingNew ? (r.inventory ? `${t('create.region.stock', { count: r.inventory.available })} · ${t('create.region.unavailable')}` : t('create.region.unavailable')) : trialOnly ? t('create.region.notInTrial') : (r.inventory ? t('create.region.stock', { count: r.inventory.available }) : r.city)}
                   latency={latency[r.id]}
                   price={disabled ? null : trial ? t('trial.free') : hourly !== null ? t('price.perHour', { amount: money(hourly, locale) }) : null}
                 />
@@ -250,7 +252,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
 
         <section aria-labelledby={`${formId}-cost`} className="rounded-[var(--radius-card)] border border-border bg-surface p-4">
           <h3 id={`${formId}-cost`} className="text-sm font-semibold">
-            {t('create.cost', { region: t(regionKey(regionId)) })}
+            {t('create.cost', { region: regions.data?.find((r) => r.id === regionId)?.name ?? regionId })}
           </h3>
           {!price ? (
             <p className="mt-2 text-sm text-muted">{pricing.isError ? t('price.unavailable') : t('common.loading')}</p>
@@ -272,7 +274,7 @@ function Choice({ name, checked, onChange, icon, title, hint }: { name: string; 
   return (
     <label
       className={cn(
-        'flex cursor-pointer gap-3 rounded-[var(--radius-control)] border p-3 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent',
+        'relative flex cursor-pointer gap-3 rounded-[var(--radius-control)] border p-3 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent',
         checked ? 'border-accent bg-accent/5' : 'border-border hover:bg-surface',
       )}
     >
@@ -296,7 +298,7 @@ function RegionRow({ region, checked, disabled, onChange, hint, latency, price }
   return (
     <label
       className={cn(
-        'flex items-center gap-3 px-3 py-3 transition-colors has-[:focus-visible]:bg-accent/5',
+        'relative flex items-center gap-3 px-3 py-3 transition-colors has-[:focus-visible]:bg-accent/5',
         disabled ? 'cursor-not-allowed opacity-55' : 'cursor-pointer',
         checked && !disabled ? 'bg-accent/5' : !disabled && 'hover:bg-surface',
       )}
@@ -306,10 +308,10 @@ function RegionRow({ region, checked, disabled, onChange, hint, latency, price }
         {checked && !disabled ? <span className="size-2 rounded-full bg-accent" /> : null}
       </span>
       <span className="w-7 shrink-0 rounded bg-surface-2 py-0.5 text-center font-mono text-[11px] font-medium text-muted" aria-hidden>
-        {REGION_INFO[region.id].country}
+        {region.country}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-medium">{t(regionKey(region.id))}</span>
+        <span className="block truncate text-sm font-medium">{region.name}</span>
         <span className="block truncate text-xs text-muted">{hint}</span>
       </span>
       <span className="shrink-0 text-right">
@@ -371,21 +373,24 @@ function TrialCost({ pricing, minutes, days, gb }: { pricing: RegionPricing; min
   );
 }
 
-/** Left of the actions: whether the balance covers this browser, and where to add credit. */
-function FundingStatus({ trial, needsCredit, needed }: { trial: boolean; needsCredit: boolean; needed: number }) {
+/** Keep the selected region's monthly example visible beside the confirmation action. */
+function CreateSummary({ pricing, trial, needsCredit, needed }: { pricing?: RegionPricing; trial: boolean; needsCredit: boolean; needed: number }) {
   const { t, locale } = useI18n();
   const { data: b } = useBilling();
   if (!b) return <span />;
   if (trial) return <p className="text-sm text-muted">{t('create.footer.noCredit')}</p>;
-  if (needsCredit && !b.frozen) {
-    return (
-      <p className="text-sm">
+  const estimate = pricing?.available && pricing.rates
+    ? browserEstimate(pricing.rates, { storageGb: pricing.defaultStorageGb, rootVolumeGb: pricing.rootVolumeGb, backups: false }) : null;
+  return (
+    <div className="min-w-0 space-y-1">
+      <p className="text-sm font-medium tabular-nums">{estimate ? t('create.footer.monthly', { amount: money(estimate.runningHour * 2 * 30 + estimate.alwaysOnMonth, locale) }) : t('price.unavailable')}</p>
+      {estimate ? <p className="text-xs text-muted">{t('create.footer.monthlyHint')}</p> : null}
+      {needsCredit && !b.frozen ? <p className="text-xs">
         <span className="text-error">{t('create.footer.need', { amount: money(needed, locale) })}</span>{' '}
         <Link to="/billing" className="font-medium whitespace-nowrap text-accent hover:underline">
           {t('create.addCredit')}
         </Link>
-      </p>
-    );
-  }
-  return <p className="text-sm text-muted">{t('create.footer.available', { amount: money(b.availableMicros, locale) })}</p>;
+      </p> : null}
+    </div>
+  );
 }

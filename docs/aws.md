@@ -42,64 +42,33 @@ unavailable and no new browsers can be created. Growing a volume also needs agen
 agent image (step 4): rebuild and push that image. Browsers created with an older agent
 keep working, but their Storage tab does not offer more space.
 
-## Current deployment: Sydney (new AWS experience)
+## Current deployment: Advanced mode and dynamic AWS Provider
 
-This project uses the selected Region **Sydney (`ap-southeast-2`)**, product region **`syd1`**,
-with timezone **`Australia/Sydney`**. The new AWS experience restricts this project to its selected
-Region: do not create deployment resources in Tokyo or US West as part of this setup.
-Confirm the selected Region in AWS Settings → View all projects → Overview → Additional Info →
-Region. The existing CLI profile is `cloudbrowser`.
+Production uses the AWS Provider integration described in [aws-provider.md](aws-provider.md).
+The existing Sydney product id `syd1` and browser placements stay immutable. Additional enabled
+AWS regions are discovered through AWS APIs and use their AWS region code as product id.
 
-The detailed Tokyo commands in steps 1–3 and 8–9, and the US West second-region example, are retained
-as reference for advanced AWS projects that permit those Regions. **Do not run those region-specific
-examples in this project.** Use the Sydney substitutions below, then follow the shared image,
-credential and Cloudflare setup in steps 4–7. Existing Tokyo and US West simulator browsers keep
-their original regions and can still wake and sleep; never relabel them or update their immutable
-`region_id`.
+The admin console at `https://admin.console.nevazu.com/aws-provider` shows organization accounts,
+billing, credits, regional quotas and inventory. Runtime, reaper, reader and organization billing
+access use separate STS roles. Worker secrets contain role references/external IDs and the
+existing IAM bootstrap keys. STS sessions refresh automatically; bootstrap key rotation remains
+an operator responsibility. The temporary AWS CLI sign-in is never used by production.
 
-Use the unmodified CloudFormation template and its IAM policies. For the current stack:
+Regional network ids are discovered from tagged VPCs, subnets and security groups and stored in
+D1. `AWS_REGIONS` remains a compatibility fallback for the original Sydney deployment. The
+network-only template is `infra/aws/regional-network.json`; it creates no VM, IP allocation, NAT
+gateway or IAM resources. AWS opt-in regions stay unavailable until enabled in the account and
+prepared with a regional network.
 
-```bash
-export AWS_PROFILE=cloudbrowser
-export AWS_DEFAULT_REGION=ap-southeast-2
-aws cloudformation deploy \
-  --stack-name cloudbrowser \
-  --template-file infra/aws/cloudbrowser.yaml \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides AllowedRegions=ap-southeast-2 AllowedInstanceTypes=c7i-flex.large,c6i.large,c5.large BudgetEmail=
-```
+For AWS Provider regions, live AWS quotas and the configured shared budget replace legacy fixed
+regional/global instance caps. Per-user browser/running limits, prepaid balances, immutable
+placements and the create/delete credential separation still apply. Inventory defaults to a
+conservative 24 running hours/day; operators can choose quota-only inventory or set a project
+monthly budget in the console. AWS Budgets is a notification service; this application separately
+checks its budget policy atomically at admission.
 
-`BudgetEmail=` skips the optional email budget. The project currently uses the Free plan; check
-service availability and the selected Region before provisioning. Check the quotas in step 2 in
-`ap-southeast-2`, without its Tokyo `export`. Retrieve the stack's `AwsRegions` output in Sydney;
-use that JSON for `AWS_REGIONS` on the engine, reaper and reconciler (step 6). Add
-`"instanceTypes":["c7i-flex.large","c6i.large","c5.large"]` to the `ap-southeast-2` object (or leave
-`instanceTypes` out for the same default) so the runtime uses the types the policy allows.
-
-The deployed configuration uses:
-
-| Setting | Value |
-|---|---|
-| api and engine `APP_URL` | `https://nevazu.com` |
-| api and engine `GATEWAY_URL` | `wss://connect.nevazu.com` |
-| gateway custom domain | `connect.nevazu.com` |
-| engine, reaper and reconciler `ENV_NAME` | `prod` (must match the existing resource tags) |
-
-Migration `0006_sydney.sql` registers Sydney with caps of three browsers and three running VMs.
-It starts **disabled**. After the AWS credentials are configured, the migration is applied and
-all five Workers are deployed, enable Sydney and stop new creates in the simulator regions:
-
-```bash
-pnpm --filter @cloudbrowser/api exec wrangler d1 execute cloudbrowser --remote \
-  --command "UPDATE regions SET enabled = CASE WHEN id = 'syd1' THEN 1 ELSE 0 END WHERE id IN ('syd1', 'tyo1', 'usw1')"
-pnpm --filter @cloudbrowser/api exec wrangler d1 execute cloudbrowser --remote \
-  --command "SELECT id, enabled, executor, provider_region, timezone FROM regions"
-```
-
-Check: `syd1` is enabled with `aws-ec2`, `ap-southeast-2` and `Australia/Sydney`; `tyo1` and `usw1`
-are disabled for new creates. Their existing instances retain their executor and region. For step 9,
-create a browser in **Sydney** at `https://nevazu.com`. Opening its live view uses
-`wss://connect.nevazu.com`; AWS VMs require TURN as described below.
+The remainder of this runbook documents initial bootstrap and legacy single-region installations.
+Do not rerun its old single-region settings over an active dynamic Provider deployment.
 
 ## Rules for whoever runs this
 

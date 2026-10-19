@@ -1,3 +1,4 @@
+import { useRegionInfo } from '../instances/hooks.js';
 import type { ConnectInfo, Instance, ViewerSession } from '@cloudbrowser/contracts';
 import { Button, cn, Menu, MenuItem, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
 import { useQuery } from '@tanstack/react-query';
@@ -27,7 +28,7 @@ import { useI18n } from '../../lib/i18n.js';
 import { keys, queryClient } from '../../lib/query.js';
 import { CreateProgress } from '../instances/CreateProgress.js';
 import { useInstance, useLifecycle, useVerifyIp } from '../instances/hooks.js';
-import { regionInfo, STATUS_TONE, statusKey } from '../instances/status.js';
+import { STATUS_TONE, statusKey } from '../instances/status.js';
 
 const HEARTBEAT_MS = 15_000;
 const IDLE_WARNING_MS = 60_000;
@@ -249,8 +250,8 @@ export function SessionPage() {
   };
 
   const i = instance.data;
-  const region = i ? regionInfo(i.regionId) : null;
-  const regionName = i ? t(`create.region.${i.regionId}`) : '';
+  const region = useRegionInfo(i?.regionId ?? '');
+  const regionName = region.name;
   const idleLeft = sleepAt ? sleepAt - now : Infinity;
 
   let overlay: ReactNode = null;

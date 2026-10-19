@@ -177,6 +177,8 @@ export interface Executor {
   allocateIp(ctx: OpContext, region: string): Promise<IpAllocation>;
   /** Availability zones a placement may use in a region (recover moves to another one). */
   zones(region: string): string[];
+  /** Load dynamically discovered network and machine configuration before planning/pricing. */
+  prepareRegion?(region: string): Promise<void>;
   /**
    * Creates the interface in an outbound-only subnet of `zone` (default: the first zone) and
    * associates the static IP with it. If the IP was associated elsewhere, it moves here: this is

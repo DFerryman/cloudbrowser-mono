@@ -85,6 +85,51 @@ beforeEach(async () => {
 afterEach(() => w.d1.sqlite.close());
 
 describe('provider price refresh and identity', () => {
+  it.each(['not-enabled', 'syncing', 'unavailable'])('skips newly discovered %s AWS regions until their networks are ready', async (status) => {
+    await w.db.update(regions).set({ executor: 'aws-ec2' }).where(eq(regions.id, 'syd1'));
+    await w.db.insert(schema.awsProviderRegions).values({ regionId: 'syd1', providerRegion: REGION, optInStatus: 'not-opted-in', status, capacity: 0 });
+    const config = vi.spyOn(w.executor, 'pricingConfigKey').mockImplementation(() => { throw new Error('AWS region is not configured (AWS_REGIONS)'); });
+    await w.db.insert(schema.alerts).values({ source: 'engine', severity: 'warning', title: 'No prices', dedupeKey: 'prices:syd1', detail: { error: 'AWS region is not configured (AWS_REGIONS)' }, createdAt: w.clock });
+    const result = await refreshPrices(w.deps(), { force: true });
+    expect(result.failed).toEqual([]);
+    expect(config).not.toHaveBeenCalled();
+    const [alert] = await w.db.select().from(schema.alerts);
+    expect(alert?.acknowledgedBy).toBe('engine:region_not_active');
+  });
+
+  it('resolves a startup alert when a good current price already exists, without fetching it again', async () => {
+    await refreshPrices(w.deps());
+    await w.db.insert(schema.alerts).values({ source: 'engine', severity: 'warning', title: 'No prices', dedupeKey: 'prices:syd1', detail: { error: 'AWS region is not configured (AWS_REGIONS)' }, createdAt: w.clock });
+    const prices = vi.spyOn(w.executor, 'prices');
+    await refreshPrices(w.deps());
+    expect(prices).not.toHaveBeenCalled();
+    const [alert] = await w.db.select().from(schema.alerts);
+    expect(alert?.acknowledgedBy).toBe('engine:prices_recovered');
+    expect(alert?.detail).toMatchObject({ resolution: 'prices_recovered', error: 'AWS region is not configured (AWS_REGIONS)' });
+  });
+
+  it('retains genuine active-region price alerts until the price API recovers', async () => {
+    await refreshPrices(w.deps());
+    w.advance(49 * 3_600_000);
+    const prices = vi.spyOn(w.executor, 'prices').mockRejectedValue(new ExecutorError('retryable', 'AWS Price List unavailable'));
+    await refreshPrices(w.deps());
+    await refreshPrices(w.deps());
+    expect((await w.db.select().from(schema.alerts))[0]?.acknowledgedAt).toBeNull();
+    prices.mockRestore();
+    await refreshPrices(w.deps(), { force: true });
+    expect((await w.db.select().from(schema.alerts))[0]?.acknowledgedBy).toBe('engine:prices_recovered');
+  });
+
+  it('continues pricing retained browsers when their region is later marked inactive', async () => {
+    await w.legacyPlacement();
+    await w.db.update(regions).set({ executor: 'aws-ec2' }).where(eq(regions.id, 'syd1'));
+    await w.db.update(placements).set({ executor: 'aws-ec2' }).where(eq(placements.id, 'legacy-placement'));
+    await w.db.insert(schema.awsProviderRegions).values({ regionId: 'syd1', providerRegion: REGION, optInStatus: 'not-opted-in', status: 'not-enabled', capacity: 0 });
+    const prices = vi.spyOn(w.executor, 'prices');
+    await refreshPrices(w.deps());
+    expect(prices).toHaveBeenCalledOnce();
+  });
+
   it('refreshes within 12 hours when machine configuration changes', async () => {
     await refreshPrices(w.deps());
     const initial = await w.row();

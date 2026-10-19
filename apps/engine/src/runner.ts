@@ -227,6 +227,7 @@ async function buildEnv(deps: EngineDeps, op: OperationRow): Promise<StepEnv | n
     .where(and(eq(placements.instanceId, instance.id), eq(placements.status, 'current')));
   const executorKind = (placement?.executor ?? region.executor) as Parameters<EngineDeps['executor']>[0];
   const executor = deps.executor(executorKind);
+  await executor.prepareRegion?.(placement?.providerRegion ?? region.providerRegion);
   const round = Number((op.params as { round?: number } | null)?.round ?? 0);
 
   const env: StepEnv = {

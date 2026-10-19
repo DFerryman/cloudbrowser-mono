@@ -7,6 +7,7 @@ import { BrowserDetailPage, BrowsersPage } from './Browsers.js';
 import { LimitsPage } from './Limits.js';
 import { OverviewPage } from './Overview.js';
 import { PricingPage } from './Pricing.js';
+import { AwsProviderPage } from './AwsProvider.js';
 import { useAdmin, type AdminSession } from './data.js';
 import { ACCESS_LOGIN_URL, ACCESS_LOGOUT_URL, APP_URL } from './location.js';
 
@@ -55,6 +56,7 @@ const NAV = [
   ['browsers', 'Browsers'],
   ['users', 'Users'],
   ['pricing', 'Pricing & margin'],
+  ['aws-provider', 'AWS Provider'],
   ['ledger', 'Ledger'],
   ['findings', 'Findings'],
   ['limits', 'Limits & switches'],
@@ -101,6 +103,7 @@ function Console({ session }: { session: AdminSession }) {
           <Route path="browsers/:id" element={<BrowserDetailPage />} />
           <Route path="users" element={<UsersPage />} />
           <Route path="pricing" element={<PricingPage />} />
+          <Route path="aws-provider" element={<AwsProviderPage />} />
           <Route path="ledger" element={<LedgerPage />} />
           <Route path="findings" element={<FindingsPage />} />
           <Route path="limits" element={<LimitsPage />} />

@@ -3,7 +3,7 @@ import { cn } from '@cloudbrowser/ui';
 import type { ReactNode } from 'react';
 import { useI18n } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
-import { regionKey } from '../instances/status.js';
+import { useRegionInfo } from '../instances/hooks.js';
 
 function Line({ label, hint, value, strong }: { label: string; hint?: string; value: ReactNode; strong?: boolean }) {
   return (
@@ -20,12 +20,13 @@ function Line({ label, hint, value, strong }: { label: string; hint?: string; va
 /** Where the prices come from, and when they were read. */
 export function PriceSource({ pricing }: { pricing: RegionPricing }) {
   const { t, locale } = useI18n();
+  const region = useRegionInfo(pricing.regionId);
   if (!pricing.updatedAt) return null;
   return (
     <p className="text-xs text-muted">
       {pricing.source === 'simulated'
         ? t('price.source.simulated')
-        : t('price.source.aws', { region: t(regionKey(pricing.regionId)), date: new Date(pricing.updatedAt).toLocaleDateString(locale) })}
+        : t('price.source.aws', { region: region.name, date: new Date(pricing.updatedAt).toLocaleDateString(locale) })}
     </p>
   );
 }

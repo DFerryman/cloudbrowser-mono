@@ -45,6 +45,7 @@ export interface AwsRegionConfig {
 }
 
 export interface AwsExecutorOptions extends ClientOptions {
+  regionConfigResolver?: (region: string) => Promise<AwsRegionConfig | null>;
   mode: CredentialMode;
   regions: Record<string, AwsRegionConfig>;
   appUrl: string;
@@ -164,6 +165,11 @@ export class AwsExecutor implements Executor {
     const cfg = this.opts.regions[region];
     if (!cfg || !Object.keys(cfg.subnets).length) throw new ExecutorError('invalid', `AWS region ${region} is not configured (AWS_REGIONS)`);
     return cfg;
+  }
+
+  async prepareRegion(region: string): Promise<void> {
+    const config = await this.opts.regionConfigResolver?.(region);
+    if (config) this.opts.regions[region] = config;
   }
 
   private call(ctx: OpContext, region: string, action: string, params: Params, mutating = true) {
