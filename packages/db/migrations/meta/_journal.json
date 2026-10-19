@@ -141,6 +141,13 @@
       "when": 1792520010000,
       "tag": "0019_unified_browser_limit",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1792520011000,
+      "tag": "0020_rollout_compat",
+      "breakpoints": true
     }
   ]
 }
