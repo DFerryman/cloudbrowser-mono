@@ -1,10 +1,11 @@
 import { useRegionInfo } from './hooks.js';
 import type { Instance } from '@cloudbrowser/contracts';
-import { Button, Card, Menu, MenuItem, MenuSeparator, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
+import { Button, Card, cn, Menu, MenuItem, MenuSeparator, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
 import { BarChart3, Moon, MoreHorizontal, Pencil, Settings, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useI18n, useRelativeTime } from '../../lib/i18n.js';
+import type { MessageKey } from '../../messages/en.js';
 import { CreateProgress } from './CreateProgress.js';
 import { DeleteBrowserDialog } from './DeleteBrowser.js';
 import { useLifecycle, useUpdateInstance } from './hooks.js';
@@ -13,6 +14,21 @@ import { TrialBadge } from './Trial.js';
 import { useBilling } from '../billing/hooks.js';
 import { canSpend, canUseBrowser } from '../billing/access.js';
 import { BalanceRequired } from '../billing/BalanceRequired.js';
+
+/**
+ * Why a browser was stopped when the user did not do it, and when an unfunded browser will be
+ * deleted. Neither kind of stop is ever undone automatically: the user opens the browser again.
+ */
+export function StopNotice({ instance: i, className }: { instance: Instance; className?: string }) {
+  const { t, locale } = useI18n();
+  if (!i.stopReason && !i.deletesAt) return null;
+  return (
+    <div className={cn('mt-3 rounded-md border border-error/40 bg-error/10 p-2.5 text-xs text-error', className)} role="status" data-testid="stop-notice">
+      {i.stopReason ? <p>{t(`browsers.stopped.${i.stopReason}` as MessageKey)}</p> : null}
+      {i.deletesAt ? <p className={i.stopReason ? 'mt-1 font-medium' : 'font-medium'}>{t('browsers.deletesAt', { date: new Date(i.deletesAt).toLocaleString(locale) })}</p> : null}
+    </div>
+  );
+}
 
 export function BrowserCard({ instance: i }: { instance: Instance }) {
   const { t, locale, errorMessage } = useI18n();
@@ -86,6 +102,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
             : t('browsers.neverUsed')}
       </p>
       {!deleted && !failed ? <BalanceRequired instance={i} /> : null}
+      <StopNotice instance={i} />
 
       {creating ? (
         <div className="mt-4">

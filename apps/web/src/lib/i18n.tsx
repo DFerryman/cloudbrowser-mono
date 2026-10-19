@@ -17,7 +17,7 @@ function initialLocale(): Locale {
   return navigator.language.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
 }
 
-type Translate = (key: MessageKey, vars?: Record<string, string | number>) => string;
+export type Translate = (key: MessageKey, vars?: Record<string, string | number>) => string;
 type I18n = { locale: Locale; setLocale: (l: Locale) => void; t: Translate; errorMessage: (e: unknown) => string };
 
 const Ctx = createContext<I18n | null>(null);

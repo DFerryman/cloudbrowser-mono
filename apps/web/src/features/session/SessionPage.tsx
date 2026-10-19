@@ -280,7 +280,7 @@ export function SessionPage() {
         overlay = <Overlay message={t('status.stopping')} busy />;
         break;
       case 'sleeping':
-        overlay = <Overlay message={t('overlay.asleep')} action={<Button variant="primary" onClick={() => void open()}>{t('overlay.wake')}</Button>} />;
+        overlay = <Overlay message={i.stopReason ? t(`browsers.stopped.${i.stopReason}` as MessageKey) : t('overlay.asleep')} action={<Button variant="primary" onClick={() => void open()}>{t('overlay.wake')}</Button>} />;
         break;
       case 'waiting_capacity':
         overlay = <Overlay message={t('overlay.capacity', { region: regionName })} />;

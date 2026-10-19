@@ -18,6 +18,7 @@ export function LimitsPage() {
   const remove = useAdminAction((c: Cap) => del('/caps', { scope: c.scope, metric: c.metric }));
   const perUser = caps.data?.find((c) => c.scope === 'user:default' && c.metric === 'instances')?.limit;
   const [perUserDraft, setPerUserDraft] = useState<string | null>(null);
+  const neverSleep = caps.data?.find((c) => c.scope === 'user:default' && c.metric === 'never_sleep')?.limit === 1;
 
   return (
     <div className="space-y-4">
@@ -41,6 +42,22 @@ export function LimitsPage() {
           </Button>
         </form>
         <p className="mt-2 text-xs text-muted">{t('limits.perUserHelp')}</p>
+      </section>
+      <section className="max-w-3xl rounded-[var(--radius-control)] border border-border p-4" data-testid="never-sleep-setting">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium">{t('limits.neverSleep')}</p>
+            <p className="text-xs text-muted">{neverSleep ? t('limits.neverSleepOn') : t('limits.neverSleepOff')}</p>
+          </div>
+          <Button
+            variant={neverSleep ? 'secondary' : 'primary'}
+            disabled={!caps.data || save.isPending}
+            onClick={() => save.mutate({ scope: 'user:default', metric: 'never_sleep', limit: neverSleep ? 0 : 1 }, { onSuccess: () => toast(t('common.saved')), onError: (err) => toast(errorText(err), 'error') })}
+          >
+            {neverSleep ? t('limits.neverSleepDisable') : t('limits.neverSleepEnable')}
+          </Button>
+        </div>
+        <p className="mt-2 text-xs text-muted">{t('limits.neverSleepHelp')}</p>
       </section>
       <p className="text-xs text-muted">{t('limits.note')}</p>
       <form

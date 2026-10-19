@@ -6,6 +6,7 @@ import {
   DEFAULT_IDLE_TIMEOUT_S,
   IDLE_TIMEOUT_OPTIONS_S,
   NEVER_SLEEP_TIMEOUT_S,
+  NeverSleepQuote,
   Instance,
   InstanceStorage,
   InstanceUsage,
@@ -35,6 +36,7 @@ import { billingRoute, PageQuery } from './billing.js';
 import { enqueueOperation, notifyUser, replayed, requireIdempotencyKey } from '../ops.js';
 import { problem, ProblemError } from '../problem.js';
 import { toInstances, toOperation } from '../views.js';
+import { neverSleepQuote, neverSleepRefused } from '../never-sleep.js';
 import { eventsRoute } from './events.js';
 import { resizeQuota } from '../storage.js';
 
@@ -255,7 +257,7 @@ v1.openapi(
     method: 'patch',
     path: '/instances/{id}',
     tags: ['instances'],
-    description: 'Rename, idle timeout, screen size or language. The region can never be changed.',
+    description: 'Rename or change the idle timeout. Turning on Never sleep (idleTimeoutS 0) needs an allowed quote from GET /instances/{id}/never-sleep and its priceVersion. The region can never be changed.',
     request: { params: IdParam, body: { content: { 'application/json': { schema: UpdateInstanceBody } }, required: true } },
     responses: { 200: jsonResponse(Instance, 'Updated browser'), ...errors, 403: problemResponse('Plan limit') },
   }),
@@ -264,12 +266,21 @@ v1.openapi(
     const user = c.get('user');
     const row = await ownedInstance(c, c.req.valid('param').id);
     const { priceVersion, ...body } = c.req.valid('json');
+    const idleChanged = body.idleTimeoutS !== undefined && body.idleTimeoutS !== row.idleTimeoutS;
     if (body.idleTimeoutS !== undefined) {
-      const max = (await entitlementsFor(db, user.id)).idleTimeoutMaxS;
       if (!(IDLE_TIMEOUT_OPTIONS_S as readonly number[]).includes(body.idleTimeoutS)) {
         throw problem(400, 'validation_failed', `idleTimeoutS must be one of ${IDLE_TIMEOUT_OPTIONS_S.join(', ')}`);
       }
-      if (body.idleTimeoutS > max) throw problem(403, 'plan_limit', `Your plan allows auto-sleep up to ${max / 60} minutes.`);
+      if (body.idleTimeoutS !== NEVER_SLEEP_TIMEOUT_S) {
+        const max = (await entitlementsFor(db, user.id)).idleTimeoutMaxS;
+        if (body.idleTimeoutS > max) throw problem(403, 'plan_limit', `Your plan allows auto-sleep up to ${max / 60} minutes.`);
+      } else if (idleChanged) {
+        // Never sleep is its own setting with its own conditions, confirmed against the 24-hour cost shown.
+        const quote = await neverSleepQuote(db, user.id, row);
+        if (!quote.allowed) throw neverSleepRefused(quote);
+        if (priceVersion === undefined) throw problem(400, 'validation_failed', 'Review the 24-hour cost of Never sleep before turning it on.');
+        if (priceVersion !== quote.priceVersion) throw problem(409, 'price_changed', 'Prices changed since the cost was shown. Review the new cost and try again.');
+      }
     }
     const now = new Date();
     const fingerprint = {
@@ -281,10 +292,29 @@ v1.openapi(
         .update(browserInstances)
         .set({ ...body, backupsEnabled: false, fingerprint, updatedAt: now })
         .where(eq(browserInstances.id, row.id)),
+      // A new idle setting counts from now, as if the user had just used the browser. This also
+      // cancels an idle stop queued under the old setting (the engine rechecks input before stopping).
+      ...(idleChanged ? [db.insert(instanceHealth).values({ instanceId: row.id, lastInputAt: now })
+        .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastInputAt: now } })] : []),
       db.insert(events).values(eventRow(user.id, 'instance.updated', { instanceId: row.id }, now)),
     ]);
     notifyUser(c, user.id);
     return c.json(await oneInstance(db, row.id), 200);
+  },
+);
+
+v1.openapi(
+  createRoute({
+    method: 'get',
+    path: '/instances/{id}/never-sleep',
+    tags: ['instances'],
+    description: 'Whether this browser may switch to Never sleep, what 24 hours of continuous running costs in its region (compute, IP and storage), and the available credit needed first.',
+    request: { params: IdParam },
+    responses: { 200: jsonResponse(NeverSleepQuote, 'Never sleep quote'), ...errors },
+  }),
+  async (c) => {
+    const row = await ownedInstance(c, c.req.valid('param').id);
+    return c.json(await neverSleepQuote(c.get('db'), c.get('user').id, row), 200);
   },
 );
 

@@ -1,7 +1,7 @@
 import { cn, Menu, MenuItem, MenuSeparator, Skeleton } from '@cloudbrowser/ui';
 import { BookOpen, Globe, LayoutGrid, LogOut, UserRound, Wallet } from 'lucide-react';
 import { NavLink, Navigate, Outlet, useLocation } from 'react-router';
-import { isLowBalance } from '../features/billing/access.js';
+import { fundedHours, isLowBalance, runwayLabel } from '../features/billing/access.js';
 import { BillingBanner } from '../features/billing/BillingBanner.js';
 import { useBilling } from '../features/billing/hooks.js';
 import { money } from '../lib/money.js';
@@ -108,6 +108,11 @@ export function AppShell() {
                       reserved: money(billing.data.reservedMicros, locale),
                     })}
                   </p>
+                  {fundedHours(billing.data) !== null ? (
+                    <p className={cn('tabular-nums', fundedHours(billing.data)! < 24 && 'text-error')} data-testid="nav-runway">
+                      {t('nav.runway', { time: runwayLabel(t, fundedHours(billing.data)!) })}
+                    </p>
+                  ) : null}
                 </>
               ) : null}
               <p className="mt-1.5">{t('nav.usage', { used: me.data.usage.browsers, max: me.data.entitlements.maxBrowsers })}</p>

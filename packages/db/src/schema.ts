@@ -672,10 +672,30 @@ export const billingAccounts = sqliteTable('billing_accounts', {
   frozenReason: text('frozen_reason'),
   /** Last low-balance email, so it is sent once per dip. */
   lowNotifiedAt: ts('low_notified_at'),
+  /** The most urgent funded-time warning (24, 6 or 1 hours) sent while credit keeps falling. */
+  runwayWarnedHours: integer('runway_warned_hours'),
   /** When the user started their one free trial. */
   trialUsedAt: ts('trial_used_at'),
   updatedAt: ts('updated_at').notNull(),
 });
+
+/**
+ * Emails the engine cannot send itself (unexpected stops, paused networks). Owner: engine writes,
+ * the api's billing sweep sends and sets sent_at. The id doubles as the dedupe key.
+ */
+export const userNotices = sqliteTable(
+  'user_notices',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id').notNull(),
+    kind: text('kind').notNull(),
+    instanceId: text('instance_id'),
+    data: json<Record<string, unknown>>('data').notNull(),
+    createdAt: ts('created_at').notNull(),
+    sentAt: ts('sent_at'),
+  },
+  (t) => [index('user_notices_pending_idx').on(t.sentAt, t.createdAt)],
+);
 
 /** Per-browser seven-day fixed-resource deposit; unspent money remains in the total balance. */
 export const browserReservations = sqliteTable('browser_reservations', {

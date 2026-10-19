@@ -57,6 +57,9 @@ export type VideoQuality = z.infer<typeof VideoQuality>;
 
 export const InstanceName = z.string().trim().min(1).max(64);
 
+export const StopReason = z.enum(['balance', 'operator', 'suspended', 'frozen']);
+export type StopReason = z.infer<typeof StopReason>;
+
 export const IpCheck = z.object({
   ok: z.boolean(),
   expected: z.string().nullable(),
@@ -74,7 +77,10 @@ export const Instance = z.object({
   /** Short reason for failed / needs_attention / provider_issue states. */
   statusReason: z.string().nullable(),
   desiredState: DesiredState,
-  /** Inactivity timeout in seconds; zero means never sleep because of inactivity. */
+  /**
+   * Inactivity timeout in seconds; zero means never sleep. Never sleep is offered only to paid,
+   * topped-up accounts with credit for 24 hours of continuous running (see NeverSleepQuote).
+   */
   idleTimeoutS: z.number().int(),
   screen: ScreenSize,
   /**
@@ -94,6 +100,14 @@ export const Instance = z.object({
   currentOperation: OperationSummary.nullable(),
   /** Size of the data volume in GB (the system disk is extra, see pricing). */
   storageGb: z.number().int(),
+  /**
+   * Why a sleeping browser was stopped when neither the user nor auto-sleep did it: credit ran
+   * out, an administrator stopped or suspended it, or the account was frozen. Null otherwise.
+   * Such a browser is never woken automatically; the user resumes it.
+   */
+  stopReason: StopReason.nullable(),
+  /** Set while credit has run out: the browser is permanently deleted at this time unless credit is added. */
+  deletesAt: z.string().nullable(),
   /** Set for the free trial browser: free until converted by adding credit (see TRIAL). */
   trial: z
     .object({
@@ -105,6 +119,32 @@ export const Instance = z.object({
     .nullable(),
 });
 export type Instance = z.infer<typeof Instance>;
+
+/**
+ * What switching a browser to Never sleep costs and whether the account may (GET
+ * /instances/{id}/never-sleep). The client shows `day` and sends `priceVersion` back to confirm.
+ */
+export const NeverSleepQuote = z.object({
+  allowed: z.boolean(),
+  /**
+   * Why not: `disabled` by the operator, a free `trial` browser, `no_topup` on the account yet,
+   * `insufficient_credit` for the first 24 hours, or `price_unavailable`.
+   */
+  reason: z.enum(['disabled', 'trial', 'no_topup', 'insufficient_credit', 'price_unavailable']).nullable(),
+  regionId: RegionId,
+  priceVersion: z.string().nullable(),
+  /** This browser running continuously for 24 hours in its region. */
+  day: z.object({
+    computeMicros: z.number().int(),
+    ipMicros: z.number().int(),
+    storageMicros: z.number().int(),
+    totalMicros: z.number().int(),
+  }),
+  availableMicros: z.number().int(),
+  /** Available credit needed first: 24 hours of the account's spending with this browser always on. */
+  requiredMicros: z.number().int(),
+});
+export type NeverSleepQuote = z.infer<typeof NeverSleepQuote>;
 
 /** The price version (`priceVersion` in pricing.ts) the user saw; refused with `price_changed` if stale. */
 export const PriceVersion = z.string().min(1).max(200);

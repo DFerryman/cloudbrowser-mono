@@ -20,9 +20,15 @@ beforeEach(async () => {
 });
 afterEach(() => { vi.useRealTimers(); });
 
+/** Never sleep is confirmed against its quoted price (free pilot here, so no credit is needed). */
+async function setIdle(idleTimeoutS: number) {
+  const priceVersion = idleTimeoutS === 0 ? (await t.call('GET', `/api/v1/instances/${instanceId}/never-sleep`)).body.priceVersion : undefined;
+  expect((await t.call('PATCH', `/api/v1/instances/${instanceId}`, { idleTimeoutS, priceVersion })).status).toBe(200);
+}
+
 describe('heartbeat D1 write budget', () => {
   it.each([600, 0])('persists four agent heartbeats as one update with timeout %s, retaining the latest counters', async (idleTimeoutS) => {
-    expect((await t.call('PATCH', `/api/v1/instances/${instanceId}`, { idleTimeoutS })).status).toBe(200);
+    await setIdle(idleTimeoutS);
     const start = Date.now();
     t.d1.sqlite.prepare('UPDATE instance_health SET last_heartbeat_at=?,last_input_at=? WHERE instance_id=?').run(start, start, instanceId);
     const before = writes();
@@ -35,7 +41,7 @@ describe('heartbeat D1 write budget', () => {
   });
 
   it('throttles viewer input updates when inactivity sleep is disabled', async () => {
-    expect((await t.call('PATCH', `/api/v1/instances/${instanceId}`, { idleTimeoutS: 0 })).status).toBe(200);
+    await setIdle(0);
     const opened = await t.call('POST', `/api/v1/instances/${instanceId}/sessions`);
     expect(opened.status).toBe(201);
     const start = Date.now();

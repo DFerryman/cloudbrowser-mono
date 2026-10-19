@@ -5,7 +5,7 @@ import { and, asc, eq, inArray, isNull, lt, lte, ne, or, sql } from 'drizzle-orm
 import { placementRef, readContext, type EngineDeps } from './context.js';
 import { runOperation } from './runner.js';
 
-const { operations, browserInstances, instanceHealth, viewerSessions, placements, events, auditLog, billingAccounts, browserReservations } = schema;
+const { operations, browserInstances, instanceHealth, viewerSessions, placements, events, auditLog, billingAccounts, browserReservations, userNotices } = schema;
 
 /** Runs every operation that is due and not leased by another worker. */
 export async function runPending(deps: EngineDeps, limit = 20): Promise<number> {
@@ -157,6 +157,9 @@ function pauseNetwork(deps: EngineDeps, instanceId: string, detail: Record<strin
       .set({ status: 'needs_attention', statusReason: 'Network paused while we check your dedicated IP.', updatedAt: at })
       .where(and(eq(browserInstances.id, instanceId), eq(browserInstances.desiredState, 'running'), eq(browserInstances.status, 'running'))),
     db.insert(auditLog).values({ actor: 'engine', action: 'ip.check_failed', target: `instance:${instanceId}`, detail, createdAt: at }),
+    // Only when this batch paused it: the user is emailed, and it stays paused until they check again.
+    db.insert(userNotices).select(sql`SELECT ${`ip:${instanceId}:${at.getTime()}`}, user_id, 'network_paused', id, json_object('name', name), ${at.getTime()}, NULL
+      FROM browser_instances WHERE id = ${instanceId} AND status = 'needs_attention' AND updated_at = ${at.getTime()}`).onConflictDoNothing(),
   ] as const;
 }
 

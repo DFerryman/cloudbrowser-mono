@@ -24,5 +24,6 @@ export const keys = {
   sessions: (id: string) => ['instance', id, 'sessions'] as const,
   storage: (id: string) => ['instance', id, 'storage'] as const,
   instanceUsage: (id: string, month: string) => ['instance', id, 'usage', month] as const,
+  neverSleep: (id: string) => ['instance', id, 'never-sleep'] as const,
   operation: (id: string) => ['operation', id] as const,
 };

@@ -2,7 +2,7 @@ import { createDb, operationRow, prepaidBalance, reopenRegion, reservationQuote,
 import { splitUsagePeriod } from '@cloudbrowser/contracts';
 import { createTestD1 } from '@cloudbrowser/db/testing';
 import { ExecutorError, FakeExecutor, MemoryFakeStore, type Executor, type FaultPlan } from '@cloudbrowser/executors';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, eq, isNull, ne } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { FakeAgentBridge, GatewayAgentBridge } from '../src/agent.js';
 import { placementRef, readContext, type EngineDeps, type EngineMode } from '../src/context.js';
@@ -366,6 +366,14 @@ describe('lifecycle', () => {
     expect(inst.status).toBe('needs_attention');
     // The dedicated IP is never swapped automatically.
     expect((await w.placement())?.ipAddress).toBe(p.ipAddress);
+    // The user is emailed once, and a later passing check does not resume the network by itself.
+    expect(await w.db.select().from(schema.userNotices)).toEqual([expect.objectContaining({ kind: 'network_paused', instanceId: 'inst1', data: { name: 'Work' } })]);
+    const nic = w.store.records.get(p.networkId!)!;
+    await w.store.update(p.networkId!, { attrs: { ...nic.attrs, extraPublicAddresses: [] } });
+    w.advance(60_000);
+    await checkInstanceIp(w.deps(), 'inst1');
+    expect((await w.instance()).status).toBe('needs_attention');
+    expect(await w.db.select().from(schema.userNotices)).toHaveLength(1);
   });
 
   it('ends a new-IP request left by an older API without touching the browser or its IP', async () => {
@@ -379,6 +387,107 @@ describe('lifecycle', () => {
     expect((await w.instance()).status).toBe(status);
     expect((await w.placement())!.ipAddress).toBe(before.ipAddress);
     expect(w.liveProvider()).toHaveLength(provider);
+  });
+
+  describe('an idle stop queued before the user changes their mind', () => {
+    const vmState = () => w.liveProvider().find((r) => r.kind === 'vm')?.state;
+    const queueIdleStop = async () => {
+      w.advance(11 * 60_000);
+      expect(await idleStops(w.deps())).toEqual(['inst1']);
+      const [op] = await w.db.select().from(operations).where(eq(operations.kind, 'stop'));
+      expect((await w.instance()).desiredState).toBe('stopped');
+      return op!.id;
+    };
+    const stopRow = async (id: string) => (await w.db.select().from(operations).where(eq(operations.id, id)))[0]!;
+
+    it('is canceled when Never sleep is turned on before the stop starts', async () => {
+      const op = await queueIdleStop();
+      await w.db.update(browserInstances).set({ idleTimeoutS: 0 }).where(eq(browserInstances.id, 'inst1'));
+      expect(await w.settle(op)).toEqual({ state: 'canceled' });
+      expect(await w.instance()).toMatchObject({ status: 'running', desiredState: 'running' });
+      expect(await stopRow(op)).toMatchObject({ status: 'canceled', errorClass: 'superseded' });
+      expect(vmState()).toBe('running');
+      // It never sleeps for inactivity afterwards.
+      w.advance(7 * 86_400_000);
+      expect(await idleStops(w.deps())).toEqual([]);
+    });
+
+    it('is canceled when the browser is used before the stop starts', async () => {
+      const op = await queueIdleStop();
+      w.advance(1_000);
+      await w.db.insert(schema.instanceHealth).values({ instanceId: 'inst1', lastInputAt: w.clock })
+        .onConflictDoUpdate({ target: schema.instanceHealth.instanceId, set: { lastInputAt: w.clock } });
+      expect(await w.settle(op)).toEqual({ state: 'canceled' });
+      expect(await w.instance()).toMatchObject({ status: 'running', desiredState: 'running' });
+      expect(vmState()).toBe('running');
+    });
+
+    it('is canceled by a new idle setting, which counts from the moment it is saved', async () => {
+      const op = await queueIdleStop();
+      w.advance(1_000);
+      // What PATCH writes for a changed timeout: the setting and an input time of now.
+      await w.db.update(browserInstances).set({ idleTimeoutS: 1800 }).where(eq(browserInstances.id, 'inst1'));
+      await w.db.insert(schema.instanceHealth).values({ instanceId: 'inst1', lastInputAt: w.clock })
+        .onConflictDoUpdate({ target: schema.instanceHealth.instanceId, set: { lastInputAt: w.clock } });
+      expect(await w.settle(op)).toEqual({ state: 'canceled' });
+      w.advance(29 * 60_000);
+      expect(await idleStops(w.deps())).toEqual([]);
+      w.advance(60_000);
+      expect(await idleStops(w.deps())).toEqual(['inst1']);
+    });
+
+    it('finishes once it has started, and Never sleep applies from the next run', async () => {
+      const op = await queueIdleStop();
+      let first = true;
+      w.faults = (m) => (m === 'ensureStopped' && first ? ((first = false), 'retryable') : null);
+      expect((await runOperation(w.deps(), op)).state).toBe('deferred');
+      expect((await w.instance()).status).toBe('stopping');
+      await w.db.update(browserInstances).set({ idleTimeoutS: 0 }).where(eq(browserInstances.id, 'inst1'));
+      w.advance(3_000); // past the first retry delay (at most 2 s), well inside the stop's deadline
+      expect(await w.settle(op)).toEqual({ state: 'succeeded' });
+      expect((await w.instance()).status).toBe('sleeping');
+      // The user wakes it (the API records the intent with the start).
+      await w.db.update(browserInstances).set({ desiredState: 'running' }).where(eq(browserInstances.id, 'inst1'));
+      expect(await w.settle(await w.enqueue('inst1', 'start'))).toEqual({ state: 'succeeded' });
+      w.advance(7 * 86_400_000);
+      expect(await idleStops(w.deps())).toEqual([]);
+    });
+
+    it('still stops a browser that stayed idle', async () => {
+      const op = await queueIdleStop();
+      expect(await w.settle(op)).toEqual({ state: 'succeeded' });
+      expect(await w.instance()).toMatchObject({ status: 'sleeping', desiredState: 'stopped' });
+      expect(vmState()).toBe('stopped');
+    });
+  });
+
+  it('emails about stops by an administrator, suspension or a frozen account, never about idle or own stops', async () => {
+    const notices = () => w.db.select().from(schema.userNotices);
+    const stopWith = async (reason: string) => {
+      expect(await requestStop(w.deps(), { id: 'inst1', userId: 'u1' }, reason)).toBe(true);
+      const [op] = await w.db.select().from(operations).where(and(eq(operations.kind, 'stop'), isNull(operations.finishedAt)));
+      expect(await w.settle(op!.id)).toEqual({ state: 'succeeded' });
+      return op!.id;
+    };
+    const wake = async () => {
+      await w.db.update(browserInstances).set({ desiredState: 'running' }).where(eq(browserInstances.id, 'inst1'));
+      expect(await w.settle(await w.enqueue('inst1', 'start'))).toEqual({ state: 'succeeded' });
+    };
+    await stopWith('manual');
+    await wake();
+    w.advance(11 * 60_000);
+    expect(await idleStops(w.deps())).toEqual(['inst1']);
+    const [idle] = await w.db.select().from(operations).where(and(eq(operations.kind, 'stop'), isNull(operations.finishedAt)));
+    await w.settle(idle!.id);
+    expect(await notices()).toEqual([]);
+    await wake();
+    const operator = await stopWith('operator');
+    expect(await notices()).toEqual([expect.objectContaining({ id: `stop:${operator}`, userId: 'u1', kind: 'stopped', instanceId: 'inst1', data: { name: 'Work', reason: 'operator' }, sentAt: null })]);
+    // Nothing brings it back on its own: the scheduler queues no start.
+    w.advance(86_400_000);
+    await idleStops(w.deps());
+    expect(await w.db.select().from(operations).where(isNull(operations.finishedAt))).toEqual([]);
+    expect((await w.instance()).status).toBe('sleeping');
   });
 
   it('soft-deletes, restores, and purges only after 7 days with the reaper', async () => {

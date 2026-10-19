@@ -1,7 +1,7 @@
 import { Link } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
-import { isLowBalance } from './access.js';
+import { fundedHours, isLowBalance, runwayLabel } from './access.js';
 import { useBilling } from './hooks.js';
 
 /** One line above every page when the balance needs attention (page 6). */
@@ -12,10 +12,16 @@ export function BillingBanner() {
   if (!b) return null;
   let message: string | null = null;
   let urgent = true;
+  const hours = fundedHours(b);
   if (b.frozen) message = t('banner.frozen');
-  else if (b.dataKeptUntil) message = t('banner.kept', { date: new Date(b.dataKeptUntil).toLocaleDateString(locale) });
+  else if (b.retained.length && b.restoreNeededMicros !== null) {
+    message = t('banner.retained', { count: b.retained.length, date: new Date(b.retained[0]!.deletesAt).toLocaleString(locale), amount: money(b.restoreNeededMicros, locale) });
+  } else if (b.dataKeptUntil) message = t('banner.kept', { date: new Date(b.dataKeptUntil).toLocaleDateString(locale) });
   else if (b.exhaustedAt) message = t('banner.exhausted');
-  else if (isLowBalance(b)) {
+  else if (b.mode === 'prepaid' && hours !== null && hours < 24) {
+    message = t('banner.runway', { time: runwayLabel(t, hours), amount: money(b.availableMicros, locale) });
+    urgent = hours < 6;
+  } else if (isLowBalance(b)) {
     message = t('banner.low', { amount: money(b.availableMicros, locale) });
     urgent = false;
   }

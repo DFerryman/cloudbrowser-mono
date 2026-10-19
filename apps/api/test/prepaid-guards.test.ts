@@ -22,6 +22,14 @@ async function create(trial = true) {
   expect(result.status).toBe(202); await t.settle();
   return result.body.instanceId as string;
 }
+/** Never sleep needs a top-up and the quoted price; any other timeout is a plain setting. */
+async function setIdle(id: string, idleTimeoutS: number) {
+  if (idleTimeoutS !== 0) return expect((await t.call('PATCH', `/api/v1/instances/${id}`, { idleTimeoutS })).status).toBe(200);
+  await applyBalance(db(), { userId, kind: 'topup', amountMicros: 1, actor: 'test', reference: `guard-topup:${++seq}` }, new Date());
+  const quote = (await t.call('GET', `/api/v1/instances/${id}/never-sleep`)).body;
+  expect(quote).toMatchObject({ allowed: true, reason: null });
+  expect((await t.call('PATCH', `/api/v1/instances/${id}`, { idleTimeoutS, priceVersion: quote.priceVersion })).status).toBe(200);
+}
 async function stop(id: string) {
   expect((await t.call('POST', `/api/v1/instances/${id}/stop`, undefined, { 'idempotency-key': `guard-stop:${++seq}` })).status).toBe(202);
   await t.settle();
@@ -78,7 +86,7 @@ describe('prepaid runtime boundaries', () => {
   it.each([600, 0])('renews funded access without treating the lease as balance exhaustion with timeout %s', async (idleTimeoutS) => {
     await credit(10_000_000);
     const id = await create(false); await meter();
-    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { idleTimeoutS })).status).toBe(200);
+    await setIdle(id, idleTimeoutS);
     const session = await t.call('POST', `/api/v1/instances/${id}/sessions`);
     expect(session.status).toBe(201);
     for (const ms of [0, 45_000, 90_000]) {
@@ -99,7 +107,7 @@ describe('prepaid runtime boundaries', () => {
   it.each([600, 0])('still reports actual depletion and clears the warning after credit with timeout %s', async (idleTimeoutS) => {
     await credit(10_000_000);
     const id = await create(false); await meter();
-    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { idleTimeoutS })).status).toBe(200);
+    await setIdle(id, idleTimeoutS);
     const session = await t.call('POST', `/api/v1/instances/${id}/sessions`);
     expect(session.status).toBe(201);
     await credit(1_000 - (await prepaidBalance(db(), userId)).availableMicros);
@@ -118,9 +126,11 @@ describe('prepaid runtime boundaries', () => {
       .toMatchObject({ status: 200, body: idleTimeoutS === 0 ? { sleepAt: null } : { reason: 'idle' } });
   });
 
-  it('still ends the free trial when inactivity sleep is disabled', async () => {
+  it('refuses never sleep for a free trial, and still ends a trial that has it from an older release', async () => {
     const id = await create(); await meter();
-    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { idleTimeoutS: 0 })).status).toBe(200);
+    expect((await t.call('GET', `/api/v1/instances/${id}/never-sleep`)).body).toMatchObject({ allowed: false, reason: 'trial' });
+    expect(await t.call('PATCH', `/api/v1/instances/${id}`, { idleTimeoutS: 0, priceVersion: 'any' })).toMatchObject({ status: 403, body: { type: 'plan_limit', limit: 'never_sleep_trial' } });
+    t.d1.sqlite.prepare('UPDATE browser_instances SET idle_timeout_s = 0 WHERE id = ?').run(id);
     const session = await t.call('POST', `/api/v1/instances/${id}/sessions`);
     expect(session.status).toBe(201);
     advance(15_000);

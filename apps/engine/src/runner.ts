@@ -1,4 +1,4 @@
-import { OPERATION_STEPS, type OperationKind } from '@cloudbrowser/contracts';
+import { NEVER_SLEEP_TIMEOUT_S, OPERATION_STEPS, type OperationKind } from '@cloudbrowser/contracts';
 import { eventRow, operationRow, raiseAlert, schema } from '@cloudbrowser/db';
 import { ExecutorError, isRegionDenial, ProviderFailed, type ErrorClass, type ResourceKind } from '@cloudbrowser/executors';
 import { and, eq, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
@@ -16,7 +16,11 @@ import { HANDLERS } from './steps.js';
 import { operationFence } from './fencing.js';
 import { assertOperationFunded } from './prepaid.js';
 
-const { operations, operationSteps, browserInstances, regions, placements, events, auditLog } = schema;
+const { operations, operationSteps, browserInstances, regions, placements, events, auditLog, instanceHealth, userNotices } = schema;
+
+/** Stops the user did not ask for and auto-sleep did not decide: the user is emailed (page 6). */
+const NOTIFIED_STOP_REASONS = new Set(['operator', 'suspended', 'frozen']);
+const IDLE_STOP_CANCELED = 'The browser was used or set to never sleep after this idle stop was queued.';
 
 // Provider calls can last two minutes. A shorter lease lets a second worker overlap them.
 const LEASE_MS = 3 * 60_000;
@@ -112,7 +116,9 @@ async function runOwnedOperation(deps: EngineDeps, operationId: string): Promise
 
   await env.assertActive();
   const transitional = TRANSITIONAL_STATUS[op.kind as OperationKind];
-  if (transitional && env.instance.status !== transitional && op.attempt === 0) {
+  if (op.kind === 'stop' && op.params?.reason === 'idle' && op.attempt === 0 && env.instance.status === 'running') {
+    if (!(await beginIdleStop(deps, env))) return { state: 'canceled' };
+  } else if (transitional && env.instance.status !== transitional && op.attempt === 0) {
     await setInstanceStatus(deps, env, transitional, null);
   }
 
@@ -218,6 +224,10 @@ async function runOwnedOperation(deps: EngineDeps, operationId: string): Promise
       detail: { operationId: op.id },
       createdAt: at,
     }),
+    ...(op.kind === 'stop' && NOTIFIED_STOP_REASONS.has(String(op.params?.reason))
+      ? [db.insert(userNotices).values({ id: `stop:${op.id}`, userId: env.instance.userId, kind: 'stopped', instanceId: op.instanceId,
+        data: { name: env.instance.name, reason: op.params?.reason }, createdAt: at }).onConflictDoNothing()]
+      : []),
   ]);
   deps.notify(env.instance.userId);
   return { state: 'succeeded' };
@@ -296,6 +306,35 @@ async function buildEnv(deps: EngineDeps, op: OperationRow): Promise<StepEnv | n
     return async (...args: unknown[]) => { await env.assertActive(); if (key === 'send') await assertOperationFunded(env); const result = await value.apply(target, args); await env.assertActive(); return result; };
   } });
   return env;
+}
+
+/**
+ * An idle stop is decided by the scheduler and runs later, so the user may use the browser or turn
+ * on Never sleep in between. The decision is checked again in the transaction that starts the
+ * stop: either the browser shows stopping and the stop runs, or the stop is canceled and the
+ * browser keeps running with its intent restored. A change saved after that applies to the next run.
+ */
+async function beginIdleStop(deps: EngineDeps, env: StepEnv): Promise<boolean> {
+  const { db } = deps;
+  const at = deps.now();
+  const { op, instance } = env;
+  const stillIdle = sql`EXISTS (SELECT 1 FROM browser_instances b LEFT JOIN instance_health h ON h.instance_id = b.id
+    WHERE b.id = ${instance.id} AND b.status = 'running' AND b.desired_state = 'stopped' AND b.idle_timeout_s <> ${NEVER_SLEEP_TIMEOUT_S}
+    AND (h.last_input_at IS NULL OR h.last_input_at <= ${op.createdAt.getTime()}))`;
+  const canceledHere = sql`EXISTS (SELECT 1 FROM operations WHERE id = ${op.id} AND status = 'canceled' AND finished_at = ${at.getTime()} AND error = ${IDLE_STOP_CANCELED})`;
+  const [, started] = await db.batch([
+    db.update(operations).set({ status: 'canceled', finishedAt: at, updatedAt: at, leaseOwner: null, leaseExpiresAt: null, errorClass: 'superseded', error: IDLE_STOP_CANCELED })
+      .where(and(eq(operations.id, op.id), operationFence(env), sql`NOT ${stillIdle}`)),
+    db.update(browserInstances).set({ status: 'stopping', statusReason: null, updatedAt: at })
+      .where(and(eq(browserInstances.id, instance.id), operationFence(env), stillIdle)).returning({ id: browserInstances.id }),
+    db.update(browserInstances).set({ desiredState: 'running', updatedAt: at })
+      .where(and(eq(browserInstances.id, instance.id), eq(browserInstances.desiredState, 'stopped'), canceledHere)),
+    db.insert(events).values(eventRow(instance.userId, 'instance.updated', { instanceId: instance.id, operationId: op.id }, at)),
+  ]);
+  deps.notify(instance.userId);
+  if (!started.length) return false;
+  env.instance.status = 'stopping';
+  return true;
 }
 
 async function setInstanceStatus(deps: EngineDeps, env: StepEnv, status: string, reason: string | null) {

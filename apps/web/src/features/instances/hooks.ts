@@ -1,5 +1,5 @@
 import { REGION_INFO } from '@cloudbrowser/contracts';
-import type { Accepted, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, Region } from '@cloudbrowser/contracts';
+import type { Accepted, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, NeverSleepQuote, Region } from '@cloudbrowser/contracts';
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api.js';
 import { keys, queryClient } from '../../lib/query.js';
@@ -24,6 +24,10 @@ export function useRecentSessions(id: string, page: number, size: number) {
 
 export const useStorage = (id: string) =>
   useQuery({ queryKey: keys.storage(id), queryFn: () => api<InstanceStorage>('GET', `/instances/${id}/storage`), refetchInterval: 30_000 });
+
+/** What Never sleep costs for 24 hours and whether it may be turned on; read fresh each time the dialog opens. */
+export const useNeverSleepQuote = (id: string, enabled: boolean) =>
+  useQuery({ queryKey: keys.neverSleep(id), queryFn: () => api<NeverSleepQuote>('GET', `/instances/${id}/never-sleep`), enabled, staleTime: 0, gcTime: 0 });
 
 export const useInstanceUsage = (id: string, month: string) =>
   useQuery({ queryKey: keys.instanceUsage(id, month), queryFn: () => api<InstanceUsage>('GET', `/instances/${id}/usage?month=${month}`), refetchInterval: 60_000 });

@@ -240,11 +240,27 @@ describe('prepaid balance', () => {
     expect((await t.call('GET', `/api/v1/instances/${inst.id}`)).body.status).toBe('sleeping');
     expect((await t.call('POST', `/api/v1/instances/${inst.id}/start`, undefined, { 'idempotency-key': 's' })).body.type).toBe('insufficient_balance');
 
-    // Day 1: a notice. The fixed-resource deposit funds the seven-day retention window.
+    // The stopped browser, its deletion time and the top-up that keeps it, in the app and by email.
+    const deletesAt = new Date(start + 7 * 86_400_000);
+    expect((await t.call('GET', `/api/v1/instances/${inst.id}`)).body).toMatchObject({ stopReason: 'balance', deletesAt: deletesAt.toISOString() });
+    const kept = (await t.call('GET', '/api/v1/billing')).body;
+    expect(kept.retained).toEqual([{ id: inst.id, name: 'w', regionId: 'tyo1', deletesAt: deletesAt.toISOString() }]);
+    // The deposit is the whole balance now, so the minimum balance is what is missing.
+    expect(kept.restoreNeededMicros).toBe(Math.max(1, kept.minBalanceMicros));
     const sweep = (days: number) => billingSweep(t.env as never, db, creemFrom(t.env as never), new Date(start + days * 86_400_000), { nightly: false });
     expect((await sweep(1)).notices).toBe(1);
     expect((await sweep(1)).notices).toBe(0);
-    expect(t.emails.at(-1)?.text).toMatch(/kept until/);
+    const notice = t.emails.at(-1)!;
+    expect(notice.subject).toMatch(/credit ran out/);
+    expect(notice.text).toContain(`• w (Tokyo): ${deletesAt.toISOString().slice(0, 16).replace('T', ' ')} UTC`);
+    expect(notice.text).toMatch(/add at least \$\d+\.\d\d/);
+    expect(notice.text).toMatch(/none restarts by itself/);
+    // Three days on, then a final reminder within a day of deletion; each once.
+    expect((await sweep(3)).notices).toBe(1);
+    expect((await sweep(4)).notices).toBe(0);
+    expect((await sweep(6.5)).notices).toBe(1);
+    expect(t.emails.at(-1)!.subject).toMatch(/Final reminder/);
+    expect((await sweep(6.9)).notices).toBe(0);
     expect((await sweep(7)).deleted).toBe(1);
     await t.settle();
     expect(t.d1.sqlite.prepare(`SELECT desired_state AS d FROM browser_instances`).get()).toEqual({ d: 'deleted' });

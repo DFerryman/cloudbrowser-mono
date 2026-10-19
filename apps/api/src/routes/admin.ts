@@ -401,6 +401,7 @@ adminRoute.put('/caps', async (c) => {
   if (metric === 'creates_per_day') throw problem(400, 'validation_failed', 'Daily creation limits are no longer supported. Set the instances limit instead.');
   if (limit === undefined) throw problem(400, 'validation_failed', 'limit is required');
   if (metric === 'running' && scope.startsWith('user:')) throw problem(400, 'validation_failed', 'Users have one limit: instances. Every browser they own may run at once.');
+  if (metric === 'never_sleep' && (!scope.startsWith('user:') || limit > 1)) throw problem(400, 'validation_failed', 'never_sleep is a switch for user:default or user:<id>: 1 offers Never sleep, 0 does not.');
   const [before] = await db.select().from(caps).where(and(eq(caps.scope, scope), eq(caps.metric, metric)));
   await db.insert(caps).values({ scope, metric, limit }).onConflictDoUpdate({ target: [caps.scope, caps.metric], set: { limit } });
   await audit(db, c, 'cap.set', `cap:${scope}/${metric}`, { from: before?.limit ?? null, to: limit });

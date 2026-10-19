@@ -108,7 +108,13 @@ describe('browsers', () => {
     expect(created.status).toBe(202);
     await t.settle();
     const path = `/api/v1/instances/${created.body.instanceId}`;
-    expect(await t.call('PATCH', path, { idleTimeoutS: 0 })).toMatchObject({ status: 200, body: { idleTimeoutS: 0 } });
+    // Never sleep is confirmed against the 24-hour cost the user was shown.
+    const neverSleep = (await t.call('GET', `${path}/never-sleep`)).body;
+    expect(neverSleep).toMatchObject({ allowed: true, reason: null, regionId: 'tyo1', priceVersion: await quote() });
+    expect(neverSleep.day.totalMicros).toBe(neverSleep.day.computeMicros + neverSleep.day.ipMicros + neverSleep.day.storageMicros);
+    expect(await t.call('PATCH', path, { idleTimeoutS: 0 })).toMatchObject({ status: 400, body: { type: 'validation_failed' } });
+    expect(await t.call('PATCH', path, { idleTimeoutS: 0, priceVersion: 'old' })).toMatchObject({ status: 409, body: { type: 'price_changed' } });
+    expect(await t.call('PATCH', path, { idleTimeoutS: 0, priceVersion: neverSleep.priceVersion })).toMatchObject({ status: 200, body: { idleTimeoutS: 0 } });
     expect((await t.call('GET', path)).body.idleTimeoutS).toBe(0);
     const opened = await t.call('POST', `${path}/sessions`);
     expect(opened.status).toBe(201);

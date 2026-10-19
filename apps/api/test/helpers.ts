@@ -35,7 +35,7 @@ export function setup(opts: { prices?: boolean } = {}) {
     props: {},
   } as unknown as ExecutionContext;
   // In-process stand-ins for the Cloudflare bindings.
-  const emails: { to: string; text: string }[] = [];
+  const emails: { to: string; subject?: string; text: string }[] = [];
   const hits = new Map<string, number>();
   const limiter = (max: number) => ({
     limit: async ({ key }: { key: string }) => {
@@ -55,7 +55,7 @@ export function setup(opts: { prices?: boolean } = {}) {
     DB: d1,
     APP_URL: ORIGIN,
     ENVIRONMENT: 'test',
-    EMAIL: { send: async (m: { to: string; text: string }) => void emails.push(m) },
+    EMAIL: { send: async (m: { to: string; subject?: string; text: string }) => void emails.push(m) },
     OPERATIONS: queue,
     EVENT_HUB: hub,
     AUTH_LIMITER: limiter(5),

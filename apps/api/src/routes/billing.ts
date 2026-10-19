@@ -14,18 +14,19 @@ import {
   RedirectResult,
   RegionPricing,
 } from '@cloudbrowser/contracts';
-import { newId, pricingSettings, schema } from '@cloudbrowser/db';
-import { and, desc, eq, notInArray, sql } from 'drizzle-orm';
+import { accountRunway, newId, pricingSettings, schema } from '@cloudbrowser/db';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { creemFrom, type Creem } from '../billing/creem.js';
 import { offeredTopupPacks } from '../billing/ledger.js';
+import { retentionState } from '../billing/retention.js';
 import type { AppEnv } from '../env.js';
 import { billingAccount, entitlementsFor } from '../limits.js';
-import { allRegionPricing, currentBurn, instancePrice, regionPrice } from '../pricing.js';
+import { allRegionPricing, regionPrice } from '../pricing.js';
 import { problem } from '../problem.js';
 import { accountUsage, monthOf, monthTotals } from '../usage.js';
 
-const { billingCustomers, topupCheckouts, balanceTransactions, browserInstances, browserReservations } = schema;
+const { billingCustomers, topupCheckouts, balanceTransactions, browserReservations } = schema;
 
 export const billingRoute = new OpenAPIHono<AppEnv>({
   defaultHook: (result) => {
@@ -75,12 +76,8 @@ billingRoute.openapi(
     const topUps = await offeredTopupPacks(db, creem, now);
     const account = await billingAccount(db, user.id);
     const settings = await pricingSettings(db);
-    const live = await db
-      .select()
-      .from(browserInstances)
-      .where(and(eq(browserInstances.userId, user.id), notInArray(browserInstances.status, ['purged', 'failed', 'deleting'])));
-    let burnHourMicros = 0;
-    for (const inst of live) burnHourMicros += currentBurn(await instancePrice(db, inst.id, inst.regionId), inst).hourMicros;
+    // One projection for the balance warnings and this page: the account's combined spending rate.
+    const [runway, retention] = await Promise.all([accountRunway(db, user.id, now), retentionState(db, user.id)]);
     const [retaining] = await db.select({ until: sql<number | null>`min(${browserReservations.retentionEndsAt})` }).from(browserReservations).where(eq(browserReservations.userId, user.id));
     const month = monthOf(undefined, now);
     const out: BillingState = {
@@ -95,7 +92,10 @@ billingRoute.openapi(
       frozen: !!account.frozenAt,
       minBalanceMicros: settings.minBalanceMicros,
       lowBalanceMicros: settings.lowBalanceMicros,
-      burnHourMicros,
+      burnHourMicros: runway.burnHourMicros,
+      fundedUntil: runway.fundedUntil?.toISOString() ?? null,
+      retained: retention.retained.map((r) => ({ ...r, regionId: r.regionId as BillingState['retained'][number]['regionId'], deletesAt: r.deletesAt.toISOString() })),
+      restoreNeededMicros: retention.restoreNeededMicros,
       topUps,
       month: { month, ...(await monthTotals(db, user.id, month)) },
       trial: {

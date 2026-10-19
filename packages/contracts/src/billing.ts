@@ -20,6 +20,11 @@ export type BillingMode = z.infer<typeof BillingMode>;
 export const BALANCE_GRACE_MS = 0;
 /** After the balance ran out, browsers are kept this long, then deleted. */
 export const DATA_KEPT_DAYS = 7;
+/**
+ * Funded-time warnings: each is emailed once as available credit falls below that many hours of
+ * the account's combined spending, and re-armed only after credit clearly recovers.
+ */
+export const RUNWAY_WARNING_HOURS = [24, 6, 1] as const;
 
 /**
  * The free trial (page 6): each user may create one browser for free, once. It runs in one region
@@ -75,6 +80,14 @@ export const BillingState = z.object({
   lowBalanceMicros: z.number().int(),
   /** What all of the user's browsers cost per hour right now (running ones plus everything kept). */
   burnHourMicros: z.number().int(),
+  /** When available credit runs out at that combined rate; null when nothing is being charged. */
+  fundedUntil: z.string().nullable(),
+  /**
+   * After credit ran out: the browsers being kept, each deleted at `deletesAt` unless credit is
+   * added, and the least top-up that keeps all of them and lets them be woken again.
+   */
+  retained: z.array(z.object({ id: z.string(), name: z.string(), regionId: RegionId, deletesAt: z.string() })),
+  restoreNeededMicros: z.number().int().nullable(),
   topUps: z.array(TopUpPack),
   /** This calendar month (UTC). */
   month: UsageTotals.extend({ month: z.string() }),

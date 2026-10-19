@@ -173,6 +173,26 @@ Cloudflare deployment.
   user's network (an estimate until measured), *Available* / *Limited* / *Unavailable* with the
   reason, the running price and a *Fastest for you* mark; long lists collapse to the nearest five
   with search. Public pricing, status and home pages list the live regions by continent.
+- **Never sleep** (`idle_timeout_s = 0`): its own operator switch (`never_sleep` cap, 1 or 0, for
+  user:default or user:<id>; migration 0023 offers it by default), never a value that slips under
+  `idle_timeout_max_s`. Refused for free trial browsers; on a paid deployment it also needs a
+  top-up on the account and available credit for 24 hours of the account's combined spending with
+  the browser always on. `GET /instances/{id}/never-sleep` quotes 24 hours of compute, IP and
+  storage in the browser's region; PATCH needs that quote's priceVersion. A converting trial gets
+  the 10-minute paid default. Changing the timeout restarts the idle countdown
+  (`instance_health.last_input_at`). An idle stop queued before the user acts is rechecked in the
+  transaction that starts it (input since it was queued, or Never sleep, cancels it and restores
+  the running intent); a stop that has started finishes, and the new setting applies to the next run.
+- **Funded time and stop notices**: `accountRunway` (the authorization projection, shared with
+  `prepaidAccess`) gives the combined spending rate and when available credit runs out; the
+  sidebar, Billing page and banner show it, and the billing sweep emails once each below 24, 6 and
+  1 hours (`billing_accounts.runway_warned_hours`, re-armed at 1.25x a threshold). Running out of
+  credit stops every paid browser even with no viewer; a top-up never wakes one. The email at
+  exhaustion, after three days and a day before deletion names each browser, its deletion time and
+  the least top-up that keeps all of them (deposits plus the minimum balance); browsers and the
+  Billing page show the same. Stops by an administrator, suspension or a frozen account, and
+  networks paused by the IP check, are queued in `user_notices` by the engine and emailed by the
+  sweep; none of them is ever undone automatically.
 - **Picture resolution and adaptive quality**: the old screen-size setting was stored but never
   applied. neko now streams a ladder of the same desktop (`full`, `high` 75%, `medium` 50%,
   `low` 50% at 15 fps, VP8 at 2.0/1.2/0.7/0.35 Mbit/s caps; before, `codec: h264` without pipelines

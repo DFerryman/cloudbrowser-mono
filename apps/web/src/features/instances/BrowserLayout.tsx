@@ -6,6 +6,7 @@ import { Link, NavLink, Outlet, useNavigate, useOutletContext, useParams } from 
 import { useI18n } from '../../lib/i18n.js';
 import { useInstance } from './hooks.js';
 import { shownStatus, STATUS_TONE, statusKey } from './status.js';
+import { StopNotice } from './BrowserCard.js';
 import { TrialBadge, TrialNotice } from './Trial.js';
 import { useBilling } from '../billing/hooks.js';
 import { canUseBrowser } from '../billing/access.js';
@@ -52,6 +53,7 @@ export function BrowserLayout() {
         </Button>
       </div>
       <TrialNotice trial={i.trial} />
+      <StopNotice instance={i} className="mb-4 max-w-3xl text-sm" />
       {i.status !== 'deleting' && i.status !== 'failed' ? <BalanceRequired instance={i} /> : null}
       <nav className="mb-6 flex gap-1 overflow-x-auto border-b border-border" aria-label={i.name}>
         {tabs.map((tab) => (

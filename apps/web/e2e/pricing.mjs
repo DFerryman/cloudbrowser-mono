@@ -25,12 +25,12 @@ const instance = {
   id: 'browser-fixture', name: 'Quoted browser', regionId: 'syd1', status: 'sleeping', statusReason: null,
   desiredState: 'stopped', idleTimeoutS: 600, screen: 'auto', videoQuality: 'full', videoAuto: true, ipAddress: '192.0.2.1',
   dedicatedSince: null, lastIpCheck: null, lastActiveAt: null, createdAt: new Date().toISOString(),
-  deletedAt: null, purgeAfter: null, currentOperation: null, storageGb: 10, trial: null,
+  deletedAt: null, purgeAfter: null, currentOperation: null, storageGb: 10, trial: null, stopReason: null, deletesAt: null,
 };
 const results = [];
 
 async function fixture({ trial = false, failed = false, noPrice = false, width = 1365, height = 1024, sizeGb = 10, totalBytes, status = 'sleeping', purgeAfter = null,
-  balanceMicros = trial ? 0 : 10_000_000, reservedMicros = 0, availableMicros = Math.max(0, balanceMicros - reservedMicros), mode = 'prepaid', trialEligible = false, trialSeconds = 600, busy = false, legacySnapshots = false, rootVolumeGb = 16, locale = 'en-US', maxBrowsers = 10, idleTimeoutMaxS = 3600 } = {}) {
+  balanceMicros = trial ? 0 : 10_000_000, reservedMicros = 0, availableMicros = Math.max(0, balanceMicros - reservedMicros), mode = 'prepaid', trialEligible = false, trialSeconds = 600, busy = false, legacySnapshots = false, rootVolumeGb = 16, locale = 'en-US', maxBrowsers = 10, idleTimeoutMaxS = 3600, neverSleep = true, neverSleepReason = null } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, locale, hasTouch: width === 820 });
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
@@ -67,7 +67,7 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
         } else body = { instanceId: 'new-browser', operationId: 'fixture-operation' };
       } else if (url.pathname === '/api/v1/me') body = {
         user: { id: 'fixture-user', name: 'Test user', email: 'fixture@example.test' },
-        entitlements: { billing: 'prepaid', maxBrowsers, maxRunning: 10, idleTimeoutMaxS, maxStorageGb: 100 },
+        entitlements: { billing: 'prepaid', maxBrowsers, maxRunning: 10, idleTimeoutMaxS, maxStorageGb: 100, neverSleep },
         usage: { browsers: failed ? 0 : 1, running: 0 },
       };
       else if (url.pathname === '/api/v1/regions') body = [{ id: 'syd1', name: 'Sydney', country: 'AU', city: 'Sydney', timezone: 'Australia/Sydney', enabled: true, acceptingNew: state.stockAvailable, probeUrl: null,
@@ -82,10 +82,15 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
       } else if (url.pathname === '/api/v1/billing') body = {
         mode, enabled: false, balanceMicros, reservedMicros, availableMicros, retentionDays: 7, exhaustedAt: null, dataKeptUntil: null, frozen: false,
         minBalanceMicros: 1_000_000, lowBalanceMicros: 2_000_000, burnHourMicros: 10_000, topUps: [], month: { ...zero, month },
+        fundedUntil: new Date(Date.now() + (availableMicros / 10_000) * 3_600_000).toISOString(), retained: [], restoreNeededMicros: null,
         trial: { eligible: trialEligible, regionId: 'syd1', minutes: 10, storageGb: 2, keptDays: 7 },
       };
       else if (url.pathname === '/api/v1/instances') body = [i];
       else if (url.pathname === `/api/v1/instances/${i.id}`) body = i;
+      else if (url.pathname === `/api/v1/instances/${i.id}/never-sleep`) body = {
+        allowed: neverSleepReason === null, reason: neverSleepReason, regionId: 'syd1', priceVersion: state.version,
+        day: { computeMicros: 2_400_000, ipMicros: 144_000, storageMicros: 86_000, totalMicros: 2_630_000 }, availableMicros, requiredMicros: 2_640_000,
+      };
       else if (url.pathname.endsWith('/storage')) body = { sizeGb: i.storageGb, rootVolumeGb, maxGb: 100, usedBytes: fsTotalBytes === null ? null : 1_000_000_000, totalBytes: fsTotalBytes,
         reportedAt: null, resizable: !trial, blockedReason: trial ? 'trial' : null, nextResizeAt: null };
       else if (url.pathname.endsWith('/usage') && url.pathname.includes('/instances/')) {
@@ -137,10 +142,22 @@ try {
     assert.equal(await timeout.locator('option').last().textContent(), never, 'Never sleep is the last option');
     assert.equal(await timeout.locator('option[value="3600"]').isDisabled(), true, 'Finite plan limits still apply');
     assert.equal(await timeout.locator('option[value="0"]').isDisabled(), false);
-    let saved = f.page.waitForResponse((r) => r.request().method() === 'PATCH');
+    // Choosing it only opens the 24-hour cost; nothing is saved until it is confirmed.
+    const requestsBefore = f.state.requests.length;
     await timeout.selectOption('0');
+    const quote = f.page.getByTestId('never-sleep-quote');
+    await quote.waitFor();
+    const quoteText = await quote.textContent();
+    for (const part of locale === 'zh-CN' ? ['24 小时', '$2.63', '$2.40', '$0.144', '$0.086', '$2.64'] : ['24 hours', '$2.63', '$2.40', '$0.144', '$0.086', '$2.64']) {
+      assert.ok(quoteText.includes(part), `the confirmation shows ${part}`);
+    }
+    assert.equal(f.state.requests.length, requestsBefore, 'Nothing is saved before confirming');
+    assert.equal(await timeout.inputValue(), '600', 'The setting is unchanged until confirmed');
+    if (process.env.SHOT_DIR) await f.page.screenshot({ path: `${process.env.SHOT_DIR}/never-sleep-${locale}.png` });
+    let saved = f.page.waitForResponse((r) => r.request().method() === 'PATCH');
+    await f.page.getByRole('button', { name: locale === 'zh-CN' ? '开启永不休眠' : 'Turn on Never sleep' }).click();
     assert.equal((await saved).status(), 200);
-    assert.deepEqual(f.state.requests.at(-1).body, { idleTimeoutS: 0 });
+    assert.deepEqual(f.state.requests.at(-1).body, { idleTimeoutS: 0, priceVersion: 'quote-1' });
     await f.page.reload();
     await timeout.waitFor();
     assert.equal(await timeout.inputValue(), '0', 'Never sleep stays selected after reload');
@@ -150,7 +167,35 @@ try {
     await f.page.reload();
     await timeout.waitFor();
     assert.equal(await timeout.inputValue(), '600', 'Ten-minute sleep can be restored');
-    await finish(f, `never sleep is last, saves across reloads, and can return to ten minutes in ${locale}`);
+    await finish(f, `never sleep is last, shows its 24-hour cost before saving, keeps across reloads, and returns to ten minutes in ${locale}`);
+  }
+
+  {
+    // Not enough credit: the cost and the reason are shown, and it cannot be confirmed.
+    const f = await fixture({ neverSleepReason: 'insufficient_credit', availableMicros: 1_000_000 });
+    await f.page.goto(`${origin}/browsers/${instance.id}/settings`);
+    const timeout = f.page.getByLabel('Auto-sleep after', { exact: true });
+    await timeout.waitFor();
+    await timeout.selectOption('0');
+    await f.page.getByText('Add credit first: you need at least $2.64 available and have $1.00.').waitFor();
+    assert.equal(await f.page.getByRole('button', { name: 'Turn on Never sleep' }).isDisabled(), true);
+    assert.equal(f.state.requests.filter((r) => r.method === 'PATCH').length, 0);
+    await finish(f, 'never sleep without enough credit explains why and cannot be confirmed');
+  }
+
+  {
+    // Not offered by the operator, and never for a free trial browser.
+    const off = await fixture({ neverSleep: false });
+    await off.page.goto(`${origin}/browsers/${instance.id}/settings`);
+    await off.page.getByLabel('Auto-sleep after', { exact: true }).waitFor();
+    assert.equal(await off.page.locator('#idle option[value="0"]').count(), 0, 'Not offered when the operator turned it off');
+    await finish(off, 'never sleep is hidden when the operator does not offer it');
+    const trial = await fixture({ trial: true });
+    await trial.page.goto(`${origin}/browsers/${instance.id}/settings`);
+    await trial.page.getByLabel('Auto-sleep after', { exact: true }).waitFor();
+    assert.equal(await trial.page.locator('#idle option[value="0"]').isDisabled(), true, 'A free trial browser always auto-sleeps');
+    await trial.page.getByText('Free trial browsers always auto-sleep. Add credit to convert this browser, then turn on Never sleep.').waitFor();
+    await finish(trial, 'a free trial browser cannot choose never sleep');
   }
 
   {

@@ -9,7 +9,7 @@ import { useI18n } from '../../lib/i18n.js';
 import { PAGE_SIZE, usePagerLabels } from '../../lib/paging.js';
 import { cents, money } from '../../lib/money.js';
 import { useRegionInfo } from '../instances/hooks.js';
-import { isLowBalance } from './access.js';
+import { fundedHours, isLowBalance, runwayLabel } from './access.js';
 import { DailyCharges } from './DailyCharges.js';
 import { currentMonth, monthLabel, recentMonths, useAccountUsage, useBilling, useCheckout, usePortal, useTransactions } from './hooks.js';
 
@@ -52,9 +52,29 @@ export function BillingPage() {
   );
 }
 
-function runway(state: BillingState) {
-  if (state.burnHourMicros <= 0 || state.availableMicros <= 0) return null;
-  return state.availableMicros / state.burnHourMicros;
+/**
+ * After credit runs out: each stopped browser with its deletion time, and the exact top-up that
+ * keeps all of them. Browsers stay asleep after topping up; the user resumes each one.
+ */
+function RetainedBrowsers({ state }: { state: BillingState }) {
+  const { t, locale } = useI18n();
+  return (
+    <div className="mt-3 rounded-[var(--radius-control)] border border-error/40 px-3 py-2.5 text-sm" data-testid="retained-browsers">
+      <p className="font-medium">{t('billing.retainedTitle')}</p>
+      <ul className="mt-1.5 space-y-1">
+        {state.retained.map((b) => (
+          <li key={b.id} className="flex flex-wrap justify-between gap-x-3">
+            <span className="truncate">{b.name}</span>
+            <span className="tabular-nums text-error">{t('billing.retainedDeletes', { date: new Date(b.deletesAt).toLocaleString(locale) })}</span>
+          </li>
+        ))}
+      </ul>
+      {state.restoreNeededMicros !== null ? (
+        <p className="mt-2">{t('billing.restoreNeeded', { amount: money(state.restoreNeededMicros, locale) })}</p>
+      ) : null}
+      <Hint className="mt-1">{t('billing.restoreResume')}</Hint>
+    </div>
+  );
 }
 
 function BalanceCard({ state }: { state: BillingState }) {
@@ -62,7 +82,7 @@ function BalanceCard({ state }: { state: BillingState }) {
   const toast = useToast();
   const checkout = useCheckout();
   const portal = usePortal();
-  const hours = runway(state);
+  const hours = fundedHours(state);
   const trialRegion = useRegionInfo(state.trial.regionId);
   const m = (v: number) => money(v, locale);
   const alert = state.frozen
@@ -127,6 +147,7 @@ function BalanceCard({ state }: { state: BillingState }) {
           <AlertTriangle className="mt-0.5 size-4 shrink-0 text-error" aria-hidden /> {alert}
         </p>
       ) : null}
+      {state.retained.length ? <RetainedBrowsers state={state} /> : null}
       {state.trial.eligible ? (
         <div className="mt-4 flex gap-3 rounded-[var(--radius-control)] border border-accent/40 bg-accent/5 px-3 py-2.5 text-sm">
           <Gift className="mt-0.5 size-4 shrink-0 text-accent" aria-hidden />
@@ -143,7 +164,7 @@ function BalanceCard({ state }: { state: BillingState }) {
         <p>{state.burnHourMicros > 0 ? t('billing.burnShort', { amount: m(state.burnHourMicros) }) : t('billing.burnNone')}</p>
         {hours !== null ? (
           <p className="text-muted">
-            {t('billing.runway', { time: hours < 48 ? t('billing.runway.hours', { n: Math.floor(hours) }) : t('billing.runway.days', { n: Math.floor(hours / 24) }) })}
+            {t('billing.runway', { time: runwayLabel(t, hours) })}
           </p>
         ) : null}
         <Hint>{t('billing.minBalance', { amount: m(state.minBalanceMicros) })}</Hint>

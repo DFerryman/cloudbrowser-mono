@@ -1,4 +1,4 @@
-import { browserEstimate, customerRates, retentionReserve, TRIAL, BYTES_PER_GB, DEFAULT_PRICING_SETTINGS, ProviderPriceSheet, type Rates } from '@cloudbrowser/contracts';
+import { browserEstimate, customerRates, retentionReserve, TRIAL, BYTES_PER_GB, DEFAULT_PRICING_SETTINGS, DEFAULT_IDLE_TIMEOUT_S, NEVER_SLEEP_TIMEOUT_S, ProviderPriceSheet, type Rates } from '@cloudbrowser/contracts';
 import { and, eq, notInArray, sql, type SQL } from 'drizzle-orm';
 import type { Db } from './index.js';
 import { priceSheets, pricingSettings } from './pricing.js';
@@ -90,22 +90,45 @@ export async function prepaidAccess(db: Db, userId: string, instanceId: string, 
   if (!hold || hold.retentionStartedAt || hold.reservedMicros < hold.requiredMicros || availableMicros <= 0) return denied('balance');
   // The gateway closes before another funded minute can be spent. Rechecks can extend this lease
   // only when fresh credit still covers it; input and reconnecting never change trial deadlines.
+  const spend = spendProjection({ all, holds, prices, settings: settingsRows[0] ?? DEFAULT_PRICING_SETTINGS, placementRows }, now);
+  if (!spend) return denied('balance');
+  const hour = spend.hourMicros;
+  const remaining = Math.max(0, availableMicros - Math.ceil(spend.pendingMicros));
+  const fundedMs = hour > 0 ? Math.floor(remaining / hour * 3_600_000) : 60_000;
+  if (fundedMs < 1000) return denied('balance');
+  const deadlineAt = new Date(now.getTime() + Math.min(60_000, fundedMs));
+  return { allowed: true, reason: null, deadlineAt, balanceDeadlineAt: hour > 0 && fundedMs <= 60_000 ? deadlineAt : null };
+}
+
+interface SpendInputs {
+  all: { inst: typeof browserInstances.$inferSelect; health: typeof instanceHealth.$inferSelect | null }[];
+  holds: Map<string, typeof browserReservations.$inferSelect>;
+  prices: { price: typeof providerPrices.$inferSelect }[];
+  settings: { markupPercent: number };
+  placementRows: { machine: typeof placements.$inferSelect }[];
+}
+
+/**
+ * The account's combined spending rate now (fixed resources of every kept paid browser plus
+ * compute of the running ones) and the charges accrued but not yet metered. Null when a browser
+ * has no price: its spend is unknown, so nothing may be authorized against it.
+ */
+function spendProjection({ all, holds, prices, settings, placementRows }: SpendInputs, now: Date): { hourMicros: number; pendingMicros: number } | null {
   const sheets = new Map<string, ProviderPriceSheet>();
   for (const { price } of prices) {
     const parsed = ProviderPriceSheet.safeParse(price.sheet);
     if (parsed.success && price.fetchedAt) sheets.set(price.regionId, parsed.data);
   }
-  const settings = settingsRows[0] ?? DEFAULT_PRICING_SETTINGS;
   const machines = new Map(placementRows.map(({ machine }) => [machine.instanceId, machine]));
   let hour = 0;
   let pending = 0;
   for (const { inst, health } of all) {
     if (inst.trialState === 'active' || inst.trialState === 'ended' || holds.get(inst.id)?.retentionStartedAt) continue;
     const sheet = sheets.get(inst.regionId);
-    if (!sheet) return denied('balance');
+    if (!sheet) return null;
     const machine = machines.get(inst.id);
     const vmPrice = machine?.instanceType ? sheet.instanceTypes[machine.instanceType] : sheet.vmHour;
-    if (vmPrice === undefined) return denied('balance');
+    if (vmPrice === undefined) return null;
     // The same rounding as metering: the cost to a micro-dollar first, then the markup.
     const rates = customerRates({ ...sheet, vmHour: vmPrice }, settings.markupPercent);
     const fixed = holds.get(inst.id)?.fixedHourMicros ?? 0;
@@ -120,11 +143,40 @@ export async function prepaidAccess(db: Db, userId: string, instanceId: string, 
     const billed = health?.netTxBilledBytes ?? tx;
     pending += (tx >= billed ? tx - billed : tx) / BYTES_PER_GB * rates.transfer;
   }
-  const remaining = Math.max(0, availableMicros - Math.ceil(pending));
-  const fundedMs = hour > 0 ? Math.floor(remaining / hour * 3_600_000) : 60_000;
-  if (fundedMs < 1000) return denied('balance');
-  const deadlineAt = new Date(now.getTime() + Math.min(60_000, fundedMs));
-  return { allowed: true, reason: null, deadlineAt, balanceDeadlineAt: hour > 0 && fundedMs <= 60_000 ? deadlineAt : null };
+  return { hourMicros: hour, pendingMicros: pending };
+}
+
+export interface AccountRunway {
+  availableMicros: number;
+  /** Combined spending rate of all the account's paid browsers right now. */
+  burnHourMicros: number;
+  /** Available credit after charges accrued but not yet metered. */
+  remainingMicros: number;
+  /** When remaining credit runs out at that rate; null when nothing is charged or a price is missing. */
+  fundedUntil: Date | null;
+}
+
+/** How long available credit lasts at the account's combined spending rate (the authorization projection). */
+export async function accountRunway(db: Db, userId: string, now = new Date()): Promise<AccountRunway> {
+  const [accounts, holdRows, prices, settingsRows, all, placementRows] = await db.batch([
+    db.select().from(billingAccounts).where(eq(billingAccounts.userId, userId)),
+    db.select().from(browserReservations).where(eq(browserReservations.userId, userId)),
+    db.select({ price: providerPrices }).from(providerPrices).innerJoin(regions,
+      and(eq(regions.id, providerPrices.regionId), eq(regions.executor, providerPrices.executor), eq(regions.providerRegion, providerPrices.providerRegion))),
+    db.select().from(pricingSettingsTable).where(eq(pricingSettingsTable.id, 1)),
+    db.select({ inst: browserInstances, health: instanceHealth }).from(browserInstances)
+      .leftJoin(instanceHealth, eq(instanceHealth.instanceId, browserInstances.id))
+      .where(and(eq(browserInstances.userId, userId), notInArray(browserInstances.status, ['deleting', 'purged', 'failed']))),
+    db.select({ machine: placements }).from(placements).innerJoin(browserInstances, eq(browserInstances.id, placements.instanceId))
+      .where(and(eq(browserInstances.userId, userId), eq(placements.status, 'current'))),
+  ]);
+  const reserved = holdRows.reduce((sum, h) => sum + h.reservedMicros, 0);
+  const availableMicros = Math.max(0, (accounts[0]?.balanceMicros ?? 0) - reserved);
+  const spend = spendProjection({ all, holds: new Map(holdRows.map((h) => [h.instanceId, h])), prices, settings: settingsRows[0] ?? DEFAULT_PRICING_SETTINGS, placementRows }, now);
+  if (!spend) return { availableMicros, burnHourMicros: 0, remainingMicros: availableMicros, fundedUntil: null };
+  const remainingMicros = Math.max(0, availableMicros - Math.ceil(spend.pendingMicros));
+  const fundedUntil = spend.hourMicros > 0 ? new Date(now.getTime() + Math.floor(remainingMicros / spend.hourMicros * 3_600_000)) : null;
+  return { availableMicros, burnHourMicros: spend.hourMicros, remainingMicros, fundedUntil };
 }
 
 /** Capture actual running time before changing status; safe inside a fenced stop/delete batch. */
@@ -156,7 +208,9 @@ export function convertTrialStatements(db: Db, userId: string, now: Date, condit
       meteredAt: sql`CASE WHEN (SELECT status FROM browser_instances WHERE id = ${instanceHealth.instanceId}) = 'running' THEN ${now.getTime()} ELSE NULL END`,
       pendingComputeMs: 0, netTxBilledBytes: sql`${instanceHealth.netTxBytes}`,
     }).where(sql`EXISTS (SELECT 1 FROM browser_instances WHERE browser_instances.id = ${instanceHealth.instanceId} AND ${eligible})`),
-    db.update(browserInstances).set({ trialState: 'converted', trialReclaimAt: null, updatedAt: now })
+    // A converted browser keeps auto-sleep: the paid default, never the trial's or never sleep.
+    db.update(browserInstances).set({ trialState: 'converted', trialReclaimAt: null, updatedAt: now,
+      idleTimeoutS: sql`CASE WHEN browser_instances.idle_timeout_s IN (${NEVER_SLEEP_TIMEOUT_S}, ${TRIAL.idleTimeoutS}) THEN ${DEFAULT_IDLE_TIMEOUT_S} ELSE browser_instances.idle_timeout_s END` })
       .where(eligible).returning({ id: browserInstances.id }),
   ] as const;
 }

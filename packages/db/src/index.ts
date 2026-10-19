@@ -22,5 +22,5 @@ export { pricingSettings, priceSheets, type StoredSheet } from './pricing.js';
 export { awsInventory } from './aws-provider.js';
 export { raiseAlert, type AlertSeverity } from './alerts.js';
 
-export { convertTrialStatements, prepaidBalance, prepaidAccess, reservationQuote, reservationWrite, reservedTotalSql, settleRunningStatements, type ReservationQuote, type PrepaidAccessReason } from './prepaid.js';
+export { accountRunway, convertTrialStatements, prepaidBalance, prepaidAccess, reservationQuote, reservationWrite, reservedTotalSql, settleRunningStatements, type AccountRunway, type ReservationQuote, type PrepaidAccessReason } from './prepaid.js';
 export { recordLaunch, launchHealthByRegion, launchHealthFor, recentCapacityAt, openProviderIssue, blocksRegion, launchVerifiedAt, reopenRegion, CAPACITY_MEMORY_MS, PROVIDER_ISSUE_MEMORY_MS, BLOCKING_FAILURE_CLASSES, type LaunchOutcome, type LaunchHealthRow } from './launch-health.js';

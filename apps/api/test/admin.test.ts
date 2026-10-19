@@ -237,6 +237,19 @@ describe('admin console', () => {
     expect(audit).toEqual(expect.arrayContaining(['flag.creation_freeze', 'cap.set']));
   });
 
+  it('switches Never sleep as its own setting, for everyone or one user, and only as 1 or 0', async () => {
+    expect((await callAdmin('PUT', '/api/v1/admin/caps', { scope: 'user:default', metric: 'never_sleep', limit: 2 }, IP)).status).toBe(400);
+    expect((await callAdmin('PUT', '/api/v1/admin/caps', { scope: 'global', metric: 'never_sleep', limit: 1 }, IP)).status).toBe(400);
+    await signIn(t, 'user@example.com');
+    expect((await t.call('GET', '/api/v1/me')).body.entitlements.neverSleep).toBe(true);
+    expect((await callAdmin('PUT', '/api/v1/admin/caps', { scope: 'user:default', metric: 'never_sleep', limit: 0 }, IP)).status).toBe(200);
+    await signIn(t, 'user@example.com');
+    expect((await t.call('GET', '/api/v1/me')).body.entitlements.neverSleep).toBe(false);
+    expect((await callAdmin('PUT', '/api/v1/admin/caps', { scope: `user:${owner}`, metric: 'never_sleep', limit: 1 }, IP)).status).toBe(200);
+    await signIn(t, 'user@example.com');
+    expect((await t.call('GET', '/api/v1/me')).body.entitlements.neverSleep).toBe(true);
+  });
+
   it('edits the default browser limit while preserving individual overrides and rejecting obsolete daily limits', async () => {
     expect((await callAdmin('PUT', '/api/v1/admin/caps', { scope: 'user:default', metric: 'creates_per_day', limit: 3 }, IP)).status).toBe(400);
     expect((await callAdmin('PUT', '/api/v1/admin/caps', { scope: 'user:default', metric: 'instances', limit: 6 }, IP)).status).toBe(200);

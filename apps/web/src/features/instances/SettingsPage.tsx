@@ -1,6 +1,6 @@
 import { useRegionInfo } from './hooks.js';
 import { IDLE_TIMEOUT_OPTIONS_S, NEVER_SLEEP_TIMEOUT_S } from '@cloudbrowser/contracts';
-import { Button, cn, Input, Label, Pagination, Section, Select, useToast } from '@cloudbrowser/ui';
+import { Button, cn, Hint, Input, Label, Pagination, Section, Select, useToast } from '@cloudbrowser/ui';
 import { ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
@@ -8,6 +8,7 @@ import { useI18n } from '../../lib/i18n.js';
 import { PAGE_SIZE, usePagerLabels } from '../../lib/paging.js';
 import { useManagedInstance } from './BrowserLayout.js';
 import { DeleteBrowserForm } from './DeleteBrowser.js';
+import { NeverSleepDialog } from './NeverSleep.js';
 import { useMe, useRecentSessions, useUpdateInstance, useVerifyIp } from './hooks.js';
 import { regionPlace } from './region-names.js';
 
@@ -42,6 +43,11 @@ export function SettingsPage() {
   const save = (patch: Parameters<typeof update.mutate>[0]['patch']) =>
     update.mutate({ id: i.id, patch }, { onSuccess: () => toast(t('settings.saved')), onError: (e) => toast(errorMessage(e), 'error') });
   const maxIdle = me.data?.entitlements.idleTimeoutMaxS ?? 1800;
+  const [neverSleepOpen, setNeverSleepOpen] = useState(false);
+  const neverSleep = i.idleTimeoutS === NEVER_SLEEP_TIMEOUT_S;
+  // Offered by the operator and never to a free trial browser; the dialog checks credit and price.
+  const neverSleepOffered = (me.data?.entitlements.neverSleep ?? false) || neverSleep;
+  const trial = i.trial !== null && i.trial.state !== 'converted';
   const check = i.lastIpCheck;
 
   return (
@@ -97,13 +103,24 @@ export function SettingsPage() {
             </div>
             <div>
               <Label htmlFor="idle">{t('settings.autoSleep')}</Label>
-              <Select id="idle" value={i.idleTimeoutS} onChange={(e) => save({ idleTimeoutS: Number(e.target.value) })}>
-                {IDLE_TIMEOUT_OPTIONS_S.map((s) => (
-                  <option key={s} value={s} disabled={s !== NEVER_SLEEP_TIMEOUT_S && s > maxIdle}>
+              <Select
+                id="idle"
+                value={i.idleTimeoutS}
+                onChange={(e) => {
+                  const s = Number(e.target.value);
+                  // Never sleep is saved only after its 24-hour cost is confirmed.
+                  if (s === NEVER_SLEEP_TIMEOUT_S) setNeverSleepOpen(true);
+                  else save({ idleTimeoutS: s });
+                }}
+              >
+                {IDLE_TIMEOUT_OPTIONS_S.filter((s) => s !== NEVER_SLEEP_TIMEOUT_S || neverSleepOffered).map((s) => (
+                  <option key={s} value={s} disabled={s === NEVER_SLEEP_TIMEOUT_S ? trial && !neverSleep : s > maxIdle}>
                     {s === NEVER_SLEEP_TIMEOUT_S ? t('settings.neverSleep') : t('settings.minutes', { n: s / 60 })}
                   </option>
                 ))}
               </Select>
+              <Hint className="mt-1.5">{neverSleep ? t('settings.neverSleepOn') : trial && neverSleepOffered ? t('settings.neverSleepTrial') : t('settings.autoSleepHint')}</Hint>
+              <NeverSleepDialog instance={i} open={neverSleepOpen} onClose={() => setNeverSleepOpen(false)} />
             </div>
           </div>
         </Section>
