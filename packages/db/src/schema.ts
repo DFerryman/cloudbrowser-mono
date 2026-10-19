@@ -180,6 +180,8 @@ export const browserInstances = sqliteTable(
     // versions still write this column, so it stays until they can no longer be rolled back to.
     locale: text('locale').notNull().default('en-US'),
     screen: text('screen').notNull(),
+    // The per-browser picture setting was removed; the live view adapts to the connection.
+    // Older API versions still read and write these columns, so they stay for the same reason.
     videoQuality: text('video_quality').notNull().default('full'),
     videoAuto: integer('video_auto', { mode: 'boolean' }).notNull().default(true),
     fingerprint: json<Fingerprint>('fingerprint').notNull(),

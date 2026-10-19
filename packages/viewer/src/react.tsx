@@ -26,7 +26,7 @@ export interface RemoteBrowserViewProps {
   onInput?: () => void;
   onKeyboardChange?: (open: boolean) => void;
   onInputError?: (reason: InputFailure) => void;
-  /** Picture quality from the browser's settings; changes apply to the live stream. */
+  /** Picture quality; the sharpest level adapting to the connection by default. Changes apply to the live stream. */
   video?: VideoPreference;
   /** The level being streamed now. */
   onVideo?: (quality: VideoQuality) => void;

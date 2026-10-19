@@ -1,6 +1,6 @@
 import { VIDEO_QUALITIES, type VideoQuality } from '@cloudbrowser/contracts';
 
-/** What the browser's settings ask for: the sharpest level, and whether to adapt below it. */
+/** The sharpest level to use, and whether to adapt below it (the web app uses the default: full, adapting). */
 export interface VideoPreference {
   quality: VideoQuality;
   auto: boolean;
@@ -45,7 +45,7 @@ const RTT_WINDOW = 30;
  * estimator compares its bandwidth estimate in bits with the stream rate in bytes, so it only
  * steps down once bandwidth falls to about an eighth of the stream; the viewer decides instead.
  * It steps down after a few seconds of dropped frames, loss, freezes or growing delay, and
- * probes one level up again after a quiet period, never above the browser's setting.
+ * probes one level up again after a quiet period, never above the preferred level.
  */
 export class QualityController {
   private level: number;

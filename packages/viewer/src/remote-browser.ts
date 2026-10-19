@@ -136,7 +136,7 @@ export class RemoteBrowser {
     return this.remoteScreen ? { width: this.remoteScreen.width, height: this.remoteScreen.height } : null;
   }
 
-  /** A changed setting applies at once to a live stream, without reconnecting. */
+  /** A changed preference applies at once to a live stream, without reconnecting. */
   setVideoPreference(video: VideoPreference) {
     if (video.quality === this.video.quality && video.auto === this.video.auto) return;
     this.video = video;

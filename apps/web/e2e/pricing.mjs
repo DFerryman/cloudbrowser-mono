@@ -317,20 +317,13 @@ try {
   {
     const picture = await fixture();
     await picture.page.goto(`${origin}/browsers/${instance.id}/settings`);
-    const select = picture.page.getByLabel('Picture resolution', { exact: true });
-    assert.equal(await select.inputValue(), 'full');
-    assert.equal(await picture.page.getByRole('checkbox', { name: /Adjust to my connection/ }).isChecked(), true);
+    await picture.page.getByLabel('Auto-sleep after', { exact: true }).waitFor();
+    assert.equal(await picture.page.getByText(/Picture resolution|Adjust to my connection/).count(), 0, 'The live view picks its picture from the connection; there is no setting');
+    assert.equal(await picture.page.locator('#picture').count(), 0);
     assert.equal(await picture.page.getByText('Screen size', { exact: true }).count(), 0, 'The old screen size option never took effect and is gone');
-    await select.selectOption('medium');
-    await picture.page.waitForFunction(() => document.querySelector('#picture')?.value === 'medium');
-    // The cache update is asynchronous; wait for the new state rather than expecting it synchronously.
-    await picture.page.getByRole('checkbox', { name: /Adjust to my connection/ }).click();
-    await picture.page.waitForFunction(() => !document.querySelector('input[type=checkbox]')?.checked);
-    await picture.page.waitForTimeout(300);
-    assert.equal(await select.inputValue(), 'medium', 'The saved setting stays shown after the refetch');
-    assert.deepEqual(picture.state.requests.map((r) => [r.method, r.body]), [['PATCH', { videoQuality: 'medium' }], ['PATCH', { videoAuto: false }]]);
+    assert.deepEqual(picture.state.requests, []);
     if (process.env.SHOT_DIR) await picture.page.screenshot({ path: `${process.env.SHOT_DIR}/picture-settings.png` });
-    await finish(picture, 'picture resolution and connection adjustment are browser settings that save at once');
+    await finish(picture, 'the browser settings have no picture option; the live view adapts on its own');
   }
 
   const trial = await fixture({ trial: true, width: 820 });

@@ -176,8 +176,12 @@ Cloudflare deployment.
 - **Picture resolution and adaptive quality**: the old screen-size setting was stored but never
   applied. neko now streams a ladder of the same desktop (`full`, `high` 75%, `medium` 50%,
   `low` 50% at 15 fps, VP8 at 2.0/1.2/0.7/0.35 Mbit/s caps; before, `codec: h264` without pipelines
-  silently fell back to neko's single default VP8 stream). Each browser has a picture resolution
-  and *Adjust to my connection* (default on). The viewer requests the level with `signal/video`
+  silently fell back to neko's single default VP8 stream). There is no picture setting: the
+  per-browser resolution and *Adjust to my connection* options were removed (their D1 columns stay
+  unused so an older API can be rolled back to); every live view starts at `full` and adapts. The
+  API still returns `videoQuality: 'full'` and `videoAuto: true` for live views opened before the
+  change; both can go in a later release.
+  The viewer requests the level with `signal/video`
   and adapts it from its own receive statistics (dropped frames, loss, freezes, growing RTT),
   because neko 3.0.8's estimator compares bits with bytes. The page layout follows the viewer's
   size at every level; pointer positions map to the remote screen, not the video's pixels.

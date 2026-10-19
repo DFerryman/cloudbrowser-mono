@@ -381,7 +381,7 @@ export function SessionPage() {
           {i && i.status !== 'running' ? (
             <StatusBadge className="mr-2 hidden text-zinc-300 md:inline-flex" tone={STATUS_TONE[i.status]} label={t(statusKey(i.status))} />
           ) : connect.data?.mode === 'webrtc' && stats ? (
-            <ConnectionIndicator stats={stats} picture={streaming ? `${t(`settings.picture.${streaming}` as MessageKey)}${i?.videoAuto ? ` · ${t('settings.picture.autoShort')}` : ''}` : null} />
+            <ConnectionIndicator stats={stats} picture={streaming ? t(`session.picture.${streaming}` as MessageKey) : null} />
           ) : connect.data?.mode === 'simulated' ? (
             <span className="mr-2 hidden items-center gap-1.5 text-xs text-zinc-400 md:inline-flex" title={t('session.simulatedHint')}>
               <span className="size-2 rounded-full bg-starting" aria-hidden /> {t('session.simulated')}
@@ -522,8 +522,6 @@ export function SessionPage() {
             }}
             onState={(state, attempt) => setViewer({ state, attempt })}
             onStats={setStats}
-            // The browser's picture setting; a change applies to the open stream.
-            video={{ quality: i.videoQuality, auto: i.videoAuto }}
             onVideo={setStreaming}
             onInput={() => (hadInput.current = true)}
             onKeyboardChange={setKeyboardOpen}
