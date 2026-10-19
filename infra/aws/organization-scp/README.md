@@ -32,7 +32,11 @@ controlled probes in ap-northeast-1 at 09:01 UTC reproducing both symptoms above
 1 GiB volume and a c7i-flex.large with an encrypted root disk); after the change at 09:05 UTC, the
 same volume probe became `available` within 7 s, encrypted with the account's `aws/ebs` key
 (`67e434da-…`), so the key itself was healthy, and the simulator allowed every action the
-runtime, reaper and reader roles use in all 34 offered regions.
+runtime, reaper and reader roles use in all 34 offered regions. Neither check covers EC2's own
+decrypt at boot: the first real launch afterwards still failed, which led to the
+`aws:ec2-infrastructure` condition (applied 09:42 UTC). After it, a production browser in
+ap-northeast-3 launched and its agent connected (09:56 UTC), and a probe instance with an
+encrypted root volume ran in ap-northeast-1 (10:08 UTC, terminated at once).
 
 ## The change
 
@@ -45,13 +49,26 @@ next to it are what was applied. The only differences:
    `DescribeKey`, so it adds four). The existing statement is otherwise byte-for-byte the same.
 2. Two new Deny statements re-deny exactly those added actions in the same regions unless
    - the caller is the Nevazu account (`aws:PrincipalAccount` = `346565070970`), **and**
-   - the call comes from EC2 (`kms:ViaService` like `ec2.*.amazonaws.com`).
+   - the call comes from EC2: through an EC2 request (`kms:ViaService` like
+     `ec2.*.amazonaws.com`), or from EC2's own per-instance role in the Nevazu account
+     (`aws:PrincipalArn` like `arn:aws:iam::346565070970:role/*aws:ec2-infrastructure`).
 
-So the other member account sees no change, Nevazu principals cannot call KMS directly or through
-any other service, and no other KMS action (Encrypt, CreateKey, key administration, ...) opens.
+EC2 needs both. Creating an encrypted volume only makes KMS calls through EC2 as the caller, but
+when an instance boots, the `aws:ec2-infrastructure` role decrypts each attached volume's data
+key itself, under a grant, without `kms:ViaService`. The first version (applied 09:05 UTC) lacked
+that condition: an encrypted volume could be created, but every instance still ended at launch
+with `Client.InternalError: Client error on launch` (a production create in ap-northeast-1 at
+09:35 UTC). IAM does not let accounts create role names containing `aws:`, so the pattern only
+matches EC2's role.
+
+So the other member account sees no change, Nevazu's own roles and users cannot call KMS directly
+or through any other service, and no other KMS action (Encrypt, CreateKey, key administration,
+...) opens.
 Within Nevazu, which principal may use a key is still decided by IAM and the key policy; the
 production roles have no KMS permissions of their own and use the AWS-managed `aws/ebs` key only
 through EC2.
+
+A volume probe alone does not prove the change: verify with an instance launch (below).
 
 ## Check, apply, verify
 
@@ -81,6 +98,9 @@ aws iam simulate-principal-policy --region us-east-1 \
     ContextKeyName=kms:ViaService,ContextKeyValues=ec2.ap-northeast-1.amazonaws.com,ContextKeyType=string \
   --query 'EvaluationResults[].[EvalActionName,OrganizationsDecisionDetail.AllowedByOrganizations]'
 # expect: True for both (was False)
+
+# 5. A real launch: an instance with an encrypted root volume must reach `running`
+#    (Nevazu account credentials; terminate it right after; about $0.002)
 ```
 
 SCP changes take effect within minutes. Then reopen any region the engine blocked
