@@ -73,18 +73,30 @@ export default {
         console.log('reaper', JSON.stringify(await reaperTick(deps)));
         return;
       }
-      await idleStops(deps);
+      // Each step runs even if an earlier one failed: an idle-stop error must not skip metering,
+      // and a provider error must not skip the IP checks. Failures are reported together.
+      const failures: unknown[] = [];
+      const step = async (name: string, run: () => Promise<unknown>) => {
+        try {
+          await run();
+        } catch (e) {
+          failures.push(new Error(`${name}: ${errorMessages(e).join(' <- ')}`, { cause: e }));
+        }
+      };
+      await step('idle stops', () => idleStops(deps));
       // Four-minute settlement leaves one cron tick of headroom under the five-minute billing cap.
-      await meterUsage(deps, { minIntervalMs: 4 * 60_000 });
-      await reclaimTrials(deps);
-      await runPending(deps);
+      await step('metering', () => meterUsage(deps, { minIntervalMs: 4 * 60_000 }));
+      await step('trial reclamation', () => reclaimTrials(deps));
+      await step('pending operations', () => runPending(deps));
       const minute = new Date(controller.scheduledTime).getUTCMinutes();
       if (minute % 5 === 0) {
-        await periodicIpChecks(deps);
-        await enforceStoppedIntent(deps);
+        await step('IP checks', () => periodicIpChecks(deps));
+        await step('stopped intent', () => enforceStoppedIntent(deps));
       }
       // Cheap when prices are fresh: only stale regions (older than 12 hours) are read from the provider.
       await refreshPrices(deps).catch((e) => console.error('price refresh failed', e));
+      if (failures.length === 1) throw failures[0];
+      if (failures.length) throw new AggregateError(failures, failures.map((f) => (f as Error).message).join('; '));
     } catch (error) {
       console.error('engine scheduled task failed', JSON.stringify({
         cron: controller.cron, scheduledTime: controller.scheduledTime, errors: errorMessages(error),

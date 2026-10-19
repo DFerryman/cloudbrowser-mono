@@ -41,7 +41,7 @@ const problems = {
   409: { content: { 'application/problem+json': { schema: Problem } }, description: 'Conflict' },
   503: { content: { 'application/problem+json': { schema: Problem } }, description: 'Billing not configured' },
 };
-const MonthQuery = z.object({ month: z.string().regex(/^\d{4}-\d{2}$/).optional() });
+const MonthQuery = z.object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional() });
 /** Paging: ask for one more row than is shown to learn whether there is another page. */
 export const PageQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional(),

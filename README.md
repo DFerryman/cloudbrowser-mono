@@ -15,7 +15,8 @@ and [`docs/deploy-cloudflare.md`](docs/deploy-cloudflare.md) to deploy.
 
 ```
 apps/
-  web/          Vite + React SPA: sign-in, dashboard, create dialog, session view, settings (zh-CN + en)
+  web/          Vite + React SPA: public site (home, pricing, docs, status, policies), sign-in,
+                dashboard, create dialog, session view, settings (zh-CN + en, light/dark/system theme)
   api/          Worker: Hono REST + SSE under /api, Better Auth (email codes via Email Service,
                 optional TOTP two-step verification), rate limits, IP echo; serves apps/web/dist
   engine/       Worker: queue consumer running operations (journal, leases, ledger, retries),
@@ -55,7 +56,7 @@ cd apps/api && pnpm exec wrangler dev -c wrangler.jsonc -c ../engine/wrangler.js
   --persist-to ../../.wrangler/state
 ```
 
-Open http://localhost:8787 and sign in with the invited email. `wrangler dev` simulates Email
+Open http://localhost:8787 for the public site, or http://localhost:8787/sign-in to sign in with the invited email. `wrangler dev` simulates Email
 Service sends (the message is printed in the log) and, with `ENVIRONMENT=development`, the 6-digit
 code is also logged. Queues, the Durable Object and the rate limiters all run locally. For frontend work with hot reload,
 also run `pnpm --filter @cloudbrowser/web dev` (Vite on :5173 proxies `/api` to :8787).

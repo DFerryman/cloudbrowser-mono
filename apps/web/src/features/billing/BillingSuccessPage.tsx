@@ -21,8 +21,14 @@ export function BillingSuccessPage() {
     const h = setTimeout(() => setSlow(true), 60_000);
     return () => clearTimeout(h);
   }, []);
-  // Done once a top-up newer than this page shows up (refreshed by the entitlements event).
-  const done = (tx.rows ?? []).some((x) => x.kind === 'topup' && Date.parse(x.createdAt) > arrivedAt.current - 15 * 60_000);
+  // Top-ups already listed on the first load are older payments, unless they were credited just
+  // before the redirect landed (the webhook can be faster than the browser).
+  const seen = useRef<Set<string> | null>(null);
+  if (tx.rows && !tx.isPlaceholderData && seen.current === null) seen.current = new Set(tx.rows.map((x) => x.id));
+  // Done once this checkout's top-up shows up (refreshed by the entitlements event).
+  const done = (tx.rows ?? []).some(
+    (x) => x.kind === 'topup' && (!seen.current?.has(x.id) || Date.parse(x.createdAt) > arrivedAt.current - 2 * 60_000),
+  );
 
   return (
     <FullPageMessage>

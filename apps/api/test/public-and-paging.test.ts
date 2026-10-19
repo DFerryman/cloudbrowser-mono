@@ -67,3 +67,24 @@ describe('paging', () => {
     expect(rest.body.map((r: { action: string }) => r.action)).toEqual(['a0']);
   });
 });
+
+describe('validation', () => {
+  it('rejects impossible months', async () => {
+    await signIn(t, 'pilot@example.com');
+    expect((await t.call('GET', '/api/v1/usage?month=2026-13')).status).toBe(400);
+    expect((await t.call('GET', '/api/v1/usage?month=2026-12')).status).toBe(200);
+  });
+
+  it('answers 404 for admin changes to things that do not exist, without auditing them', async () => {
+    configureAdmin(t);
+    mockAccessJwks();
+    const token = await accessToken();
+    const reason = { reason: 'test reason', note: 'test note', action: 'suspend' };
+    expect((await adminCall(t, token, 'POST', '/api/v1/admin/alerts/999/ack')).status).toBe(404);
+    expect((await adminCall(t, token, 'POST', '/api/v1/admin/alerts/abc/ack')).status).toBe(404);
+    expect((await adminCall(t, token, 'POST', '/api/v1/admin/findings/nope/resolve', reason)).status).toBe(404);
+    expect((await adminCall(t, token, 'POST', '/api/v1/admin/users/nope/actions', reason)).status).toBe(404);
+    expect((await adminCall(t, token, 'POST', '/api/v1/admin/users/nope/unfreeze', reason)).status).toBe(404);
+    expect(t.d1.sqlite.prepare('SELECT count(*) AS n FROM audit_log').get()).toEqual({ n: 0 });
+  });
+});

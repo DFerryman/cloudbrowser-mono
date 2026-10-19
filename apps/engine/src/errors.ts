@@ -5,6 +5,8 @@ export function errorMessages(error: unknown): string[] {
   for (let current = error; current != null && !seen.has(current) && messages.length < 8;) {
     seen.add(current);
     messages.push(current instanceof Error ? current.message : String(current));
+    // Several independent failures (a cron round): list each one's own message too.
+    if (current instanceof AggregateError) for (const inner of current.errors.slice(0, 8)) messages.push(...errorMessages(inner).map((m) => `  ${m}`));
     current = current instanceof Error ? current.cause : undefined;
   }
   return messages;

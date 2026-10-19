@@ -32,7 +32,13 @@ export async function api<T>(method: string, path: string, opts: Options = {}): 
   });
   if (res.status === 204) return undefined as T;
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    // A proxy or edge error page (HTML), not the API: report it by status like any other failure.
+    if (res.ok) throw new ApiError(502, { type: 'internal', title: 'Unreadable response', status: 502 });
+  }
   if (!res.ok) {
     const problem: Problem =
       data && typeof data.type === 'string'

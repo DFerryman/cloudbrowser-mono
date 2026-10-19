@@ -209,11 +209,22 @@ export async function periodicIpChecks(deps: EngineDeps) {
     .innerJoin(placements, and(eq(placements.instanceId, browserInstances.id), eq(placements.status, 'current')))
     .leftJoin(instanceHealth, eq(instanceHealth.instanceId, browserInstances.id))
     .where(eq(browserInstances.status, 'running'));
+  // One browser's provider or agent error must not skip the fail-closed check of the others.
+  const failures: unknown[] = [];
   for (const { inst, placement, health } of running) {
+    try {
+      await checkOne(inst, placement, health);
+    } catch (e) {
+      failures.push(e);
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, `IP checks failed for ${failures.length} of ${running.length} browsers`);
+
+  async function checkOne(inst: (typeof running)[number]['inst'], placement: (typeof running)[number]['placement'], health: (typeof running)[number]['health']) {
     const kind = placement.executor as ExecutorKind;
     if (!deps.agent(kind).selfReportsIpChecks) {
       await checkInstanceIp(deps, inst.id);
-      continue;
+      return;
     }
     const binding = await deps.executor(kind).verifyEgress(readContext('ip-check', deps.envName), placementRef(placement));
     const last = health?.lastIpCheck;

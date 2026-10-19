@@ -119,6 +119,8 @@ adminRoute.get('/alerts', async (c) => {
 adminRoute.post('/alerts/:id/ack', async (c) => {
   const db = c.get('db');
   const id = Number(c.req.param('id'));
+  const [alert] = Number.isSafeInteger(id) ? await db.select({ id: alerts.id }).from(alerts).where(eq(alerts.id, id)) : [];
+  if (!alert) throw problem(404, 'not_found');
   await acknowledgeAlert(db, id, actor(c));
   await audit(db, c, 'alert.acknowledged', `alert:${id}`, {});
   return c.json({ ok: true });
@@ -351,6 +353,8 @@ adminRoute.post('/findings/:id/resolve', async (c) => {
   const db = c.get('db');
   const { note } = await body(c, z.object({ note: z.string().trim().min(3).max(500) }));
   const id = c.req.param('id');
+  const [finding] = await db.select({ id: driftFindings.id }).from(driftFindings).where(eq(driftFindings.id, id));
+  if (!finding) throw problem(404, 'not_found');
   await db.update(driftFindings).set({ status: 'resolved', resolvedAt: new Date() }).where(eq(driftFindings.id, id));
   await audit(db, c, 'finding.resolved', `finding:${id}`, { note });
   return c.json({ ok: true });
@@ -454,6 +458,8 @@ adminRoute.post('/users/:id/actions', async (c) => {
   const db = c.get('db');
   const id = c.req.param('id');
   const { action, reason } = await body(c, z.object({ action: z.enum(['suspend', 'unsuspend']), reason: z.string().trim().min(3).max(500) }));
+  const [u] = await db.select({ id: user.id }).from(user).where(eq(user.id, id));
+  if (!u) throw problem(404, 'not_found');
   const now = new Date();
   await db
     .update(browserInstances)
@@ -505,6 +511,8 @@ adminRoute.post('/users/:id/unfreeze', async (c) => {
   const db = c.get('db');
   const id = c.req.param('id');
   const { reason } = await body(c, z.object({ reason: z.string().trim().min(3).max(500) }));
+  const [u] = await db.select({ id: user.id }).from(user).where(eq(user.id, id));
+  if (!u) throw problem(404, 'not_found');
   await db.update(billingAccounts).set({ frozenAt: null, frozenReason: null, updatedAt: new Date() }).where(eq(billingAccounts.userId, id));
   await audit(db, c, 'user.unfreeze', `user:${id}`, { reason });
   c.executionCtx.waitUntil(notifyHub(c.env, id));

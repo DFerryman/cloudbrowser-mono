@@ -288,6 +288,19 @@ describe('lifecycle', () => {
     await w.settle(await w.newInstance());
   });
 
+  it('checks every running browser even when one IP check hits a provider error', async () => {
+    await w.settle(await w.newInstance('inst2'));
+    await w.db.update(schema.instanceHealth).set({ lastIpCheck: null });
+    let calls = 0;
+    w.faults = (m, ctx) => (m === 'verifyEgress' && ctx.operationId === 'ip-check' && calls++ === 0 ? 'retryable' : null);
+    const { periodicIpChecks } = await import('../src/scheduler.js');
+    await expect(periodicIpChecks(w.deps())).rejects.toThrow(/IP checks failed for 1 of 2 browsers/);
+    w.faults = () => null;
+    const checked = await w.db.select().from(schema.instanceHealth);
+    // The first browser's check failed to run; the second one was still checked.
+    expect(checked.filter((h) => h.lastIpCheck?.ok)).toHaveLength(1);
+  });
+
   it('keeps the same IP across sleep and wake cycles', async () => {
     const ip = (await w.placement())?.ipAddress;
     for (let i = 0; i < 10; i++) {

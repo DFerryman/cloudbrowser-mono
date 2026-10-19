@@ -136,6 +136,20 @@ Cloudflare deployment.
   report newer than the operation; `verify_ip_in_chrome` and `prepare_shutdown` are commands with
   60 s timeouts (the VM is stopped anyway without an ack); real agents self-check every 5 minutes and
   the engine pauses the network if the last check failed or is older than 15 minutes.
+- **Public site**: `/` (home), `/pricing` (per-region running, asleep and data rates from
+  `GET /api/public/pricing`, unit rates, a monthly estimator, how prepaid charges and the held
+  amount work, the free trial and an FAQ), `/docs` (the user guide; long explanations live here
+  instead of on the app's pages), `/status` (`GET /api/public/status`: database, background jobs,
+  and whether each offered region takes new browsers), `/terms`, `/privacy`, `/refunds`,
+  `/contact` and a 404 page, all in English and Chinese. The public endpoints are GET-only, carry
+  nothing per user and may be cached for a minute. The theme (system, light or dark) is applied
+  before first paint by `public/theme-init.js`. Registration stays invite-only; sign-in links the
+  policies and an invitation request, confirms sign-out, and skips the form when already signed in.
+- **Pagination**: admin lists, credit history and viewer sessions accept `limit` and `offset`
+  (defaults unchanged); clients ask for one row more than they show to know whether a next page
+  exists. Browsers (12), usage by browser and by day (10), daily charges (10), credit history (10),
+  activity (10) and passkeys (10) are paged in the app; console lists page by 50–100 rows on the
+  server and in-memory tables by 25.
 - **Two-step verification**: Better Auth's two-factor plugin, passwordless, with TOTP authenticator
   apps. Account → Security shows a QR code (rendered locally) and the setup key; the first code
   confirms it, then ten one-time backup codes are shown to copy or download. Every email-code
@@ -143,6 +157,13 @@ Cloudflare deployment.
   challenge, a 15-minute lock after ten wrong codes, an optional 30-day trusted device). Turning it
   off needs a current authenticator or backup code, replacing backup codes needs an authenticator
   code, and the setup secret is never readable again. Operators can reset it (audited).
+  The second step stays at sign-in, before any session exists, rather than when opening the
+  dashboard or a browser: a session created after the email code alone could already read billing
+  and change settings, and checking once at the entrance keeps opening a browser fast.
+- **Cron isolation**: each engine cron step (idle stops, metering, trial reclamation, pending
+  operations, IP checks, stopped intent) runs even if an earlier one failed, and one browser's
+  provider error no longer skips the fail-closed IP check of the others; failures are reported
+  together.
 - **Connection path**: the session page hands its prefetched viewer token to the first connection
   attempt instead of fetching a second one; session open and connect run their independent D1
   reads and the TURN credential request in parallel; the gateway redeems a token in one statement,

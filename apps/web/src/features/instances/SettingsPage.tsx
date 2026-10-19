@@ -1,5 +1,5 @@
 import { IDLE_TIMEOUT_OPTIONS_S, SCREEN_SIZES, type BrowserLocale, type Instance, type RegionPricing } from '@cloudbrowser/contracts';
-import { Button, cn, Dialog, Hint, Input, Label, Pagination, Section, Select, useToast } from '@cloudbrowser/ui';
+import { Button, cn, Dialog, Input, Label, Pagination, Section, Select, useToast } from '@cloudbrowser/ui';
 import { ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';

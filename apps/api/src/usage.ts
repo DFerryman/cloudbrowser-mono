@@ -17,7 +17,7 @@ function totals(rows: { item: string; amountMicros: number }[]): UsageTotals {
 }
 
 /** `YYYY-MM`, defaulting to the current month (UTC); anything else is refused by the caller's schema. */
-export const monthOf = (month: string | undefined, now = new Date()) => (month && /^\d{4}-\d{2}$/.test(month) ? month : now.toISOString().slice(0, 7));
+export const monthOf = (month: string | undefined, now = new Date()) => (month && /^\d{4}-(0[1-9]|1[0-2])$/.test(month) ? month : now.toISOString().slice(0, 7));
 
 export async function monthTotals(db: Db, userId: string, month: string): Promise<UsageTotals> {
   const rows = await db

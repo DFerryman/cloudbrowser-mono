@@ -608,7 +608,7 @@ v1.openapi(
     path: '/instances/{id}/usage',
     tags: ['instances'],
     description: 'This browser’s usage and charges for a month (UTC), per item and per day, and what it costs right now.',
-    request: { params: IdParam, query: z.object({ month: z.string().regex(/^\d{4}-\d{2}$/).optional() }) },
+    request: { params: IdParam, query: z.object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional() }) },
     responses: { 200: jsonResponse(InstanceUsage, 'Usage'), ...errors },
   }),
   async (c) => {
