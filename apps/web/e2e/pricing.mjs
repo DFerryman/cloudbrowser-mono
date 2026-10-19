@@ -23,7 +23,7 @@ const zero = { totalMicros: 0, byItem: { compute: 0, ip: 0, storage: 0, snapshot
 const month = new Date().toISOString().slice(0, 7);
 const instance = {
   id: 'browser-fixture', name: 'Quoted browser', regionId: 'syd1', status: 'sleeping', statusReason: null,
-  desiredState: 'stopped', idleTimeoutS: 600, locale: 'en-US', screen: 'auto', videoQuality: 'full', videoAuto: true, ipAddress: '192.0.2.1',
+  desiredState: 'stopped', idleTimeoutS: 600, screen: 'auto', videoQuality: 'full', videoAuto: true, ipAddress: '192.0.2.1',
   dedicatedSince: null, lastIpCheck: null, lastActiveAt: null, createdAt: new Date().toISOString(),
   deletedAt: null, purgeAfter: null, currentOperation: null, storageGb: 10, trial: null,
 };
@@ -67,7 +67,7 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
         } else body = { instanceId: 'new-browser', operationId: 'fixture-operation' };
       } else if (url.pathname === '/api/v1/me') body = {
         user: { id: 'fixture-user', name: 'Test user', email: 'fixture@example.test' },
-        entitlements: { billing: 'prepaid', maxBrowsers, maxRunning: 10, idleTimeoutMaxS: 3600, ipChangesPerMonth: 1, maxStorageGb: 100 },
+        entitlements: { billing: 'prepaid', maxBrowsers, maxRunning: 10, idleTimeoutMaxS: 3600, maxStorageGb: 100 },
         usage: { browsers: failed ? 0 : 1, running: 0 },
       };
       else if (url.pathname === '/api/v1/regions') body = [{ id: 'syd1', name: 'Sydney', country: 'AU', city: 'Sydney', timezone: 'Australia/Sydney', enabled: true, acceptingNew: state.stockAvailable, probeUrl: null,
@@ -284,22 +284,34 @@ try {
   await noStock.page.locator('button:enabled', { hasText: 'Create browser' }).waitFor();
   await finish(noStock, 'no inventory disables creation with a clear message and new inventory restores the action');
 
-  for (const action of ['storage', 'ip']) {
-    const f = await fixture({ width: action === 'storage' ? 820 : 1365 });
-    await f.page.goto(`${origin}/browsers/${instance.id}/${action === 'ip' ? 'settings' : 'storage'}`);
-    const open = action === 'storage' ? 'Add storage' : 'Request a new IP';
+  {
+    const f = await fixture({ width: 820 });
+    await f.page.goto(`${origin}/browsers/${instance.id}/storage`);
+    const open = 'Add storage';
     await f.page.getByRole('button', { name: open, exact: true }).click();
     f.state.reject = true;
     const dialog = f.page.getByRole('dialog');
-    await dialog.getByRole('button', { name: action === 'ip' ? 'Request new IP' : open, exact: true }).click();
-    const path = action === 'storage' ? `/api/v1/instances/${instance.id}/storage` : `/api/v1/instances/${instance.id}/ip-change-requests`;
-    await rejected(f, path);
+    await dialog.getByRole('button', { name: open, exact: true }).click();
+    await rejected(f, `/api/v1/instances/${instance.id}/storage`);
     await dialog.waitFor({ state: 'hidden' });
     await f.page.getByRole('button', { name: open, exact: true }).click();
-    await f.page.getByRole('dialog').getByRole('button', { name: action === 'ip' ? 'Request new IP' : open, exact: true }).click();
+    await f.page.getByRole('dialog').getByRole('button', { name: open, exact: true }).click();
     await f.page.getByRole('dialog').waitFor({ state: 'hidden' });
     assert.equal(f.state.requests[1].body.priceVersion, 'quote-2');
-    await finish(f, `${action} rejects stale quote, closes confirmation, and sends a fresh quote only after explicit reconfirmation`);
+    await finish(f, 'storage rejects stale quote, closes confirmation, and sends a fresh quote only after explicit reconfirmation');
+  }
+
+  {
+    const settings = await fixture();
+    await settings.page.goto(`${origin}/browsers/${instance.id}/settings`);
+    await settings.page.getByRole('button', { name: 'Verify IP', exact: true }).waitFor();
+    assert.equal(await settings.page.getByRole('button', { name: /new IP/i }).count(), 0, 'A browser keeps its IP: there is no new-IP request');
+    assert.equal(await settings.page.getByText('Browser language', { exact: true }).count(), 0, 'Chrome uses its default language');
+    await settings.page.goto(`${origin}/browsers/new`);
+    await settings.page.getByRole('dialog').getByRole('button', { name: 'Create browser', exact: true }).waitFor();
+    assert.equal(await settings.page.getByText(/Browser language|Advanced/).count(), 0, 'Creating asks for no browser language');
+    assert.equal(settings.state.requests.length, 0);
+    await finish(settings, 'settings and create offer neither a browser language nor a new IP');
   }
 
   {
@@ -355,9 +367,10 @@ try {
   await deletion.page.getByText('Permanently deletes this browser, its data and sign-ins. This cannot be undone.', { exact: true }).waitFor();
   const deleteButton = deletion.page.getByRole('button', { name: 'Delete browser', exact: true });
   assert.equal(await deleteButton.isDisabled(), true);
-  await deletion.page.locator('#confirm-delete').fill('Wrong name');
+  const typed = deletion.page.getByLabel(`Type “${instance.name}” to confirm`, { exact: true });
+  await typed.fill('Wrong name');
   assert.equal(await deleteButton.isDisabled(), true);
-  await deletion.page.locator('#confirm-delete').fill(instance.name);
+  await typed.fill(instance.name);
   assert.equal(deletion.state.requests.length, 0, 'Typing confirmation must not delete automatically');
   await deleteButton.click();
   await deletion.page.waitForURL('**/browsers');
@@ -366,23 +379,33 @@ try {
 
   const cardDelete = await fixture();
   await cardDelete.page.goto(`${origin}/browsers`);
-  for (const accepted of [false, true]) {
+  for (const confirmed of [false, true]) {
     await cardDelete.page.getByRole('button', { name: 'More actions', exact: true }).click();
-    const confirmation = cardDelete.page.waitForEvent('dialog');
-    const clicked = cardDelete.page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
-    const dialog = await confirmation;
-    assert.match(dialog.message(), /Permanently delete/);
-    assert.match(dialog.message(), /This cannot be undone/);
-    const deletedResponse = accepted ? cardDelete.page.waitForResponse((response) => response.request().method() === 'DELETE') : null;
-    if (accepted) await dialog.accept();
-    else await dialog.dismiss();
-    await clicked;
-    if (accepted) await deletedResponse;
-    else assert.equal(cardDelete.state.requests.length, 0, 'Cancelling must not delete');
+    await cardDelete.page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+    const dialog = cardDelete.page.getByRole('dialog', { name: `Delete “${instance.name}”?` });
+    await dialog.getByText('Permanently deletes this browser, its data and sign-ins. This cannot be undone.', { exact: true }).waitFor();
+    const field = dialog.getByLabel(`Type “${instance.name}” to confirm`, { exact: true });
+    const confirm = dialog.getByRole('button', { name: 'Delete browser', exact: true });
+    assert.equal(await field.inputValue(), '', 'The name is never already typed');
+    assert.equal(await confirm.isDisabled(), true);
+    await field.fill(instance.name.toUpperCase());
+    assert.equal(await confirm.isDisabled(), true, 'Only the exact name confirms');
+    if (!confirmed) {
+      await field.fill(instance.name);
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).first().click();
+      await dialog.waitFor({ state: 'hidden' });
+      assert.equal(cardDelete.state.requests.length, 0, 'Cancelling must not delete');
+      continue;
+    }
+    await field.fill(instance.name);
+    assert.equal(cardDelete.state.requests.length, 0, 'Typing the name must not delete by itself');
+    const deletedResponse = cardDelete.page.waitForResponse((response) => response.request().method() === 'DELETE');
+    await confirm.click();
+    await deletedResponse;
+    await dialog.waitFor({ state: 'hidden' });
   }
-  assert.equal(cardDelete.state.requests.length, 1);
-  assert.equal(cardDelete.state.requests[0].method, 'DELETE');
-  await finish(cardDelete, 'card deletion explains permanence, cancellation sends nothing, and acceptance sends one DELETE');
+  assert.deepEqual(cardDelete.state.requests.map((request) => [request.method, request.path]), [['DELETE', `/api/v1/instances/${instance.id}`]]);
+  await finish(cardDelete, 'card deletion asks for the browser name like the danger zone, cancellation sends nothing, and confirmation sends one DELETE');
 
   for (const recoverable of [false, true]) {
     const pending = await fixture({ status: 'deleting', purgeAfter: new Date(Date.now() + (recoverable ? 7 : -1) * 86_400_000).toISOString() });
@@ -400,11 +423,9 @@ try {
   }
 
   const missing = await fixture({ noPrice: true });
-  await missing.page.goto(`${origin}/browsers/${instance.id}/settings`);
-  assert.equal(await missing.page.getByRole('button', { name: 'Request a new IP', exact: true }).isDisabled(), true);
   await missing.page.goto(`${origin}/browsers/new`);
   assert.equal(await missing.page.getByRole('button', { name: 'Create browser', exact: true }).isDisabled(), true);
-  await finish(missing, 'missing prices block create and IP change before confirmation');
+  await finish(missing, 'missing prices block create before confirmation');
 
   const phone = await fixture({ width: 390 });
   await phone.page.goto(`${origin}/billing`);

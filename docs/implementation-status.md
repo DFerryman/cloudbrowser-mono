@@ -19,8 +19,8 @@ Cloudflare deployment.
   `fake` executor with client-token idempotency, tag guardrails, credential modes (runtime cannot
   delete; reaper cannot create; read-only), and fault injection.
 - **Engine** (`apps/engine`): consumes the `cloudbrowser-operations` queue; hosts the `EventHub`
-  Durable Object for SSE; `create`, `start`, `stop`, `change_ip`, `delete`, `undelete`, `purge`,
-  `restore` and `recover`
+  Durable Object for SSE; `create`, `start`, `stop`, `delete`, `undelete`, `purge`, `restore` and
+  `recover` (`change_ip` is retired: a request left by an older API ends without any step)
   with the write-ahead step journal, leases, ledger-before-call, lookup on unknown outcomes, retries
   per error class, IP screening (never reuse an address), binding check and in-Chrome IP check,
   honest states (*Waiting for capacity*, *Provider issue*, *Needs attention*, *Failed*), idle sleep,
@@ -43,7 +43,7 @@ Cloudflare deployment.
   Sheets are stored in `provider_prices`, refreshed every 12 hours (or from the console), and a
   region without a price takes no new browsers. Customer prices are cost times a markup kept in
   `pricing_settings` and set in the console (default 120%). Every price the user is shown before
-  an action (create, more storage, snapshots, a new IP) carries a version; the API refuses the
+  an action (create, more storage, snapshots) carries a version; the API refuses the
   action with `price_changed` if prices moved in between.
 - **Prepaid balance with Creem** (page 6): users buy one-time top-up products through Creem's
   hosted checkout; the amount credited is the verified checkout's actual paid USD amount
@@ -117,7 +117,8 @@ Cloudflare deployment.
   email codes sent with Cloudflare Email Service (invite-only), Workers Rate Limiting on sign-in and
   writes, the IP echo endpoint, Idempotency-Key on lifecycle calls, admission checks (plan, region,
   global caps, quota headroom, spend guard, creation freeze), viewer sessions with take-over and
-  idle heartbeats, IP verify, IP change requests and SSE with `Last-Event-ID` resume. Viewer open
+  idle heartbeats, IP verify and SSE with `Last-Event-ID` resume (new-IP requests were removed;
+  the route answers 410). Viewer open
   requests accept a stable Idempotency-Key so a timed-out retry cannot take over its own session.
   Paid access renewal deadlines are separate from actual credit-depletion warnings.
 - **Session gateway** (`apps/gateway`): a Worker on `connect.example.com` plus one `InstanceGateway`
@@ -215,8 +216,9 @@ Cloudflare deployment.
   offered, regions with price and latency, permanence note, collapsed advanced options, a cost
   summary with the full breakdown on request, actions and balance status in a footer that stays
   visible; a bottom sheet on phones), four progress steps and auto-open when ready, session view (44 px toolbar, region/IP chip, every state overlay, idle
-  warning, fullscreen with Keyboard Lock), browser settings (identity, verify IP, request new IP,
-  backups with restore, behavior, activity, delete with type-to-confirm), account page, Simplified Chinese and English.
+  warning, fullscreen with Keyboard Lock), browser settings (identity, verify IP,
+  backups with restore, behavior, activity, delete with type-to-confirm, also from a card's menu;
+  no per-browser language: Chrome uses English), account page, Simplified Chinese and English.
 
 ## Deviations from the plan, and why
 

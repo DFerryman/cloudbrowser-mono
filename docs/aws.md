@@ -397,5 +397,4 @@ on all three Workers (step 6), then switch `usw1` as in step 8.
 ## Not done yet
 
 - A pre-built golden image (`images/vm`, Packer), so new browsers skip the first-boot install.
-- After a confirmed IP change, the live view needs one sleep and wake to advertise the new IP.
 - Signed images (cosign) that the agent checks before running them.

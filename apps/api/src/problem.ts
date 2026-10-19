@@ -15,7 +15,6 @@ const TITLES: Record<ErrorType, string> = {
   capacity_unavailable: 'Waiting for capacity',
   spend_guard_active: 'Temporarily unavailable',
   creation_frozen: 'Temporarily unavailable',
-  ip_change_limit: 'IP change limit reached',
   viewer_unavailable: 'Live view unavailable',
   rate_limited: 'Too many requests',
   hours_exhausted: 'Active hours used up',

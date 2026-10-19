@@ -113,6 +113,23 @@ describe('browsers', () => {
     expect(third).toMatchObject({ status: 403, body: { type: 'plan_limit', limit: 'instances' } });
   });
 
+  it('wakes one browser at a time under the default running limit, and says how to wake another', async () => {
+    const ids: string[] = [];
+    for (const k of ['a', 'b']) {
+      ids.push((await t.call('POST', '/api/v1/instances', { name: k, regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': k })).body.instanceId);
+      await t.settle();
+      await t.call('POST', `/api/v1/instances/${ids.at(-1)}/stop`, undefined, { 'idempotency-key': `stop-${k}` });
+      await t.settle();
+    }
+    expect((await t.call('POST', `/api/v1/instances/${ids[0]}/start`, undefined, { 'idempotency-key': 'start-a' })).status).toBe(202);
+    await t.settle();
+    const second = await t.call('POST', `/api/v1/instances/${ids[1]}/start`, undefined, { 'idempotency-key': 'start-b' });
+    expect(second).toMatchObject({ status: 403, body: { type: 'plan_limit', limit: 'running', detail: 'Your account can run 1 browser at a time. Put another browser to sleep, then try again.' } });
+    await t.call('POST', `/api/v1/instances/${ids[0]}/stop`, undefined, { 'idempotency-key': 'stop-a2' });
+    await t.settle();
+    expect((await t.call('POST', `/api/v1/instances/${ids[1]}/start`, undefined, { 'idempotency-key': 'start-b2' })).status).toBe(202);
+  });
+
   it('allows replacement browsers regardless of daily create history or obsolete daily-cap settings', async () => {
     const body = { name: 'Work', regionId: 'tyo1', storageGb: 10, priceVersion: await quote() };
     const first = await t.call('POST', '/api/v1/instances', body, { 'idempotency-key': 'daily-first' });
@@ -183,11 +200,14 @@ describe('browsers', () => {
     expect((await t.call('PATCH', `/api/v1/instances/${id}`, { videoQuality: 'medium', videoAuto: false })).body).toMatchObject({ videoQuality: 'medium', videoAuto: false });
     expect((await t.call('PATCH', `/api/v1/instances/${id}`, { videoQuality: '4k' })).status).toBe(400);
 
-    expect((await t.call('POST', `/api/v1/instances/${id}/ip-change-requests`, {}, { 'idempotency-key': 'ip0' })).status).toBe(400);
-    expect((await t.call('POST', `/api/v1/instances/${id}/ip-change-requests`, { confirm: true, priceVersion: await quote() }, { 'idempotency-key': 'ip1' })).status).toBe(202);
-    await t.settle();
-    const limited = await t.call('POST', `/api/v1/instances/${id}/ip-change-requests`, { confirm: true, priceVersion: await quote() }, { 'idempotency-key': 'ip2' });
-    expect(limited.body.type).toBe('ip_change_limit');
+    // The browser language and new-IP requests were removed: the field is refused, the route is gone.
+    expect(inst).not.toHaveProperty('locale');
+    expect((await t.call('PATCH', `/api/v1/instances/${id}`, { locale: 'zh-CN' })).status).toBe(400);
+    const ipBefore = inst.ipAddress;
+    expect(await t.call('POST', `/api/v1/instances/${id}/ip-change-requests`, { confirm: true, priceVersion: await quote() }, { 'idempotency-key': 'ip1' })).toMatchObject({ status: 410, body: { type: 'not_found' } });
+    expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM operations WHERE kind = 'change_ip'").get()).toEqual({ n: 0 });
+    expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM caps WHERE metric = 'ip_changes_per_month'").get()).toEqual({ n: 0 });
+    expect((await t.call('GET', `/api/v1/instances/${id}`)).body.ipAddress).toBe(ipBefore);
 
     expect((await t.call('DELETE', `/api/v1/instances/${id}`, undefined, { 'idempotency-key': 'd1' })).status).toBe(202);
     await t.settle();
@@ -226,7 +246,7 @@ describe('browsers', () => {
     expect(Object.keys(doc.paths).some((p) => p.includes('/backups'))).toBe(false);
   });
 
-  it('requires a current quote for creating, adding storage and a new IP', async () => {
+  it('requires a current quote for creating and adding storage', async () => {
     const create = { name: 'Quoted', regionId: 'tyo1', storageGb: 10 };
     expect((await t.call('POST', '/api/v1/instances', create, { 'idempotency-key': 'no-quote' })).status).toBe(400);
     const created = await t.call('POST', '/api/v1/instances', { ...create, priceVersion: await quote() }, { 'idempotency-key': 'quoted' });
@@ -234,11 +254,7 @@ describe('browsers', () => {
     const path = `/api/v1/instances/${created.body.instanceId}`;
     expect((await t.call('PATCH', path, { backupsEnabled: true })).status).toBe(400);
     expect((await t.call('POST', `${path}/storage`, { sizeGb: 11 }, { 'idempotency-key': 'resize-no-quote' })).status).toBe(400);
-    expect((await t.call('POST', `${path}/ip-change-requests`, { confirm: true }, { 'idempotency-key': 'ip-no-quote' })).status).toBe(400);
-    expect((await t.call('POST', `${path}/ip-change-requests`, { confirm: true, priceVersion: 'stale' }, { 'idempotency-key': 'ip-stale' })).body.type).toBe('price_changed');
-    t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()}) ON CONFLICT(key) DO UPDATE SET value = 'true'`);
-    expect((await t.call('POST', `${path}/ip-change-requests`, { confirm: true, priceVersion: await quote() }, { 'idempotency-key': 'ip-unpaid' })).body.type).toBe('insufficient_balance');
-    expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM operations WHERE kind IN ('change_ip', 'resize_volume')").get()).toEqual({ n: 0 });
+    expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM operations WHERE kind = 'resize_volume'").get()).toEqual({ n: 0 });
     expect((await t.call('GET', path)).body).not.toHaveProperty('backupsEnabled');
   });
 
@@ -305,6 +321,7 @@ describe('browsers', () => {
     for (const suffix of ['', '/storage', '/usage', '/backups', '/sessions']) expect((await t.call('GET', `${path}${suffix}`)).status).toBe(404);
     for (const [suffix, body] of [
       ['/storage', { sizeGb: 20, priceVersion: await quote() }],
+      // Removed, but still answers 404 rather than 410 for someone else's browser.
       ['/ip-change-requests', { confirm: true, priceVersion: await quote() }],
       ['/sessions', undefined],
     ] as const) expect((await t.call('POST', `${path}${suffix}`, body, { 'idempotency-key': `other${suffix}` })).status).toBe(404);
@@ -316,7 +333,8 @@ describe('browsers', () => {
   it('serves the OpenAPI document', async () => {
     const doc = await t.call('GET', '/api/v1/openapi.json');
     expect(doc.status).toBe(200);
-    expect(Object.keys(doc.body.paths)).toContain('/api/v1/instances/{id}/ip-change-requests');
+    expect(Object.keys(doc.body.paths)).toContain('/api/v1/instances/{id}/storage');
+    expect(Object.keys(doc.body.paths)).not.toContain('/api/v1/instances/{id}/ip-change-requests');
   });
 });
 

@@ -7,7 +7,6 @@ export const Entitlements = z.object({
   maxBrowsers: z.number().int(),
   maxRunning: z.number().int(),
   idleTimeoutMaxS: z.number().int(),
-  ipChangesPerMonth: z.number().int(),
   /** The most a browser's storage can grow to, in GB. */
   maxStorageGb: z.number().int(),
 });

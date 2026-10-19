@@ -149,7 +149,8 @@ export const regions = sqliteTable('regions', {
 
 export type Fingerprint = {
   timezone: string;
-  locale: string;
+  /** Older rows only: the removed per-browser language setting. */
+  locale?: string;
   screen: string;
   chromeMajor: number | null;
 };
@@ -175,7 +176,9 @@ export const browserInstances = sqliteTable(
     providerReleasedAt: ts('provider_released_at'),
     desiredState: text('desired_state').notNull(),
     idleTimeoutS: integer('idle_timeout_s').notNull(),
-    locale: text('locale').notNull(),
+    // The per-browser language setting was removed; Chrome uses its default (English). Older API
+    // versions still write this column, so it stays until they can no longer be rolled back to.
+    locale: text('locale').notNull().default('en-US'),
     screen: text('screen').notNull(),
     videoQuality: text('video_quality').notNull().default('full'),
     videoAuto: integer('video_auto', { mode: 'boolean' }).notNull().default(true),

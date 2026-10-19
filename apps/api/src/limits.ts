@@ -1,6 +1,6 @@
 import { MICROS_PER_USD, TRIAL, type Entitlements } from '@cloudbrowser/contracts';
 import { awsInventory, billingRequired, blocksRegion, convertTrialStatements, launchHealthFor, openProviderIssue, prepaidBalance, reservationQuote, reservationWrite, pricingSettings, schema, userCaps as sharedUserCaps, type Db } from '@cloudbrowser/db';
-import { and, desc, eq, gte, inArray, ne, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 import { storageLimits } from './pricing.js';
 import { problem } from './problem.js';
 
@@ -30,7 +30,6 @@ export async function entitlementsFor(db: Db, userId: string): Promise<Entitleme
     maxBrowsers: c.get('instances') ?? 0,
     maxRunning: c.get('running') ?? 0,
     idleTimeoutMaxS: c.get('idle_timeout_max_s') ?? 1800,
-    ipChangesPerMonth: c.get('ip_changes_per_month') ?? 0,
     maxStorageGb: (await storageLimits(db, userId)).maxGb,
   };
 }
@@ -218,7 +217,7 @@ export async function admitStart(db: Db, userId: string, instanceId: string, reg
   if (inst?.suspendedAt) throw problem(403, 'suspended', 'This browser is suspended. Contact support.');
   const c = await userCaps(db, userId);
   if ((c.get('running') ?? 0) === 0) {
-    throw problem(403, 'plan_limit', 'Your account cannot run browsers right now. Contact support; data and IPs are kept.', { limit: 'running' });
+    throw problem(403, 'plan_limit', 'Your account cannot run browsers right now. Contact support; data and IPs are kept.', { limit: 'running_disabled' });
   }
   if (inst && isTrial(inst) && inst.trialState === 'active' && trialSecondsLeft(inst) > 0) {
     // Free trial minutes left: waking is free.
@@ -232,7 +231,8 @@ export async function admitStart(db: Db, userId: string, instanceId: string, reg
   const others = and(ne(browserInstances.id, instanceId), inArray(browserInstances.status, RUNNING_STATUSES));
   const mine = await count(db, and(eq(browserInstances.userId, userId), others));
   if (mine >= (c.get('running') ?? 0)) {
-    throw problem(403, 'plan_limit', `Your account allows ${c.get('running') ?? 0} running browser(s) at a time. Put another one to sleep first.`, {
+    const n = c.get('running') ?? 0;
+    throw problem(403, 'plan_limit', `Your account can run ${n} browser${n === 1 ? '' : 's'} at a time. Put another browser to sleep, then try again.`, {
       limit: 'running',
     });
   }
@@ -244,25 +244,6 @@ export async function admitStart(db: Db, userId: string, instanceId: string, reg
   const global = await capsFor(db, ['global']);
   if (!providerManaged && (await count(db, others)) >= (global.get('running') ?? Infinity)) {
     throw problem(503, 'capacity_unavailable', 'We are busy right now. Try again in a few minutes.');
-  }
-}
-
-export async function admitIpChange(db: Db, userId: string, now: Date) {
-  const c = await userCaps(db, userId);
-  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const [row] = await db
-    .select({ n: sql<number>`count(*)` })
-    .from(operations)
-    .where(
-      and(
-        eq(operations.userId, userId),
-        eq(operations.kind, 'change_ip'),
-        gte(operations.createdAt, monthStart),
-        notInArray(operations.status, ['failed', 'canceled']),
-      ),
-    );
-  if (Number(row?.n ?? 0) >= (c.get('ip_changes_per_month') ?? 0)) {
-    throw problem(429, 'ip_change_limit', 'You have used this month’s IP change requests.');
   }
 }
 

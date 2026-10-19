@@ -1,19 +1,16 @@
 import { useRegionInfo } from './hooks.js';
-import { IDLE_TIMEOUT_OPTIONS_S, VIDEO_QUALITIES, VIDEO_QUALITY_MAX_KBPS, type BrowserLocale, type Instance, type RegionPricing, type VideoQuality } from '@cloudbrowser/contracts';
-import { Button, cn, Dialog, Hint, Input, Label, Pagination, Section, Select, useToast } from '@cloudbrowser/ui';
+import { IDLE_TIMEOUT_OPTIONS_S, VIDEO_QUALITIES, VIDEO_QUALITY_MAX_KBPS, type VideoQuality } from '@cloudbrowser/contracts';
+import { Button, cn, Hint, Input, Label, Pagination, Section, Select, useToast } from '@cloudbrowser/ui';
 import type { MessageKey } from '../../messages/en.js';
 import { ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
-import { DocsLink } from '../../app/DocsLink.js';
 import { useI18n } from '../../lib/i18n.js';
 import { PAGE_SIZE, usePagerLabels } from '../../lib/paging.js';
-import { money } from '../../lib/money.js';
-import { isPriceChanged, useBilling, usePricing } from '../billing/hooks.js';
-import { canSpend } from '../billing/access.js';
-import { BalanceRequired } from '../billing/BalanceRequired.js';
 import { useManagedInstance } from './BrowserLayout.js';
-import { useLifecycle, useMe, useRecentSessions, useUpdateInstance, useVerifyIp } from './hooks.js';
+import { DeleteBrowserForm } from './DeleteBrowser.js';
+import { useMe, useRecentSessions, useUpdateInstance, useVerifyIp } from './hooks.js';
+import { regionPlace } from './region-names.js';
 
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
@@ -33,18 +30,12 @@ export function SettingsPage() {
   const navigate = useNavigate();
   const me = useMe();
   const verify = useVerifyIp();
-  const lifecycle = useLifecycle();
   const update = useUpdateInstance();
   const [sessionPage, setSessionPage] = useState(0);
   const sessions = useRecentSessions(i.id, sessionPage, PAGE_SIZE.sessions);
   const pagerLabels = usePagerLabels(false);
-  const pricing = usePricing();
-  const billing = useBilling();
   const region = useRegionInfo(i.regionId);
   const [name, setName] = useState(i.name);
-  const [ipQuote, setIpQuote] = useState<RegionPricing | null>(null);
-  const [ipError, setIpError] = useState<string | null>(null);
-  const [deleteText, setDeleteText] = useState('');
   useEffect(() => setName(i.name), [i.name]);
   useEffect(() => setSessionPage(0), [i.id]);
 
@@ -52,10 +43,7 @@ export function SettingsPage() {
   const save = (patch: Parameters<typeof update.mutate>[0]['patch']) =>
     update.mutate({ id: i.id, patch }, { onSuccess: () => toast(t('settings.saved')), onError: (e) => toast(errorMessage(e), 'error') });
   const maxIdle = me.data?.entitlements.idleTimeoutMaxS ?? 1800;
-  // A free trial browser keeps its IP until the user adds credit (page 6).
-  const onTrial = i.trial !== null && i.trial.state !== 'converted';
   const check = i.lastIpCheck;
-  const price = pricing.isError ? undefined : pricing.data?.find((p) => p.regionId === i.regionId);
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -67,9 +55,7 @@ export function SettingsPage() {
           <Row label={t('settings.ip')}>
             <span className="font-mono">{i.ipAddress ?? t('browsers.reservingIp')}</span>
           </Row>
-          <Row label={t('settings.location')}>
-            {{ AU: 'Australia', JP: 'Japan', US: 'United States' }[region.country]} · {region.city}
-          </Row>
+          <Row label={t('settings.location')}>{regionPlace(region, locale)}</Row>
           <Row label={t('settings.dedicatedSince')}>{fmt(i.dedicatedSince)}</Row>
           <Row label={t('settings.timezone')}>{region.timezone}</Row>
           <Row label={t('settings.lastCheck')}>
@@ -94,16 +80,8 @@ export function SettingsPage() {
           >
             {t('settings.verify')}
           </Button>
-          <Button disabled={!canSpend(billing.data) || !['running', 'sleeping'].includes(i.status) || onTrial || !price?.rates || !price.version} onClick={() => { setIpError(null); setIpQuote(price!); }}>
-            {t('settings.requestIp')}
-          </Button>
-          {onTrial ? (
-            <span className="text-xs text-subtle">{t('settings.ipTrial')}</span>
-          ) : i.status !== 'running' ? (
-            <span className="text-xs text-subtle">{t('settings.verifyRunningOnly')}</span>
-          ) : null}
+          {i.status !== 'running' ? <span className="text-xs text-subtle">{t('settings.verifyRunningOnly')}</span> : null}
         </div>
-        {ipError ? <p role="alert" className="mt-2 text-sm text-error">{ipError}</p> : null}
       </Section>
 
       <div className="space-y-4">
@@ -126,14 +104,6 @@ export function SettingsPage() {
                     {t('settings.minutes', { n: s / 60 })}
                   </option>
                 ))}
-              </Select>
-            </div>
-            <div>
-              <Label htmlFor="locale">{t('settings.language')}</Label>
-              <Select id="locale" value={i.locale} onChange={(e) => save({ locale: e.target.value as BrowserLocale })}>
-                <option value="zh-CN">简体中文</option>
-                <option value="en-US">English (US)</option>
-                <option value="ja-JP">日本語</option>
               </Select>
             </div>
             <div className="sm:col-span-2">
@@ -178,54 +148,9 @@ export function SettingsPage() {
       </div>
 
       <Section title={t('settings.danger')} description={t('settings.deleteBody')} className="border-error/40 lg:col-span-2">
-        <Label htmlFor="confirm-delete">{t('settings.deleteType', { name: i.name })}</Label>
-        <div className="flex max-w-xl gap-2">
-          <Input id="confirm-delete" value={deleteText} onChange={(e) => setDeleteText(e.target.value)} autoComplete="off" />
-          <Button
-            variant="danger"
-            disabled={deleteText !== i.name || (lifecycle.isPending && lifecycle.variables.action === 'delete') || i.status === 'deleting'}
-            onClick={() =>
-              lifecycle.mutate({ id: i.id, action: 'delete' }, { onSuccess: () => navigate('/browsers'), onError: (e) => toast(errorMessage(e), 'error') })
-            }
-          >
-            {t('settings.delete')}
-          </Button>
-        </div>
+        <DeleteBrowserForm instance={i} onDeleted={() => navigate('/browsers')} />
       </Section>
 
-      <Dialog open={ipQuote !== null} onOpenChange={(open) => !open && setIpQuote(null)} title={t('settings.requestIpTitle')} description={t('settings.requestIpBody')} closeLabel={t('common.cancel')}>
-        <BalanceRequired />
-        {ipQuote?.rates ? (
-          <p className="mb-4 rounded-[var(--radius-control)] bg-surface-2 px-3 py-2 text-sm">
-            {t('settings.requestIpCost', { amount: money(ipQuote.rates.ip, locale) })} <DocsLink to="browsers#new-ip" />
-          </p>
-        ) : null}
-        <div className="flex justify-end gap-2">
-          <Button onClick={() => setIpQuote(null)}>{t('common.cancel')}</Button>
-          <Button
-            variant="primary"
-            disabled={lifecycle.isPending || !ipQuote?.version || !canSpend(billing.data)}
-            onClick={() =>
-              lifecycle.mutate(
-                { id: i.id, action: 'ip-change', body: { priceVersion: ipQuote!.version! } },
-                {
-                  onSuccess: () => {
-                    setIpQuote(null);
-                    toast(t('settings.requestIpDone'));
-                  },
-                  onError: (e) => {
-                    if (isPriceChanged(e)) setIpQuote(null);
-                    setIpError(errorMessage(e));
-                    toast(errorMessage(e), 'error');
-                  },
-                },
-              )
-            }
-          >
-            {t('settings.requestIpConfirm')}
-          </Button>
-        </div>
-      </Dialog>
     </div>
   );
 }

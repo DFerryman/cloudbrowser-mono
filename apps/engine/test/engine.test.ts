@@ -348,40 +348,17 @@ describe('lifecycle', () => {
     expect((await w.placement())?.ipAddress).toBe(p.ipAddress);
   });
 
-  it('changes the IP only on request, and keeps the old one for 30 days', async () => {
-    const before = (await w.placement())!.ipAddress!;
-    const nextOctet = Number(before.split('.').at(-1)) === 1 ? 2 : 1;
-    w.random = () => (nextOctet - 0.5) / 254;
-    expect(await w.settle(await w.enqueue('inst1', 'change_ip'))).toEqual({ state: 'succeeded' });
-    const after = (await w.placement())!.ipAddress!;
-    expect(after).not.toBe(before);
-    const old = await w.db.select().from(resources).where(eq(resources.state, 'superseded'));
-    expect(old).toHaveLength(1);
-    expect(old[0]?.address).toBe(before);
-
-    await reaperTick(w.deps('reaper'));
-    expect(w.liveProvider().filter((r) => r.kind === 'ip')).toHaveLength(2);
-    w.advance(31 * 86_400_000);
-    await reaperTick(w.deps('reaper'));
-    expect(w.liveProvider().filter((r) => r.kind === 'ip')).toHaveLength(1);
-    const [oldRow] = await w.db.select().from(ipAddresses).where(eq(ipAddresses.address, before));
-    expect(oldRow?.instanceId).toBe('inst1');
-    expect(oldRow?.releasedAt).not.toBeNull();
-  });
-
-  it('puts the old IP back when verifying the new one fails', async () => {
-    const before = (await w.placement())!.ipAddress!;
-    w.random = (() => {
-      let x = 0.1;
-      return () => (x = (x + 0.37) % 1);
-    })();
-    w.faults = (m, ctx) => (m === 'verifyEgress' && ctx.operationId !== 'agent' && ctx.step === 'verify_binding' ? 'invalid' : null);
-    const r = await w.settle(await w.enqueue('inst1', 'change_ip'));
-    expect(r.state).toBe('failed');
-    expect((await w.placement())!.ipAddress).toBe(before);
-    w.faults = () => null;
-    const check = await checkInstanceIp(w.deps(), 'inst1');
-    expect(check?.ok).toBe(true);
+  it('ends a new-IP request left by an older API without touching the browser or its IP', async () => {
+    const before = (await w.placement())!;
+    const { status } = await w.instance();
+    const provider = w.liveProvider().length;
+    expect(await w.settle(await w.enqueue('inst1', 'change_ip'))).toMatchObject({ state: 'failed' });
+    expect(await w.db.select().from(operations).where(eq(operations.kind, 'change_ip'))).toEqual([
+      expect.objectContaining({ status: 'failed', error: 'This action is no longer available.' }),
+    ]);
+    expect((await w.instance()).status).toBe(status);
+    expect((await w.placement())!.ipAddress).toBe(before.ipAddress);
+    expect(w.liveProvider()).toHaveLength(provider);
   });
 
   it('soft-deletes, restores, and purges only after 7 days with the reaper', async () => {

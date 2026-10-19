@@ -19,7 +19,6 @@ export const ErrorType = z.enum([
   'capacity_unavailable',
   'spend_guard_active',
   'creation_frozen',
-  'ip_change_limit',
   'viewer_unavailable',
   'rate_limited',
   'hours_exhausted',

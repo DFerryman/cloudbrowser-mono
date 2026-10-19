@@ -53,8 +53,6 @@ export type VideoQuality = z.infer<typeof VideoQuality>;
 /** Most a level sends per second while the screen changes constantly (its encoder's target). */
 export const VIDEO_QUALITY_MAX_KBPS: Record<VideoQuality, number> = { full: 2000, high: 1200, medium: 700, low: 350 };
 
-export const BrowserLocale = z.enum(['zh-CN', 'en-US', 'ja-JP']);
-export type BrowserLocale = z.infer<typeof BrowserLocale>;
 
 export const InstanceName = z.string().trim().min(1).max(64);
 
@@ -76,7 +74,6 @@ export const Instance = z.object({
   statusReason: z.string().nullable(),
   desiredState: DesiredState,
   idleTimeoutS: z.number().int(),
-  locale: BrowserLocale,
   screen: ScreenSize,
   /** The sharpest picture the live view uses. */
   videoQuality: VideoQuality,
@@ -111,7 +108,6 @@ export const PriceVersion = z.string().min(1).max(200);
 export const CreateInstanceBody = z.object({
   name: InstanceName,
   regionId: RegionId,
-  locale: BrowserLocale.optional(),
   screen: ScreenSize.optional(),
   priceVersion: PriceVersion,
   /** Data volume size shown in the quote; must still match the default size when confirmed. */
@@ -127,19 +123,12 @@ export const UpdateInstanceBody = z
     name: InstanceName.optional(),
     idleTimeoutS: z.number().int().min(60).max(3600).optional(),
     screen: ScreenSize.optional(),
-    locale: BrowserLocale.optional(),
     videoQuality: VideoQuality.optional(),
     videoAuto: z.boolean().optional(),
     priceVersion: PriceVersion.optional(),
   })
   .strict();
 export type UpdateInstanceBody = z.infer<typeof UpdateInstanceBody>;
-
-export const IpChangeRequestBody = z.object({
-  /** Must be true: a new IP is only ever issued on a confirmed user request. */
-  confirm: z.literal(true),
-  priceVersion: PriceVersion,
-});
 
 /** Grow the data volume (never shrink). AWS allows one change every 6 hours. */
 export const ResizeStorageBody = z.object({

@@ -88,17 +88,6 @@ describe('operation preemption fences in-flight workers', () => {
     expect(await w.settle(deletion)).toEqual({ state: 'succeeded' });
   });
 
-  it('does not compensate a canceled IP change after a newer deletion wins', async () => {
-    const w = new World(); await w.settle(await w.seed()); const gate = barrier();
-    const job = await w.enqueue('change_ip');
-    vi.spyOn(HANDLERS.change_ip!, 'verify_binding').mockImplementation(async () => { await gate.pause(); throw new ExecutorError('invalid', 'late old failure'); });
-    const old = runOperation(w.deps(), job); await gate.entered;
-    const moved = w.calls.filter((x) => x === 'associateIp').length;
-    const deletion = await w.supersede(job, 'delete'); gate.release();
-    expect(await old).toEqual({ state: 'canceled' }); expect(w.calls.filter((x) => x === 'associateIp')).toHaveLength(moved);
-    expect((await w.instance()).status).toBe('deleting'); expect(await w.settle(deletion)).toEqual({ state: 'succeeded' });
-  });
-
   it('rechecks stop after the old start request drains instead of reporting sleeping too soon', async () => {
     const w = new World(); await w.settle(await w.seed()); await w.settle(await w.enqueue('stop'));
     await w.db.update(browserInstances).set({ desiredState: 'running' });
@@ -232,16 +221,18 @@ describe('operation preemption fences in-flight workers', () => {
     expect(w.calls.slice(before).some((x) => ['ensureStopped', 'ensureRunning', 'ensureVm', 'snapshot'].includes(x))).toBe(false);
   });
 
-  it('releases an unused IP allocated by an interrupted change without touching the current dedicated IP', async () => {
+  it('releases a disk restored by an interrupted recovery without touching the current placement', async () => {
     const w = new World(); await w.settle(await w.seed()); const gate = barrier(); let once = false;
     const [p] = await w.db.select().from(placements);
-    w.afterProvider = async (method) => { if (method === 'allocateIp' && !once) { once = true; await gate.pause(); } };
-    const change = await w.enqueue('change_ip'), old = runOperation(w.deps(), change); await gate.entered;
-    const stop = await w.supersede(change, 'stop'); await w.settle(stop); gate.release(); expect(await old).toEqual({ state: 'canceled' });
+    w.afterProvider = async (method) => { if (method === 'ensureVolumeFromSnapshot' && !once) { once = true; await gate.pause(); } };
+    const recover = await w.enqueue('recover'), old = runOperation(w.deps(), recover); await gate.entered;
+    const stop = await w.supersede(recover, 'stop'); await w.settle(stop); gate.release(); expect(await old).toEqual({ state: 'canceled' });
     await reaperTick(w.deps('reaper'));
-    const ips = [...w.store.records.values()].filter((r) => r.kind === 'ip');
-    expect(ips.find((ip) => ip.id === p!.ipAllocationId)?.state).not.toBe('deleted');
-    expect(ips.filter((ip) => ip.id !== p!.ipAllocationId).every((ip) => ip.state === 'deleted')).toBe(true);
+    const volumes = [...w.store.records.values()].filter((r) => r.kind === 'volume');
+    expect(volumes).toHaveLength(2);
+    expect(volumes.find((v) => v.id === p!.volumeId)?.state).not.toBe('deleted');
+    expect(volumes.filter((v) => v.id !== p!.volumeId).every((v) => v.state === 'deleted')).toBe(true);
+    expect([...w.store.records.values()].find((r) => r.id === p!.ipAllocationId)?.state).not.toBe('deleted');
   });
 
   it('queues a fenced stop when an already-sleeping browser VM appears running later', async () => {

@@ -12,7 +12,7 @@ import {
   type StepOutcome,
   type StepWait,
 } from './context.js';
-import { compensateChangeIp, HANDLERS } from './steps.js';
+import { HANDLERS } from './steps.js';
 import { operationFence } from './fencing.js';
 import { assertOperationFunded } from './prepaid.js';
 
@@ -105,15 +105,16 @@ async function runOwnedOperation(deps: EngineDeps, operationId: string): Promise
     return fail(deps, op, env, 'deadline', deadlineReason(op.kind as OperationKind));
   }
 
+  const steps = OPERATION_STEPS[op.kind as OperationKind] as readonly string[];
+  const handlers = HANDLERS[op.kind];
+  // A retired kind (e.g. change_ip) queued by an older API ends before any step and leaves the browser as it is.
+  if (!handlers || steps.length === 0) return fail(deps, op, null, 'invalid', 'This action is no longer available.');
+
   await env.assertActive();
   const transitional = TRANSITIONAL_STATUS[op.kind as OperationKind];
   if (transitional && env.instance.status !== transitional && op.attempt === 0) {
     await setInstanceStatus(deps, env, transitional, null);
   }
-
-  const steps = OPERATION_STEPS[op.kind as OperationKind] as readonly string[];
-  const handlers = HANDLERS[op.kind];
-  if (!handlers || steps.length === 0) return fail(deps, op, env, 'invalid', `Operation ${op.kind} is not supported yet.`);
 
   const journal = await db.select().from(operationSteps).where(eq(operationSteps.operationId, op.id));
   if (op.kind === 'create' && typeof op.params?.resumeCreateFrom === 'string') {
@@ -436,22 +437,13 @@ async function fail(
     source: 'reaper', severity: 'critical', title: `Browser cleanup incomplete: ${op.instanceId}`,
     detail: { instanceId: op.instanceId, operationId: op.id, errorClass, reason }, dedupeKey: `cleanup:${op.instanceId}`,
   }, deps.now());
-  if (env && op.kind === 'change_ip') {
-    try {
-      await compensateChangeIp(env);
-    } catch (e) {
-      if (e instanceof OperationSuperseded) throw e;
-      reason = `${reason} Restoring the previous IP also failed.`;
-      void e;
-    }
-  }
   const at = deps.now();
   let instanceStatus: string | null = null;
   if (env) {
     if (op.kind === 'create') instanceStatus = 'failed';
     // A failed resize leaves the browser as it was (the volume keeps its size); it is reported, not shown as a problem.
     else if (op.kind === 'delete') instanceStatus = 'deleting';
-    else if (op.kind === 'change_ip' || op.kind === 'purge' || op.kind === 'resize_volume') instanceStatus = null;
+    else if (op.kind === 'purge' || op.kind === 'resize_volume') instanceStatus = null;
     else instanceStatus = 'needs_attention';
   }
   const stmts = [

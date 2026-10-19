@@ -43,9 +43,8 @@ const refresh = (instanceId?: string) => {
  */
 export function useLifecycle() {
   return useMutation({
-    mutationFn: ({ id, action, body }: { id: string; action: 'start' | 'stop' | 'undelete' | 'delete'; body?: unknown } | { id: string; action: 'ip-change'; body: { priceVersion: string } }) => {
+    mutationFn: ({ id, action, body }: { id: string; action: 'start' | 'stop' | 'undelete' | 'delete'; body?: unknown }) => {
       if (action === 'delete') return api<Accepted>('DELETE', `/instances/${id}`, { idempotent: true });
-      if (action === 'ip-change') return api<Accepted>('POST', `/instances/${id}/ip-change-requests`, { idempotent: true, body: { confirm: true, ...body } });
       return api<Accepted>('POST', `/instances/${id}/${action}`, { idempotent: true, body });
     },
     onError: refreshChangedPrices,
@@ -65,7 +64,7 @@ export function useCreateInstance() {
 /** Rename and settings edits are reversible, so they update the cache optimistically. */
 export function useUpdateInstance() {
   return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: Partial<Pick<Instance, 'name' | 'idleTimeoutS' | 'screen' | 'locale' | 'videoQuality' | 'videoAuto'>> & { priceVersion?: string } }) =>
+    mutationFn: ({ id, patch }: { id: string; patch: Partial<Pick<Instance, 'name' | 'idleTimeoutS' | 'screen' | 'videoQuality' | 'videoAuto'>> & { priceVersion?: string } }) =>
       api<Instance>('PATCH', `/instances/${id}`, { body: patch }),
     onMutate: async ({ id, patch }) => {
       await Promise.all([queryClient.cancelQueries({ queryKey: keys.instances }), queryClient.cancelQueries({ queryKey: keys.instance(id) })]);

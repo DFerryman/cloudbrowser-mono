@@ -58,7 +58,6 @@ async function vmPricing(env: StepEnv, providerRegion: string) {
 }
 
 const MAX_IP_ROUNDS = 3;
-const OLD_IP_KEEP_DAYS = 30;
 
 // --- ledger ------------------------------------------------------------------------------------
 
@@ -609,85 +608,6 @@ async function createVm(env: StepEnv): Promise<StepOutcome> {
   return { result: { vmId: vm.vmId } };
 }
 
-// --- change_ip ---------------------------------------------------------------------------------
-
-async function associateNewIp(env: StepEnv): Promise<StepOutcome> {
-  const p = await loadPlacement(env);
-  const next = result<{ allocationId: string; address: string }>(env, 'allocate_ip');
-  const { db, now } = env.deps;
-  const previous = env.results.associate_ip_prepared ?? {
-    oldAllocationId: p.ipAllocationId,
-    oldAddress: p.ipAddress,
-  };
-  await env.executor.associateIp(env.ctx('associate_ip'), p.providerRegion, p.networkId ?? '', next);
-  await db.batch([
-    db
-      .update(placements)
-      .set({ ipAllocationId: next.allocationId, ipAddress: next.address })
-      .where(and(eq(placements.id, p.id), operationFence(env))),
-    // The old IP stays allocated and unattached for 30 days, then the reaper releases it.
-    db
-      .update(resources)
-      .set({ state: 'superseded', releaseAfter: new Date(now().getTime() + OLD_IP_KEEP_DAYS * 86_400_000) })
-      .where(
-        and(
-          eq(resources.instanceId, env.instance.id),
-          eq(resources.kind, 'ip'),
-          eq(resources.providerId, String(previous.oldAllocationId)), operationFence(env),
-        ),
-      ),
-  ]);
-  return { result: previous };
-}
-
-async function verifyNewIpInChrome(env: StepEnv): Promise<StepOutcome> {
-  if (env.instance.status !== 'running') return { result: { skipped: 'verified on next wake' } };
-  return verifyIpInChrome(env);
-}
-
-async function finishChangeIp(env: StepEnv): Promise<StepOutcome> {
-  const { address } = result<{ address: string }>(env, 'screen_ip');
-  const { db, now } = env.deps;
-  await db.batch([
-    db.update(ipAddresses).set({ assignedAt: now() }).where(eq(ipAddresses.address, address)),
-    db.insert(auditLog).values({
-      actor: env.op.userId ? `user:${env.op.userId}` : 'engine',
-      action: 'ip.changed',
-      target: `instance:${env.instance.id}`,
-      detail: { from: env.results.associate_ip?.oldAddress ?? null, to: address },
-      createdAt: now(),
-    }),
-  ]);
-  return finishWithStatus(env, env.instance.status);
-}
-
-/** Puts the old IP back when a change_ip fails after the swap (page 10). */
-export async function compensateChangeIp(env: StepEnv) {
-  const swapped = env.results.associate_ip as { oldAllocationId: string; oldAddress: string } | undefined;
-  if (!swapped) return;
-  const p = await loadPlacement(env);
-  const next = env.results.allocate_ip as { allocationId: string } | undefined;
-  await env.executor.associateIp(env.ctx('associate_ip', 'rollback'), p.providerRegion, p.networkId ?? '', {
-    allocationId: swapped.oldAllocationId,
-    address: swapped.oldAddress,
-  });
-  const { db } = env.deps;
-  await db.batch([
-    db
-      .update(placements)
-      .set({ ipAllocationId: swapped.oldAllocationId, ipAddress: swapped.oldAddress })
-      .where(and(eq(placements.id, p.id), operationFence(env))),
-    db
-      .update(resources)
-      .set({ state: 'active', releaseAfter: null })
-      .where(and(eq(resources.instanceId, env.instance.id), eq(resources.providerId, swapped.oldAllocationId), operationFence(env))),
-    db
-      .update(resources)
-      .set({ state: 'rejected' })
-      .where(and(eq(resources.instanceId, env.instance.id), eq(resources.providerId, next?.allocationId ?? ''), operationFence(env))),
-  ]);
-}
-
 // --- purge (reaper only) -----------------------------------------------------------------------
 
 const DELETE_ORDER: ResourceKind[] = ['vm', 'network_interface', 'volume', 'snapshot', 'ip'];
@@ -1116,11 +1036,11 @@ async function finishRecover(env: StepEnv): Promise<StepOutcome> {
   return finishWithStatus(env, 'running', { lastActiveAt: now() });
 }
 
-/** Canceled recovery/IP work must not leave unused paid assets allocated indefinitely. */
+/** Canceled recovery work must not leave unused paid assets allocated indefinitely. */
 async function finishStop(env: StepEnv): Promise<StepOutcome> {
   const oldId = env.op.params?.preemptedOperationId;
   const [interrupted] = typeof oldId === 'string' ? await env.deps.db.select({ kind: schema.operations.kind }).from(schema.operations).where(eq(schema.operations.id, oldId)) : [];
-  if (interrupted && ['recover', 'change_ip'].includes(interrupted.kind)) {
+  if (interrupted?.kind === 'recover') {
     await discoverInstanceResources(env, env.instance.id);
     const p = await currentPlacement(env);
     const keep = new Set([p?.vmId, p?.networkId, p?.volumeId, p?.ipAllocationId].filter((x): x is string => !!x));
@@ -1226,14 +1146,6 @@ export const HANDLERS: Record<string, Record<string, Handler>> = {
     ensure_stopped: ensureStopped,
     verify_binding: verifyBinding,
     finish: finishStop,
-  },
-  change_ip: {
-    allocate_ip: allocateIp,
-    screen_ip: screenIp,
-    associate_ip: associateNewIp,
-    verify_binding: verifyBinding,
-    verify_ip_in_chrome: verifyNewIpInChrome,
-    finish: finishChangeIp,
   },
   delete: {
     prepare_shutdown: prepareShutdown,

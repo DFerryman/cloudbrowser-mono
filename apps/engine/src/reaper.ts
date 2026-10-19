@@ -81,7 +81,7 @@ export async function reaperTick(deps: EngineDeps) {
   }
 
   // 3. IPs rejected by screening, and superseded resources past their keep period
-  //    (old IPs 30 days after change_ip).
+  //    (e.g. an old IP kept 30 days after the IP changes that existed until 2026-10).
   const eligible = await db
     .select()
     .from(resources)

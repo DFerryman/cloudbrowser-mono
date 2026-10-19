@@ -63,7 +63,7 @@ export async function reconcileReservations(deps: EngineDeps) {
 
 /** Called by operation fencing before any new provider-side cost; cleanup always remains possible. */
 export async function assertOperationFunded(env: StepEnv) {
-  if (!['create', 'start', 'recover', 'restore', 'undelete', 'change_ip', 'resize_volume'].includes(env.op.kind)) return;
+  if (!['create', 'start', 'recover', 'restore', 'undelete', 'resize_volume'].includes(env.op.kind)) return;
   const account = await prepaidBalance(env.deps.db, env.instance.userId);
   if (account.frozenAt) throw new StepFailed('Your account is frozen because of a payment dispute.');
   if (!(await billingRequired(env.deps.db))) return;

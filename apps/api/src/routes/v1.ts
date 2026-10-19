@@ -8,7 +8,6 @@ import {
   Instance,
   InstanceStorage,
   InstanceUsage,
-  IpChangeRequestBody,
   IpCheck,
   Me,
   Operation,
@@ -21,7 +20,6 @@ import {
   UpdateInstanceBody,
   ViewerSession,
   signViewerToken,
-  type BrowserLocale,
   type RegionId,
 } from '@cloudbrowser/contracts';
 import { turnIceServers } from '../turn.js';
@@ -29,7 +27,7 @@ import { callerLocation, regionViews } from '../availability.js';
 import { awsInventory, billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, sha256Hex, settleRunningStatements } from '@cloudbrowser/db';
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import type { AppEnv } from '../env.js';
-import { admitCreate, admitInstanceSpend, admitIpChange, admitSpend, admitStart, claimTrial, entitlementsFor, isTrial, regionAcceptingNew, trialSecondsLeft, usage } from '../limits.js';
+import { admitCreate, admitInstanceSpend, admitSpend, admitStart, claimTrial, entitlementsFor, isTrial, regionAcceptingNew, trialSecondsLeft, usage } from '../limits.js';
 import { currentBurn, instancePrice, regionPrice, requirePrice, storageLimits } from '../pricing.js';
 import { instanceUsage, monthOf } from '../usage.js';
 import { billingRoute, PageQuery } from './billing.js';
@@ -177,7 +175,6 @@ v1.openapi(
 
     const [info] = await db.select().from(regions).where(eq(regions.id, body.regionId));
     if (!info) throw problem(409, 'region_unavailable');
-    const locale: BrowserLocale = body.locale ?? 'en-US';
     const screen = body.screen ?? 'auto';
     const instanceId = newId(now.getTime());
     const funding = !trial && (await billingRequired(db)) ? await reservationQuote(db, body.regionId, { storageGb, backupsEnabled: false }) : null;
@@ -201,9 +198,8 @@ v1.openapi(
               backupsEnabled: false,
               idleTimeoutS: trial ? TRIAL.idleTimeoutS : DEFAULT_IDLE_TIMEOUT_S,
               ...(trial ? { trialState: 'active' } : {}),
-              locale,
               screen,
-              fingerprint: { timezone: info.timezone, locale, screen, chromeMajor: null },
+              fingerprint: { timezone: info.timezone, screen, chromeMajor: null },
               createdAt: now,
               updatedAt: now,
             }),
@@ -267,7 +263,6 @@ v1.openapi(
     const now = new Date();
     const fingerprint = {
       ...row.fingerprint,
-      ...(body.locale ? { locale: body.locale } : {}),
       ...(body.screen ? { screen: body.screen } : {}),
     };
     await db.batch([
@@ -428,56 +423,13 @@ v1.openapi(
   },
 );
 
-v1.openapi(
-  createRoute({
-    method: 'post',
-    path: '/instances/{id}/ip-change-requests',
-    tags: ['ip'],
-    description: 'User-confirmed request for a new IP in the same region. Never automatic.',
-    request: {
-      params: IdParam,
-      headers: IdempotencyHeader,
-      body: { content: { 'application/json': { schema: IpChangeRequestBody } }, required: true },
-    },
-    responses: { ...accepted, ...errors, 429: problemResponse('Monthly limit reached') },
-  }),
-  async (c) => {
-    const db = c.get('db');
-    const user = c.get('user');
-    const id = c.req.valid('param').id;
-    const key = requireIdempotencyKey(c);
-    const route = `POST /v1/instances/${id}/ip-change-requests`;
-    const earlier = await replayed(db, user.id, key, route);
-    if (earlier) return c.json(earlier, 202);
-    const row = await ownedInstance(c, id);
-    if (row.status !== 'running' && row.status !== 'sleeping') {
-      throw problem(409, 'invalid_state', 'A new IP can be requested while the browser is running or sleeping.');
-    }
-    if (isTrial(row)) throw problem(409, 'invalid_state', 'A new IP is not part of the free trial. Add credit to keep this browser first.');
-    await requirePrice(db, row.regionId, c.req.valid('json').priceVersion);
-    await admitInstanceSpend(db, user.id, row, 'request a new IP');
-    await admitIpChange(db, user.id, new Date());
-    const result = await enqueueOperation(c, {
-      instanceId: row.id,
-      kind: 'change_ip',
-      key,
-      route,
-      params: { confirmedBy: user.id },
-      after: [
-        db.insert(auditLog).values({
-          actor: `user:${user.id}`,
-          action: 'ip.change_requested',
-          target: `instance:${row.id}`,
-          createdAt: new Date(),
-        }),
-      ],
-    });
-    return c.json(result, 202);
-  },
-);
 
-// Old client routes remain tombstoned; public snapshot/backup features have been removed.
+// Old client routes remain tombstoned; public snapshot/backup and new-IP features have been removed.
 // Ownership is checked first so this response cannot reveal another user's browser.
+v1.post('/instances/:id/ip-change-requests', async (c) => {
+  await ownedInstance(c, c.req.param('id'));
+  throw problem(410, 'not_found', 'Requesting a new IP is no longer available. A browser keeps its dedicated IP.');
+});
 v1.get('/instances/:id/backups', async (c) => {
   await ownedInstance(c, c.req.param('id'));
   throw problem(410, 'not_found', 'Browser backups are no longer available.');

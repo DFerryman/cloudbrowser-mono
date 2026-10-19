@@ -148,7 +148,6 @@ describe('seven-day prepaid resource deposits', () => {
       () => t.call('POST', `/api/v1/instances/${id}/start`, undefined, { 'idempotency-key': 'empty:start' }),
       () => t.call('POST', `/api/v1/instances/${id}/sessions`),
       () => t.call('POST', `/api/v1/instances/${id}/storage`, { sizeGb: 20, priceVersion }, { 'idempotency-key': 'empty:grow' }),
-      () => t.call('POST', `/api/v1/instances/${id}/ip-change-requests`, { confirm: true, priceVersion }, { 'idempotency-key': 'empty:ip' }),
     ];
     for (const request of requests) expect(await request()).toMatchObject({ status: 402, body: { type: 'insufficient_balance' } });
     await t.settle();

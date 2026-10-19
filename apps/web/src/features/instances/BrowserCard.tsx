@@ -2,9 +2,11 @@ import { useRegionInfo } from './hooks.js';
 import type { Instance } from '@cloudbrowser/contracts';
 import { Button, Card, Menu, MenuItem, MenuSeparator, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
 import { BarChart3, Moon, MoreHorizontal, Pencil, Settings, Trash2 } from 'lucide-react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useI18n, useRelativeTime } from '../../lib/i18n.js';
 import { CreateProgress } from './CreateProgress.js';
+import { DeleteBrowserDialog } from './DeleteBrowser.js';
 import { useLifecycle, useUpdateInstance } from './hooks.js';
 import { STATUS_TONE, statusKey } from './status.js';
 import { TrialBadge } from './Trial.js';
@@ -21,6 +23,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
   const update = useUpdateInstance();
   const billing = useBilling();
   const region = useRegionInfo(i.regionId);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const run = (p: Promise<unknown>) => p.catch((e) => toast(errorMessage(e), 'error'));
 
   const deleted = i.status === 'deleting';
@@ -124,14 +127,13 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
           <MenuItem
             danger
             disabled={deleted || (lifecycle.isPending && lifecycle.variables.action === 'delete')}
-            onSelect={() => {
-              if (window.confirm(t('browsers.deleteConfirm', { name: i.name }))) void run(lifecycle.mutateAsync({ id: i.id, action: 'delete' }));
-            }}
+            onSelect={() => setConfirmDelete(true)}
           >
             <Trash2 /> {t('browsers.delete')}
           </MenuItem>
         </Menu>
       </div>
+      <DeleteBrowserDialog instance={i} open={confirmDelete} onClose={() => setConfirmDelete(false)} />
     </Card>
   );
 }

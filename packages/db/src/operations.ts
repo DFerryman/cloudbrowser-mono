@@ -7,7 +7,6 @@ export const OPERATION_DEADLINE_MIN: Record<string, number> = {
   stop: 5,
   recover: 60,
   restore: 60,
-  change_ip: 20,
   delete: 5,
   undelete: 5,
   purge: 60,

@@ -57,7 +57,7 @@ async function fixture({ holdHeartbeat = false, heartbeatDenied = false, holdCon
       if (url.pathname === '/api/v1/me') body = { user: { id: 'u1', name: 'Fixture', email: 'fixture@example.test' }, entitlements: {}, usage: {} };
       else if (url.pathname === '/api/v1/instances/i1' && req.method() === 'GET') body = {
         id: 'i1', name: 'Fixture browser', regionId: 'syd1', status: 'running', desiredState: 'running',
-        idleTimeoutS: 600, locale: 'en-US', screen: 'auto', ipAddress: '192.0.2.1', createdAt: new Date().toISOString(),
+        idleTimeoutS: 600, screen: 'auto', ipAddress: '192.0.2.1', createdAt: new Date().toISOString(),
         lastIpCheck: { ok: true }, lastActiveAt: new Date().toISOString(), currentOperation: null,
       };
       else if (url.pathname === '/api/v1/instances/i1/sessions') {
@@ -76,6 +76,10 @@ async function fixture({ holdHeartbeat = false, heartbeatDenied = false, holdCon
         body = { mode: 'webrtc', gatewayUrl: 'wss://nevazu.com/local-fixture', token: `token${state.connects}`, iceServers: [] };
       } else if (url.pathname.endsWith('/end')) return route.fulfill({ status: 204 });
       else if (url.pathname === '/api/v1/events') return route.fulfill({ contentType: 'text/event-stream', body: ': local fixture\n\n' });
+      else if (url.pathname === '/api/v1/regions') body = [{
+        id: 'syd1', name: 'AWS Sydney', country: 'AU', city: 'Sydney', timezone: 'Australia/Sydney', enabled: true, acceptingNew: true,
+        probeUrl: null, area: 'asia_pacific', availability: 'available', availabilityReason: null, launchVerifiedAt: null, estimatedRttMs: null,
+      }];
       else throw new Error(`Unhandled fixture API: ${req.method()} ${url.pathname}`);
       return route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
     }

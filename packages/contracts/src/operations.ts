@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+/** `change_ip` is retired: no longer created or run, kept so earlier operations still parse. */
 export const OperationKind = z.enum([
   'create',
   'start',
@@ -35,7 +36,7 @@ export const OPERATION_STEPS = {
   ],
   start: ['ensure_running', 'await_agent', 'verify_binding', 'verify_ip_in_chrome', 'finish'],
   stop: ['prepare_shutdown', 'ensure_stopped', 'verify_binding', 'finish'],
-  change_ip: ['allocate_ip', 'screen_ip', 'associate_ip', 'verify_binding', 'verify_ip_in_chrome', 'finish'],
+  change_ip: [],
   delete: ['prepare_shutdown', 'ensure_stopped', 'finish'],
   undelete: ['finish'],
   purge: ['delete_resources', 'finish'],

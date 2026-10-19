@@ -1,10 +1,10 @@
-import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
-import { Button, cn, Dialog, Hint, Input, Label, Select } from '@cloudbrowser/ui';
+import { CreateInstanceBody, DEFAULT_REGION, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
+import { Button, cn, Dialog, Hint, Input, Label } from '@cloudbrowser/ui';
 import { DocsLink } from '../../app/DocsLink.js';
 import { AlertCircle, ChevronRight, Gift, Wallet } from 'lucide-react';
 import { useEffect, useId, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
-import { useI18n, type Locale } from '../../lib/i18n.js';
+import { useI18n } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
 import { useBilling, usePricing } from '../billing/hooks.js';
 import { PriceBreakdown, PriceSource } from '../billing/PriceBreakdown.js';
@@ -14,13 +14,6 @@ import { useCreateInstance, useInstances, useMe, useRegions } from './hooks.js';
 import { RegionPicker } from './RegionPicker.js';
 import { regionPlace } from './region-names.js';
 
-
-const UI_TO_BROWSER_LOCALE: Record<Locale, BrowserLocale> = { en: 'en-US', 'zh-CN': 'zh-CN' };
-const LANGUAGES: { value: BrowserLocale; label: string }[] = [
-  { value: 'zh-CN', label: '简体中文' },
-  { value: 'en-US', label: 'English (US)' },
-  { value: 'ja-JP', label: '日本語' },
-];
 
 type Plan = 'trial' | 'paid';
 
@@ -41,18 +34,13 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
 
   const [name, setName] = useState('');
   const [regionId, setRegionId] = useState<Region['id']>(DEFAULT_REGION);
-  const [browserLocale, setBrowserLocale] = useState<BrowserLocale>(UI_TO_BROWSER_LOCALE[locale]);
-  const [advanced, setAdvanced] = useState(false);
   const [plan, setPlan] = useState<Plan>('paid');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) {
       setName(initialInstance?.name ?? `Browser ${(instances.data?.length ?? 0) + 1}`);
-      if (initialInstance) {
-        setRegionId(initialInstance.regionId);
-        setBrowserLocale(initialInstance.locale);
-      }
+      if (initialInstance) setRegionId(initialInstance.regionId);
       setError(null);
     }
   }, [open, initialInstance?.id]);
@@ -86,7 +74,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    const parsed = CreateInstanceBody.safeParse({ name, regionId, locale: browserLocale, priceVersion: price?.version ?? undefined, storageGb: trial ? b!.trial.storageGb : price?.defaultStorageGb, ...(trial ? { trial: true } : {}) });
+    const parsed = CreateInstanceBody.safeParse({ name, regionId, priceVersion: price?.version ?? undefined, storageGb: trial ? b!.trial.storageGb : price?.defaultStorageGb, ...(trial ? { trial: true } : {}) });
     if (!parsed.success) {
       setError(t('error.validation_failed'));
       return;
@@ -172,28 +160,6 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
             priceLabel={trial ? t('trial.free') : undefined}
           />
         </fieldset>
-
-        <div>
-          <button type="button" className="flex w-full items-center gap-1.5 text-left text-sm font-medium" aria-expanded={advanced} onClick={() => setAdvanced((a) => !a)}>
-            <ChevronRight className={cn('size-4 text-muted transition-transform', advanced && 'rotate-90')} aria-hidden />
-            {t('create.advanced')}
-            {!advanced ? (
-              <span className="ml-1 truncate font-normal text-muted">
-                · {LANGUAGES.find((l) => l.value === browserLocale)?.label ?? browserLocale}
-              </span>
-            ) : null}
-          </button>
-          {advanced ? (
-            <div className="mt-3 grid gap-3 pl-5 sm:grid-cols-2">
-              <div>
-                <Label htmlFor="locale">{t('create.language')}</Label>
-                <Select id="locale" value={browserLocale} onChange={(e) => setBrowserLocale(e.target.value as BrowserLocale)}>
-                  {LANGUAGES.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
-                </Select>
-              </div>
-            </div>
-          ) : null}
-        </div>
 
         <section aria-labelledby={`${formId}-cost`} className="rounded-[var(--radius-card)] border border-border bg-surface p-4">
           <h3 id={`${formId}-cost`} className="text-sm font-semibold">

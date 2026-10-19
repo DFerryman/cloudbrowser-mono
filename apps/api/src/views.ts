@@ -55,7 +55,6 @@ export async function toInstances(db: Db, rows: InstanceRow[]): Promise<Instance
       statusReason: r.statusReason,
       desiredState: r.desiredState as Instance['desiredState'],
       idleTimeoutS: r.idleTimeoutS,
-      locale: r.locale as Instance['locale'],
       screen: r.screen as Instance['screen'],
       videoQuality: r.videoQuality as Instance['videoQuality'],
       videoAuto: r.videoAuto,
