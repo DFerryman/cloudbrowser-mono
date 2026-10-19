@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { QualityController, type QualitySample } from '../src/quality.js';
 
 const good = (at: number, fps: number | null = 25): QualitySample => ({ at, stalled: false, fps, lossRate: 0, freezes: 0, rttMs: 40 });
-const bad = (at: number): QualitySample => ({ at, stalled: false, fps: 6, lossRate: 0.12, freezes: 1, rttMs: 420 });
+const bad = (at: number): QualitySample => ({ at, stalled: false, fps: 6, lossRate: 0.12, freezes: 1, rttMs: 40 });
+const rtt = (ms: number) => (at: number): QualitySample => ({ ...good(at), rttMs: ms });
 
 /** Feeds a reading every 2 s from `from` (ms) and returns every switch made. */
 function run(c: QualityController, from: number, seconds: number, sample: (at: number) => QualitySample) {
@@ -41,8 +42,10 @@ describe('picture quality controller', () => {
   it('treats dropped frames or growing delay alone as trouble', () => {
     const slow = new QualityController('full', 0);
     expect(run(slow, 10_000, 4, (at) => good(at, 10))).toEqual([[12, 'high']]);
+    // Delay growing well past the path's usual round trip, at the level that path allows.
     const delayed = new QualityController('full', 0);
-    expect(run(delayed, 10_000, 6, (at) => ({ ...good(at), rttMs: at < 12_000 ? 40 : 400 }))).toEqual([[14, 'high']]);
+    expect(run(delayed, 0, 20, rtt(300))).toEqual([[4, 'medium']]);
+    expect(run(delayed, 20_000, 6, rtt(600))).toEqual([[22, 'low']]);
     // The low level runs at 15 fps on purpose.
     const low = new QualityController('low', 0);
     expect(run(low, 10_000, 20, (at) => good(at, 15))).toEqual([]);
@@ -54,16 +57,37 @@ describe('picture quality controller', () => {
     expect(run(c, 70_000, 6, (at) => ({ ...good(at, null), stalled: true }))).toEqual([[72_000 / 1000, 'high']]);
   });
 
-  it('accepts a longer path as the new normal after a minute', () => {
-    const c = new QualityController('full', 0);
-    run(c, 10_000, 20, good);
-    // The network changes to one with 330 ms round trips: one step down, then the baseline moves.
-    const switches = run(c, 30_000, 240, (at) => ({ ...good(at), rttMs: 330 }));
-    expect(switches[0]).toEqual([32, 'high']);
-    expect(switches.at(-1)![1]).toBe('full');
+  it('lowers the sharpest level on a long path to stay smooth, keeping 25 fps', () => {
+    const near = new QualityController('full', 0);
+    expect(run(near, 0, 120, rtt(120))).toEqual([]);
+    const far = new QualityController('full', 0);
+    expect(run(far, 0, 120, rtt(200))).toEqual([[4, 'high']]);
+    // Even a very long path stops at medium: low's 15 fps is only for a struggling connection.
+    const farther = new QualityController('full', 0);
+    expect(run(farther, 0, 120, rtt(500))).toEqual([[4, 'medium']]);
   });
 
-  it('returns one level at a time after a quiet period, never above the setting', () => {
+  it('settles a longer path at the level it allows, and returns to full when the path shortens', () => {
+    const c = new QualityController('full', 0);
+    run(c, 10_000, 20, good);
+    // The network changes to one with 330 ms round trips: down to medium, not to low.
+    expect(run(c, 30_000, 240, rtt(330))).toEqual([[32, 'high'], [36, 'medium']]);
+    // Back on a short path the picture returns a step at a time.
+    expect(run(c, 270_000, 60, good).map(([, q]) => q)).toEqual(['high', 'full']);
+  });
+
+  it('does not flap on a path near a threshold, and ignores a single slow reading', () => {
+    const c = new QualityController('full', 0);
+    expect(run(c, 0, 30, rtt(170))).toEqual([[4, 'high']]);
+    // 135 ms is below the 150 ms threshold but not clearly: the cap stays.
+    expect(run(c, 30_000, 60, rtt(135))).toEqual([]);
+    expect(run(c, 90_000, 30, rtt(100)).map(([, q]) => q)).toEqual(['full']);
+    // One slow reading on a short path is not a long path.
+    const spike = new QualityController('full', 0);
+    expect(run(spike, 0, 60, (at) => rtt(at === 20_000 ? 260 : 60)(at))).toEqual([]);
+  });
+
+  it('returns one level at a time after a quiet period, never above the preferred level', () => {
     const c = new QualityController('high', 0, 'low');
     expect(c.quality).toBe('low');
     const switches = run(c, 10_000, 60, good);

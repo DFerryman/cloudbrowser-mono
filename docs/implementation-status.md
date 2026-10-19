@@ -180,7 +180,10 @@ Cloudflare deployment.
   per-browser resolution and *Adjust to my connection* options were removed (their D1 columns stay
   unused so an older API can be rolled back to); every live view starts at `full` and adapts. The
   API still returns `videoQuality: 'full'` and `videoAuto: true` for live views opened before the
-  change; both can go in a later release.
+  change; both can go in a later release. A long round trip caps the level to keep 25 fps: the
+  median of the last five readings above 150 ms allows `high`, above 250 ms `medium` (30 ms of
+  hysteresis before a cap lifts); `low` at 15 fps is reached only when frames, loss, freezes or a
+  rise in delay show the connection struggling.
   The viewer requests the level with `signal/video`
   and adapts it from its own receive statistics (dropped frames, loss, freezes, growing RTT),
   because neko 3.0.8's estimator compares bits with bytes. The page layout follows the viewer's
