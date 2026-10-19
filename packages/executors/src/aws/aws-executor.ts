@@ -136,14 +136,18 @@ const VISIBILITY_GRACE_MS = 90_000;
 
 /**
  * What a VM that ended during launch means, from its EC2 state reason. Only a capacity shortage
- * is worth retrying elsewhere; the `Client.*` reasons (an unusable EBS encryption key, a
- * permission boundary, a missing snapshot) repeat on every launch until an operator fixes them.
+ * is worth retrying elsewhere; the `Client.*` reasons repeat on every launch until an operator
+ * fixes them. EC2 reports a KMS call it was not allowed to make for the caller (IAM, an
+ * organization SCP or the key policy) as `Client.InvalidKMSKey.InvalidState` ("the KMS key is in
+ * an incorrect state") with transition reason `Client.InternalError`, the same as a disabled key:
+ * either way the account may not use the key here, so it is `forbidden`, not a capacity problem.
  */
 export function launchFailureClass(code: string | null): ErrorClass {
   if (!code) return 'retryable';
   if (code === 'Server.InsufficientInstanceCapacity') return 'capacity';
   if (code === 'Server.InternalError') return 'retryable';
   if (code === 'Client.VolumeLimitExceeded') return 'quota';
+  if (code.startsWith('Client.InvalidKMSKey.') || code === 'Client.InternalError') return 'forbidden';
   return 'invalid';
 }
 
@@ -427,8 +431,9 @@ export class AwsExecutor implements Executor {
   }
 
   /**
-   * CreateVolume only starts the work. An encrypted volume whose KMS key EC2 cannot use goes from
-   * `creating` to `error` and is then deleted, so wait for `available` before building on it.
+   * CreateVolume only starts the work. An encrypted volume whose KMS key EC2 cannot use for the
+   * caller goes from `creating` to `error` and is deleted within seconds, so wait for `available`
+   * before building on it. A new volume fails like this only for its key, hence `forbidden`.
    */
   private async volumeCreated(ctx: OpContext, region: string, volumeId: string) {
     const since = Date.now();
@@ -440,7 +445,7 @@ export class AwsExecutor implements Executor {
       seen ||= !!v;
       // Not visible yet right after CreateVolume is normal; gone after being seen is a failure.
       if (status === 'creating' || (!v && !seen && Date.now() - since < VISIBILITY_GRACE_MS)) return null;
-      throw new ProviderFailed('invalid', volumeId, text(v ?? undefined, 'availabilityZone') ?? null, null, `EBS could not create volume ${volumeId} in ${region} (${v ? status : 'it disappeared'}). Check that the EBS encryption key is usable there.`);
+      throw new ProviderFailed('forbidden', volumeId, text(v ?? undefined, 'availabilityZone') ?? null, null, `EBS could not create volume ${volumeId} in ${region} (${v ? status : 'it disappeared'}). Check that the EBS encryption key is usable there: key state, key policy and SCPs for KMS through EC2.`);
     });
   }
 
@@ -560,7 +565,14 @@ export class AwsExecutor implements Executor {
     return this.waitFor(ctx, `VM ${p.vmId} to run`, async () => {
       inst = await this.instance(ctx, region, p.vmId);
       const s = this.stateOf(inst);
-      if (s === 'stopped') throw new ExecutorError('capacity', `VM ${p.vmId} stopped again while starting`);
+      if (s === 'stopped') {
+        // Its encrypted disks need the KMS key on every start too; that is no capacity shortage.
+        const code = text(inst ?? undefined, 'stateReason', 'code') ?? null;
+        if (launchFailureClass(code) === 'forbidden') {
+          throw new ProviderFailed('forbidden', p.vmId, p.zone, code, `VM ${p.vmId} could not start: ${text(inst ?? undefined, 'stateReason', 'message') ?? code}`);
+        }
+        throw new ExecutorError('capacity', `VM ${p.vmId} stopped again while starting`);
+      }
       return s === 'running' ? ('running' as const) : null;
     });
   }

@@ -1,6 +1,6 @@
 import { ProviderPriceSheet, TRIAL, resourceMonthlyCostCents } from '@cloudbrowser/contracts';
-import { eventRow, launchHealthFor, newArchiveKey, newId, raiseAlert, recentCapacityAt, recordLaunch, schema, settleRunningStatements, sha256Hex, userCaps, type Db } from '@cloudbrowser/db';
-import { ExecutorError, LaunchFailed, NoLaunchCandidate, ProviderFailed, type ExecutorKind, type ResourceKind, type VmRef } from '@cloudbrowser/executors';
+import { blocksRegion, eventRow, launchHealthFor, newArchiveKey, newId, openProviderIssue, raiseAlert, recentCapacityAt, recordLaunch, schema, settleRunningStatements, sha256Hex, userCaps, type Db } from '@cloudbrowser/db';
+import { ExecutorError, isRegionDenial, LaunchFailed, NoLaunchCandidate, ProviderFailed, type ExecutorKind, type ResourceKind, type VmRef } from '@cloudbrowser/executors';
 import { and, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import {
   placementRef,
@@ -151,9 +151,11 @@ async function zonesByHealth(env: StepEnv, zones: string[]): Promise<string[]> {
 /**
  * What a failed launch teaches. A VM that EC2 terminated during launch is gone and the next
  * launch needs its own token. A capacity shortage steers later browsers to other zones. A VM or
- * disk the provider itself failed for a reason that repeats (an unusable EBS key, a volume limit)
- * pauses new browsers in the region for a while. Errors from our own configuration or a refused
- * request teach nothing about the region.
+ * disk the provider itself failed for a reason that repeats pauses new browsers in the region:
+ * one AWS does not allow this account here (an encryption key it may not use, or an action IAM
+ * or an SCP denies in the region) until an operator reopens the region or a launch there
+ * succeeds, other reasons for a while. Errors from our own configuration or guardrails teach
+ * nothing about the region.
  */
 async function learnFromLaunch(env: StepEnv, e: unknown, zone: string, token: string) {
   if (!(e instanceof ExecutorError)) return;
@@ -166,7 +168,8 @@ async function learnFromLaunch(env: StepEnv, e: unknown, zone: string, token: st
     await saveParams(env, { launch: counter(env.op.params?.launch) + 1 });
   }
   if (e.errorClass === 'capacity' && !(e instanceof NoLaunchCandidate)) await recordLaunch(db, env.region.id, zone, { kind: 'capacity' }, now());
-  else if (e instanceof ProviderFailed && (e.errorClass === 'invalid' || e.errorClass === 'quota')) {
+  else if (isRegionDenial(e)) await recordLaunch(db, env.region.id, zone, { kind: 'failure', errorClass: 'forbidden', message: e.message }, now());
+  else if (e instanceof ProviderFailed && (e.errorClass === 'forbidden' || e.errorClass === 'invalid' || e.errorClass === 'quota')) {
     await recordLaunch(db, env.region.id, zone, { kind: 'failure', errorClass: e.errorClass, message: e.message }, now());
   }
 }
@@ -212,10 +215,23 @@ async function moveCreateToAnotherZone(env: StepEnv, zone: string) {
 
 async function allocateIp(env: StepEnv): Promise<StepOutcome> {
   if (env.round >= MAX_IP_ROUNDS) throw new StepFailed('No suitable IP address was available in this region.');
+  // Admission refuses these too; this also stops creates queued before the failure, or accepted
+  // by an API without that check, before anything is allocated.
+  if (env.op.kind === 'create') {
+    const issue = openProviderIssue(await launchHealthFor(env.deps.db, env.region.id), env.deps.now());
+    if (issue) {
+      throw new StepFailed(blocksRegion(issue)
+        ? `New browsers can't be created in ${env.region.name} until we fix a provider configuration problem. Choose another region.`
+        : `New browsers are paused in ${env.region.name} while we fix a provider problem. Choose another region or try again later.`);
+    }
+  }
   const generation = env.placement?.generation ?? 1;
   const ctx = env.ctx('allocate_ip', `r${env.round}`);
   await ledgerPending(env, 'ip', ctx.token, generation, null);
-  const ip = await env.executor.allocateIp(ctx, env.region.providerRegion);
+  const ip = await env.executor.allocateIp(ctx, env.region.providerRegion).catch(async (e: unknown) => {
+    if (isRegionDenial(e)) await learnFromLaunch(env, e, '', ctx.token);
+    throw e;
+  });
   await ledgerActive(env, ctx.token, ip.allocationId, null, ip.address);
   return { result: { allocationId: ip.allocationId, address: ip.address, token: ctx.token } };
 }
@@ -342,6 +358,9 @@ async function ensureRunning(env: StepEnv): Promise<StepOutcome> {
     await env.executor.ensureRunning(env.ctx('ensure_running'), placementRef(p));
   } catch (e) {
     if (e instanceof ExecutorError && e.errorClass === 'capacity') await recordLaunch(env.deps.db, env.region.id, p.zone, { kind: 'capacity' }, env.deps.now());
+    else if (e instanceof ProviderFailed && e.errorClass === 'forbidden') {
+      await recordLaunch(env.deps.db, env.region.id, p.zone, { kind: 'failure', errorClass: e.errorClass, message: e.message }, env.deps.now());
+    }
     throw e;
   }
   return {};
@@ -476,7 +495,10 @@ async function createNic(env: StepEnv): Promise<StepOutcome> {
   const avoid = strings(env.op.params?.avoidZones);
   const zones = env.executor.zones(env.region.providerRegion);
   const [zone] = await zonesByHealth(env, zones.some((z) => !avoid.includes(z)) ? zones.filter((z) => !avoid.includes(z)) : zones);
-  const nic = await env.executor.ensureNetworkInterface(ctx, env.region.providerRegion, ip, zone);
+  const nic = await env.executor.ensureNetworkInterface(ctx, env.region.providerRegion, ip, zone).catch(async (e: unknown) => {
+    if (isRegionDenial(e)) await learnFromLaunch(env, e, zone ?? '', ctx.token);
+    throw e;
+  });
   await ledgerActive(env, ctx.token, nic.nicId, nic.zone);
   return { result: { nicId: nic.nicId, zone: nic.zone } };
 }

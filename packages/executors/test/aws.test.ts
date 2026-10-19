@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { AwsExecutor, bootstrapScript, ExecutorError, FakeExecutor, LaunchFailed, launchFailureClass, MemoryFakeStore, type CredentialMode, type Executor, type OpContext, type Placement, type ResourceKind } from '../src/index.js';
+import { AwsExecutor, bootstrapScript, ExecutorError, FakeExecutor, LaunchFailed, isRegionDenial, launchFailureClass, MemoryFakeStore, ProviderFailed, type CredentialMode, type Executor, type OpContext, type Placement, type ResourceKind } from '../src/index.js';
 import { FakeEc2 } from './fake-ec2.js';
 
 const REGION = 'ap-northeast-1';
@@ -146,7 +146,8 @@ describe('aws-ec2 executor', () => {
     const spec = { instanceId: 'inst1', zone: nic.zone, nicId: nic.nicId, volumeId: vol.volumeId, bootstrapToken: 't', gatewayUrl: 'wss://g' };
     const first = await ex.ensureVm(ctx('create_vm'), REGION, spec).catch((e: unknown) => e);
     expect(first).toBeInstanceOf(LaunchFailed);
-    expect(first).toMatchObject({ errorClass: 'invalid', reasonCode: 'Client.InvalidKMSKey.InvalidState', zone: 'ap-northeast-1a' });
+    // What EC2 reports when an SCP denies the KMS calls it makes for the caller: not capacity.
+    expect(first).toMatchObject({ errorClass: 'forbidden', reasonCode: 'Client.InvalidKMSKey.InvalidState', zone: 'ap-northeast-1a' });
     expect(String((first as Error).message)).toContain('incorrect state');
     // The same token only ever returns the same dead VM.
     const again = await ex.ensureVm(ctx('create_vm'), REGION, spec).catch((e: LaunchFailed) => e.vmId);
@@ -160,12 +161,43 @@ describe('aws-ec2 executor', () => {
     expect(ec2.instances.get(vm.vmId)?.state).toBe('running');
     expect(launchFailureClass('Server.InternalError')).toBe('retryable');
     expect(launchFailureClass('Client.VolumeLimitExceeded')).toBe('quota');
+    expect(launchFailureClass('Client.InternalError')).toBe('forbidden');
+    expect(launchFailureClass('Client.InvalidKMSKey.KeyDisabled')).toBe('forbidden');
+    expect(launchFailureClass('Client.InvalidSnapshot.NotFound')).toBe('invalid');
   });
 
   it('fails a volume that EBS could not create instead of building on it', async () => {
     const { ex, ec2 } = setup();
     ec2.volumeFailure = () => true;
-    await expect(ex.ensureVolume(ctx('create_volume'), REGION, 'ap-northeast-1a', 20)).rejects.toMatchObject({ errorClass: 'invalid', message: expect.stringContaining('encryption key') });
+    await expect(ex.ensureVolume(ctx('create_volume'), REGION, 'ap-northeast-1a', 20)).rejects.toMatchObject({ errorClass: 'forbidden', message: expect.stringContaining('encryption key') });
+  });
+
+  it('tells AWS denying the account an action in a region from bad credentials and our own guardrails', async () => {
+    const { ex, ec2 } = setup();
+    ec2.fail = (a) => (a === 'AllocateAddress' ? { code: 'UnauthorizedOperation', status: 403 } : null);
+    const denied = await ex.allocateIp(ctx('allocate_ip'), REGION).catch((e: unknown) => e);
+    expect(denied).toMatchObject({ errorClass: 'forbidden' });
+    expect(isRegionDenial(denied)).toBe(true);
+    ec2.fail = (a) => (a === 'AllocateAddress' ? { code: 'AuthFailure', status: 401 } : null);
+    expect(isRegionDenial(await ex.allocateIp(ctx('allocate_ip', 'op2:allocate_ip:1'), REGION).catch((e: unknown) => e))).toBe(false);
+    // A guardrail of ours (here: the reaper's credentials may not create) is no AWS denial.
+    const guard = await setup('reaper', ec2).ex.allocateIp(ctx('allocate_ip', 'op3:allocate_ip:1'), REGION).catch((e: unknown) => e);
+    expect(guard).toMatchObject({ errorClass: 'forbidden' });
+    expect(isRegionDenial(guard)).toBe(false);
+  });
+
+  it('tells a start the encryption key refused from a capacity shortage', async () => {
+    const { ex, ec2 } = setup();
+    const { p } = await create(ex);
+    await ex.ensureStopped(ctx('stop'), p);
+    ec2.startFailure = () => ({ code: 'Client.InvalidKMSKey.InvalidState', message: 'The KMS key provided is in an incorrect state' });
+    const refused = await ex.ensureRunning(ctx('start'), p).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(ProviderFailed);
+    expect(refused).toMatchObject({ errorClass: 'forbidden', reasonCode: 'Client.InvalidKMSKey.InvalidState', resourceId: p.vmId });
+    ec2.startFailure = () => ({ code: 'Server.InsufficientInstanceCapacity', message: 'Insufficient capacity.' });
+    await expect(ex.ensureRunning(ctx('start', 'op2:start:1'), p)).rejects.toMatchObject({ errorClass: 'capacity' });
+    ec2.startFailure = () => null;
+    await expect(ex.ensureRunning(ctx('start', 'op3:start:1'), p)).resolves.toBe('running');
   });
 
   it('launches only machine types the zone offers, and prefers zones that offer one', async () => {

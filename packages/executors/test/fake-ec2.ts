@@ -21,6 +21,8 @@ export class FakeEc2 {
   fail: (action: string, p: Record<string, string>) => { code: string; status?: number } | null = () => null;
   /** A launch EC2 accepts and then terminates while pending, with this state reason. */
   launchFailure: (p: Record<string, string>) => { code: string; message: string } | null = () => null;
+  /** StartInstances is accepted, then the VM falls back to stopped with this state reason. */
+  startFailure: (id: string) => { code: string; message: string } | null = () => null;
   /** CreateVolume accepts the request, then the volume fails (e.g. an unusable KMS key) and is deleted. */
   volumeFailure: (p: Record<string, string>) => boolean = () => false;
   /** A delete may be accepted while its resource remains visible in subsequent Describe calls. */
@@ -292,6 +294,8 @@ export class FakeEc2 {
         if (i.state === 'terminated') throw new Error('IncorrectInstanceState|400');
         i.state = action === 'StartInstances' ? 'pending' : 'stopping';
         i.pendingDescribes = 1;
+        const failure = action === 'StartInstances' ? this.startFailure(i.id) : null;
+        if (failure) Object.assign(i, { state: 'stopping', stateReason: failure });
         return `<instancesSet><item><instanceId>${i.id}</instanceId><currentState><name>${i.state}</name></currentState></item></instancesSet>`;
       }
       case 'ModifyInstanceAttribute': {

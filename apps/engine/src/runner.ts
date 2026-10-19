@@ -1,6 +1,6 @@
 import { OPERATION_STEPS, type OperationKind } from '@cloudbrowser/contracts';
 import { eventRow, operationRow, raiseAlert, schema } from '@cloudbrowser/db';
-import { ExecutorError, type ErrorClass, type ResourceKind } from '@cloudbrowser/executors';
+import { ExecutorError, isRegionDenial, ProviderFailed, type ErrorClass, type ResourceKind } from '@cloudbrowser/executors';
 import { and, eq, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
 import {
   RestartFrom,
@@ -382,7 +382,11 @@ async function handleError(deps: EngineDeps, op: OperationRow, env: StepEnv, ste
         op,
         env,
         cls,
-        cls === 'quota' ? `New browsers are temporarily unavailable in ${env.region.name}.` : 'Something went wrong on our side. We have been alerted.',
+        cls === 'quota'
+          ? `New browsers are temporarily unavailable in ${env.region.name}.`
+          : cls === 'forbidden' && (e instanceof ProviderFailed || isRegionDenial(e))
+            ? `${env.region.name} is unavailable while we fix a provider configuration problem. We have been alerted.`
+            : 'Something went wrong on our side. We have been alerted.',
       );
   }
 }

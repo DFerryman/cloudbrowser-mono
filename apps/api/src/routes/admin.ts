@@ -5,7 +5,7 @@
  * not part of the public OpenAPI document.
  */
 import { AwsProviderSettings, OPERATION_STEPS, PricingSettings, UsageItem, costRates, customerRates, type OperationKind } from '@cloudbrowser/contracts';
-import { awsInventory, newId, priceSheets, pricingSettings, schema, type Db } from '@cloudbrowser/db';
+import { awsInventory, blocksRegion, launchHealthByRegion, launchHealthFor, launchVerifiedAt, newId, openProviderIssue, priceSheets, pricingSettings, reopenRegion, schema, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, isNotNull, isNull, like, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
@@ -69,7 +69,25 @@ adminRoute.get('/aws-provider', async (c) => {
   const rows=await db.select().from(schema.awsProviderRegions).innerJoin(regions,eq(regions.id,schema.awsProviderRegions.regionId));
   const sheets=new Map((await db.select().from(providerPrices)).map((r)=>[r.regionId,r]));
   const [commitments]=await db.all<{n:number;micros:number}>(sql`SELECT COUNT(*) n, COALESCE(SUM(monthly_micros),0) micros FROM aws_browser_commitments`);
-  return c.json({settings,state,inventorySummary:{existingBrowsers:Number(commitments?.n ?? 0),committedMicros:Number(commitments?.micros ?? 0)},regions:rows.map((r)=>({...r.aws_provider_regions,name:r.regions.name,enabled:r.regions.enabled,inventory:inventory.get(r.regions.id),price:{fetchedAt:sheets.get(r.regions.id)?.fetchedAt,lastError:sheets.get(r.regions.id)?.lastError},config:undefined}))});
+  const health=await launchHealthByRegion(db);
+  const now=new Date();
+  const launch=(regionId:string)=>{
+    const rows=health.get(regionId) ?? [];
+    const issue=openProviderIssue(rows,now);
+    return {verifiedAt:launchVerifiedAt(rows),issue:issue?{at:issue.lastFailureAt,class:issue.lastFailureClass,message:issue.lastFailure,zone:issue.zone||null,blocking:blocksRegion(issue)}:null};
+  };
+  return c.json({settings,state,inventorySummary:{existingBrowsers:Number(commitments?.n ?? 0),committedMicros:Number(commitments?.micros ?? 0)},regions:rows.map((r)=>({...r.aws_provider_regions,name:r.regions.name,enabled:r.regions.enabled,inventory:inventory.get(r.regions.id),price:{fetchedAt:sheets.get(r.regions.id)?.fetchedAt,lastError:sheets.get(r.regions.id)?.lastError},launch:launch(r.regions.id),config:undefined}))});
+});
+// After the cause of a provider failure is fixed (e.g. an SCP): new browsers may be created
+// there again, and the next create shows whether the fix worked.
+adminRoute.post('/aws-provider/regions/:id/reopen',async(c)=>{
+  const {reason}=await body(c,z.object({reason:z.string().trim().min(3).max(500)}));
+  const db=c.get('db');
+  const regionId=c.req.param('id');
+  const before=await launchHealthFor(db,regionId);
+  if (!openProviderIssue(before,new Date())) throw problem(409,'invalid_state','This region has no open provider failure.');
+  await db.batch([reopenRegion(db,regionId),audit(db,c,'aws-provider.region.reopen',`region:${regionId}`,{before,reason})]);
+  return c.json({reopened:true});
 });
 adminRoute.put('/aws-provider/settings',async(c)=>{
   const {reason,...settings}=await body(c,AwsProviderSettings.extend({reason:z.string().trim().min(3).max(500)}));

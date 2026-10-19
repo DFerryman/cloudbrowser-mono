@@ -1,4 +1,4 @@
-import { createDb, operationRow, prepaidBalance, reservationQuote, schema, type Db } from '@cloudbrowser/db';
+import { createDb, operationRow, prepaidBalance, reopenRegion, reservationQuote, schema, type Db } from '@cloudbrowser/db';
 import { splitUsagePeriod } from '@cloudbrowser/contracts';
 import { createTestD1 } from '@cloudbrowser/db/testing';
 import { ExecutorError, FakeExecutor, MemoryFakeStore, type Executor, type FaultPlan } from '@cloudbrowser/executors';
@@ -968,18 +968,20 @@ describe('on the aws-ec2 executor', () => {
 
   it('fails at once with the provider reason when EC2 ends every launch, and marks the region', async () => {
     const ec2 = await onEc2();
+    // What EC2 reports when an organization SCP denies the KMS calls it makes for the caller.
     ec2.launchFailure = () => ({ code: 'Client.InvalidKMSKey.InvalidState', message: 'The KMS key provided is in an incorrect state' });
     const result = await w.settle(await w.newInstance());
     expect(result).toMatchObject({ state: 'failed' });
     const inst = await w.instance();
     expect(inst.status).toBe('failed');
     expect(inst.status).not.toBe('waiting_capacity');
+    expect(inst.statusReason).toContain('provider configuration problem');
     const [op] = await w.db.select().from(operations).where(eq(operations.instanceId, 'inst1'));
-    expect(op).toMatchObject({ errorClass: 'invalid', attempt: 0 });
+    expect(op).toMatchObject({ errorClass: 'forbidden', attempt: 0 });
     const [step] = await w.db.select().from(schema.operationSteps).where(and(eq(schema.operationSteps.operationId, op!.id), eq(schema.operationSteps.step, 'create_vm')));
-    expect(step?.result).toMatchObject({ errorClass: 'invalid', error: expect.stringContaining('incorrect state') });
-    expect(await w.db.select().from(schema.alerts)).toEqual([expect.objectContaining({ severity: 'critical', title: 'invalid error in create (tyo1)', detail: expect.objectContaining({ message: expect.stringContaining('incorrect state') }) })]);
-    expect(await health()).toEqual([expect.objectContaining({ zone: 'ap-northeast-1a', lastFailureClass: 'invalid', lastFailure: expect.stringContaining('incorrect state') })]);
+    expect(step?.result).toMatchObject({ errorClass: 'forbidden', error: expect.stringContaining('incorrect state') });
+    expect(await w.db.select().from(schema.alerts)).toEqual([expect.objectContaining({ severity: 'critical', title: 'forbidden error in create (tyo1)', detail: expect.objectContaining({ message: expect.stringContaining('incorrect state') }) })]);
+    expect(await health()).toEqual([expect.objectContaining({ zone: 'ap-northeast-1a', lastFailureClass: 'forbidden', lastFailure: expect.stringContaining('incorrect state') })]);
     // The dead VM is not left in the ledger as an open resource.
     expect((await w.db.select().from(resources).where(eq(resources.kind, 'vm')))).toEqual([expect.objectContaining({ state: 'deleted', providerId: [...ec2.instances.keys()][0] })]);
 
@@ -989,6 +991,32 @@ describe('on the aws-ec2 executor', () => {
     expect(ec2.addresses.size + ec2.enis.size + ec2.volumes.size).toBe(0);
     const calls = ec2.calls.length;
     await reaperTick(w.deps('reaper'));
+    expect(ec2.calls.length).toBe(calls);
+
+    // The region stays blocked, past the 30-minute pause of other failures: a create queued
+    // anyway (e.g. accepted by an API without the admission check) ends before any AWS call.
+    w.advance(6 * 3_600_000);
+    expect(await w.settle(await w.newInstance('inst2'))).toMatchObject({ state: 'failed' });
+    expect(await w.instance('inst2')).toMatchObject({ status: 'failed', statusReason: expect.stringContaining("can't be created in") });
+    expect(ec2.calls.length).toBe(calls);
+    expect(await w.db.select().from(resources).where(eq(resources.instanceId, 'inst2'))).toEqual([]);
+
+    // Once the cause is fixed and an operator reopens the region, the next create is the test.
+    ec2.launchFailure = () => null;
+    await reopenRegion(w.db, 'tyo1');
+    expect(await w.settle(await w.newInstance('inst3'))).toEqual({ state: 'succeeded' });
+    expect(await health()).toEqual([expect.objectContaining({ zone: 'ap-northeast-1a', lastSuccessAt: expect.any(Date), lastFailureAt: null })]);
+  });
+
+  it('blocks a region where AWS denies the account a launch action', async () => {
+    const ec2 = await onEc2();
+    // E.g. an organization SCP that does not list ec2:RunInstances for this region.
+    ec2.fail = (a) => (a === 'RunInstances' ? { code: 'UnauthorizedOperation', status: 403 } : null);
+    expect(await w.settle(await w.newInstance())).toMatchObject({ state: 'failed' });
+    expect(await health()).toEqual([expect.objectContaining({ zone: 'ap-northeast-1a', lastFailureClass: 'forbidden', lastFailure: expect.stringContaining('UnauthorizedOperation') })]);
+    expect((await w.instance()).statusReason).toContain('provider configuration problem');
+    const calls = ec2.calls.length;
+    expect(await w.settle(await w.newInstance('inst2'))).toMatchObject({ state: 'failed' });
     expect(ec2.calls.length).toBe(calls);
   });
 

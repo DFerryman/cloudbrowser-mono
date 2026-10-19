@@ -67,12 +67,25 @@ AWS publishes no live on-demand capacity, so the region list combines what is kn
 
 - **Inventory** (above): no room under quotas or budget makes a region *Unavailable*.
 - **Launch outcomes** (`launch_health`, written by the engine per region and zone): a capacity
-  shortage in the last 30 minutes with no successful launch since makes the region *Limited*; a VM
-  or disk the provider itself failed (EC2 terminated it while pending, or EBS failed the volume,
-  e.g. an unusable KMS key) makes it *Unavailable*. Admission then refuses the region for 30
-  minutes; the next create after that is the probe (deleting the region's `launch_health` rows
-  lifts the pause at once). Errors from our own configuration never pause a region. New browsers start in the
-  zone without a recent shortage and move to another zone on a capacity error.
+  shortage in the last 30 minutes with no successful launch since makes the region *Limited*. A VM
+  or disk the provider itself failed makes it *Unavailable*:
+  - *Blocked* (`forbidden`): the account may not use the region's EBS encryption key (EC2 state
+    reason `Client.InvalidKMSKey.*` or `Client.InternalError`, or an encrypted volume that EBS
+    deletes; a start that falls back to stopped for that reason counts too), or AWS denies a
+    create step there (`UnauthorizedOperation`, `AccessDenied`, `OptInRequired`, `Blocked`; bad
+    credentials and our own guardrails do not count). Every launch would
+    fail until IAM, an organization SCP or the key policy changes, so no user create is spent as
+    a probe: admission and the engine's first create step refuse the region until an operator
+    reopens it (AWS Provider → *Reopen*, audited, or deleting the region's `launch_health` rows)
+    or a launch there succeeds. The organization SCPs are kept in `infra/aws/organization-scp/`.
+  - *Paused* (any other provider failure): refused for 30 minutes; the next create is the probe.
+
+  Errors from our own configuration never pause a region. New browsers start in the zone without
+  a recent shortage and move to another zone on a capacity error.
+- **Tested or not**: a region where a browser VM has started (`launch_health.last_success_at`)
+  is *Tested*. One that only passed the configuration checks (network, offered machines, quotas,
+  prices) shows *Not yet tested* to users and operators until its first launch succeeds.
+  Migration 0016 counts a region as tested from history only if its last create there succeeded.
 - **Latency**: the browser times `https://dynamodb.<region>.amazonaws.com/ping` (allowed in the
   CSP) and shows a distance estimate from Cloudflare's approximate location until it has measured.
 - **Location**: city, country and timezone come from `AWS_REGION_FACTS`, not SSM (SSM has no city or
@@ -102,10 +115,15 @@ Worker secrets. Changing the key or role takes effect on the next Worker invocat
 sign-in expiration has no effect on these production roles.
 
 Advanced-mode organization regional restrictions need exact exceptions for the actual EC2,
-network CloudFormation and read-only quota/metadata APIs. Keep the managed-account security SCP
+network CloudFormation and read-only quota/metadata APIs, and for the KMS calls EC2 makes as the
+caller to encrypt, attach, start and restore disks (`kms:CreateGrant`, `kms:Decrypt`,
+`kms:DescribeKey`, `kms:GenerateDataKeyWithoutPlaintext`, `kms:ReEncryptFrom`,
+`kms:ReEncryptTo`), limited to the Nevazu account and `kms:ViaService` EC2. Without them every
+encrypted disk fails outside the unrestricted regions. Keep the managed-account security SCP
 and all unrelated regional restrictions. SCP documents are limited to 5,120 bytes; the existing
 three regional Deny statements may occupy separate policies to keep exact action lists instead
-of broad service exceptions. Preserve the pre-change policies for rollback.
+of broad service exceptions. The current policies, their pre-change versions, a logic check and
+the apply/rollback commands are in `infra/aws/organization-scp/`.
 
 ## Deploy and verify
 

@@ -1,4 +1,4 @@
-import { createDb, raiseAlert } from '@cloudbrowser/db';
+import { createDb, raiseAlert, recordLaunch } from '@cloudbrowser/db';
 import { meterUsage } from '@cloudbrowser/engine';
 import { SignJWT } from 'jose';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -36,6 +36,22 @@ it('audits shared AWS inventory policy changes and validates the running-time as
   expect(saved.body.settings.monthlyBudgetMicros).toBe(200_000_000);
   const audit=t.d1.sqlite.prepare("SELECT detail FROM audit_log WHERE action='aws-provider.settings'").get() as {detail:string};
   expect(JSON.parse(audit.detail)).toMatchObject({after:{monthlyBudgetMicros:200_000_000},reason:policy.reason,email:ADMIN_EMAIL});
+});
+
+it('shows which regions launched or are blocked, and reopens a blocked region with an audited reason',async()=>{
+  const db=createDb(t.d1);
+  t.d1.sqlite.exec(`INSERT INTO aws_provider_regions (region_id,provider_region,opt_in_status,status,capacity) VALUES ('tyo1','ap-northeast-1','opt-in-not-required','ready',0)`);
+  const launch=async()=>(await callAdmin('GET','/api/v1/admin/aws-provider')).body.regions.find((r:{regionId:string})=>r.regionId==='tyo1').launch;
+  expect(await launch()).toEqual({verifiedAt:null,issue:null});
+  expect((await callAdmin('POST','/api/v1/admin/aws-provider/regions/tyo1/reopen',{reason:'Nothing to reopen'})).status).toBe(409);
+  await recordLaunch(db,'tyo1','ap-northeast-1a',{kind:'failure',errorClass:'forbidden',message:'VM ended during launch: The KMS key provided is in an incorrect state'},new Date());
+  expect(await launch()).toMatchObject({verifiedAt:null,issue:{class:'forbidden',blocking:true,zone:'ap-northeast-1a',message:expect.stringContaining('KMS key')}});
+  expect((await callAdmin('POST','/api/v1/admin/aws-provider/regions/tyo1/reopen',{reason:''})).status).toBe(400);
+  expect((await callAdmin('POST','/api/v1/admin/aws-provider/regions/tyo1/reopen',{reason:'SCP now allows KMS through EC2'})).status).toBe(200);
+  expect((await launch()).issue).toBeNull();
+  const audit=t.d1.sqlite.prepare("SELECT target, detail FROM audit_log WHERE action='aws-provider.region.reopen'").get() as {target:string;detail:string};
+  expect(audit.target).toBe('region:tyo1');
+  expect(JSON.parse(audit.detail)).toMatchObject({reason:'SCP now allows KMS through EC2',email:ADMIN_EMAIL,before:[expect.objectContaining({lastFailureClass:'forbidden'})]});
 });
 
 beforeAll(prepareAdminKeys);

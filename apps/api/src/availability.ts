@@ -2,10 +2,10 @@
  * Whether a region can take a new browser, and what the user should know before choosing it.
  * AWS publishes no live on-demand capacity, so this combines what can be known: the operator's
  * switches, the inventory left under quotas and budget, and how recent launches there went
- * (a capacity shortage, or a provider failure such as an unusable EBS key).
+ * (a capacity shortage, or a provider failure such as an encryption key the account may not use).
  */
 import { AWS_REGION_FACTS, awsLatencyProbeUrl, estimateRttMs, type Region } from '@cloudbrowser/contracts';
-import { awsInventory, launchHealthByRegion, openProviderIssue, recentCapacityAt, schema, type Db, type LaunchHealthRow } from '@cloudbrowser/db';
+import { awsInventory, blocksRegion, launchHealthByRegion, launchVerifiedAt, openProviderIssue, recentCapacityAt, schema, type Db, type LaunchHealthRow } from '@cloudbrowser/db';
 import { asc } from 'drizzle-orm';
 import { regionAcceptingNew } from './limits.js';
 
@@ -19,7 +19,8 @@ export function availabilityOf(input: {
   now: Date;
 }): Pick<Region, 'availability' | 'availabilityReason'> {
   if (!input.enabled) return { availability: 'unavailable', availabilityReason: 'closed' };
-  if (openProviderIssue(input.health, input.now)) return { availability: 'unavailable', availabilityReason: 'provider_issue' };
+  const issue = openProviderIssue(input.health, input.now);
+  if (issue) return { availability: 'unavailable', availabilityReason: blocksRegion(issue) ? 'blocked' : 'provider_issue' };
   if (!input.acceptingNew) return { availability: 'unavailable', availabilityReason: input.stock === 0 ? 'no_stock' : 'closed' };
   const shortage = Math.max(0, ...input.health.map((r) => recentCapacityAt(r, input.now)));
   const success = Math.max(0, ...input.health.map((r) => r.lastSuccessAt?.getTime() ?? 0));
@@ -52,7 +53,8 @@ export async function regionViews(db: Db, from: { lat: number; lon: number } | n
     const stock = inventory ? inventory.available : null;
     const acceptingNewBase = r.enabled && (stock !== null ? stock > 0 : await regionAcceptingNew(db, r.id));
     const facts = r.executor === 'aws-ec2' ? AWS_REGION_FACTS[r.providerRegion] : undefined;
-    const { availability, availabilityReason } = availabilityOf({ enabled: r.enabled, acceptingNew: acceptingNewBase, stock, health: health.get(r.id) ?? [], now });
+    const rows = health.get(r.id) ?? [];
+    const { availability, availabilityReason } = availabilityOf({ enabled: r.enabled, acceptingNew: acceptingNewBase, stock, health: rows, now });
     return {
       id: r.id,
       name: r.name,
@@ -71,6 +73,7 @@ export async function regionViews(db: Db, from: { lat: number; lon: number } | n
       area: facts?.area ?? null,
       availability,
       availabilityReason,
+      launchVerifiedAt: launchVerifiedAt(rows)?.toISOString() ?? null,
       estimatedRttMs: facts && from ? estimateRttMs(from, facts) : null,
     };
   }));

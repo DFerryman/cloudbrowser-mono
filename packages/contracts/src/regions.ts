@@ -30,9 +30,16 @@ export const Region = z.object({
   /**
    * What a new browser can expect here now. `limited`: creation is allowed but may wait or
    * stock is nearly gone; `unavailable`: creation is refused (same as acceptingNew false).
+   * `blocked`: the provider refused our account here (e.g. its encryption key), until an operator
+   * fixes it; `provider_issue`: a provider failure that is retried after a pause.
    */
   availability: z.enum(['available', 'limited', 'unavailable']),
-  availabilityReason: z.enum(['low_stock', 'capacity', 'provider_issue', 'no_stock', 'closed']).nullable(),
+  availabilityReason: z.enum(['low_stock', 'capacity', 'provider_issue', 'blocked', 'no_stock', 'closed']).nullable(),
+  /**
+   * When a browser last launched here: null for a region where none has yet (configuration
+   * checks passed, but no VM has proved it).
+   */
+  launchVerifiedAt: z.string().nullable(),
   /** Round trip estimated from the caller's approximate location, before the client measures it. */
   estimatedRttMs: z.number().int().nonnegative().nullable(),
 });

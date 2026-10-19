@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { estimateRttMs } from '@cloudbrowser/contracts';
-import { createDb, recordLaunch, type LaunchHealthRow } from '@cloudbrowser/db';
+import { createDb, recordLaunch, reopenRegion, schema, type LaunchHealthRow } from '@cloudbrowser/db';
 import { createTestD1 } from '@cloudbrowser/db/testing';
 import { describe, expect, it } from 'vitest';
 import { availabilityOf, regionViews } from '../src/availability.js';
@@ -31,6 +32,12 @@ describe('region availability', () => {
     expect(availabilityOf({ ...base, acceptingNew: false, stock: 0 })).toEqual({ availability: 'unavailable', availabilityReason: 'no_stock' });
   });
 
+  it('keeps a region blocked when the provider refused our account, until a launch succeeds there', () => {
+    const refused = row('a', { lastFailureAt: at(7 * 60), lastFailureClass: 'forbidden' });
+    expect(availabilityOf({ ...base, health: [refused] })).toEqual({ availability: 'unavailable', availabilityReason: 'blocked' });
+    expect(availabilityOf({ ...base, health: [refused, row('c', { lastSuccessAt: at(1) })] }).availability).toBe('available');
+  });
+
   it('estimates latency from distance, within the range real networks show', () => {
     const tokyo = { lat: 35.7, lon: 139.7 };
     expect(estimateRttMs(tokyo, tokyo)).toBe(5);
@@ -53,6 +60,39 @@ describe('region availability', () => {
     expect(views.find((r) => r.id === 'syd1')).toMatchObject({ availability: 'available', acceptingNew: true });
     await recordLaunch(db, 'tyo1', 'ap-northeast-1c', { kind: 'success' }, new Date());
     await admitCreate(db, 'u', 'tyo1', new Date(), { trial: true });
+  });
+
+  it('refuses a blocked region with its own reason, marks regions without a launch as not yet tested, and reopens', async () => {
+    const d1 = createTestD1();
+    const db = createDb(d1);
+    const t = Date.now();
+    d1.sqlite.exec(`INSERT INTO user (id,name,email,email_verified,created_at,updated_at) VALUES ('u','test','u@example.test',1,${t},${t});
+      UPDATE regions SET enabled = 1;`);
+    const launched = new Date(t - 3_600_000);
+    await recordLaunch(db, 'syd1', 'ap-southeast-2a', { kind: 'success' }, launched);
+    await recordLaunch(db, 'tyo1', 'ap-northeast-1a', { kind: 'failure', errorClass: 'forbidden', message: 'VM ended during launch: KMS key' }, new Date(t - 6 * 3_600_000));
+    await expect(admitCreate(db, 'u', 'tyo1', new Date(), { trial: true })).rejects.toMatchObject({ status: 409, detail: expect.stringContaining('provider configuration problem') });
+    const views = await regionViews(db, null);
+    expect(views.find((r) => r.id === 'tyo1')).toMatchObject({ availability: 'unavailable', availabilityReason: 'blocked', launchVerifiedAt: null });
+    expect(views.find((r) => r.id === 'syd1')).toMatchObject({ availability: 'available', launchVerifiedAt: launched.toISOString() });
+    expect(views.find((r) => r.id === 'usw1')).toMatchObject({ availability: 'available', launchVerifiedAt: null });
+    await reopenRegion(db, 'tyo1');
+    await admitCreate(db, 'u', 'tyo1', new Date(), { trial: true });
+  });
+
+  it('counts a region as tested from history only when its last create there succeeded (migration 0016)', async () => {
+    const d1 = createTestD1();
+    const t = Date.UTC(2026, 9, 18);
+    const op = (id: string, inst: string, status: string, at: number) =>
+      `INSERT INTO operations (id,instance_id,user_id,kind,status,attempt,deadline_at,created_at,updated_at,finished_at) VALUES ('${id}','${inst}','u','create','${status}',0,${at + 3_600_000},${at},${at},${at + 60_000});`;
+    const inst = (id: string, region: string) =>
+      `INSERT INTO browser_instances (id,user_id,name,region_id,status,desired_state,idle_timeout_s,locale,screen,fingerprint,created_at,updated_at) VALUES ('${id}','u','b','${region}','purged','deleted',600,'en-US','auto','{}',${t},${t});`;
+    d1.sqlite.exec(`INSERT INTO user (id,name,email,email_verified,created_at,updated_at) VALUES ('u','test','u@example.test',1,${t},${t});
+      ${inst('s1', 'syd1')}${inst('s2', 'syd1')}${inst('t1', 'tyo1')}${inst('t2', 'tyo1')}
+      ${op('o1', 's1', 'failed', t)}${op('o2', 's2', 'succeeded', t + 3_600_000)}${op('o3', 't1', 'succeeded', t)}${op('o4', 't2', 'failed', t + 3_600_000)}`);
+    d1.sqlite.exec(readFileSync(new URL('../../../packages/db/migrations/0016_launch_verified_backfill.sql', import.meta.url), 'utf8'));
+    const rows = await createDb(d1).select().from(schema.launchHealth);
+    expect(rows).toEqual([expect.objectContaining({ regionId: 'syd1', zone: '', lastSuccessAt: new Date(t + 3_660_000), lastFailureAt: null })]);
   });
 
   it('offers a latency probe and estimate for AWS regions', async () => {

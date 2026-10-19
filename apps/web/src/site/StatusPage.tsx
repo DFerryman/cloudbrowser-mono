@@ -54,7 +54,9 @@ export function StatusPage() {
                   <Row
                     key={r.regionId}
                     label={regionPlace(r, locale)}
-                    detail={r.availabilityReason === 'capacity' ? t('create.region.reason.capacity') : r.availabilityReason === 'provider_issue' ? t('create.region.reason.provider_issue') : t(r.acceptingNew ? 'status.region.ok' : 'status.region.noNew')}
+                    detail={r.availabilityReason === 'capacity' || r.availabilityReason === 'provider_issue' || r.availabilityReason === 'blocked'
+                      ? t(`create.region.reason.${r.availabilityReason}`)
+                      : `${t(r.acceptingNew ? 'status.region.ok' : 'status.region.noNew')}${r.acceptingNew && r.launchVerifiedAt === null ? ` · ${t('create.region.untested')}` : ''}`}
                     status={r.status}
                   />
                 ))}

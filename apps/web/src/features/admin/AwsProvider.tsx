@@ -8,16 +8,29 @@ type Provider = {
   settings: AwsProviderSettings;
   inventorySummary?: {existingBrowsers:number;committedMicros:number};
   state: { accountId:string|null;managementAccountId:string|null;organizationId:string|null;connection:Record<string,unknown>|null;billing:{month:string;spendMicros:number;organizationSpendMicros?:number;byAccount?:Record<string,number>;byRegion?:Record<string,number>;budgetMicros:number|null;estimated:boolean;accounts:Record<string,unknown>[];credits:Record<string,unknown>[]|null;auxiliaryErrors:Record<string,string>}|null;billingAt:string|null;catalogAt:string|null;lastError:string|null;lastErrorAt:string|null;syncLeaseUntil:string };
-  regions:{regionId:string;providerRegion:string;name:string;optInStatus:string;status:string;quotas:{metric:string;used:number;limit:number}[]|null;checkedAt:string|null;lastError:string|null;price:{fetchedAt:string|null;lastError:string|null};inventory?:{available:number;quota_available:number;monthly_unit_micros:number;budget_remaining_micros:number;availability:string}}[];
+  regions:{regionId:string;providerRegion:string;name:string;optInStatus:string;status:string;quotas:{metric:string;used:number;limit:number}[]|null;checkedAt:string|null;lastError:string|null;price:{fetchedAt:string|null;lastError:string|null};inventory?:{available:number;quota_available:number;monthly_unit_micros:number;budget_remaining_micros:number;availability:string};launch?:Launch}[];
 };
+/** How launches went: tested by a real VM, or a provider failure that stops new browsers. */
+type Launch={verifiedAt:string|null;issue:{at:string;class:string|null;message:string|null;zone:string|null;blocking:boolean}|null};
+
+function LaunchCell({launch,onReopen}:{launch?:Launch;onReopen:()=>void}) {
+  if(launch?.issue) return <span className="text-xs">
+    <Pill tone="bad">{launch.issue.blocking?'Blocked':'Paused'}</Pill> {when(launch.issue.at)}{launch.issue.zone?` · ${launch.issue.zone}`:''}
+    <span className="block max-w-xs text-error">{launch.issue.message}</span>
+    <Button size="sm" onClick={onReopen}>Reopen</Button>
+  </span>;
+  return launch?.verifiedAt ? <span className="text-xs"><Pill tone="ok">Tested</Pill><br/>{when(launch.verifiedAt)}</span> : <span className="text-xs"><Pill tone="warn">Not yet tested</Pill></span>;
+}
 
 export function AwsProviderPage() {
   const query=useAdmin<Provider>('/aws-provider',{refetchInterval:15_000});
   const toast=useToast();
   const refresh=useAdminAction(()=>post('/aws-provider/refresh'));
   const save=useAdminAction((v:AwsProviderSettings & {reason:string})=>put('/aws-provider/settings',v));
+  const reopen=useAdminAction((v:{regionId:string;reason:string})=>post(`/aws-provider/regions/${encodeURIComponent(v.regionId)}/reopen`,{reason:v.reason}));
   const [draft,setDraft]=useState<AwsProviderSettings|null>(null);
   const [confirm,setConfirm]=useState(false);
+  const [reopening,setReopening]=useState<string|null>(null);
   if(query.isError) return <p role="alert">{query.error.message}</p>;
   if(!query.data) return <p className="text-muted">Loading AWS Provider…</p>;
   const {settings,state,regions}=query.data;
@@ -61,14 +74,16 @@ export function AwsProviderPage() {
     </section>
     <section className="space-y-2">
       <h2 className="text-sm font-medium">Regional inventory from AWS APIs</h2>
-      <Table rows={regions} rowKey={(r)=>r.regionId} columns={['Region','Status / opt-in','Available','Quota room','AWS cost this month','Est. cost / month','AWS quotas (used / limit)','Last sync']} cells={(r)=>[
+      <Table rows={regions} rowKey={(r)=>r.regionId} columns={['Region','Status / opt-in','Launches','Available','Quota room','AWS cost this month','Est. cost / month','AWS quotas (used / limit)','Last sync']} cells={(r)=>[
         <span>{r.name}<br/><Mono>{r.providerRegion}</Mono></span>,
         <span><Pill tone={r.status==='ready'?'ok':'warn'}>{r.status}</Pill><br/>{r.optInStatus}</span>,
+        <LaunchCell launch={r.launch} onReopen={()=>setReopening(r.regionId)} />,
         r.inventory?.available ?? 0,r.inventory?.quota_available ?? '—',billing?.byRegion ? usd(billing.byRegion[r.providerRegion] ?? 0):'—',r.inventory ? usd(r.inventory.monthly_unit_micros):'—',
         <span className="text-xs">{r.quotas?.map((q)=><span key={q.metric} className="block">{q.metric}: {q.used} / {q.limit}</span>) ?? 'Unavailable'}</span>,
         <span className="text-xs">{when(r.checkedAt)}<br/>Prices: {when(r.price.fetchedAt)}{r.lastError || r.price.lastError ? <span className="block text-error">{r.lastError ?? r.price.lastError}</span>:null}</span>,
       ]}/>
       <p className="text-xs text-muted">Regions and country names come from AWS DescribeRegions and public infrastructure parameters. Inventory reflects account quotas and the selected budget policy; AWS physical capacity is confirmed at launch. Unavailable, disabled or stale regions cannot accept new browsers. Price List refreshes every 12 hours; new purchases stop after 48 hours without a successful price refresh.</p>
+      <p className="text-xs text-muted">Launches: <em>Tested</em> once a browser VM started there; <em>Not yet tested</em> regions passed the configuration checks above only. <em>Blocked</em>: AWS refused the account's use of the region's encryption key (IAM, an organization SCP or the key policy) and new browsers are refused until you fix the cause and reopen it. <em>Paused</em>: another provider failure; creation resumes by itself after 30 minutes. The next create after a reopen is the test.</p>
     </section>
     <section className="space-y-3">
       <h2 className="text-sm font-medium">Organization accounts & credits</h2>
@@ -82,6 +97,7 @@ export function AwsProviderPage() {
       <p className="text-xs text-muted">AWS credits have service eligibility, expiry dates and sharing rules. Remaining and estimated values come directly from AWS and may update at different times.</p>
       {billing && Object.keys(billing.auxiliaryErrors).length ? <Json value={billing.auxiliaryErrors}/>:null}
     </section>
+    <ReasonDialog open={reopening!==null} title={`Reopen ${reopening ?? ''} for new browsers`} description="Only after the cause is fixed: the next browser created there fails the same way otherwise." confirm="Reopen" busy={reopen.isPending} onClose={()=>setReopening(null)} onConfirm={(reason)=>reopen.mutate({regionId:reopening!,reason},{onSuccess:()=>{setReopening(null);toast('Region reopened');},onError:(e)=>toast(e.message,'error')})}/>
     <ReasonDialog open={confirm} title="Change AWS inventory policy" description="The new policy applies to browser creation immediately across all regions." confirm="Save" busy={save.isPending} onClose={()=>setConfirm(false)} onConfirm={(reason)=>save.mutate({...form,reason},{onSuccess:()=>{setConfirm(false);setDraft(null);},onError:(e)=>toast(e.message,'error')})}/>
   </div>;
 }

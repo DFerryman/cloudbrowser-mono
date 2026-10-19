@@ -13,6 +13,9 @@ const CACHE_MS = 10 * 60_000;
 /** Shown before "show all": the nearest few, plus the selected one. */
 const NEAREST = 5;
 
+/** Creation is open but no browser has run here yet; unknown (older API) is not flagged. */
+const untested = (r: Region) => r.availability !== 'unavailable' && r.launchVerifiedAt === null;
+
 type Cached = Record<string, { ms: number; at: number }>;
 function readCache(): Cached {
   try {
@@ -151,9 +154,10 @@ export function RegionPicker({ open, regions, loading, pricing, value, onChange,
           const p = pricing?.find((x) => x.regionId === r.id);
           const hourly = p?.rates ? browserEstimate(p.rates, { storageGb: storageFor(p), rootVolumeGb: p.rootVolumeGb, backups: false }).runningTotalHour : null;
           const disabled = !selectable(r);
-          const reason = trialRegionId && r.id !== trialRegionId && r.acceptingNew
+          const status = trialRegionId && r.id !== trialRegionId && r.acceptingNew
             ? t('create.region.notInTrial')
             : r.availabilityReason ? t(`create.region.reason.${r.availabilityReason}` as MessageKey) : r.inventory ? t('create.region.stock', { count: r.inventory.available }) : null;
+          const reason = [status, untested(r) ? t('create.region.untested') : null].filter(Boolean).join(' · ') || null;
           return (
             <RegionRow
               key={r.id}
@@ -181,6 +185,12 @@ export function RegionPicker({ open, regions, loading, pricing, value, onChange,
         <p role="status" className="mt-2 flex gap-2 rounded-[var(--radius-control)] border border-starting/40 bg-starting/5 px-3 py-2 text-xs leading-relaxed">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-starting" aria-hidden />
           <span>{t('create.region.limitedNotice', { region: regionPlace(selected, locale) })}</span>
+        </p>
+      ) : null}
+      {selected && untested(selected) ? (
+        <p role="status" className="mt-2 flex gap-2 rounded-[var(--radius-control)] border border-border bg-surface px-3 py-2 text-xs leading-relaxed">
+          <Info className="mt-0.5 size-3.5 shrink-0 text-muted" aria-hidden />
+          <span>{t('create.region.untestedNotice', { region: regionPlace(selected, locale) })}</span>
         </p>
       ) : null}
       <p className="mt-2 flex gap-2 text-xs leading-relaxed text-subtle">

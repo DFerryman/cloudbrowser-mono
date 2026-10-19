@@ -61,10 +61,11 @@ publicRoute.get('/status', async (c) => {
     // A region whose stock is used up is working as intended, not degraded.
     regionRows = listed.filter((r) => r.enabled).map((r) => {
       const acceptingNew = !creationPaused && r.acceptingNew;
-      const status: ComponentStatus = creationPaused || r.availabilityReason === 'provider_issue' || r.availabilityReason === 'capacity' ? 'degraded' : 'operational';
+      const status: ComponentStatus = creationPaused || r.availabilityReason === 'provider_issue' || r.availabilityReason === 'blocked' || r.availabilityReason === 'capacity' ? 'degraded' : 'operational';
       return {
         regionId: r.id, status, enabled: r.enabled, acceptingNew, name: r.name, city: r.city, country: r.country, area: r.area,
         availability: creationPaused ? 'unavailable' as const : r.availability, availabilityReason: creationPaused ? 'closed' as const : r.availabilityReason,
+        launchVerifiedAt: r.launchVerifiedAt,
       };
     });
   } catch (e) {

@@ -82,6 +82,14 @@ export class Ec2Error extends ExecutorError {
 // A malformed id is not proof that the intended resource was deleted.
 export const isNotFound = (e: unknown) => e instanceof Ec2Error && /NotFound$/.test(e.code);
 
+/**
+ * AWS refused this account the action in this region (IAM or an organization SCP, an opt-in
+ * region that is not enabled): every launch there is refused the same way until that changes.
+ * Bad credentials are not regional, and our own guardrails are not AWS errors.
+ */
+const REGION_DENIALS = new Set(['UnauthorizedOperation', 'AccessDenied', 'AccessDeniedException', 'OptInRequired', 'Blocked']);
+export const isRegionDenial = (e: unknown) => e instanceof Ec2Error && REGION_DENIALS.has(e.code);
+
 type Service = 'ec2' | 'servicequotas' | 'pricing';
 
 /** One product from the Price List API: its attributes and on-demand price dimensions. */

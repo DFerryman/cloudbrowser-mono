@@ -37,7 +37,7 @@ export const PublicStatus = z.object({
       enabled: z.boolean(),
       /** New browsers can be created. */
       acceptingNew: z.boolean(),
-    }).merge(Region.pick({ name: true, city: true, country: true, area: true, availability: true, availabilityReason: true })),
+    }).merge(Region.pick({ name: true, city: true, country: true, area: true, availability: true, availabilityReason: true, launchVerifiedAt: true })),
   ),
   /** An operator paused new browsers everywhere; existing browsers keep working. */
   creationPaused: z.boolean(),

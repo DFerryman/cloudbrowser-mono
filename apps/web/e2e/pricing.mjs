@@ -215,16 +215,16 @@ try {
     const signals = await fixture({ width: 1365 });
     const region = (id, city, country, ms, availability = 'available', availabilityReason = null) => ({
       id, name: `AWS ${city}`, country, city, timezone: 'UTC', enabled: true, acceptingNew: availability !== 'unavailable', probeUrl: null,
-      area: 'asia_pacific', availability, availabilityReason, estimatedRttMs: ms,
+      area: 'asia_pacific', availability, availabilityReason, estimatedRttMs: ms, launchVerifiedAt: '2026-10-19T09:30:00.000Z',
     });
     signals.state.extraRegions = [
       region('ap-northeast-1', 'Tokyo', 'JP', 12, 'limited', 'capacity'),
       region('ap-northeast-3', 'Osaka', 'JP', 18, 'unavailable', 'provider_issue'),
-      region('ap-northeast-2', 'Seoul', 'KR', 40),
+      { ...region('ap-northeast-2', 'Seoul', 'KR', 40), launchVerifiedAt: null },
       region('ap-southeast-1', 'Singapore', 'SG', 75),
       region('ap-east-1', 'Hong Kong', 'HK', 55, 'limited', 'low_stock'),
       region('us-west-2', 'Oregon', 'US', 110),
-      region('eu-central-1', 'Frankfurt', 'DE', 230),
+      region('eu-central-1', 'Frankfurt', 'DE', 230, 'unavailable', 'blocked'),
     ];
     await signals.page.goto(`${origin}/browsers/new`);
     const dialog = signals.page.getByRole('dialog');
@@ -236,11 +236,19 @@ try {
     assert.equal(await recommended.locator('input').getAttribute('value'), 'ap-northeast-2', 'A limited region is not recommended');
     await dialog.getByText('AWS capacity was short recently', { exact: true }).waitFor();
     await dialog.getByText('≈12 ms').waitFor();
+    // A region that passed the setup checks but has never run a browser says so.
+    await recommended.getByText('Not yet tested', { exact: true }).waitFor();
+    assert.equal(await dialog.getByText('Not yet tested', { exact: true }).count(), 1, 'Only the region without a launch is marked');
+    await recommended.click();
+    await dialog.getByRole('status').filter({ hasText: 'passed our setup checks, but no browser has run there yet.' }).waitFor();
     await dialog.getByText('Tokyo, Japan', { exact: true }).click();
+    assert.equal(await dialog.getByRole('status').filter({ hasText: 'passed our setup checks' }).count(), 0);
     await dialog.getByRole('status').filter({ hasText: 'AWS capacity in Tokyo, Japan was short in the last 30 minutes.' }).waitFor();
     await dialog.getByRole('button', { name: 'Show all 8 regions', exact: true }).click();
     assert.equal(await dialog.getByRole('radio', { name: /Osaka/ }).isDisabled(), true);
     await dialog.getByText('Paused while we fix a provider problem', { exact: true }).waitFor();
+    assert.equal(await dialog.getByRole('radio', { name: /Frankfurt/ }).isDisabled(), true);
+    await dialog.getByText('Unavailable until we fix a provider setup problem', { exact: true }).waitFor();
     await dialog.getByRole('searchbox').fill('germany');
     assert.deepEqual(await dialog.locator('label:has(input[name=region]) input').evaluateAll((inputs) => inputs.map((i) => i.value)), ['eu-central-1']);
     await dialog.getByRole('searchbox').fill('');
@@ -258,6 +266,7 @@ try {
     await sheet.getByText('离你最快', { exact: true }).waitFor();
     await sheet.getByText('日本 · 东京', { exact: true }).waitFor();
     await sheet.getByText('AWS 近期容量紧张', { exact: true }).waitFor();
+    await sheet.getByText('尚未实测', { exact: true }).waitFor();
     if (process.env.SHOT_DIR) await phone.page.screenshot({ path: `${process.env.SHOT_DIR}/regions-zh-phone.png` });
     await finish(phone, 'Chinese region list fits a phone with localized places and availability');
   }
