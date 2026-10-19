@@ -22,7 +22,7 @@ const LOCK_MS = 15 * 60_000;
 type TwoFactorRow = { id: string; secret: string; backupCodes: string; verified?: boolean | null; failedVerificationCount?: number | null; lockedUntil?: Date | null };
 
 export function twoFactorPlugin() {
-  const plugin = twoFactor({ issuer: 'CloudBrowser', allowPasswordless: true, totpOptions: TOTP });
+  const plugin = twoFactor({ issuer: 'Nevazu', allowPasswordless: true, totpOptions: TOTP });
   // The plugin challenges password sign-ins only. Email codes are this app's first factor, so its
   // challenge (session withheld until a TOTP or backup code is verified) must cover them as well.
   return {

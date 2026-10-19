@@ -16,7 +16,7 @@ async function isInvited(db: Db, email: string) {
 /** WebAuthn relying party: the app's own host and origin (passkeys are bound to them). */
 export function relyingParty(env: Env) {
   const url = new URL(env.APP_URL);
-  return { rpID: url.hostname, origin: url.origin, rpName: 'CloudBrowser' };
+  return { rpID: url.hostname, origin: url.origin, rpName: 'Nevazu' };
 }
 
 /**
@@ -27,7 +27,7 @@ export function relyingParty(env: Env) {
  */
 export function createAuth(env: Env, db: Db, waitUntil: (p: Promise<unknown>) => void) {
   return betterAuth({
-    appName: 'CloudBrowser',
+    appName: 'Nevazu',
     baseURL: env.APP_URL,
     basePath: '/api/auth',
     secret: env.BETTER_AUTH_SECRET,

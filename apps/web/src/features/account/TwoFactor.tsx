@@ -202,7 +202,7 @@ function SavedCodes({ codes, onDone }: { codes: string[]; onDone: () => void }) 
           onClick={() => {
             const a = document.createElement('a');
             a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
-            a.download = 'cloudbrowser-backup-codes.txt';
+            a.download = 'nevazu-backup-codes.txt';
             a.click();
             URL.revokeObjectURL(a.href);
           }}

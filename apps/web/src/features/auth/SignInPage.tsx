@@ -145,7 +145,7 @@ export function SignInPage() {
           <p>
             {rich(t('auth.inviteHint'), {
               contact: (
-                <a href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('CloudBrowser invitation')}`} className="text-accent hover:underline">
+                <a href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Nevazu invitation')}`} className="text-accent hover:underline">
                   {t('auth.requestInvite')}
                 </a>
               ),

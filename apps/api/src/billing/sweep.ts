@@ -114,20 +114,20 @@ async function sendEmail(env: Env, db: Db, userId: string, kind: 'low' | 'ended'
   const message =
     kind === 'low'
       ? {
-          subject: 'Your CloudBrowser balance is low',
+          subject: 'Your Nevazu balance is low',
           text:
             `Your prepaid balance is running low. When available credit is used up, browser access stops immediately. Your held deposit then pays fixed IP and disk costs for seven days. Add credit: ${url}\n\n` +
             `你的预付余额即将用完。可用余额不足时立即停止使用，已预留余额仅支付接下来七天的 IP 和磁盘保留费。充值：${url}`,
         }
       : {
-          subject: (day ?? 0) >= 6 ? 'Your CloudBrowser browsers will be deleted soon' : 'Your CloudBrowser balance has run out',
+          subject: (day ?? 0) >= 6 ? 'Your Nevazu browsers will be deleted soon' : 'Your Nevazu balance has run out',
           text:
             `Your prepaid balance has run out, so your browsers are asleep. Their reserved credit pays only fixed IP and disk retention costs, and they are kept until ${date}; ` +
             `after that they are deleted and the IPs are released. Add credit to keep them: ${url}\n\n` +
             `你的预付余额已用完，浏览器已进入休眠。预留余额仅支付 IP 和磁盘保留费，数据将保留到 ${date}，之后会被删除并释放 IP。充值即可保留：${url}`,
         };
   try {
-    await env.EMAIL.send({ from: { email: env.EMAIL_FROM ?? 'no-reply@example.com', name: 'CloudBrowser' }, to: u.email, ...message });
+    await env.EMAIL.send({ from: { email: env.EMAIL_FROM ?? 'no-reply@example.com', name: 'Nevazu' }, to: u.email, ...message });
   } catch (e) {
     console.error('billing email failed', userId, e);
   }

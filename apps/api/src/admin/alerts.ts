@@ -28,9 +28,9 @@ export async function deliverAlerts(env: Env, db: Db, now = new Date()): Promise
     if (emails.length && env.EMAIL) {
       for (const to of emails) {
         await env.EMAIL.send({
-          from: { email: env.EMAIL_FROM ?? 'no-reply@example.com', name: 'CloudBrowser alerts' },
+          from: { email: env.EMAIL_FROM ?? 'no-reply@example.com', name: 'Nevazu alerts' },
           to,
-          subject: `${critical ? '[CRITICAL] ' : ''}CloudBrowser: ${pending.length} new alert${pending.length > 1 ? 's' : ''}`,
+          subject: `${critical ? '[CRITICAL] ' : ''}Nevazu: ${pending.length} new alert${pending.length > 1 ? 's' : ''}`,
           text: `${lines.join('\n')}\n\n${link}`,
         });
       }

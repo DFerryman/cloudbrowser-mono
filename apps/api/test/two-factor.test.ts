@@ -22,8 +22,8 @@ const wrong = async (uri: string) => String((Number(await codeFor(uri)) + 1) % 1
 async function enable() {
   const setup2fa = await auth('/two-factor/enable');
   expect(setup2fa.status).toBe(200);
-  expect(setup2fa.body.totpURI).toMatch(/^otpauth:\/\/totp\/CloudBrowser:two%40example\.com\?secret=[A-Z2-7]+/);
-  expect(setup2fa.body.totpURI).toContain('issuer=CloudBrowser');
+  expect(setup2fa.body.totpURI).toMatch(/^otpauth:\/\/totp\/Nevazu:two%40example\.com\?secret=[A-Z2-7]+/);
+  expect(setup2fa.body.totpURI).toContain('issuer=Nevazu');
   expect(setup2fa.body.backupCodes).toHaveLength(10);
   expect((await auth('/two-factor/verify-totp', { code: await codeFor(setup2fa.body.totpURI) })).status).toBe(200);
   return setup2fa.body as { totpURI: string; backupCodes: string[] };

@@ -12,11 +12,11 @@ const en: Record<PolicySlug, Article> = {
   terms: {
     slug: 'terms',
     title: 'Terms of Service',
-    summary: 'The agreement between you and CloudBrowser when you use the service.',
+    summary: 'The agreement between you and Nevazu when you use the service.',
     blocks: [
-      { p: 'These terms apply when you use CloudBrowser (“the service”, “we”, “us”) at nevazu.com. By signing in you accept them. If you use the service for an organisation, you accept them on its behalf.' },
+      { p: 'These terms apply when you use Nevazu (“the service”, “we”, “us”) at nevazu.com. By signing in you accept them. If you use the service for an organisation, you accept them on its behalf.' },
       { h: '1. The service' },
-      { p: 'CloudBrowser provides cloud-hosted Chrome browsers, each on its own virtual machine with a dedicated IP address and persistent encrypted storage, which you view and control over the internet. During the pilot the service is available by invitation only and features may change.' },
+      { p: 'Nevazu provides cloud-hosted Chrome browsers, each on its own virtual machine with a dedicated IP address and persistent encrypted storage, which you view and control over the internet. During the pilot the service is available by invitation only and features may change.' },
       { h: '2. Your account' },
       { ul: [
         'You sign in with codes sent to your email address. Keep access to that mailbox, and to your authenticator app if you turn on two-step verification, secure.',
@@ -55,7 +55,7 @@ const en: Record<PolicySlug, Article> = {
     title: 'Privacy Policy',
     summary: 'What we collect, why, and the choices you have.',
     blocks: [
-      { p: 'This policy explains how CloudBrowser handles personal data when you use the service. We collect only what we need to run it.' },
+      { p: 'This policy explains how Nevazu handles personal data when you use the service. We collect only what we need to run it.' },
       { h: 'What we collect' },
       { ul: [
         'Account: your email address, sign-in and two-step verification records, passkeys you register (public keys only), and trusted-device markers.',
@@ -96,7 +96,7 @@ const en: Record<PolicySlug, Article> = {
     title: 'Refund Policy',
     summary: 'When unused credit can be refunded.',
     blocks: [
-      { p: 'CloudBrowser is prepaid: you buy credit and usage is deducted per minute. This policy explains how refunds work. Payments are processed by Creem, our merchant of record, and refunds are paid back to the original payment method.' },
+      { p: 'Nevazu is prepaid: you buy credit and usage is deducted per minute. This policy explains how refunds work. Payments are processed by Creem, our merchant of record, and refunds are paid back to the original payment method.' },
       { h: 'Unused credit' },
       { p: `You can ask for a refund of credit you have not used within 14 days of buying it. Write to ${SUPPORT_EMAIL} from your sign-in email with the date of the top-up. We refund the unused part of that top-up, less any credit held for browsers you still keep.` },
       { h: 'What is not refundable' },
@@ -119,11 +119,11 @@ const zh: Record<PolicySlug, Article> = {
   terms: {
     slug: 'terms',
     title: '服务条款',
-    summary: '你使用 CloudBrowser 服务时与我们之间的协议。',
+    summary: '你使用 Nevazu 服务时与我们之间的协议。',
     blocks: [
-      { p: '本条款适用于你在 nevazu.com 使用 CloudBrowser（“本服务”“我们”）。登录即表示你接受本条款。如果你代表某个组织使用本服务，即代表该组织接受本条款。' },
+      { p: '本条款适用于你在 nevazu.com 使用 Nevazu（“本服务”“我们”）。登录即表示你接受本条款。如果你代表某个组织使用本服务，即代表该组织接受本条款。' },
       { h: '1. 服务内容' },
-      { p: 'CloudBrowser 提供托管在云端的 Chrome 浏览器，每个浏览器运行在独立的虚拟机上，配有独享 IP 和持久化加密存储，你可以通过互联网查看和控制。试用期间本服务仅限受邀使用，功能可能会调整。' },
+      { p: 'Nevazu 提供托管在云端的 Chrome 浏览器，每个浏览器运行在独立的虚拟机上，配有独享 IP 和持久化加密存储，你可以通过互联网查看和控制。试用期间本服务仅限受邀使用，功能可能会调整。' },
       { h: '2. 你的账户' },
       { ul: [
         '你通过发送到邮箱的验证码登录。请妥善保护该邮箱，以及开启两步验证后的身份验证器应用。',
@@ -162,7 +162,7 @@ const zh: Record<PolicySlug, Article> = {
     title: '隐私政策',
     summary: '我们收集哪些信息、为什么收集，以及你的选择。',
     blocks: [
-      { p: '本政策说明你使用本服务时 CloudBrowser 如何处理个人数据。我们只收集运行服务所需的信息。' },
+      { p: '本政策说明你使用本服务时 Nevazu 如何处理个人数据。我们只收集运行服务所需的信息。' },
       { h: '我们收集的信息' },
       { ul: [
         '账户：你的邮箱地址、登录和两步验证记录、你注册的通行密钥（仅公钥）以及受信任设备标记。',
@@ -203,7 +203,7 @@ const zh: Record<PolicySlug, Article> = {
     title: '退款政策',
     summary: '未使用的余额何时可以退款。',
     blocks: [
-      { p: 'CloudBrowser 为预付费：你购买余额，用量按分钟扣除。本政策说明退款方式。支付由我们的记录商户 Creem 处理，退款将退回原支付方式。' },
+      { p: 'Nevazu 为预付费：你购买余额，用量按分钟扣除。本政策说明退款方式。支付由我们的记录商户 Creem 处理，退款将退回原支付方式。' },
       { h: '未使用的余额' },
       { p: `购买后 14 天内未使用的余额可以申请退款。请用登录邮箱发邮件至 ${SUPPORT_EMAIL}，并注明充值日期。我们将退还该笔充值中未使用的部分，但会扣除你仍保留的浏览器所冻结的金额。` },
       { h: '不予退款的情况' },

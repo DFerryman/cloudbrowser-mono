@@ -11,9 +11,9 @@ const en: Article[] = [
     title: 'Getting started',
     summary: 'Sign in, create your first browser and open it.',
     blocks: [
-      { p: 'CloudBrowser gives you a real Chrome running on its own computer in the cloud. Each browser has a dedicated IP address that no one else uses, and encrypted storage that keeps your profile, cookies and sign-ins between sessions.' },
+      { p: 'Nevazu gives you a real Chrome running on its own computer in the cloud. Each browser has a dedicated IP address that no one else uses, and encrypted storage that keeps your profile, cookies and sign-ins between sessions.' },
       { h: 'Sign in' },
-      { p: 'CloudBrowser is invite-only during the pilot. Enter your invited email on the sign-in page and we send you a 6-digit code, valid for 5 minutes. If you turned on two-step verification, you then enter a code from your authenticator app.' },
+      { p: 'Nevazu is invite-only during the pilot. Enter your invited email on the sign-in page and we send you a 6-digit code, valid for 5 minutes. If you turned on two-step verification, you then enter a code from your authenticator app.' },
       { h: 'Create a browser' },
       { ul: [
         'Open Browsers and choose New browser.',
@@ -98,7 +98,7 @@ const en: Article[] = [
     summary: 'Prepaid balance, per-minute metering, held credit and what happens when credit runs out.',
     blocks: [
       { h: 'Prepaid balance', id: 'prepaid' },
-      { p: 'CloudBrowser is prepaid, with no subscription. Add credit from Billing & usage; you choose the amount on the payment page. Payments, receipts and sales tax are handled by Creem, our merchant of record. Unused credit stays on your balance.' },
+      { p: 'Nevazu is prepaid, with no subscription. Add credit from Billing & usage; you choose the amount on the payment page. Payments, receipts and sales tax are handled by Creem, our merchant of record. Unused credit stays on your balance.' },
       { h: 'What is charged', id: 'items' },
       { ul: [
         'Compute: per minute while the browser is awake.',
@@ -187,9 +187,9 @@ const zh: Article[] = [
     title: '快速开始',
     summary: '登录、创建并打开你的第一个浏览器。',
     blocks: [
-      { p: 'CloudBrowser 为你提供运行在云端独立计算机上的真实 Chrome。每个浏览器都有一个不与他人共享的独享 IP，以及在会话之间保存个人资料、Cookie 和登录状态的加密存储。' },
+      { p: 'Nevazu 为你提供运行在云端独立计算机上的真实 Chrome。每个浏览器都有一个不与他人共享的独享 IP，以及在会话之间保存个人资料、Cookie 和登录状态的加密存储。' },
       { h: '登录', id: 'sign-in' },
-      { p: '试用期间 CloudBrowser 仅限受邀用户。在登录页输入受邀邮箱，我们会发送 6 位验证码，5 分钟内有效。如果你开启了两步验证，接着还需输入身份验证器应用中的验证码。' },
+      { p: '试用期间 Nevazu 仅限受邀用户。在登录页输入受邀邮箱，我们会发送 6 位验证码，5 分钟内有效。如果你开启了两步验证，接着还需输入身份验证器应用中的验证码。' },
       { h: '创建浏览器', id: 'create' },
       { ul: [
         '打开“浏览器”，选择“新建浏览器”。',
@@ -274,7 +274,7 @@ const zh: Article[] = [
     summary: '预付余额、按分钟计量、冻结金额，以及余额用完时会发生什么。',
     blocks: [
       { h: '预付余额', id: 'prepaid' },
-      { p: 'CloudBrowser 采用预付费，无需订阅。在“账单与用量”中充值，并在支付页面选择金额。支付、收据和销售税由我们的记录商户 Creem 处理。未用完的余额会一直保留。' },
+      { p: 'Nevazu 采用预付费，无需订阅。在“账单与用量”中充值，并在支付页面选择金额。支付、收据和销售税由我们的记录商户 Creem 处理。未用完的余额会一直保留。' },
       { h: '收费项目', id: 'items' },
       { ul: [
         '计算：浏览器运行时按分钟计费。',

@@ -123,7 +123,7 @@ app.get('/api/v1/health', (c) => c.json({ ok: true }));
 app.route('/api/public', publicRoute);
 app.doc31('/api/v1/openapi.json', {
   openapi: '3.1.0',
-  info: { title: 'CloudBrowser API', version: '1.0.0' },
+  info: { title: 'Nevazu API', version: '1.0.0' },
 });
 app.use('/api/v1/*', sameOrigin, async (c, next) => {
   if (isAdminPath(c.req.path)) return requireAdmin(c, next);

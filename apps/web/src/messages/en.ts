@@ -1,12 +1,12 @@
 export const en = {
-  'app.name': 'CloudBrowser',
+  'app.name': 'Nevazu',
   'nav.browsers': 'Browsers',
   'nav.usage': '{used} of {max} browsers',
   'nav.signOut': 'Sign out',
   'nav.language': 'Language',
 
-  'auth.title': 'Sign in to CloudBrowser',
-  'auth.subtitle': 'We will email you a 6-digit code. CloudBrowser is invite-only during the pilot.',
+  'auth.title': 'Sign in to Nevazu',
+  'auth.subtitle': 'We will email you a 6-digit code. Nevazu is invite-only during the pilot.',
   'auth.email': 'Email',
   'auth.sendCode': 'Send code',
   'auth.code': 'Code',
@@ -227,7 +227,7 @@ export const en = {
   'twofa.confirm': 'Turn on',
   'twofa.codesTitle': 'Save your backup codes',
   'twofa.codesBody': 'Two-step verification is on. If you lose your phone, each of these codes lets you sign in once. They are shown only now.',
-  'twofa.fileHeader': 'CloudBrowser backup codes. Each code can be used once to sign in without your authenticator app.',
+  'twofa.fileHeader': 'Nevazu backup codes. Each code can be used once to sign in without your authenticator app.',
   'twofa.copy': 'Copy',
   'twofa.copied': 'Backup codes copied',
   'twofa.download': 'Download',
@@ -458,7 +458,7 @@ export const en = {
   'footer.refunds': 'Refund Policy',
   'footer.contact': 'Contact',
   'footer.tagline': 'Persistent cloud browsers with dedicated IPs.',
-  'footer.rights': '© {year} CloudBrowser. All rights reserved.',
+  'footer.rights': '© {year} Nevazu. All rights reserved.',
 
   'home.eyebrow': 'Invite-only pilot',
   'home.title': 'A real Chrome in the cloud, with an IP that is yours alone',

@@ -1,13 +1,13 @@
 import type { Messages } from './en.js';
 
 export const zhCN: Messages = {
-  'app.name': 'CloudBrowser',
+  'app.name': 'Nevazu',
   'nav.browsers': '浏览器',
   'nav.usage': '已用 {used} / {max} 个浏览器',
   'nav.signOut': '退出登录',
   'nav.language': '语言',
 
-  'auth.title': '登录 CloudBrowser',
+  'auth.title': '登录 Nevazu',
   'auth.subtitle': '我们会向你的邮箱发送 6 位验证码。试用期间仅限受邀用户。',
   'auth.email': '邮箱',
   'auth.sendCode': '发送验证码',
@@ -229,7 +229,7 @@ export const zhCN: Messages = {
   'twofa.confirm': '开启',
   'twofa.codesTitle': '保存备用码',
   'twofa.codesBody': '两步验证已开启。手机丢失时，每个备用码可用于登录一次。备用码仅显示这一次。',
-  'twofa.fileHeader': 'CloudBrowser 备用码。每个备用码可在没有身份验证器应用时用于登录一次。',
+  'twofa.fileHeader': 'Nevazu 备用码。每个备用码可在没有身份验证器应用时用于登录一次。',
   'twofa.copy': '复制',
   'twofa.copied': '已复制备用码',
   'twofa.download': '下载',
@@ -460,7 +460,7 @@ export const zhCN: Messages = {
   'footer.refunds': '退款政策',
   'footer.contact': '联系我们',
   'footer.tagline': '拥有独享 IP 的持久化云浏览器。',
-  'footer.rights': '© {year} CloudBrowser。保留所有权利。',
+  'footer.rights': '© {year} Nevazu。保留所有权利。',
 
   'home.eyebrow': '邀请制试用中',
   'home.title': '云端的真实 Chrome，配一个只属于你的 IP',

@@ -14,9 +14,9 @@ export async function sendSignInCode(env: Env, to: string, code: string) {
   const from = env.EMAIL_FROM ?? 'no-reply@example.com';
   try {
     await env.EMAIL.send({
-      from: { email: from, name: 'CloudBrowser' },
+      from: { email: from, name: 'Nevazu' },
       to,
-      subject: `Your CloudBrowser sign-in code: ${code}`,
+      subject: `Your Nevazu sign-in code: ${code}`,
       text: `Your sign-in code is ${code}\n\nIt expires in 5 minutes. If you did not ask for it, ignore this email.\n\n你的登录验证码是 ${code}，5 分钟内有效。如果不是你本人操作，请忽略此邮件。`,
       html: `<p>Your sign-in code is</p><p style="font-size:24px;font-weight:600;letter-spacing:4px;font-family:monospace">${code}</p><p>It expires in 5 minutes. If you did not ask for it, ignore this email.</p><hr><p>你的登录验证码是 <b>${code}</b>，5 分钟内有效。如果不是你本人操作，请忽略此邮件。</p>`,
     });

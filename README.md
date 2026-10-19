@@ -1,6 +1,6 @@
 # cloudbrowser-mono
 
-Persistent cloud browsers: each browser is a real Chrome in its own cloud VM with a **dedicated,
+Nevazu ([nevazu.com](https://nevazu.com)) — persistent cloud browsers: each browser is a real Chrome in its own cloud VM with a **dedicated,
 stable IP** in Tokyo or US West, **persistent encrypted data**, and a **low-latency live view**.
 The design lives in the Notion plan *Persistent Cloud Browser — Implementation Plan*.
 

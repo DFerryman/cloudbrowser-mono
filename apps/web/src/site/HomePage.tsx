@@ -110,7 +110,7 @@ export function HomePage() {
           <div className="flex flex-wrap gap-3">
             {primary}
             {!signedIn ? (
-              <a href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('CloudBrowser invitation')}`}>
+              <a href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Nevazu invitation')}`}>
                 <Button className="h-10 px-5">{t('home.cta.request')}</Button>
               </a>
             ) : null}

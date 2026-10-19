@@ -24,7 +24,7 @@ export function bootstrapScript(input: BootstrapInput): string {
   const agentJson = JSON.stringify({ instanceId: input.instanceId, gatewayUrl: input.gatewayUrl, bootstrapToken: input.bootstrapToken });
   const echo = `${input.appUrl.replace(/\/$/, '')}/api/echo/ip`;
   return `#!/bin/bash
-# CloudBrowser first boot. Also on the serial console (EC2: Actions → Monitor → Get system log).
+# Nevazu first boot. Also on the serial console (EC2: Actions → Monitor → Get system log).
 set -euo pipefail
 exec > >(tee -a /var/log/cloudbrowser-bootstrap.log | sed 's/^/cloudbrowser: /' >/dev/console) 2>&1
 echo "bootstrap start $(date -Is)"
