@@ -1,11 +1,12 @@
-import { REGION_INFO, type RegionId } from '@cloudbrowser/contracts';
+import { REGION_AREAS } from '@cloudbrowser/contracts';
 import { Button, Card } from '@cloudbrowser/ui';
 import { ArrowRight, Globe2, HardDrive, Lock, MonitorSmartphone, MoonStar, Wallet, Zap } from 'lucide-react';
 import { useNavigate } from 'react-router';
-import { regionKey } from '../features/instances/status.js';
+import { regionPlace } from '../features/instances/region-names.js';
 import { useI18n } from '../lib/i18n.js';
 import { SUPPORT_EMAIL } from '../lib/site.js';
-import { useSignedIn } from './hooks.js';
+import type { MessageKey } from '../messages/en.js';
+import { usePublicPricing, useSignedIn } from './hooks.js';
 import { container } from './PublicShell.js';
 
 const FEATURES = [
@@ -17,12 +18,13 @@ const FEATURES = [
   { key: 'devices', icon: MonitorSmartphone },
 ] as const;
 
-const REGIONS: RegionId[] = ['syd1', 'tyo1', 'usw1'];
-
 /** The public homepage: what the product is, how it works, and the way in. */
 export function HomePage() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const navigate = useNavigate();
+  // The live region list, by continent; the same cached answer the pricing page uses.
+  const regions = (usePublicPricing().data?.regions ?? []).filter((r) => r.acceptingNew);
+  const areas = REGION_AREAS.map((area) => [area, regions.filter((r) => r.area === area).map((r) => regionPlace(r, locale)).sort()] as const).filter(([, list]) => list.length);
   const signedIn = useSignedIn();
   const primary = signedIn ? (
     <Button variant="primary" className="h-10 px-5" onClick={() => navigate('/browsers')}>
@@ -89,12 +91,14 @@ export function HomePage() {
             <h2 className="text-xl font-semibold tracking-tight">{t('home.regions.title')}</h2>
             <p className="mt-2 text-sm leading-relaxed text-muted">{t('home.regions.body')}</p>
           </div>
-          <ul className="grid gap-3 sm:grid-cols-3">
-            {REGIONS.map((id) => (
-              <li key={id} className="rounded-[var(--radius-control)] border border-border bg-surface px-4 py-3">
-                <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] font-medium text-muted">{REGION_INFO[id]?.country}</span>
-                <p className="mt-2 text-sm font-medium">{t(regionKey(id))}</p>
-                <p className="text-xs text-subtle">{REGION_INFO[id]?.timezone}</p>
+          <ul className="grid gap-3 sm:grid-cols-2">
+            {areas.map(([area, places]) => (
+              <li key={area} className="rounded-[var(--radius-control)] border border-border bg-surface px-4 py-3">
+                <p className="flex items-baseline justify-between gap-2 text-sm font-medium">
+                  {t(`area.${area}` as MessageKey)}
+                  <span className="text-xs font-normal text-subtle">{t('home.regions.count', { count: places.length })}</span>
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-muted">{places.join(locale === 'zh-CN' ? '、' : ' · ')}</p>
               </li>
             ))}
           </ul>

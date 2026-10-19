@@ -12,7 +12,7 @@ and errors. Changes to inventory policy require a reason and are audited.
 | Region list / opt-in state | EC2 DescribeRegions, all regions | Every 5 minutes |
 | Display name / country | SSM public global infrastructure parameters | First discovery, daily, or manual refresh |
 | Browser networks | EC2 DescribeVpcs/Subnets/SecurityGroups | Every 5 minutes |
-| Machines and AZ availability | DescribeInstanceTypeOfferings / DescribeInstanceTypes | Every 5 minutes |
+| Machines and AZ availability | DescribeInstanceTypeOfferings / DescribeInstanceTypes (stored per zone, so a launch never asks a zone for a type it does not offer) | Every 5 minutes |
 | Account quotas | Service Quotas GetServiceQuota | Every 5 minutes |
 | Consumed IPs, CPU, storage, interfaces | Paginated EC2 describe APIs, including non-project resources | Every 5 minutes |
 | Unit prices | AWS Price List GetProducts, including historical machine types | Every 12 hours or manual refresh |
@@ -60,6 +60,22 @@ cross into a new calendar month. New purchases stop after 48 hours without a goo
 existing usage retains the last known price. Failed creates hold inventory until the reaper
 confirms provider cleanup; retained/deleting browsers hold it until purge. Each browser still
 obeys the existing per-user limits and prepaid requirements.
+
+## What users see before creating
+
+AWS publishes no live on-demand capacity, so the region list combines what is known:
+
+- **Inventory** (above): no room under quotas or budget makes a region *Unavailable*.
+- **Launch outcomes** (`launch_health`, written by the engine per region and zone): a capacity
+  shortage in the last 30 minutes with no successful launch since makes the region *Limited*; a
+  launch failure that repeats (an unusable EBS key, a permission, a quota) makes it *Unavailable*
+  and admission refuses it for 6 hours or until a launch there succeeds. New browsers start in the
+  zone without a recent shortage and move to another zone on a capacity error.
+- **Latency**: the browser times `https://dynamodb.<region>.amazonaws.com/ping` (allowed in the
+  CSP) and shows a distance estimate from Cloudflare's approximate location until it has measured.
+- **Location**: city, country and timezone come from `AWS_REGION_FACTS`, not SSM (SSM has no city or
+  timezone and reports Hong Kong as CN). The browser's timezone follows the region (`TZ` in the
+  browser container).
 
 ## Credentials
 

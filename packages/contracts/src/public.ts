@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { RegionPricing } from './pricing.js';
-import { RegionId } from './regions.js';
+import { Region, RegionId } from './regions.js';
 
 /**
  * Signed-out pages (`/api/public/*`): the price list and the service status. Nothing here is
@@ -12,7 +12,7 @@ export const PublicPricing = z.object({
       name: z.string(),
       /** False when the region takes no new browsers right now (existing ones keep working). */
       acceptingNew: z.boolean(),
-    }),
+    }).merge(Region.pick({ city: true, country: true, area: true, availability: true })),
   ),
   /** The least available credit needed to create or wake a paid browser. */
   minBalanceMicros: z.number().int(),
@@ -37,7 +37,7 @@ export const PublicStatus = z.object({
       enabled: z.boolean(),
       /** New browsers can be created. */
       acceptingNew: z.boolean(),
-    }),
+    }).merge(Region.pick({ name: true, city: true, country: true, area: true, availability: true, availabilityReason: true })),
   ),
   /** An operator paused new browsers everywhere; existing browsers keep working. */
   creationPaused: z.boolean(),

@@ -1,9 +1,10 @@
-import { browserEstimate, type PublicPricing, type RegionId } from '@cloudbrowser/contracts';
-import { Button, Card, cn, Hint, Skeleton } from '@cloudbrowser/ui';
+import { REGION_AREAS, browserEstimate, type PublicPricing, type RegionId } from '@cloudbrowser/contracts';
+import { Button, Card, cn, Hint, Label, Select, Skeleton } from '@cloudbrowser/ui';
 import { ArrowRight, ChevronDown, Gift } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import { regionKey } from '../features/instances/status.js';
+import { regionPlace } from '../features/instances/region-names.js';
+import type { MessageKey } from '../messages/en.js';
 import { useI18n } from '../lib/i18n.js';
 import { money } from '../lib/money.js';
 import { usePublicPricing, useSignedIn } from './hooks.js';
@@ -29,6 +30,10 @@ export function PricingPage() {
   }, [regions, regionId]);
   const region = regions.find((r) => r.regionId === regionId);
   const m = (v: number) => money(v, locale);
+  const selectId = useId();
+  // Many regions: one list grouped by continent, each option with its running price.
+  const groups = [...REGION_AREAS, null].map((area) => [area, regions.filter((r) => r.area === area).sort((a, b) => regionPlace(a, locale).localeCompare(regionPlace(b, locale)))] as const).filter(([, list]) => list.length);
+  const trialRegion = regions.find((r) => r.regionId === pricing.data?.trial.regionId);
 
   return (
     <>
@@ -41,22 +46,20 @@ export function PricingPage() {
           <Card className="p-6 text-sm text-muted">{t('pricing.unavailable')}</Card>
         ) : (
           <>
-            <div role="tablist" aria-label={t('pricing.region')} className="mb-4 inline-flex flex-wrap gap-1 rounded-[var(--radius-control)] border border-border bg-surface p-1">
-              {regions.map((r) => (
-                <button
-                  key={r.regionId}
-                  type="button"
-                  role="tab"
-                  aria-selected={r.regionId === regionId}
-                  onClick={() => setRegionId(r.regionId)}
-                  className={cn(
-                    'rounded-md px-3 py-1.5 text-sm font-medium transition-colors',
-                    r.regionId === regionId ? 'bg-bg text-fg shadow-sm' : 'text-muted hover:text-fg',
-                  )}
-                >
-                  {t(regionKey(r.regionId))}
-                </button>
-              ))}
+            <div className="mb-4 max-w-md">
+              <Label htmlFor={selectId}>{t('pricing.region')}</Label>
+              <Select id={selectId} value={regionId ?? ''} onChange={(e) => setRegionId(e.target.value)}>
+                {groups.map(([area, list]) => (
+                  <optgroup key={area ?? 'other'} label={area ? t(`area.${area}` as MessageKey) : t('area.other')}>
+                    {list.map((r) => (
+                      <option key={r.regionId} value={r.regionId}>
+                        {regionPlace(r, locale)}
+                        {r.rates ? ` · ${t('price.perHour', { amount: m(browserEstimate(r.rates, { storageGb: r.defaultStorageGb, rootVolumeGb: r.rootVolumeGb, backups: false }).runningTotalHour) })}` : ''}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </Select>
             </div>
             {region ? <RegionCard region={region} /> : null}
           </>
@@ -100,7 +103,7 @@ export function PricingPage() {
               <div>
                 <h2 className="font-semibold">{t('pricing.trial.title')}</h2>
                 <p className="mt-1 text-sm text-muted">
-                  {t('pricing.trial.body', { minutes: pricing.data.trial.minutes, region: t(regionKey(pricing.data.trial.regionId)) })}
+                  {t('pricing.trial.body', { minutes: pricing.data.trial.minutes, region: trialRegion ? regionPlace(trialRegion, locale) : pricing.data.trial.regionId })}
                 </p>
               </div>
             </div>

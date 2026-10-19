@@ -66,7 +66,9 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
         entitlements: { billing: 'prepaid', maxBrowsers, maxRunning: 10, idleTimeoutMaxS: 3600, ipChangesPerMonth: 1, maxStorageGb: 100 },
         usage: { browsers: failed ? 0 : 1, running: 0 },
       };
-      else if (url.pathname === '/api/v1/regions') body = [{ id: 'syd1', name: 'Sydney', country: 'AU', city: 'Sydney', timezone: 'Australia/Sydney', enabled: true, acceptingNew: state.stockAvailable, probeUrl: null, ...(!state.stockAvailable ? { inventory: { available: 0, checkedAt: new Date().toISOString(), status: 'ready', constraint: 'quota_and_budget' } } : {}) }];
+      else if (url.pathname === '/api/v1/regions') body = [{ id: 'syd1', name: 'Sydney', country: 'AU', city: 'Sydney', timezone: 'Australia/Sydney', enabled: true, acceptingNew: state.stockAvailable, probeUrl: null,
+        area: 'asia_pacific', availability: state.stockAvailable ? 'available' : 'unavailable', availabilityReason: state.stockAvailable ? null : 'no_stock', estimatedRttMs: null,
+        ...(!state.stockAvailable ? { inventory: { available: 0, checkedAt: new Date().toISOString(), status: 'ready', constraint: 'quota_and_budget' } } : {}) }];
       else if (url.pathname === '/api/v1/pricing') {
         state.priceReads++;
         const newer = state.version === 'quote-2';
@@ -90,7 +92,8 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
       else if (url.pathname === '/api/v1/events') return route.fulfill({ contentType: 'text/event-stream', body: ': local fixture\n\n' });
       else if (url.pathname.endsWith('/sessions') || url.pathname.endsWith('/transactions')) body = [];
       else throw new Error(`Unhandled fixture route: ${request.method()} ${url.pathname}`);
-      if (request.method() === 'GET' && state.extraRegion && url.pathname === '/api/v1/regions') body.push({ id: 'eu-central-1', name: 'Europe (Frankfurt)', country: 'DE', city: 'Frankfurt', timezone: 'UTC', enabled: true, acceptingNew: true, probeUrl: null, inventory: { available: 4, checkedAt: new Date().toISOString(), status: 'ready', constraint: 'quota_and_budget' } });
+      if (request.method() === 'GET' && state.extraRegion && url.pathname === '/api/v1/regions') body.push({ id: 'eu-central-1', name: 'Europe (Frankfurt)', country: 'DE', city: 'Frankfurt', timezone: 'Europe/Berlin', enabled: true, acceptingNew: true, probeUrl: null,
+        area: 'europe', availability: 'available', availabilityReason: null, estimatedRttMs: null, inventory: { available: 4, checkedAt: new Date().toISOString(), status: 'ready', constraint: 'quota_and_budget' } });
       if (request.method() === 'GET' && state.extraRegion && url.pathname === '/api/v1/pricing') body.push({ ...body[0], regionId: 'eu-central-1', rates: body[0].rates ? { ...body[0].rates, compute: 120_000 } : null });
       if (request.method() === 'GET' && url.pathname === '/api/v1/regions') body.push(...state.extraRegions);
       if (request.method() === 'GET' && url.pathname === '/api/v1/pricing') body.push(...state.extraRegions.map((r) => ({ ...body[0], regionId: r.id })));
@@ -180,10 +183,13 @@ try {
     const longList = await fixture({ width, height: 900 });
     longList.state.extraRegions = Array.from({ length: 20 }, (_, i) => ({
       id: `test-region-${i}`, name: `Test region ${i + 1}`, country: 'US', city: 'Test city', timezone: 'UTC',
-      enabled: true, acceptingNew: true, probeUrl: null,
+      enabled: true, acceptingNew: true, probeUrl: null, area: null, availability: 'available', availabilityReason: null, estimatedRttMs: null,
     }));
     await longList.page.goto(`${origin}/browsers/new`);
     const dialog = longList.page.getByRole('dialog');
+    // A long list shows the nearest regions first; the rest are one click away.
+    assert.equal(await dialog.getByText('Test region 20', { exact: true }).count(), 0);
+    await dialog.getByRole('button', { name: 'Show all 21 regions', exact: true }).click();
     await dialog.getByText('Test region 20', { exact: true }).click();
     assert.equal(await dialog.getByRole('radio', { name: /Test region 20/ }).isChecked(), true);
     const geometry = await dialog.evaluate((node) => {
@@ -198,6 +204,58 @@ try {
     assert.equal(await dialog.evaluate((node) => node.scrollTop), 0, 'Keyboard selection also keeps the dialog shell stationary');
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).first().click();
     await finish(longList, `long region list keeps header and footer in place after selection at ${width}px`);
+  }
+
+  {
+    // Regions sorted by latency, labelled by availability, the nearest available one recommended.
+    const signals = await fixture({ width: 1365 });
+    const region = (id, city, country, ms, availability = 'available', availabilityReason = null) => ({
+      id, name: `AWS ${city}`, country, city, timezone: 'UTC', enabled: true, acceptingNew: availability !== 'unavailable', probeUrl: null,
+      area: 'asia_pacific', availability, availabilityReason, estimatedRttMs: ms,
+    });
+    signals.state.extraRegions = [
+      region('ap-northeast-1', 'Tokyo', 'JP', 12, 'limited', 'capacity'),
+      region('ap-northeast-3', 'Osaka', 'JP', 18, 'unavailable', 'provider_issue'),
+      region('ap-northeast-2', 'Seoul', 'KR', 40),
+      region('ap-southeast-1', 'Singapore', 'SG', 75),
+      region('ap-east-1', 'Hong Kong', 'HK', 55, 'limited', 'low_stock'),
+      region('us-west-2', 'Oregon', 'US', 110),
+      region('eu-central-1', 'Frankfurt', 'DE', 230),
+    ];
+    await signals.page.goto(`${origin}/browsers/new`);
+    const dialog = signals.page.getByRole('dialog');
+    const rows = dialog.getByRole('radio');
+    await dialog.getByText('Fastest for you', { exact: true }).waitFor();
+    const order = await dialog.locator('label:has(input[name=region])').evaluateAll((labels) => labels.map((l) => l.querySelector('input').value));
+    assert.deepEqual(order.slice(0, 5), ['ap-northeast-1', 'ap-northeast-2', 'ap-east-1', 'ap-southeast-1', 'us-west-2'], 'Selectable regions come first, nearest first');
+    const recommended = dialog.locator('label', { hasText: 'Fastest for you' });
+    assert.equal(await recommended.locator('input').getAttribute('value'), 'ap-northeast-2', 'A limited region is not recommended');
+    await dialog.getByText('AWS capacity was short recently', { exact: true }).waitFor();
+    await dialog.getByText('≈12 ms').waitFor();
+    await dialog.getByText('Tokyo, Japan', { exact: true }).click();
+    await dialog.getByRole('status').filter({ hasText: 'AWS capacity in Tokyo, Japan was short in the last 30 minutes.' }).waitFor();
+    await dialog.getByRole('button', { name: 'Show all 8 regions', exact: true }).click();
+    assert.equal(await dialog.getByRole('radio', { name: /Osaka/ }).isDisabled(), true);
+    await dialog.getByText('Paused while we fix a provider problem', { exact: true }).waitFor();
+    await dialog.getByRole('searchbox').fill('germany');
+    assert.deepEqual(await dialog.locator('label:has(input[name=region]) input').evaluateAll((inputs) => inputs.map((i) => i.value)), ['eu-central-1']);
+    await dialog.getByRole('searchbox').fill('');
+    await signals.page.screenshot({ path: process.env.SHOT_DIR ? `${process.env.SHOT_DIR}/regions-en.png` : '/dev/null' });
+    assert.ok(await rows.count() >= 8);
+    await dialog.getByRole('button', { name: 'Create browser', exact: true }).click();
+    await signals.page.waitForURL('**/browsers');
+    assert.equal(signals.state.requests[0].body.regionId, 'ap-northeast-1');
+    await finish(signals, 'region list shows availability, latency and a recommendation, and a limited region can still be chosen');
+
+    const phone = await fixture({ width: 390, height: 844, locale: 'zh-CN' });
+    phone.state.extraRegions = signals.state.extraRegions;
+    await phone.page.goto(`${origin}/browsers/new`);
+    const sheet = phone.page.getByRole('dialog');
+    await sheet.getByText('离你最快', { exact: true }).waitFor();
+    await sheet.getByText('日本 · 东京', { exact: true }).waitFor();
+    await sheet.getByText('AWS 近期容量紧张', { exact: true }).waitFor();
+    await phone.page.screenshot({ path: process.env.SHOT_DIR ? `${process.env.SHOT_DIR}/regions-zh-phone.png` : '/dev/null' });
+    await finish(phone, 'Chinese region list fits a phone with localized places and availability');
   }
 
   const noStock = await fixture();

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { REGION_AREAS } from './aws-regions.js';
 
 export const RegionId = z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9-]*$/);
 export type RegionId = z.infer<typeof RegionId>;
@@ -24,5 +25,15 @@ export const Region = z.object({
   inventory: z.object({ available: z.number().int().nonnegative(), checkedAt: z.string().nullable(), status: z.enum(['ready', 'syncing', 'unavailable']), constraint: z.string().nullable() }).optional(),
   /** URL the client fetches to measure latency from its own network; null when not configured. */
   probeUrl: z.string().nullable(),
+  /** Continent group for a long list; null when the region is not in the facts table. */
+  area: z.enum(REGION_AREAS).nullable(),
+  /**
+   * What a new browser can expect here now. `limited`: creation is allowed but may wait or
+   * stock is nearly gone; `unavailable`: creation is refused (same as acceptingNew false).
+   */
+  availability: z.enum(['available', 'limited', 'unavailable']),
+  availabilityReason: z.enum(['low_stock', 'capacity', 'provider_issue', 'no_stock', 'closed']).nullable(),
+  /** Round trip estimated from the caller's approximate location, before the client measures it. */
+  estimatedRttMs: z.number().int().nonnegative().nullable(),
 });
 export type Region = z.infer<typeof Region>;

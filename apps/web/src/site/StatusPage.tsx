@@ -1,7 +1,7 @@
 import type { ComponentStatus } from '@cloudbrowser/contracts';
 import { Card, cn, Hint, Skeleton } from '@cloudbrowser/ui';
 import { AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
-import { regionKey } from '../features/instances/status.js';
+import { regionPlace } from '../features/instances/region-names.js';
 import { useI18n } from '../lib/i18n.js';
 import { usePublicStatus } from './hooks.js';
 import { container, PublicHero } from './PublicShell.js';
@@ -53,8 +53,8 @@ export function StatusPage() {
                 {s.regions.map((r) => (
                   <Row
                     key={r.regionId}
-                    label={t(regionKey(r.regionId))}
-                    detail={t(r.acceptingNew ? 'status.region.ok' : 'status.region.noNew')}
+                    label={regionPlace(r, locale)}
+                    detail={r.availabilityReason === 'capacity' ? t('create.region.reason.capacity') : r.availabilityReason === 'provider_issue' ? t('create.region.reason.provider_issue') : t(r.acceptingNew ? 'status.region.ok' : 'status.region.noNew')}
                     status={r.status}
                   />
                 ))}

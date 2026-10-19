@@ -1,7 +1,7 @@
 import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, SCREEN_SIZES, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
 import { Button, cn, Dialog, Hint, Input, Label, Select } from '@cloudbrowser/ui';
 import { DocsLink } from '../../app/DocsLink.js';
-import { AlertCircle, ChevronRight, Gift, Info, Wallet } from 'lucide-react';
+import { AlertCircle, ChevronRight, Gift, Wallet } from 'lucide-react';
 import { useEffect, useId, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { useI18n, type Locale } from '../../lib/i18n.js';
@@ -11,6 +11,8 @@ import { PriceBreakdown, PriceSource } from '../billing/PriceBreakdown.js';
 import { RateRow } from '../billing/RateRow.js';
 import { canSpend, minimumSpendBalance } from '../billing/access.js';
 import { useCreateInstance, useInstances, useMe, useRegions } from './hooks.js';
+import { RegionPicker } from './RegionPicker.js';
+import { regionPlace } from './region-names.js';
 
 
 const UI_TO_BROWSER_LOCALE: Record<Locale, BrowserLocale> = { en: 'en-US', 'zh-CN': 'zh-CN' };
@@ -19,36 +21,6 @@ const LANGUAGES: { value: BrowserLocale; label: string }[] = [
   { value: 'en-US', label: 'English (US)' },
   { value: 'ja-JP', label: '日本語' },
 ];
-
-/** Measures latency from the user's own network as a hint; the region is never picked for them. */
-function useLatency(regions: Region[] | undefined) {
-  const [ms, setMs] = useState<Record<string, number>>({});
-  useEffect(() => {
-    if (!regions) return;
-    let cancelled = false;
-    for (const r of regions) {
-      if (!r.probeUrl) continue;
-      const url = r.probeUrl;
-      void (async () => {
-        const samples: number[] = [];
-        for (let n = 0; n < 3; n++) {
-          const start = performance.now();
-          try {
-            await fetch(url, { mode: 'no-cors', cache: 'no-store' });
-            samples.push(performance.now() - start);
-          } catch {
-            return;
-          }
-        }
-        if (!cancelled) setMs((m) => ({ ...m, [r.id]: Math.round(Math.min(...samples)) }));
-      })();
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [regions]);
-  return ms;
-}
 
 type Plan = 'trial' | 'paid';
 
@@ -66,7 +38,6 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
   const create = useCreateInstance();
   const pricing = usePricing();
   const billing = useBilling();
-  const latency = useLatency(regions.data);
 
   const [name, setName] = useState('');
   const [regionId, setRegionId] = useState<Region['id']>(DEFAULT_REGION);
@@ -191,33 +162,17 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
 
         <fieldset>
           <legend className="mb-2 text-sm font-medium">{t('create.region')}</legend>
-          <div className="divide-y divide-border overflow-hidden rounded-[var(--radius-control)] border border-border" role="radiogroup">
-            {(regions.data ?? []).map((r) => {
-              const trialOnly = r.acceptingNew && trial && r.id !== b?.trial.regionId;
-              const disabled = !r.acceptingNew || trialOnly;
-              const p = pricing.data?.find((x) => x.regionId === r.id);
-              const hourly = p?.rates ? browserEstimate(p.rates, { storageGb: storageFor(p), rootVolumeGb: p.rootVolumeGb, backups: false }).runningTotalHour : null;
-              return (
-                <RegionRow
-                  key={r.id}
-                  region={r}
-                  checked={regionId === r.id}
-                  disabled={disabled}
-                  onChange={() => setRegionId(r.id)}
-                  hint={!r.acceptingNew ? (r.inventory ? `${t('create.region.stock', { count: r.inventory.available })} · ${t('create.region.unavailable')}` : t('create.region.unavailable')) : trialOnly ? t('create.region.notInTrial') : (r.inventory ? t('create.region.stock', { count: r.inventory.available }) : r.city)}
-                  latency={latency[r.id]}
-                  price={disabled ? null : trial ? t('trial.free') : hourly !== null ? t('price.perHour', { amount: money(hourly, locale) }) : null}
-                />
-              );
-            })}
-            {regions.isPending ? <div className="h-32 bg-surface-2 [animation:cb-pulse_1.5s_ease-in-out_infinite]" /> : null}
-          </div>
-          <p className="mt-2 flex gap-2 text-xs leading-relaxed text-subtle">
-            <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-            <span>
-              {t('create.permanent')} <DocsLink to="browsers#regions" />
-            </span>
-          </p>
+          <RegionPicker
+            open={open}
+            regions={regions.data}
+            loading={regions.isPending}
+            pricing={pricing.data}
+            value={regionId}
+            onChange={setRegionId}
+            trialRegionId={trial && b ? b.trial.regionId : null}
+            storageFor={storageFor}
+            priceLabel={trial ? t('trial.free') : undefined}
+          />
         </fieldset>
 
         <div>
@@ -254,7 +209,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
 
         <section aria-labelledby={`${formId}-cost`} className="rounded-[var(--radius-card)] border border-border bg-surface p-4">
           <h3 id={`${formId}-cost`} className="text-sm font-semibold">
-            {t('create.cost', { region: regions.data?.find((r) => r.id === regionId)?.name ?? regionId })}
+            {t('create.cost', { region: (() => { const r = regions.data?.find((x) => x.id === regionId); return r ? regionPlace(r, locale) : regionId; })() })}
           </h3>
           {!price ? (
             <p className="mt-2 text-sm text-muted">{pricing.isError ? t('price.unavailable') : t('common.loading')}</p>
@@ -287,38 +242,6 @@ function Choice({ name, checked, onChange, icon, title, hint }: { name: string; 
       <span className="min-w-0">
         <span className="block text-sm font-medium">{title}</span>
         <span className="block text-xs text-subtle">{hint}</span>
-      </span>
-    </label>
-  );
-}
-
-/** One region: where, how far away, and what a browser there costs per running hour. */
-function RegionRow({ region, checked, disabled, onChange, hint, latency, price }: {
-  region: Region; checked: boolean; disabled: boolean; onChange: () => void; hint: string; latency?: number; price: string | null;
-}) {
-  const { t } = useI18n();
-  return (
-    <label
-      className={cn(
-        'relative flex items-center gap-3 px-3 py-3 transition-colors has-[:focus-visible]:bg-accent/5',
-        disabled ? 'cursor-not-allowed opacity-55' : 'cursor-pointer',
-        checked && !disabled ? 'bg-accent/5' : !disabled && 'hover:bg-surface',
-      )}
-    >
-      <input type="radio" name="region" value={region.id} className="peer sr-only" checked={checked} disabled={disabled} onChange={onChange} />
-      <span className={cn('grid size-4 shrink-0 place-items-center rounded-full border', checked && !disabled ? 'border-accent' : 'border-border')} aria-hidden>
-        {checked && !disabled ? <span className="size-2 rounded-full bg-accent" /> : null}
-      </span>
-      <span className="w-7 shrink-0 rounded bg-surface-2 py-0.5 text-center font-mono text-[11px] font-medium text-muted" aria-hidden>
-        {region.country}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-medium">{region.name}</span>
-        <span className="block truncate text-xs text-muted">{hint}</span>
-      </span>
-      <span className="shrink-0 text-right">
-        {price ? <span className="block text-sm font-medium tabular-nums">{price}</span> : null}
-        {latency !== undefined && !disabled ? <span className="block font-mono text-xs text-muted">{latency} ms</span> : null}
       </span>
     </label>
   );

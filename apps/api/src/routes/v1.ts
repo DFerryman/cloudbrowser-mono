@@ -25,6 +25,7 @@ import {
   type RegionId,
 } from '@cloudbrowser/contracts';
 import { turnIceServers } from '../turn.js';
+import { callerLocation, regionViews } from '../availability.js';
 import { awsInventory, billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, sha256Hex, settleRunningStatements } from '@cloudbrowser/db';
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import type { AppEnv } from '../env.js';
@@ -120,28 +121,7 @@ v1.openapi(
 
 v1.openapi(
   createRoute({ method: 'get', path: '/regions', tags: ['regions'], responses: { 200: jsonResponse(z.array(Region), 'Regions') } }),
-  async (c) => {
-    const db = c.get('db');
-    const rows = await db.select().from(regions).orderBy(asc(regions.id));
-    const inventory = await awsInventory(db);
-    const out = await Promise.all(
-      rows
-        .filter((r) => r.enabled || r.executor!=='fake')
-        .filter((r) => !['not-enabled','not-supported'].includes(inventory.get(r.id)?.status ?? ''))
-        .map(async (r) => ({
-          id: r.id as RegionId,
-          name: r.name,
-          country: r.country as Region['country'],
-          city: r.city,
-          timezone: r.timezone,
-          enabled: r.enabled,
-          acceptingNew: r.enabled && (inventory.has(r.id) ? inventory.get(r.id)!.available>0 : await regionAcceptingNew(db, r.id)),
-          ...(inventory.has(r.id) ? { inventory: { available: inventory.get(r.id)!.available, checkedAt: inventory.get(r.id)!.checked_at ? new Date(inventory.get(r.id)!.checked_at!).toISOString() : null, status: inventory.get(r.id)!.availability === 'ready' ? 'ready' as const : 'unavailable' as const, constraint: inventory.get(r.id)!.availability === 'ready' ? (inventory.get(r.id)!.inventory_mode === 'budget' ? 'quota_and_budget' : 'quota') : 'sync_unavailable' } } : {}),
-          probeUrl: r.probeUrl,
-        })),
-    );
-    return c.json(out, 200);
-  },
+  async (c) => c.json(await regionViews(c.get('db'), callerLocation(c.req.raw)), 200),
 );
 
 // --- instances ---------------------------------------------------------------------------------

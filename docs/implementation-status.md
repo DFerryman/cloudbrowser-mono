@@ -160,6 +160,18 @@ Cloudflare deployment.
   The second step stays at sign-in, before any session exists, rather than when opening the
   dashboard or a browser: a session created after the email code alone could already read billing
   and change settings, and checking once at the entrance keeps opening a browser fast.
+- **Launch failures and zones**: a VM that EC2 terminates during launch is reported with EC2's
+  state reason and relaunched under a new token (the old ClientToken only ever returned the same
+  dead VM, so retries could never succeed and every such failure looked like "waiting for
+  capacity"). Only `Server.InsufficientInstanceCapacity` counts as capacity; an unusable EBS key or
+  similar fails at once with an alert. Data volumes are confirmed `available` before use. A new
+  browser starts in a zone that offers its machine types and had no recent shortage, and on a
+  capacity error moves to another zone with the same IP. The reaper no longer rescans failed
+  creates whose cleanup is confirmed.
+- **Region choice**: the create dialog lists regions nearest first, with latency measured from the
+  user's network (an estimate until measured), *Available* / *Limited* / *Unavailable* with the
+  reason, the running price and a *Fastest for you* mark; long lists collapse to the nearest five
+  with search. Public pricing, status and home pages list the live regions by continent.
 - **Cron isolation**: each engine cron step (idle stops, metering, trial reclamation, pending
   operations, IP checks, stopped intent) runs even if an earlier one failed, and one browser's
   provider error no longer skips the fail-closed IP check of the others; failures are reported
