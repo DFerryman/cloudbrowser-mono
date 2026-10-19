@@ -97,10 +97,15 @@ export async function reconcileLedger(deps: ReconcilerDeps) {
       // exposes them to permanent deletion, including an orphaned disk after termination.
       (r) => r.tags['cb:env'] === deps.envName && r.tags['cb:kind'] !== 'root_volume',
     );
-    const ledger = await db
-      .select()
-      .from(resources)
-      .where(and(eq(resources.executor, t.executor), eq(resources.region, t.providerRegion), ne(resources.state, 'deleted')));
+    const ledger = (
+      await db
+        .select()
+        .from(resources)
+        .where(and(eq(resources.executor, t.executor), eq(resources.region, t.providerRegion), ne(resources.state, 'deleted')))
+    )
+      // Purge discovers root disks so it can confirm deletion. Match the provider filter above:
+      // these disks are accounted for by their VM, rather than reconciled as separate resources.
+      .filter((r) => r.tags['cb:kind'] !== 'root_volume');
     const byProviderId = new Map(ledger.filter((r) => r.providerId).map((r) => [r.providerId!, r]));
     const seen = new Set<string>();
 
@@ -156,6 +161,14 @@ export async function reconcileLedger(deps: ReconcilerDeps) {
 
     for (const l of ledger) {
       if (l.state !== 'active' || !l.providerId || seen.has(l.providerId)) continue;
+      // Provider inventory and the ledger are read at different times. The reaper may have
+      // removed this resource meanwhile; disappearance is also expected after a delete request.
+      const [current] = await db
+        .select({ state: resources.state, desiredState: browserInstances.desiredState })
+        .from(resources)
+        .leftJoin(browserInstances, eq(browserInstances.id, resources.instanceId))
+        .where(eq(resources.id, l.id));
+      if (current?.state !== 'active' || current.desiredState === 'deleted') continue;
       if (
         await openFinding(deps, {
           kind: 'missing',
