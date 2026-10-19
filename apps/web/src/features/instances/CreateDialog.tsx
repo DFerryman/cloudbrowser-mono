@@ -274,7 +274,7 @@ function Choice({ name, checked, onChange, icon, title, hint }: { name: string; 
   return (
     <label
       className={cn(
-        'flex cursor-pointer gap-3 rounded-[var(--radius-control)] border p-3 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent',
+        'relative flex cursor-pointer gap-3 rounded-[var(--radius-control)] border p-3 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent',
         checked ? 'border-accent bg-accent/5' : 'border-border hover:bg-surface',
       )}
     >
@@ -298,7 +298,7 @@ function RegionRow({ region, checked, disabled, onChange, hint, latency, price }
   return (
     <label
       className={cn(
-        'flex items-center gap-3 px-3 py-3 transition-colors has-[:focus-visible]:bg-accent/5',
+        'relative flex items-center gap-3 px-3 py-3 transition-colors has-[:focus-visible]:bg-accent/5',
         disabled ? 'cursor-not-allowed opacity-55' : 'cursor-pointer',
         checked && !disabled ? 'bg-accent/5' : !disabled && 'hover:bg-surface',
       )}
