@@ -17,20 +17,17 @@ export function LimitsPage() {
   const save = useAdminAction((c: Cap) => put('/caps', c));
   const remove = useAdminAction((c: Cap) => del('/caps', { scope: c.scope, metric: c.metric }));
   const edit = (c: Cap) => setDraft({ ...c });
-  const defaultInstances = caps.data?.find((c) => c.scope === 'user:default' && c.metric === 'instances');
 
   return (
     <div className="space-y-6">
       <PageTitle title="Limits & switches" />
       {overview.data ? <Switches flags={overview.data.flags} /> : null}
 
-      {defaultInstances ? <DefaultBrowserLimit key={defaultInstances.limit} currentLimit={defaultInstances.limit} /> : null}
-
       <section>
         <h2 className="mb-2 text-sm font-medium">Caps</h2>
         <p className="mb-3 text-xs text-muted">
-          Scopes: <Mono>global</Mono>, <Mono>region:&lt;id&gt;</Mono>, <Mono>user:default</Mono> (account defaults) and <Mono>user:&lt;id&gt;</Mono> (per-account override, wins over the
-          defaults). Use <Mono>instances</Mono> for the browser count and <Mono>running</Mono> for simultaneous running browsers.
+          Scopes: <Mono>global</Mono>, <Mono>region:&lt;id&gt;</Mono>, <Mono>user:default</Mono> (pilot defaults) and <Mono>user:&lt;id&gt;</Mono> (per-user override, wins over the
+          plan). <Mono>billing:&lt;id&gt;</Mono> rows come from Creem and are read-only here.
         </p>
         <form
           className="mb-3 flex flex-wrap items-end gap-2"
@@ -81,7 +78,7 @@ export function LimitsPage() {
       <ReasonDialog
         open={removing !== null}
         title={removing ? `Delete ${removing.scope} / ${removing.metric}` : ''}
-        description="Removing a per-account override restores the user:default value."
+        description="Without this row the next scope applies (user:<id> → plan → user:default)."
         confirm="Delete"
         danger
         busy={remove.isPending}
@@ -89,31 +86,5 @@ export function LimitsPage() {
         onConfirm={() => removing && remove.mutate(removing, { onSuccess: () => setRemoving(null), onError: (e) => toast((e as Error).message, 'error') })}
       />
     </div>
-  );
-}
-
-function DefaultBrowserLimit({ currentLimit }: { currentLimit: number }) {
-  const toast = useToast();
-  const [value, setValue] = useState(String(currentLimit));
-  const save = useAdminAction((limit: number) => put('/caps', { scope: 'user:default', metric: 'instances', limit }));
-  const limit = Number(value);
-  const valid = value !== '' && Number.isInteger(limit) && limit >= 0;
-  return (
-    <section className="rounded-[var(--radius-card)] border border-border bg-surface p-4">
-      <h2 className="text-sm font-medium">Default browsers per account</h2>
-      <p className="mt-1 text-xs text-muted">
-        Counts running and sleeping browsers. Per-account overrides take priority. Running limits and regional capacity apply separately; there is no daily creation quota.
-      </p>
-      <form className="mt-3 flex flex-wrap items-end gap-2" onSubmit={(e) => {
-        e.preventDefault();
-        if (valid) save.mutate(limit, { onSuccess: () => toast('Default browser limit saved'), onError: (err) => toast((err as Error).message, 'error') });
-      }}>
-        <div>
-          <Label htmlFor="default-browser-limit">Browser instance limit</Label>
-          <Input id="default-browser-limit" type="number" min={0} step={1} required value={value} onChange={(e) => setValue(e.target.value)} className="w-28" />
-        </div>
-        <Button type="submit" variant="primary" disabled={!valid || limit === currentLimit || save.isPending}>Save default browser limit</Button>
-      </form>
-    </section>
   );
 }

@@ -117,15 +117,15 @@ async function rejected(f, path, version = 'quote-1') {
 try {
   {
     const message = '浏览器数量已达上限，请先删除一个浏览器再创建。';
-    const limited = await fixture({ locale: 'zh-CN', maxBrowsers: 5 });
+    const limited = await fixture({ locale: 'zh-CN', maxBrowsers: 2 });
     await limited.page.goto(`${origin}/browsers/new`);
-    await limited.page.getByText('已用 1 / 5 个浏览器', { exact: true }).waitFor();
+    await limited.page.getByText('已用 1 / 2 个浏览器', { exact: true }).waitFor();
     limited.state.reject = 'instances';
     await limited.page.getByRole('button', { name: '创建浏览器', exact: true }).click();
     await limited.page.getByRole('alert').filter({ hasText: message }).waitFor();
     assert.equal(limited.state.requests.length, 1, 'Limit failures must not retry automatically');
     assert.equal(await limited.page.getByText('已达到账户上限。', { exact: true }).count(), 0);
-    await finish(limited, 'Chinese browser-count errors explain the cap while the sidebar shows 1 of 5 browsers');
+    await finish(limited, 'Chinese browser-count errors explain the cap while the sidebar shows 1 of 2 browsers');
   }
 
   const create = await fixture();

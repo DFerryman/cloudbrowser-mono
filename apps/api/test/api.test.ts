@@ -21,7 +21,7 @@ describe('auth', () => {
     const me = await t.call('GET', '/api/v1/me');
     expect(me.status).toBe(200);
     expect(me.body.user.email).toBe('pilot@example.com');
-    expect(me.body.entitlements.maxBrowsers).toBe(5);
+    expect(me.body.entitlements.maxBrowsers).toBe(2);
     expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM caps WHERE metric = 'creates_per_day'").get()).toEqual({ n: 0 });
   });
 
@@ -102,15 +102,15 @@ describe('browsers', () => {
     expect(op.body.status).toBe('succeeded');
   });
 
-  it('allows five browser instances by default and rejects a sixth', async () => {
-    for (const k of ['a', 'b', 'c', 'd', 'e']) {
+  it('keeps the original two-browser account limit and rejects a third', async () => {
+    for (const k of ['a', 'b']) {
       const created = await t.call('POST', '/api/v1/instances', { name: k, regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': k });
       expect(created.status).toBe(202);
     }
     await t.settle();
-    expect((await t.call('GET', '/api/v1/me')).body.usage.browsers).toBe(5);
-    const sixth = await t.call('POST', '/api/v1/instances', { name: 'f', regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': 'f' });
-    expect(sixth).toMatchObject({ status: 403, body: { type: 'plan_limit', limit: 'instances' } });
+    expect((await t.call('GET', '/api/v1/me')).body.usage.browsers).toBe(2);
+    const third = await t.call('POST', '/api/v1/instances', { name: 'c', regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': 'c' });
+    expect(third).toMatchObject({ status: 403, body: { type: 'plan_limit', limit: 'instances' } });
   });
 
   it('allows replacement browsers regardless of daily create history or obsolete daily-cap settings', async () => {
@@ -131,7 +131,7 @@ describe('browsers', () => {
     await t.call('POST', `/api/v1/instances/${first.body.instanceId}/stop`, undefined, { 'idempotency-key': 'daily-stop' });
     await t.settle();
     const before = await t.call('GET', '/api/v1/me');
-    expect(before.body).toMatchObject({ usage: { browsers: 1 }, entitlements: { maxBrowsers: 5 } });
+    expect(before.body).toMatchObject({ usage: { browsers: 1 }, entitlements: { maxBrowsers: 2 } });
 
     const second = await t.call('POST', '/api/v1/instances', body, { 'idempotency-key': 'daily-second' });
     expect(second.status).toBe(202);
