@@ -1,5 +1,5 @@
 import type { Accepted, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, Region } from '@cloudbrowser/contracts';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api.js';
 import { keys, queryClient } from '../../lib/query.js';
 import { refreshChangedPrices } from '../billing/hooks.js';
@@ -11,8 +11,15 @@ export const useInstance = (id: string) =>
   useQuery({ queryKey: keys.instance(id), queryFn: () => api<Instance>('GET', `/instances/${id}`) });
 
 export type RecentSession = { id: string; startedAt: string; endedAt: string | null; country: string | null; userAgent: string | null };
-export const useRecentSessions = (id: string) =>
-  useQuery({ queryKey: keys.sessions(id), queryFn: () => api<RecentSession[]>('GET', `/instances/${id}/sessions`) });
+/** One page of viewer sessions, newest first; one extra row tells whether a next page exists. */
+export function useRecentSessions(id: string, page: number, size: number) {
+  const q = useQuery({
+    queryKey: [...keys.sessions(id), page, size],
+    queryFn: () => api<RecentSession[]>('GET', `/instances/${id}/sessions?limit=${size + 1}&offset=${page * size}`),
+    placeholderData: keepPreviousData,
+  });
+  return { ...q, rows: q.data?.slice(0, size), hasMore: (q.data?.length ?? 0) > size };
+}
 
 export const useStorage = (id: string) =>
   useQuery({ queryKey: keys.storage(id), queryFn: () => api<InstanceStorage>('GET', `/instances/${id}/storage`), refetchInterval: 30_000 });

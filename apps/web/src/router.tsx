@@ -10,13 +10,37 @@ import { useMe } from './features/instances/hooks.js';
 import { isUnauthenticated } from './lib/api.js';
 import { useLiveEvents } from './lib/events.js';
 import { adminRedirectUrl, isAdminHost } from './features/admin/location.js';
+import { ContactPage } from './site/ContactPage.js';
+import { HomePage } from './site/HomePage.js';
+import { NotFoundPage } from './site/NotFoundPage.js';
+import { PricingPage } from './site/PricingPage.js';
+import { PublicShell } from './site/PublicShell.js';
+import { StatusPage } from './site/StatusPage.js';
 
-/** Routes from page 1, "Information architecture". Landing and pricing pages come later. */
+/**
+ * Routes from page 1, "Information architecture": the public site (home, pricing, docs, status,
+ * policies) for everyone, sign-in, and the app behind it.
+ */
 export const router = createBrowserRouter(isAdminHost() ? [
   { path: '/admin/*', element: <AdminRedirect /> },
   { path: '*', lazy: async () => ({ Component: (await import('./features/admin/AdminApp.js')).AdminApp }) },
 ] : [
-  { path: '/', element: <Navigate to="/browsers" replace /> },
+  {
+    element: <PublicShell />,
+    children: [
+      { path: '/', element: <HomePage /> },
+      { path: '/pricing', element: <PricingPage /> },
+      // Long-form content is loaded on demand, outside the app's main bundle.
+      { path: '/docs', lazy: async () => ({ Component: (await import('./site/DocsPage.js')).DocsPage }) },
+      { path: '/docs/:slug', lazy: async () => ({ Component: (await import('./site/DocsPage.js')).DocsPage }) },
+      { path: '/status', element: <StatusPage /> },
+      { path: '/terms', lazy: async () => { const { LegalPage } = await import('./site/LegalPage.js'); return { Component: () => <LegalPage policy="terms" /> }; } },
+      { path: '/privacy', lazy: async () => { const { LegalPage } = await import('./site/LegalPage.js'); return { Component: () => <LegalPage policy="privacy" /> }; } },
+      { path: '/refunds', lazy: async () => { const { LegalPage } = await import('./site/LegalPage.js'); return { Component: () => <LegalPage policy="refunds" /> }; } },
+      { path: '/contact', element: <ContactPage /> },
+      { path: '*', element: <NotFoundPage /> },
+    ],
+  },
   { path: '/sign-in', element: <SignInPage /> },
   { path: '/sign-up', element: <Navigate to="/sign-in" replace /> },
   { path: '/admin/*', element: <AdminRedirect /> },
@@ -50,7 +74,6 @@ export const router = createBrowserRouter(isAdminHost() ? [
       { path: '/billing/success', element: <BillingSuccessPage /> },
     ],
   },
-  { path: '*', element: <Navigate to="/browsers" replace /> },
 ]);
 
 function AdminRedirect() {
@@ -65,7 +88,7 @@ function AppShellGate() {
   const location = useLocation();
   useLiveEvents(me.isSuccess);
   if (me.isError && isUnauthenticated(me.error)) {
-    return <Navigate to={`/sign-in?next=${encodeURIComponent(location.pathname)}`} replace />;
+    return <Navigate to={`/sign-in?next=${encodeURIComponent(location.pathname + location.search)}`} replace />;
   }
   return <Outlet />;
 }

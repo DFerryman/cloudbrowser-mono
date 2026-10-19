@@ -14,7 +14,7 @@ import { useBilling, useTransactions } from './hooks.js';
 export function BillingSuccessPage() {
   const { t, locale } = useI18n();
   const billing = useBilling();
-  const tx = useTransactions();
+  const tx = useTransactions(0, 5);
   const [slow, setSlow] = useState(false);
   const arrivedAt = useRef(Date.now());
   useEffect(() => {
@@ -22,7 +22,7 @@ export function BillingSuccessPage() {
     return () => clearTimeout(h);
   }, []);
   // Done once a top-up newer than this page shows up (refreshed by the entitlements event).
-  const done = (tx.data ?? []).some((x) => x.kind === 'topup' && Date.parse(x.createdAt) > arrivedAt.current - 15 * 60_000);
+  const done = (tx.rows ?? []).some((x) => x.kind === 'topup' && Date.parse(x.createdAt) > arrivedAt.current - 15 * 60_000);
 
   return (
     <FullPageMessage>
@@ -34,7 +34,6 @@ export function BillingSuccessPage() {
               available: money(billing.data.availableMicros, locale),
               reserved: money(billing.data.reservedMicros, locale),
             })}</p>
-            <p className="text-sm text-muted">{t('billing.reserveHint')}</p>
             <Link to="/billing">
               <Button variant="primary">{t('billing.success.go')}</Button>
             </Link>

@@ -1,5 +1,5 @@
 import type { AccountUsage, BalanceTransaction, BillingState, RegionPricing } from '@cloudbrowser/contracts';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { api, ApiError } from '../../lib/api.js';
 import { keys, queryClient } from '../../lib/query.js';
 
@@ -11,7 +11,15 @@ export const isPriceChanged = (error: unknown) => error instanceof ApiError && e
 export async function refreshChangedPrices(error: unknown) {
   if (isPriceChanged(error)) await queryClient.invalidateQueries({ queryKey: keys.pricing });
 }
-export const useTransactions = () => useQuery({ queryKey: keys.transactions, queryFn: () => api<BalanceTransaction[]>('GET', '/billing/transactions') });
+/** One page of credit history; one extra row is fetched to tell whether a next page exists. */
+export function useTransactions(page: number, size: number) {
+  const q = useQuery({
+    queryKey: [...keys.transactions, page, size],
+    queryFn: () => api<BalanceTransaction[]>('GET', `/billing/transactions?limit=${size + 1}&offset=${page * size}`),
+    placeholderData: keepPreviousData,
+  });
+  return { ...q, rows: q.data?.slice(0, size), hasMore: (q.data?.length ?? 0) > size };
+}
 export const useAccountUsage = (month: string) =>
   useQuery({ queryKey: keys.usage(month), queryFn: () => api<AccountUsage>('GET', `/usage?month=${month}`) });
 

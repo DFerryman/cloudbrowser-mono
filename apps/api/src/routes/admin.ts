@@ -14,6 +14,7 @@ import { acknowledgeAlert } from '../admin/alerts.js';
 import { applyBalance, notifyHub } from '../billing/ledger.js';
 import type { AppEnv } from '../env.js';
 import { systemOperation } from '../ops.js';
+import { pageQuery } from '../paging.js';
 import { problem } from '../problem.js';
 
 const {
@@ -103,13 +104,15 @@ adminRoute.get('/overview', async (c) => {
 
 adminRoute.get('/alerts', async (c) => {
   const open = c.req.query('open') !== '0';
+  const page = pageQuery(c, 200);
   const rows = await c
     .get('db')
     .select()
     .from(alerts)
     .where(open ? isNull(alerts.acknowledgedAt) : undefined)
-    .orderBy(desc(alerts.createdAt))
-    .limit(200);
+    .orderBy(desc(alerts.createdAt), desc(alerts.id))
+    .limit(page.limit)
+    .offset(page.offset);
   return c.json(rows);
 });
 
@@ -128,6 +131,7 @@ adminRoute.get('/operations', async (c) => {
   const status = c.req.query('status') ?? 'all';
   const kind = c.req.query('kind');
   const instanceId = c.req.query('instanceId');
+  const page = pageQuery(c, 100);
   const where = and(
     status === 'unfinished' ? isNull(operations.finishedAt) : status === 'failed' ? eq(operations.status, 'failed') : undefined,
     kind ? eq(operations.kind, kind) : undefined,
@@ -153,8 +157,9 @@ adminRoute.get('/operations', async (c) => {
     .leftJoin(browserInstances, eq(browserInstances.id, operations.instanceId))
     .leftJoin(user, eq(user.id, browserInstances.userId))
     .where(where)
-    .orderBy(desc(operations.createdAt))
-    .limit(100);
+    .orderBy(desc(operations.createdAt), desc(operations.id))
+    .limit(page.limit)
+    .offset(page.offset);
   return c.json(rows);
 });
 
@@ -175,6 +180,7 @@ adminRoute.get('/instances', async (c) => {
   const db = c.get('db');
   const q = (c.req.query('q') ?? '').trim();
   const pattern = `%${q.replace(/[%_]/g, '')}%`;
+  const page = pageQuery(c, 100);
   const ipMatches = q
     ? (await db.select({ id: ipAddresses.instanceId }).from(ipAddresses).where(eq(ipAddresses.address, q))).map((r) => r.id).filter((x): x is string => !!x)
     : [];
@@ -201,8 +207,9 @@ adminRoute.get('/instances', async (c) => {
           )
         : undefined,
     )
-    .orderBy(desc(browserInstances.updatedAt))
-    .limit(100);
+    .orderBy(desc(browserInstances.updatedAt), desc(browserInstances.id))
+    .limit(page.limit)
+    .offset(page.offset);
   const ids = rows.map((r) => r.id);
   const current = ids.length
     ? await db
@@ -314,25 +321,29 @@ adminRoute.post('/instances/:id/actions', async (c) => {
 adminRoute.get('/ledger', async (c) => {
   const state = c.req.query('state');
   const kind = c.req.query('kind');
+  const page = pageQuery(c, 300);
   const rows = await c
     .get('db')
     .select()
     .from(resources)
     .where(and(state ? eq(resources.state, state) : undefined, kind ? eq(resources.kind, kind) : undefined))
-    .orderBy(desc(resources.firstSeenAt))
-    .limit(300);
+    .orderBy(desc(resources.firstSeenAt), desc(resources.id))
+    .limit(page.limit)
+    .offset(page.offset);
   return c.json(rows);
 });
 
 adminRoute.get('/findings', async (c) => {
   const status = c.req.query('status') ?? 'open';
+  const page = pageQuery(c, 200);
   const rows = await c
     .get('db')
     .select()
     .from(driftFindings)
     .where(status === 'all' ? undefined : eq(driftFindings.status, status))
-    .orderBy(desc(driftFindings.createdAt))
-    .limit(200);
+    .orderBy(desc(driftFindings.createdAt), desc(driftFindings.id))
+    .limit(page.limit)
+    .offset(page.offset);
   return c.json(rows);
 });
 
@@ -395,12 +406,14 @@ adminRoute.put('/flags/:key', async (c) => {
 adminRoute.get('/users', async (c) => {
   const db = c.get('db');
   const q = (c.req.query('q') ?? '').trim().replace(/[%_]/g, '');
+  const page = pageQuery(c, 100);
   const rows = await db
     .select({ id: user.id, email: user.email, createdAt: user.createdAt, twoFactorEnabled: user.twoFactorEnabled })
     .from(user)
     .where(q ? or(like(user.email, `%${q}%`), eq(user.id, q)) : undefined)
-    .orderBy(desc(user.createdAt))
-    .limit(100);
+    .orderBy(desc(user.createdAt), desc(user.id))
+    .limit(page.limit)
+    .offset(page.offset);
   const ids = rows.map((r) => r.id);
   if (!ids.length) return c.json([]);
   const counts = await db
@@ -608,12 +621,14 @@ adminRoute.post('/pricing/refresh', async (c) => {
 adminRoute.get('/audit', async (c) => {
   const target = c.req.query('target');
   const actorQ = c.req.query('actor');
+  const page = pageQuery(c, 200);
   const rows = await c
     .get('db')
     .select()
     .from(auditLog)
-    .where(and(target ? eq(auditLog.target, target) : undefined, actorQ ? like(auditLog.actor, `${actorQ}%`) : undefined))
-    .orderBy(desc(auditLog.createdAt))
-    .limit(200);
+    .where(and(target ? eq(auditLog.target, target) : undefined, actorQ ? like(auditLog.actor, `${actorQ.replace(/[%_]/g, '')}%`) : undefined))
+    .orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+    .limit(page.limit)
+    .offset(page.offset);
   return c.json(rows);
 });

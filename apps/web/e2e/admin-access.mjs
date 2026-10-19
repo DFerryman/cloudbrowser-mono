@@ -157,7 +157,7 @@ try {
   await finish(denied, 'forbidden session shows access denial without automatic login or reload');
 
   const wrongHost = await fixture();
-  await wrongHost.page.goto(`https://${admin.hostname}.example.test/`);
+  await wrongHost.page.goto(`https://${admin.hostname}.example.test/browsers`);
   await wrongHost.page.waitForURL('**/sign-in?next=*');
   assert.equal(wrongHost.requests.some((r) => r.path.startsWith('/api/v1/admin/')), false, 'Hostname suffix lookalikes must not enter the console');
   assert.ok(wrongHost.requests.some((r) => r.path === '/api/v1/me'));

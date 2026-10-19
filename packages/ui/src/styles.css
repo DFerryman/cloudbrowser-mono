@@ -1,6 +1,8 @@
 /*
  * Design tokens (page 1, "Visual style"). Neutrals are the zinc scale, one blue accent, status
- * colors always paired with an icon and a label. Light and dark follow the system setting.
+ * colors always paired with an icon and a label. Light and dark follow the system setting unless
+ * `data-theme="light"` or `data-theme="dark"` on <html> picks one. `subtle` is for secondary
+ * explanations: softer than `muted`, still at least 4.5:1 against the page.
  */
 @theme {
   --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
@@ -23,6 +25,7 @@
   --color-border: var(--cb-border);
   --color-fg: var(--cb-fg);
   --color-muted: var(--cb-muted);
+  --color-subtle: var(--cb-subtle);
   --color-accent: var(--cb-accent);
   --color-accent-fg: #ffffff;
   --color-running: #16a34a;
@@ -41,21 +44,35 @@
   --cb-border: #e4e4e7;
   --cb-fg: #09090b;
   --cb-muted: #52525b;
+  --cb-subtle: #6b6b74;
   --cb-accent: #2563eb;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --cb-bg: #09090b;
     --cb-surface: #18181b;
     --cb-surface-2: #27272a;
     --cb-border: #27272a;
     --cb-fg: #fafafa;
     --cb-muted: #a1a1aa;
+    --cb-subtle: #8e8e98;
     --cb-accent: #3b82f6;
     color-scheme: dark;
   }
+}
+
+:root[data-theme='dark'] {
+  --cb-bg: #09090b;
+  --cb-surface: #18181b;
+  --cb-surface-2: #27272a;
+  --cb-border: #27272a;
+  --cb-fg: #fafafa;
+  --cb-muted: #a1a1aa;
+  --cb-subtle: #8e8e98;
+  --cb-accent: #3b82f6;
+  color-scheme: dark;
 }
 
 @layer base {

@@ -1,4 +1,5 @@
-import { useMutation, useQuery, type QueryKey } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, type QueryKey } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
 import { ApiError } from '../../lib/api.js';
 import { queryClient } from '../../lib/query.js';
 import { money as formatMoney } from '../../lib/money.js';
@@ -57,6 +58,36 @@ export function useAdmin<T>(path: string, opts: { refetchInterval?: number; enab
     enabled: opts.enabled,
     retry: (n, e) => path !== '/session' && !(e instanceof ApiError && e.status < 500) && n < 2,
   });
+}
+
+/** Page sizes for the console's server-paged lists. */
+export const ADMIN_PAGE = { alerts: 50, operations: 50, browsers: 50, ledger: 100, findings: 50, users: 50, audit: 100 } as const;
+
+/**
+ * One page of a server-paged admin list (`limit`/`offset`). Fetches one row more than it shows
+ * to know whether a next page exists. Changing the filters (the path) goes back to page one.
+ */
+export function useAdminPage<T>(path: string, size: number, opts: { refetchInterval?: number } = {}) {
+  const [state, setState] = useState({ path, page: 0 });
+  useEffect(() => setState((s) => (s.path === path ? s : { path, page: 0 })), [path]);
+  const page = state.path === path ? state.page : 0;
+  const url = `${path}${path.includes('?') ? '&' : '?'}limit=${size + 1}&offset=${page * size}`;
+  const q = useQuery({
+    queryKey: adminKey(url),
+    queryFn: () =>
+      adminApi<T[]>('GET', url).catch((e: unknown) => {
+        onAccessExpired(e);
+        throw e;
+      }),
+    refetchInterval: opts.refetchInterval,
+    placeholderData: keepPreviousData,
+    retry: (n, e) => !(e instanceof ApiError && e.status < 500) && n < 2,
+  });
+  return {
+    ...q,
+    rows: q.data?.slice(0, size),
+    pager: { page, hasMore: (q.data?.length ?? 0) > size, onPage: (p: number) => setState({ path, page: p }) },
+  };
 }
 
 /** A change through the admin API; refreshes every admin query afterwards. */

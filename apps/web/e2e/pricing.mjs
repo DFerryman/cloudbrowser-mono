@@ -189,7 +189,7 @@ try {
 
   const deletion = await fixture();
   await deletion.page.goto(`${origin}/browsers/${instance.id}/settings`);
-  await deletion.page.getByText('Permanently delete this browser, its saved data and signed-in sessions, and release its resources. Access closes immediately. This cannot be undone.', { exact: true }).waitFor();
+  await deletion.page.getByText('Permanently deletes this browser, its data and sign-ins. This cannot be undone.', { exact: true }).waitFor();
   const deleteButton = deletion.page.getByRole('button', { name: 'Delete browser', exact: true });
   assert.equal(await deleteButton.isDisabled(), true);
   await deletion.page.locator('#confirm-delete').fill('Wrong name');
@@ -230,7 +230,7 @@ try {
     } else {
       await pending.page.getByRole('button', { name: 'Permanently deleting', exact: true }).waitFor();
       assert.equal(await pending.page.getByRole('button', { name: 'Restore', exact: true }).count(), 0);
-      await pending.page.getByText('Access is closed. Data is being permanently removed and resources released.', { exact: true }).waitFor();
+      await pending.page.getByText('Access is closed; data is being removed.', { exact: true }).waitFor();
     }
     assert.equal(pending.state.requests.length, 0);
     await finish(pending, recoverable ? 'legacy system recovery window remains available without automatic restoration' : 'permanent cleanup has no restore action and explains data removal');
@@ -346,7 +346,7 @@ try {
   const insufficientGrowth = await fixture({ availableMicros: 1_000_001 });
   await insufficientGrowth.page.goto(`${origin}/browsers/${instance.id}/storage`);
   await insufficientGrowth.page.getByLabel('New size (GB)', { exact: true }).fill('100');
-  await insufficientGrowth.page.getByText(/Additional held amount:/).first().waitFor();
+  await insufficientGrowth.page.getByText(/Also holds .* for seven days of disk retention/).first().waitFor();
   assert.equal(await insufficientGrowth.page.getByRole('button', { name: 'Add storage', exact: true }).isDisabled(), true);
   assert.equal(insufficientGrowth.state.requests.length, 0);
   await finish(insufficientGrowth, 'storage growth requires available credit for both the minimum balance and additional seven-day reserve');
@@ -358,7 +358,7 @@ try {
   assert.equal(growth.state.requests.length, 0);
   await growth.page.getByRole('button', { name: 'Add storage', exact: true }).click();
   const growthDialog = growth.page.getByRole('dialog');
-  await growthDialog.getByText(/Storage grows from 10 GB to 35 GB.*from \$3.00 to \$5.50/).waitFor();
+  await growthDialog.getByText(/From 10 GB to 35 GB: about \$5.50\/month instead of \$3.00/).waitFor();
   assert.equal(growth.state.requests.length, 0, 'Opening a quote must not resize or charge');
   await growthDialog.getByRole('button', { name: 'Add storage', exact: true }).click();
   await growthDialog.waitFor({ state: 'hidden' });

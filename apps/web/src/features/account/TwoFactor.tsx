@@ -29,7 +29,7 @@ export function TwoFactorSettings() {
           <h3 className="text-sm font-medium">{t('twofa.title')}</h3>
           {me.data ? <StatusBadge tone={on ? 'running' : 'sleeping'} icon={on ? ShieldCheck : ShieldOff} label={t(on ? 'twofa.on' : 'twofa.off')} className="text-xs" /> : null}
         </div>
-        <p className="mt-1 max-w-prose text-sm text-muted">{t(on ? 'twofa.onBody' : 'twofa.offBody')}</p>
+        <p className="mt-1 max-w-prose text-xs leading-relaxed text-subtle">{t(on ? 'twofa.onBody' : 'twofa.offBody')}</p>
       </div>
       <div className="flex shrink-0 flex-wrap gap-2">
         {on ? (

@@ -1,7 +1,7 @@
 import { Button, Section, Select } from '@cloudbrowser/ui';
 import { Link } from 'react-router';
 import { PageHeader, signOut } from '../../app/AppShell.js';
-import { api } from '../../lib/api.js';
+import { DocsLink } from '../../app/DocsLink.js';
 import { useI18n, type Locale } from '../../lib/i18n.js';
 import { Passkeys } from './Passkeys.js';
 import { TwoFactorSettings } from './TwoFactor.js';
@@ -35,7 +35,7 @@ export function AccountPage() {
             <Button>{t('nav.billing')}</Button>
           </Link>
         </Section>
-        <Section title={t('account.security')} description={t('account.securityBody')} className="lg:col-span-2">
+        <Section title={t('account.security')} action={<DocsLink to="security" />} className="lg:col-span-2">
           <div className="divide-y divide-border">
             <div className="pb-5">
               <TwoFactorSettings />
@@ -45,12 +45,7 @@ export function AccountPage() {
             </div>
           </div>
           <div className="flex flex-wrap gap-2 border-t border-border pt-5">
-            <Button
-              onClick={async () => {
-                await api('POST', '/api/auth/revoke-sessions', { body: {} }).catch(() => {});
-                await signOut();
-              }}
-            >
+            <Button onClick={() => void signOut({ everywhere: true })}>
               {t('account.signOutEverywhere')}
             </Button>
             <Button variant="ghost" onClick={() => void signOut()}>

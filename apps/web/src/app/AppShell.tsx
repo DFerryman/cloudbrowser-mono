@@ -1,5 +1,5 @@
 import { cn, Menu, MenuItem, MenuSeparator, Skeleton } from '@cloudbrowser/ui';
-import { Globe, LayoutGrid, LogOut, UserRound, Wallet } from 'lucide-react';
+import { BookOpen, Globe, LayoutGrid, LogOut, UserRound, Wallet } from 'lucide-react';
 import { NavLink, Navigate, Outlet, useLocation } from 'react-router';
 import { isLowBalance } from '../features/billing/access.js';
 import { BillingBanner } from '../features/billing/BillingBanner.js';
@@ -10,6 +10,7 @@ import { api, isUnauthenticated } from '../lib/api.js';
 import { useLiveEvents } from '../lib/events.js';
 import { useI18n } from '../lib/i18n.js';
 import { queryClient } from '../lib/query.js';
+import { ThemeItems } from './Preferences.js';
 
 export function Logo({ compact }: { compact?: boolean }) {
   const { t } = useI18n();
@@ -21,10 +22,12 @@ export function Logo({ compact }: { compact?: boolean }) {
   );
 }
 
-export async function signOut() {
+/** Ends the session (every session with `everywhere`) and lands on sign-in with a confirmation. */
+export async function signOut({ everywhere = false }: { everywhere?: boolean } = {}) {
+  if (everywhere) await api('POST', '/api/auth/revoke-sessions', { body: {} }).catch(() => {});
   await api('POST', '/api/auth/sign-out', { body: {} }).catch(() => {});
   queryClient.clear();
-  window.location.assign('/sign-in');
+  window.location.assign('/sign-in?signedOut=1');
 }
 
 /** Left sidebar (240 px, a 64 px rail below 1024 px, a top bar on mobile) around the app pages. */
@@ -36,7 +39,7 @@ export function AppShell() {
   useLiveEvents(me.isSuccess);
 
   if (me.isError && isUnauthenticated(me.error)) {
-    return <Navigate to={`/sign-in?next=${encodeURIComponent(location.pathname)}`} replace />;
+    return <Navigate to={`/sign-in?next=${encodeURIComponent(location.pathname + location.search)}`} replace />;
   }
 
   const nav = [
@@ -64,6 +67,12 @@ export function AppShell() {
     >
       <MenuItem onSelect={() => setLocale(locale === 'en' ? 'zh-CN' : 'en')}>
         <Globe /> {locale === 'en' ? '中文' : 'English'}
+      </MenuItem>
+      <MenuSeparator />
+      <ThemeItems />
+      <MenuSeparator />
+      <MenuItem onSelect={() => window.open('/docs', '_blank', 'noopener')}>
+        <BookOpen /> {t('nav.help')}
       </MenuItem>
       <MenuSeparator />
       <MenuItem onSelect={() => void signOut()}>

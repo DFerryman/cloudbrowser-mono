@@ -59,13 +59,14 @@ export async function requirePrice(db: Db, regionId: string, shownVersion: strin
   return p;
 }
 
-export async function storageLimits(db: Db, userId: string) {
-  const caps = await userCaps(db, userId);
+/** Without a user (signed-out price list), only the `user:default` caps apply. */
+export async function storageLimits(db: Db, userId: string | null) {
+  const caps = await userCaps(db, userId ?? 'default');
   return { defaultGb: caps.get('storage_gb') ?? DEFAULT_STORAGE_GB, maxGb: caps.get('storage_max_gb') ?? DEFAULT_MAX_STORAGE_GB };
 }
 
 /** Every region's customer prices, for the create dialog and the price list. */
-export async function allRegionPricing(db: Db, userId: string): Promise<RegionPricing[]> {
+export async function allRegionPricing(db: Db, userId: string | null): Promise<RegionPricing[]> {
   const regions = (await db.select().from(schema.regions).orderBy(asc(schema.regions.id))).filter((r) => r.id in REGION_INFO);
   const sheets = await priceSheets(db);
   const { markupPercent } = await pricingSettings(db);

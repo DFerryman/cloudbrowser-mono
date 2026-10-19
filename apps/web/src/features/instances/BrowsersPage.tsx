@@ -1,9 +1,10 @@
-import { Button, Card, Skeleton } from '@cloudbrowser/ui';
+import { Button, Card, Pagination, Skeleton, usePaged } from '@cloudbrowser/ui';
 import { Check, Plus } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router';
 import { PageHeader } from '../../app/AppShell.js';
 import { useI18n } from '../../lib/i18n.js';
+import { PAGE_SIZE, usePagerLabels } from '../../lib/paging.js';
 import { BrowserCard } from './BrowserCard.js';
 import { CreateDialog } from './CreateDialog.js';
 import { useInstances } from './hooks.js';
@@ -13,6 +14,8 @@ export function BrowsersPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const instances = useInstances();
+  const paged = usePaged(instances.data, PAGE_SIZE.browsers);
+  const pagerLabels = usePagerLabels();
   const retryId = new URLSearchParams(location.search).get('retry');
   const retry = instances.data?.find((i) => i.id === retryId && i.status === 'failed');
   const dialogOpen = location.pathname === '/browsers/new';
@@ -57,11 +60,14 @@ export function BrowsersPage() {
           <div className="mt-6">{newButton}</div>
         </Card>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {instances.data.map((i) => (
-            <BrowserCard key={i.id} instance={i} />
-          ))}
-        </div>
+        <>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {paged.rows.map((i) => (
+              <BrowserCard key={i.id} instance={i} />
+            ))}
+          </div>
+          <Pagination className="mt-4" page={paged.page} pages={paged.pages} onPage={paged.setPage} labels={pagerLabels} />
+        </>
       )}
       <CreateDialog
         open={dialogOpen}

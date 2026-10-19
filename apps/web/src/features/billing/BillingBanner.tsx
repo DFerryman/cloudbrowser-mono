@@ -30,11 +30,6 @@ export function BillingBanner() {
       }
     >
       {message}{' '}
-      {!b.frozen ? <span className="text-muted">{t('billing.balanceSummary', {
-        total: money(b.balanceMicros, locale),
-        available: money(b.availableMicros, locale),
-        reserved: money(b.reservedMicros, locale),
-      })}{' '}</span> : null}
       {b.frozen ? null : (
         <Link to="/billing" className="font-medium text-accent hover:underline">
           {t('banner.manage')}

@@ -42,6 +42,11 @@ const problems = {
   503: { content: { 'application/problem+json': { schema: Problem } }, description: 'Billing not configured' },
 };
 const MonthQuery = z.object({ month: z.string().regex(/^\d{4}-\d{2}$/).optional() });
+/** Paging: ask for one more row than is shown to learn whether there is another page. */
+export const PageQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  offset: z.coerce.number().int().min(0).max(100_000).optional(),
+});
 
 function requireCreem(c: Context<AppEnv>): Creem {
   const creem = creemFrom(c.env);
@@ -111,17 +116,20 @@ billingRoute.openapi(
     method: 'get',
     path: '/billing/transactions',
     tags: ['billing'],
-    description: 'Top-ups, refunds and credits on the balance, newest first. Usage is under /usage.',
+    description: 'Top-ups, refunds and credits on the balance, newest first (100 by default; page with limit and offset). Usage is under /usage.',
+    request: { query: PageQuery },
     responses: { 200: json(z.array(BalanceTransaction), 'Balance transactions') },
   }),
   async (c) => {
+    const { limit = 100, offset = 0 } = c.req.valid('query');
     const rows = await c
       .get('db')
       .select()
       .from(balanceTransactions)
       .where(and(eq(balanceTransactions.userId, c.get('user').id), sql`${balanceTransactions.kind} <> 'usage'`))
-      .orderBy(desc(balanceTransactions.createdAt))
-      .limit(100);
+      .orderBy(desc(balanceTransactions.createdAt), desc(balanceTransactions.id))
+      .limit(limit)
+      .offset(offset);
     return c.json(
       rows.map((r) => ({ id: r.id, kind: r.kind as BalanceTransaction['kind'], amountMicros: r.amountMicros, description: r.description, createdAt: r.createdAt.toISOString() })),
       200,

@@ -17,6 +17,7 @@ import type { AppEnv, Env } from './env.js';
 import { internalApi } from './internal.js';
 import { problem, ProblemError } from './problem.js';
 import { adminRoute } from './routes/admin.js';
+import { publicRoute } from './routes/public.js';
 import { v1 } from './routes/v1.js';
 
 const app = new OpenAPIHono<AppEnv>();
@@ -118,6 +119,8 @@ const limitWrites: MiddlewareHandler<AppEnv> = async (c, next) => {
 };
 
 app.get('/api/v1/health', (c) => c.json({ ok: true }));
+/** Signed-out price list and status for the public site; GET only, nothing per user. */
+app.route('/api/public', publicRoute);
 app.doc31('/api/v1/openapi.json', {
   openapi: '3.1.0',
   info: { title: 'CloudBrowser API', version: '1.0.0' },

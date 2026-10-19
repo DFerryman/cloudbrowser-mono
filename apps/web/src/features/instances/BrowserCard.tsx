@@ -71,7 +71,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
         copyLabel={t('browsers.copyIp')}
         pendingLabel={t('browsers.reservingIp')}
       />
-      <p className="mt-1 text-xs text-muted">
+      <p className="mt-1 text-xs text-subtle">
         {recoverable && i.purgeAfter
           ? t('browsers.recoverableUntil', { date: new Date(i.purgeAfter).toLocaleDateString(locale) })
           : deleted

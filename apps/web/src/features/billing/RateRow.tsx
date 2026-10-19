@@ -10,7 +10,7 @@ export function RateRow({ label, hint, value, strong, badge }: { label: string; 
           {label}
           {badge}
         </p>
-        {hint ? <p className="text-xs text-muted">{hint}</p> : null}
+        {hint ? <p className="text-xs text-subtle">{hint}</p> : null}
       </div>
       <p className={cn('shrink-0 text-right tabular-nums', strong ? 'text-base font-semibold' : 'text-sm')}>{value}</p>
     </div>

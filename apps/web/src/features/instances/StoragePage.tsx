@@ -1,5 +1,6 @@
 import { retentionReserve, type Instance, type RegionPricing } from '@cloudbrowser/contracts';
-import { Button, cn, Dialog, Input, Label, Section, Skeleton, useToast } from '@cloudbrowser/ui';
+import { Button, cn, Dialog, Hint, Input, Label, Section, Skeleton, useToast } from '@cloudbrowser/ui';
+import { DocsLink } from '../../app/DocsLink.js';
 import { useEffect, useState } from 'react';
 import { useI18n } from '../../lib/i18n.js';
 import { bytes, money } from '../../lib/money.js';
@@ -78,7 +79,7 @@ function StorageCard({ instance: i, pricing }: { instance: Instance; pricing: Re
             {t(i.status === 'sleeping' ? 'storage.capacityAfterStart' : 'storage.capacityPending')}
           </p>
         ) : null}
-        <p className="mt-2 text-xs text-muted">{t('storage.system', { gb: s.rootVolumeGb })}</p>
+        <Hint className="mt-2">{t('storage.system', { gb: s.rootVolumeGb })}</Hint>
         {before !== null && rate !== null ? (
           <p className="mt-1 text-sm">{t('storage.cost', { amount: m(before), rate: t('price.perGbMonth', { amount: m(rate) }) })}</p>
         ) : null}
@@ -104,11 +105,13 @@ function StorageCard({ instance: i, pricing }: { instance: Instance; pricing: Re
             ) : (
               <p className="mt-2 text-sm text-muted">{t('price.unavailable')}</p>
             )}
-            <p className="mt-2 text-xs text-muted">{t('storage.reserveIncrease', { amount: m(reserveIncrease) })}</p>
+            {reserveIncrease > 0 ? <Hint className="mt-1">{t('storage.reserveIncrease', { amount: m(reserveIncrease) })}</Hint> : null}
             <BalanceRequired additionalReserve={reserveIncrease} />
           </>
         )}
-        <p className="mt-2 text-xs text-muted">{t('storage.rules')}</p>
+        <Hint className="mt-2">
+          {t('storage.rules')} <DocsLink to="storage#grow" />
+        </Hint>
         {error ? <p role="alert" className="mt-2 text-sm text-error">{error}</p> : null}
       </div>
 
@@ -119,7 +122,7 @@ function StorageCard({ instance: i, pricing }: { instance: Instance; pricing: Re
         description={quote ? t('storage.confirmBody', { from: quote.from, to: quote.to, amount: m(quoteMonthly(quote.to)), before: m(quoteMonthly(quote.from)) }) : ''}
         closeLabel={t('common.cancel')}
       >
-        <p className="mb-3 text-sm text-muted">{t('storage.reserveIncrease', { amount: m(quoteReserveIncrease) })}</p>
+        {quoteReserveIncrease > 0 ? <Hint className="mb-3">{t('storage.reserveIncrease', { amount: m(quoteReserveIncrease) })}</Hint> : null}
         <BalanceRequired additionalReserve={quoteReserveIncrease} />
         <div className="flex justify-end gap-2">
           <Button onClick={() => setQuote(null)}>{t('common.cancel')}</Button>

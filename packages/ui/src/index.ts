@@ -7,3 +7,5 @@ export { Menu, MenuItem, MenuSeparator } from './menu.js';
 export { RegionIpChip } from './region-ip-chip.js';
 export { StatusBadge, type StatusTone } from './status-badge.js';
 export { ToastProvider, useToast } from './toast.js';
+export { Hint } from './hint.js';
+export { Pagination, usePaged, type PaginationLabels } from './pagination.js';

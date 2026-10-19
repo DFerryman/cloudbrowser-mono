@@ -1,8 +1,9 @@
 import { HOURS_PER_MONTH, USAGE_UNITS, UsageItem } from '@cloudbrowser/contracts';
-import { Card, Section, Select, Skeleton } from '@cloudbrowser/ui';
+import { Card, Hint, Pagination, Section, Select, Skeleton, usePaged } from '@cloudbrowser/ui';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
+import { PAGE_SIZE, usePagerLabels } from '../../lib/paging.js';
 import { money, quantity } from '../../lib/money.js';
 import { currentMonth, monthLabel, recentMonths, usePricing } from '../billing/hooks.js';
 import { RateRow } from '../billing/RateRow.js';
@@ -23,6 +24,8 @@ export function UsagePage() {
   const price = pricing.data?.find((p) => p.regionId === i.regionId);
   // The same 730-hour projection as every hourly estimate of fixed resources.
   const alwaysOnHour = u ? Math.round(u.now.alwaysOnMonthMicros / HOURS_PER_MONTH) : 0;
+  const days = usePaged(u ? [...u.byDay].reverse() : undefined, PAGE_SIZE.usageByDay);
+  const pagerLabels = usePagerLabels();
 
   return (
     <div className="space-y-4">
@@ -55,7 +58,7 @@ export function UsagePage() {
                   value={t('price.perHour', { amount: m(alwaysOnHour) })} badge={i.status !== 'running' ? <NowBadge /> : null} />
                 {price?.rates ? <RateRow label={t('price.transfer')} value={t('price.perGb', { amount: m(price.rates.transfer) })} /> : null}
               </div>
-              <p className="mt-2 text-xs text-muted">{t('usage.ratesNote')}</p>
+              <Hint className="mt-2">{t('usage.ratesNote')}</Hint>
             </>
           )}
         </Card>
@@ -90,9 +93,9 @@ export function UsagePage() {
 
       {u && u.byDay.length ? (
         <Section title={t('usage.byDay')}>
-          <div className="max-h-96 overflow-y-auto">
+          <div>
             <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-bg text-left text-xs text-muted">
+              <thead className="text-left text-xs text-muted">
                 <tr className="border-b border-border">
                   <th className="py-2 pr-3 font-medium">{t('usage.col.day')}</th>
                   {items.map((item) => (
@@ -104,7 +107,7 @@ export function UsagePage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {[...u.byDay].reverse().map((d) => (
+                {days.rows.map((d) => (
                   <tr key={d.day}>
                     <td className="py-2 pr-3 whitespace-nowrap">{new Date(`${d.day}T00:00:00Z`).toLocaleDateString(locale, { timeZone: 'UTC' })}</td>
                     {items.map((item) => (
@@ -117,6 +120,7 @@ export function UsagePage() {
                 ))}
               </tbody>
             </table>
+            <Pagination page={days.page} pages={days.pages} onPage={days.setPage} labels={pagerLabels} />
           </div>
         </Section>
       ) : null}

@@ -1,12 +1,12 @@
 import { Button, Dialog, Input, Label, Select, useToast } from '@cloudbrowser/ui';
 import { useState } from 'react';
 import { Link } from 'react-router';
-import { post, usd, useAdmin, useAdminAction, when, type AlertRow, type OperationRow, type Row, type UserRow } from './data.js';
+import { ADMIN_PAGE, post, usd, useAdmin, useAdminAction, useAdminPage, when, type AlertRow, type OperationRow, type Row, type UserRow } from './data.js';
 import { Json, Mono, PageTitle, Pill, ReasonDialog, statusTone, Table } from './ui.js';
 
 export function AlertsPage() {
   const [open, setOpen] = useState(true);
-  const alerts = useAdmin<AlertRow[]>(`/alerts?open=${open ? 1 : 0}`, { refetchInterval: 30_000 });
+  const alerts = useAdminPage<AlertRow>(`/alerts?open=${open ? 1 : 0}`, ADMIN_PAGE.alerts, { refetchInterval: 30_000 });
   const ack = useAdminAction((id: number) => post(`/alerts/${id}/ack`));
   return (
     <div>
@@ -18,7 +18,8 @@ export function AlertsPage() {
       </PageTitle>
       <p className="mb-3 text-xs text-muted">New alerts are sent to the alert emails and the chat webhook every 5 minutes. Acknowledge once handled (runbooks: page 7).</p>
       <Table
-        rows={alerts.data}
+        rows={alerts.rows}
+        pager={alerts.pager}
         rowKey={(a) => a.id}
         columns={['When', 'Severity', 'Source', 'Alert', 'Detail', 'Sent', '']}
         empty="No open alerts."
@@ -49,7 +50,7 @@ export function AlertsPage() {
 export function OperationsPage() {
   const [status, setStatus] = useState('unfinished');
   const [kind, setKind] = useState('');
-  const ops = useAdmin<OperationRow[]>(`/operations?status=${status}${kind ? `&kind=${kind}` : ''}`, { refetchInterval: 15_000 });
+  const ops = useAdminPage<OperationRow>(`/operations?status=${status}${kind ? `&kind=${kind}` : ''}`, ADMIN_PAGE.operations, { refetchInterval: 15_000 });
   const [open, setOpen] = useState<string | null>(null);
   return (
     <div>
@@ -69,7 +70,8 @@ export function OperationsPage() {
         </div>
       </PageTitle>
       <Table
-        rows={ops.data}
+        rows={ops.rows}
+        pager={ops.pager}
         rowKey={(o) => o.id}
         onRow={(o) => setOpen(o.id)}
         columns={['Created', 'Kind', 'Status', 'Step', 'Attempt', 'Browser', 'User', 'Error']}
@@ -129,7 +131,7 @@ export function OperationDialog({ id, onClose }: { id: string | null; onClose: (
 export function LedgerPage() {
   const [state, setState] = useState('active');
   const [kind, setKind] = useState('');
-  const rows = useAdmin<Row[]>(`/ledger?state=${state}${kind ? `&kind=${kind}` : ''}`);
+  const rows = useAdminPage<Row>(`/ledger?state=${state}${kind ? `&kind=${kind}` : ''}`, ADMIN_PAGE.ledger);
   return (
     <div>
       <PageTitle title="Ledger">
@@ -149,7 +151,8 @@ export function LedgerPage() {
       </PageTitle>
       <p className="mb-3 text-xs text-muted">Every billable provider resource (page 10). The reconciler compares this with the provider every 5 minutes.</p>
       <Table
-        rows={rows.data}
+        rows={rows.rows}
+        pager={rows.pager}
         rowKey={(r) => String(r.id)}
         columns={['Kind', 'Provider id', 'Region / zone', 'State', 'Browser', 'Cost / month', 'First seen', 'Release after']}
         cells={(r) => [
@@ -176,7 +179,7 @@ export function LedgerPage() {
 export function FindingsPage() {
   const toast = useToast();
   const [status, setStatus] = useState('open');
-  const rows = useAdmin<Row[]>(`/findings?status=${status}`);
+  const rows = useAdminPage<Row>(`/findings?status=${status}`, ADMIN_PAGE.findings);
   const [resolving, setResolving] = useState<string | null>(null);
   const resolve = useAdminAction((v: { id: string; note: string }) => post(`/findings/${v.id}/resolve`, { note: v.note }));
   return (
@@ -193,7 +196,8 @@ export function FindingsPage() {
         a decision.
       </p>
       <Table
-        rows={rows.data}
+        rows={rows.rows}
+        pager={rows.pager}
         rowKey={(r) => String(r.id)}
         columns={['When', 'Kind', 'Resource', 'Where', 'Browser', 'Detail', '']}
         empty="No findings."
@@ -240,7 +244,7 @@ export function UsersPage() {
   const toast = useToast();
   const [q, setQ] = useState('');
   const [query, setQuery] = useState('');
-  const users = useAdmin<UserRow[]>(`/users?q=${encodeURIComponent(query)}`);
+  const users = useAdminPage<UserRow>(`/users?q=${encodeURIComponent(query)}`, ADMIN_PAGE.users);
   const [pending, setPending] = useState<{ user: UserRow; action: 'suspend' | 'unsuspend' } | null>(null);
   const act = useAdminAction((v: { id: string; action: string; reason: string }) => post(`/users/${v.id}/actions`, { action: v.action, reason: v.reason }));
   const [credit, setCredit] = useState<UserRow | null>(null);
@@ -265,7 +269,8 @@ export function UsersPage() {
         </form>
       </PageTitle>
       <Table
-        rows={users.data}
+        rows={users.rows}
+        pager={users.pager}
         rowKey={(u) => u.id}
         columns={['Email', 'Joined', 'Balance', 'Browsers', 'Kill switch']}
         cells={(u) => [
@@ -371,7 +376,7 @@ export function AuditPage() {
   const [target, setTarget] = useState('');
   const [actor, setActor] = useState('');
   const [filters, setFilters] = useState({ target: '', actor: '' });
-  const rows = useAdmin<Row[]>(`/audit?target=${encodeURIComponent(filters.target)}&actor=${encodeURIComponent(filters.actor)}`);
+  const rows = useAdminPage<Row>(`/audit?target=${encodeURIComponent(filters.target)}&actor=${encodeURIComponent(filters.actor)}`, ADMIN_PAGE.audit);
   return (
     <div>
       <PageTitle title="Audit log">
@@ -388,7 +393,8 @@ export function AuditPage() {
         </form>
       </PageTitle>
       <Table
-        rows={rows.data}
+        rows={rows.rows}
+        pager={rows.pager}
         rowKey={(r) => String(r.id)}
         columns={['When', 'Actor', 'Action', 'Target', 'Detail']}
         cells={(r) => [when(r.createdAt), <Mono>{String(r.actor)}</Mono>, String(r.action), <Mono>{String(r.target)}</Mono>, <Json value={r.detail} />]}

@@ -31,7 +31,7 @@ import type { AppEnv } from '../env.js';
 import { admitCreate, admitInstanceSpend, admitIpChange, admitSpend, admitStart, claimTrial, entitlementsFor, isTrial, regionAcceptingNew, trialSecondsLeft, usage } from '../limits.js';
 import { currentBurn, instancePrice, regionPrice, requirePrice, storageLimits } from '../pricing.js';
 import { instanceUsage, monthOf } from '../usage.js';
-import { billingRoute } from './billing.js';
+import { billingRoute, PageQuery } from './billing.js';
 import { enqueueOperation, notifyUser, replayed, requireIdempotencyKey } from '../ops.js';
 import { problem } from '../problem.js';
 import { toInstances, toOperation } from '../views.js';
@@ -858,8 +858,8 @@ v1.openapi(
     method: 'get',
     path: '/instances/{id}/sessions',
     tags: ['sessions'],
-    description: 'The last 20 viewer sessions.',
-    request: { params: IdParam },
+    description: 'Viewer sessions, newest first (20 by default; page with limit and offset).',
+    request: { params: IdParam, query: PageQuery },
     responses: {
       200: jsonResponse(
         z.array(
@@ -883,8 +883,9 @@ v1.openapi(
       .select()
       .from(viewerSessions)
       .where(eq(viewerSessions.instanceId, row.id))
-      .orderBy(desc(viewerSessions.startedAt))
-      .limit(20);
+      .orderBy(desc(viewerSessions.startedAt), desc(viewerSessions.id))
+      .limit(c.req.valid('query').limit ?? 20)
+      .offset(c.req.valid('query').offset ?? 0);
     return c.json(
       rows.map((s) => ({
         id: s.id,

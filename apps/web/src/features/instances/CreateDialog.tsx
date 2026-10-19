@@ -1,5 +1,6 @@
 import { BrowserLocale, CreateInstanceBody, DEFAULT_REGION, REGION_INFO, SCREEN_SIZES, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
-import { Button, cn, Dialog, Input, Label, Select } from '@cloudbrowser/ui';
+import { Button, cn, Dialog, Hint, Input, Label, Select } from '@cloudbrowser/ui';
+import { DocsLink } from '../../app/DocsLink.js';
 import { AlertCircle, ChevronRight, Gift, Info, Wallet } from 'lucide-react';
 import { useEffect, useId, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
@@ -140,7 +141,6 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
       open={open}
       onOpenChange={(o) => !o && onClose()}
       title={t('create.title')}
-      description={t('create.subtitle')}
       closeLabel={t('common.cancel')}
       footer={
         <div className="space-y-3">
@@ -165,7 +165,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
     >
       <form id={formId} onSubmit={submit} className="space-y-6">
         {initialInstance?.trial && initialInstance.trial.state !== 'converted' ? (
-          <p className="rounded-[var(--radius-control)] border border-border bg-surface px-3 py-2 text-sm text-muted">{t('create.retryTrial')}</p>
+          <p className="rounded-[var(--radius-control)] border border-border bg-surface px-3 py-2 text-xs text-muted">{t('create.retryTrial')}</p>
         ) : null}
 
         {trialOffer && b ? (
@@ -210,9 +210,11 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
             })}
             {regions.isPending ? <div className="h-32 bg-surface-2 [animation:cb-pulse_1.5s_ease-in-out_infinite]" /> : null}
           </div>
-          <p className="mt-2 flex gap-2 text-xs leading-relaxed text-muted">
+          <p className="mt-2 flex gap-2 text-xs leading-relaxed text-subtle">
             <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-            <span>{t('create.permanent')}</span>
+            <span>
+              {t('create.permanent')} <DocsLink to="browsers#regions" />
+            </span>
           </p>
         </fieldset>
 
@@ -282,7 +284,7 @@ function Choice({ name, checked, onChange, icon, title, hint }: { name: string; 
       </span>
       <span className="min-w-0">
         <span className="block text-sm font-medium">{title}</span>
-        <span className="block text-xs text-muted">{hint}</span>
+        <span className="block text-xs text-subtle">{hint}</span>
       </span>
     </label>
   );
@@ -334,7 +336,7 @@ function PaidCost({ pricing, reserve }: { pricing: RegionPricing; reserve: numbe
         <RateRow label={t('create.cost.transfer')} hint={t('create.cost.transferHint')} value={t('price.perGb', { amount: m(pricing.rates!.transfer) })} />
         <RateRow label={t('create.cost.held')} hint={t('create.cost.heldHint')} value={m(reserve)} />
       </div>
-      <p className="mt-2 text-xs text-muted">{t('create.chargesStart')}</p>
+      <Hint className="mt-2">{t('create.chargesStart')}</Hint>
       <button type="button" className="mt-3 flex items-center gap-1 text-sm font-medium text-accent hover:underline" aria-expanded={details} onClick={() => setDetails((d) => !d)}>
         <ChevronRight className={cn('size-4 transition-transform', details && 'rotate-90')} aria-hidden />
         {t('create.cost.details')}
@@ -363,8 +365,10 @@ function TrialCost({ pricing, minutes, days, gb }: { pricing: RegionPricing; min
         <span className="text-base font-semibold text-running">{t('trial.free')}</span>
       </p>
       {pricing.machine ? <p className="text-xs text-muted">{t('price.machineShort', { vcpu: pricing.machine.vcpu, memory: pricing.machine.memoryGb })} · {t('create.cost.trialStorage', { gb })}</p> : null}
-      <p className="text-muted">{t('trial.how', { minutes, days })}</p>
-      <p className="border-t border-border pt-2 text-xs text-muted">
+      <Hint>
+        {t('trial.how', { minutes, days })} <DocsLink to="trial" />
+      </Hint>
+      <p className="border-t border-border pt-2 text-xs text-subtle">
         {t('create.cost.afterTrial', { running: money(e.runningTotalHour, locale), asleep: money(e.alwaysOnHour, locale) })}
       </p>
     </div>

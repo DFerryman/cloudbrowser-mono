@@ -1,5 +1,6 @@
 import { browserEstimate, retentionReserve, type RegionPricing } from '@cloudbrowser/contracts';
-import { cn } from '@cloudbrowser/ui';
+import { cn, Hint } from '@cloudbrowser/ui';
+import { DocsLink } from '../../app/DocsLink.js';
 import type { ReactNode } from 'react';
 import { useI18n } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
@@ -10,7 +11,7 @@ function Line({ label, hint, value, strong }: { label: string; hint?: string; va
     <div className="flex items-start justify-between gap-4 py-1.5">
       <div className="min-w-0">
         <p className={cn('text-sm', strong && 'font-medium')}>{label}</p>
-        {hint ? <p className="text-xs text-muted">{hint}</p> : null}
+        {hint ? <p className="text-xs text-subtle">{hint}</p> : null}
       </div>
       <p className={cn('shrink-0 text-right text-sm tabular-nums', strong && 'font-semibold')}>{value}</p>
     </div>
@@ -22,7 +23,7 @@ export function PriceSource({ pricing }: { pricing: RegionPricing }) {
   const { t, locale } = useI18n();
   if (!pricing.updatedAt) return null;
   return (
-    <p className="text-xs text-muted">
+    <p className="text-xs text-subtle">
       {pricing.source === 'simulated'
         ? t('price.source.simulated')
         : t('price.source.aws', { region: t(regionKey(pricing.regionId)), date: new Date(pricing.updatedAt).toLocaleDateString(locale) })}
@@ -55,7 +56,7 @@ export function PriceBreakdown({ pricing, storageGb }: { pricing: RegionPricing;
           value={t('price.perHour', { amount: m(e.runningHour) })} />
         <div className="py-1.5">
           <p className="text-sm font-medium">{t('price.kept')}</p>
-          <p className="text-xs text-muted">{t('price.keptHint')}</p>
+          <p className="text-xs text-subtle">{t('price.keptHint')}</p>
           <div className="mt-1 pl-3">
             <Line label={t('price.ip')} hint={t('price.ipHint')} value={t('price.perHour', { amount: m(r.ip) })} />
             <Line
@@ -68,8 +69,10 @@ export function PriceBreakdown({ pricing, storageGb }: { pricing: RegionPricing;
         </div>
         <Line label={t('price.transfer')} hint={t('price.transferHint')} value={t('price.perGb', { amount: m(r.transfer) })} strong />
       </div>
-      <p className="text-xs text-muted">{t('price.example', { amount: m(e.runningHour * 60 + e.alwaysOnMonth) })}</p>
-      <p className="text-xs text-muted">{t('price.reserve', { amount: m(retentionReserve(r, { storageGb: gb, rootVolumeGb: pricing.rootVolumeGb, backups: false })) })}</p>
+      <Hint>{t('price.example', { amount: m(e.runningHour * 60 + e.alwaysOnMonth) })}</Hint>
+      <Hint>
+        {t('price.reserve', { amount: m(retentionReserve(r, { storageGb: gb, rootVolumeGb: pricing.rootVolumeGb, backups: false })) })} <DocsLink to="billing#held" />
+      </Hint>
       <PriceSource pricing={pricing} />
     </div>
   );

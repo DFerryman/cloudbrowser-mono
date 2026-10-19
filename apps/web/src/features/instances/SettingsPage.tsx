@@ -1,9 +1,11 @@
-import { HOURS_PER_MONTH, IDLE_TIMEOUT_OPTIONS_S, SCREEN_SIZES, type BrowserLocale, type Instance, type RegionPricing } from '@cloudbrowser/contracts';
-import { Button, Dialog, Input, Label, Section, Select, useToast } from '@cloudbrowser/ui';
+import { IDLE_TIMEOUT_OPTIONS_S, SCREEN_SIZES, type BrowserLocale, type Instance, type RegionPricing } from '@cloudbrowser/contracts';
+import { Button, cn, Dialog, Hint, Input, Label, Pagination, Section, Select, useToast } from '@cloudbrowser/ui';
 import { ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
+import { DocsLink } from '../../app/DocsLink.js';
 import { useI18n } from '../../lib/i18n.js';
+import { PAGE_SIZE, usePagerLabels } from '../../lib/paging.js';
 import { money } from '../../lib/money.js';
 import { isPriceChanged, useBilling, usePricing } from '../billing/hooks.js';
 import { canSpend } from '../billing/access.js';
@@ -31,7 +33,9 @@ export function SettingsPage() {
   const verify = useVerifyIp();
   const lifecycle = useLifecycle();
   const update = useUpdateInstance();
-  const sessions = useRecentSessions(i.id);
+  const [sessionPage, setSessionPage] = useState(0);
+  const sessions = useRecentSessions(i.id, sessionPage, PAGE_SIZE.sessions);
+  const pagerLabels = usePagerLabels(false);
   const pricing = usePricing();
   const billing = useBilling();
   const region = regionInfo(i.regionId);
@@ -40,6 +44,7 @@ export function SettingsPage() {
   const [ipError, setIpError] = useState<string | null>(null);
   const [deleteText, setDeleteText] = useState('');
   useEffect(() => setName(i.name), [i.name]);
+  useEffect(() => setSessionPage(0), [i.id]);
 
   const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString(locale) : '—');
   const save = (patch: Parameters<typeof update.mutate>[0]['patch']) =>
@@ -91,9 +96,9 @@ export function SettingsPage() {
             {t('settings.requestIp')}
           </Button>
           {onTrial ? (
-            <span className="text-xs text-muted">{t('settings.ipTrial')}</span>
+            <span className="text-xs text-subtle">{t('settings.ipTrial')}</span>
           ) : i.status !== 'running' ? (
-            <span className="text-xs text-muted">{t('settings.verifyRunningOnly')}</span>
+            <span className="text-xs text-subtle">{t('settings.verifyRunningOnly')}</span>
           ) : null}
         </div>
         {ipError ? <p role="alert" className="mt-2 text-sm text-error">{ipError}</p> : null}
@@ -143,9 +148,9 @@ export function SettingsPage() {
         </Section>
 
         <Section title={t('settings.activity')}>
-          {sessions.data?.length ? (
-            <ul className="divide-y divide-border text-sm">
-              {sessions.data.slice(0, 8).map((s) => (
+          {sessions.rows?.length ? (
+            <ul className={cn('divide-y divide-border text-sm transition-opacity', sessions.isPlaceholderData && 'opacity-60')}>
+              {sessions.rows.map((s) => (
                 <li key={s.id} className="flex flex-wrap justify-between gap-2 py-2">
                   <span>{fmt(s.startedAt)}</span>
                   <span className="text-muted">
@@ -158,6 +163,7 @@ export function SettingsPage() {
           ) : (
             <p className="text-sm text-muted">{t('settings.noActivity')}</p>
           )}
+          <Pagination page={sessionPage} hasMore={sessions.hasMore} onPage={setSessionPage} labels={pagerLabels} />
         </Section>
       </div>
 
@@ -181,7 +187,7 @@ export function SettingsPage() {
         <BalanceRequired />
         {ipQuote?.rates ? (
           <p className="mb-4 rounded-[var(--radius-control)] bg-surface-2 px-3 py-2 text-sm">
-            {t('settings.requestIpCost', { amount: money(ipQuote.rates.ip, locale), monthly: money(ipQuote.rates.ip * HOURS_PER_MONTH, locale) })}
+            {t('settings.requestIpCost', { amount: money(ipQuote.rates.ip, locale) })} <DocsLink to="browsers#new-ip" />
           </p>
         ) : null}
         <div className="flex justify-end gap-2">

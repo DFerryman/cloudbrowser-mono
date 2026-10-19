@@ -1,10 +1,12 @@
 import { UsageItem, type BillingState, type UsageTotals } from '@cloudbrowser/contracts';
-import { Button, Card, cn, Section, Select, Skeleton, useToast } from '@cloudbrowser/ui';
+import { Button, Card, cn, Hint, Pagination, Section, Select, Skeleton, usePaged, useToast } from '@cloudbrowser/ui';
 import { AlertTriangle, ExternalLink, Gift, Plus } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { PageHeader } from '../../app/AppShell.js';
+import { DocsLink } from '../../app/DocsLink.js';
 import { useI18n } from '../../lib/i18n.js';
+import { PAGE_SIZE, usePagerLabels } from '../../lib/paging.js';
 import { cents, money } from '../../lib/money.js';
 import { regionKey } from '../instances/status.js';
 import { isLowBalance } from './access.js';
@@ -30,7 +32,7 @@ export function BillingPage() {
   const [month, setMonth] = useState(currentMonth());
   return (
     <>
-      <PageHeader title={t('billing.title')} />
+      <PageHeader title={t('billing.title')} action={<DocsLink to="billing" label={t('billing.howLink')} />} />
       {billing.isPending ? (
         <div className="grid gap-4 lg:grid-cols-3">
           <Skeleton className="h-64" />
@@ -43,10 +45,7 @@ export function BillingPage() {
             <MonthCard totals={billing.data.month} month={billing.data.month.month} className="lg:col-span-2" />
           </div>
           <UsageByBrowser month={month} setMonth={setMonth} />
-          <div className="grid gap-4 lg:grid-cols-2">
-            <Transactions />
-            <HowItWorks />
-          </div>
+          <Transactions />
         </div>
       ) : null}
     </>
@@ -97,7 +96,9 @@ function BalanceCard({ state }: { state: BillingState }) {
           <dd className="font-medium tabular-nums">{m(state.reservedMicros)}</dd>
         </div>
       </dl>
-      <p className="mt-2 text-xs text-muted">{t('billing.reserveHint')}</p>
+      <Hint className="mt-2">
+        {t('billing.reserveHint')} <DocsLink to="billing#held" />
+      </Hint>
 
       <div className="mt-4">
         {!state.enabled ? (
@@ -117,7 +118,7 @@ function BalanceCard({ state }: { state: BillingState }) {
             ))}
           </div>
         )}
-        {state.enabled && state.topUps.length ? <p className="mt-2 text-xs text-muted">{t('billing.topUpHint')}</p> : null}
+        {state.enabled && state.topUps.length ? <Hint className="mt-2">{t('billing.topUpHint')}</Hint> : null}
       </div>
 
       {alert ? (
@@ -144,7 +145,7 @@ function BalanceCard({ state }: { state: BillingState }) {
             {t('billing.runway', { time: hours < 48 ? t('billing.runway.hours', { n: Math.floor(hours) }) : t('billing.runway.days', { n: Math.floor(hours / 24) }) })}
           </p>
         ) : null}
-        <p className="text-xs text-muted">{t('billing.minBalance', { amount: m(state.minBalanceMicros) })}</p>
+        <Hint>{t('billing.minBalance', { amount: m(state.minBalanceMicros) })}</Hint>
       </div>
     </Card>
   );
@@ -198,8 +199,10 @@ function MonthCard({ totals, month, className }: { totals: UsageTotals; month: s
 function UsageByBrowser({ month, setMonth }: { month: string; setMonth: (m: string) => void }) {
   const { t, locale } = useI18n();
   const usage = useAccountUsage(month);
-  const rows = usage.data?.byBrowser ?? [];
-  const items = UsageItem.options.filter((item) => item !== 'snapshot' || rows.some((row) => row.byItem.snapshot !== 0));
+  const all = usage.data?.byBrowser ?? [];
+  const items = UsageItem.options.filter((item) => item !== 'snapshot' || all.some((row) => row.byItem.snapshot !== 0));
+  const { rows, page, pages, setPage } = usePaged(all, PAGE_SIZE.usageByBrowser);
+  const pagerLabels = usePagerLabels();
   return (
     <Section title={t('billing.byBrowser')}>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -259,6 +262,7 @@ function UsageByBrowser({ month, setMonth }: { month: string; setMonth: (m: stri
               </li>
             ))}
           </ul>
+          <Pagination page={page} pages={pages} onPage={setPage} labels={pagerLabels} />
         </>
       )}
     </Section>
@@ -287,16 +291,18 @@ function BrowserName({ instanceId, name, regionId, deleted }: { instanceId: stri
 
 function Transactions() {
   const { t, locale } = useI18n();
-  const tx = useTransactions();
+  const [page, setPage] = useState(0);
+  const tx = useTransactions(page, PAGE_SIZE.transactions);
+  const pagerLabels = usePagerLabels(false);
   return (
     <Section title={t('billing.transactions')}>
       {tx.isPending ? (
         <Skeleton className="h-16" />
-      ) : !tx.data?.length ? (
+      ) : !tx.rows?.length ? (
         <p className="text-sm text-muted">{t('billing.noTransactions')}</p>
       ) : (
-        <ul className="divide-y divide-border text-sm">
-          {tx.data.map((x) => (
+        <ul className={cn('divide-y divide-border text-sm transition-opacity', tx.isPlaceholderData && 'opacity-60')}>
+          {tx.rows.map((x) => (
             <li key={x.id} className="flex items-center justify-between gap-3 py-2">
               <span className="min-w-0">
                 {t(`billing.tx.${x.kind}`)}
@@ -314,19 +320,8 @@ function Transactions() {
           ))}
         </ul>
       )}
+      <Pagination page={page} hasMore={tx.hasMore} onPage={setPage} labels={pagerLabels} />
     </Section>
   );
 }
 
-function HowItWorks() {
-  const { t } = useI18n();
-  return (
-    <Section title={t('billing.how')}>
-      <ol className="list-decimal space-y-2 pl-5 text-sm text-muted">
-        <li>{t('billing.how.1')}</li>
-        <li>{t('billing.how.2')}</li>
-        <li>{t('billing.how.3')}</li>
-      </ol>
-    </Section>
-  );
-}

@@ -1,9 +1,10 @@
-import { Button, useToast } from '@cloudbrowser/ui';
+import { Button, Hint, Pagination, usePaged, useToast } from '@cloudbrowser/ui';
 import { startRegistration, type PublicKeyCredentialCreationOptionsJSON } from '@simplewebauthn/browser';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { KeyRound, Trash2 } from 'lucide-react';
 import { api } from '../../lib/api.js';
 import { useI18n } from '../../lib/i18n.js';
+import { PAGE_SIZE, usePagerLabels } from '../../lib/paging.js';
 import { queryClient } from '../../lib/query.js';
 
 type Passkey = { id: string; name?: string | null; createdAt: string };
@@ -34,13 +35,15 @@ export function Passkeys() {
     onSettled: () => void queryClient.invalidateQueries({ queryKey: KEY }),
   });
   const supported = typeof window !== 'undefined' && 'PublicKeyCredential' in window;
+  const paged = usePaged(list.data, PAGE_SIZE.passkeys);
+  const pagerLabels = usePagerLabels();
 
   return (
     <div>
       <h3 className="mb-1 text-sm font-medium">{t('passkeys.title')}</h3>
       {list.data?.length ? (
         <ul className="mb-2 divide-y divide-border text-sm">
-          {list.data.map((p) => (
+          {paged.rows.map((p) => (
             <li key={p.id} className="flex items-center justify-between gap-2 py-2">
               <span className="flex min-w-0 items-center gap-2">
                 <KeyRound className="size-4 shrink-0 text-muted" aria-hidden />
@@ -54,8 +57,9 @@ export function Passkeys() {
           ))}
         </ul>
       ) : (
-        <p className="mb-2 text-sm text-muted">{t('passkeys.none')}</p>
+        <Hint className="mb-3">{t('passkeys.none')}</Hint>
       )}
+      <Pagination className="mb-3" page={paged.page} pages={paged.pages} onPage={paged.setPage} labels={pagerLabels} />
       <Button size="sm" disabled={!supported || add.isPending} onClick={() => add.mutate()}>
         <KeyRound /> {t('passkeys.add')}
       </Button>

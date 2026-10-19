@@ -1,14 +1,19 @@
-import { Button, cn, Dialog, Input, Label } from '@cloudbrowser/ui';
+import { Button, cn, Dialog, Input, Label, Pagination, usePaged } from '@cloudbrowser/ui';
 import { useState, type ReactNode } from 'react';
 
-/** Compact table for the console. `cells` returns one node per column. */
+/**
+ * Compact table for the console. `cells` returns one node per column. Rows already in memory are
+ * paged here (`pageSize`); a server-paged list passes its `pager` instead and is shown as is.
+ */
 export function Table<T>({
-  rows,
+  rows: all,
   columns,
   cells,
   empty = 'Nothing here.',
   onRow,
   rowKey,
+  pageSize = 25,
+  pager,
 }: {
   rows: T[] | undefined;
   columns: string[];
@@ -16,10 +21,15 @@ export function Table<T>({
   empty?: string;
   onRow?: (r: T) => void;
   rowKey: (r: T) => string | number;
+  pageSize?: number;
+  pager?: { page: number; hasMore: boolean; onPage: (page: number) => void };
 }) {
+  const local = usePaged(pager ? undefined : all, pageSize);
+  const rows = pager ? all : all && local.rows;
   if (!rows) return <p className="py-6 text-sm text-muted">Loading…</p>;
-  if (!rows.length) return <p className="py-6 text-sm text-muted">{empty}</p>;
+  if (!rows.length && !(pager && pager.page > 0)) return <p className="py-6 text-sm text-muted">{empty}</p>;
   return (
+    <div>
     <div className="overflow-x-auto rounded-[var(--radius-card)] border border-border">
       <table className="w-full text-left text-sm">
         <thead className="bg-surface text-xs text-muted">
@@ -43,6 +53,12 @@ export function Table<T>({
           ))}
         </tbody>
       </table>
+    </div>
+    {pager ? (
+      <Pagination page={pager.page} hasMore={pager.hasMore} onPage={pager.onPage} labels={{ previous: 'Previous', next: 'Next', page: 'Page {page}' }} />
+    ) : (
+      <Pagination page={local.page} pages={local.pages} onPage={local.setPage} labels={{ previous: 'Previous', next: 'Next', page: `Page {page} of {pages} · ${all!.length} rows` }} />
+    )}
     </div>
   );
 }

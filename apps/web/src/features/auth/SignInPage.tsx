@@ -1,23 +1,32 @@
 import { Button, Card, Input, Label } from '@cloudbrowser/ui';
-import { ArrowLeft, ShieldCheck } from 'lucide-react';
-import { useState, type FormEvent } from 'react';
-import { useNavigate, useSearchParams } from 'react-router';
+import { ArrowLeft, CheckCircle2, ShieldCheck } from 'lucide-react';
+import { useEffect, useState, type FormEvent } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router';
 import { Logo } from '../../app/AppShell.js';
+import { LanguageButton, ThemeButton } from '../../app/Preferences.js';
 import { api, ApiError } from '../../lib/api.js';
 import { useI18n } from '../../lib/i18n.js';
 import { queryClient } from '../../lib/query.js';
+import { rich } from '../../lib/rich.js';
+import { SUPPORT_EMAIL } from '../../lib/site.js';
+import { useSignedIn } from '../../site/hooks.js';
 
 type Step = 'email' | 'code' | 'second-factor';
 
+/** Only same-site paths, so a crafted link cannot send a fresh session elsewhere. */
+const safeNext = (next: string | null) => (next && next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\') ? next : '/browsers');
+
 /**
- * Email one-time code sign-in (page 1, "Auth"). Google is unavailable from mainland China. With
- * two-factor sign-in on, the email code is followed by a code from an authenticator app (or a
- * one-time backup code) before a session exists.
+ * Email one-time code sign-in (page 1, "Auth"), invite-only. Google is unavailable from mainland
+ * China. With two-factor sign-in on, the email code is followed by a code from an authenticator
+ * app (or a one-time backup code) before a session exists: the second factor guards the whole
+ * account at its one entrance, rather than single pages or actions later on.
  */
 export function SignInPage() {
-  const { t, locale, setLocale } = useI18n();
+  const { t } = useI18n();
   const navigate = useNavigate();
   const [params] = useSearchParams();
+  const signedIn = useSignedIn();
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [step, setStep] = useState<Step>('email');
@@ -26,9 +35,13 @@ export function SignInPage() {
 
   const enter = () => {
     queryClient.clear();
-    const next = params.get('next');
-    navigate(next && next.startsWith('/') && !next.startsWith('//') ? next : '/browsers', { replace: true });
+    navigate(safeNext(params.get('next')), { replace: true });
   };
+  // Already signed in (for example from a bookmark): go straight in.
+  useEffect(() => {
+    if (signedIn && step === 'email') navigate(safeNext(params.get('next')), { replace: true });
+  }, [signedIn, step, navigate, params]);
+  const signedOut = params.has('signedOut') && step === 'email' && !error;
 
   const sendCode = async (e: FormEvent) => {
     e.preventDefault();
@@ -70,18 +83,26 @@ export function SignInPage() {
     <div className="grid min-h-dvh place-items-center bg-surface px-4 py-8">
       <div className="w-full max-w-sm">
         <div className="mb-6 flex items-center justify-between">
-          <Logo />
-          <button type="button" className="text-sm text-muted hover:text-fg" onClick={() => setLocale(locale === 'en' ? 'zh-CN' : 'en')}>
-            {locale === 'en' ? '中文' : 'English'}
-          </button>
+          <Link to="/" aria-label={t('auth.backHome')}>
+            <Logo />
+          </Link>
+          <div className="flex items-center gap-1">
+            <LanguageButton />
+            <ThemeButton />
+          </div>
         </div>
+        {signedOut ? (
+          <p role="status" className="mb-3 flex items-center gap-2 rounded-[var(--radius-control)] border border-running/30 bg-running/10 px-3 py-2 text-sm">
+            <CheckCircle2 className="size-4 shrink-0 text-running" aria-hidden /> {t('auth.signedOut')}
+          </p>
+        ) : null}
         <Card className="p-6">
           {step === 'second-factor' ? (
             <SecondFactor onSignedIn={enter} onRestart={restart} />
           ) : (
             <>
               <h1 className="text-lg font-semibold">{t('auth.title')}</h1>
-              <p className="mt-1 text-sm text-muted">{step === 'email' ? t('auth.subtitle') : t('auth.codeSent', { email })}</p>
+              <p className="mt-1 text-xs leading-relaxed text-subtle">{step === 'email' ? t('auth.subtitle') : t('auth.codeSent', { email })}</p>
               {step === 'email' ? (
                 <form onSubmit={sendCode} className="mt-5 space-y-4">
                   <div>
@@ -114,6 +135,23 @@ export function SignInPage() {
             </p>
           ) : null}
         </Card>
+        <div className="mt-4 space-y-2 px-1 text-center text-xs leading-relaxed text-subtle">
+          <p>
+            {rich(t('auth.agree'), {
+              terms: <Link to="/terms" className="underline hover:text-fg">{t('footer.terms')}</Link>,
+              privacy: <Link to="/privacy" className="underline hover:text-fg">{t('footer.privacy')}</Link>,
+            })}
+          </p>
+          <p>
+            {rich(t('auth.inviteHint'), {
+              contact: (
+                <a href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('CloudBrowser invitation')}`} className="text-accent hover:underline">
+                  {t('auth.requestInvite')}
+                </a>
+              ),
+            })}
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -173,7 +211,7 @@ function SecondFactor({ onSignedIn, onRestart }: { onSignedIn: () => void; onRes
         <ShieldCheck className="size-5" />
       </span>
       <h1 className="text-lg font-semibold">{t('auth.2fa.title')}</h1>
-      <p className="mt-1 text-sm text-muted">{t(backup ? 'auth.2fa.backupBody' : 'auth.2fa.body')}</p>
+      <p className="mt-1 text-xs leading-relaxed text-subtle">{t(backup ? 'auth.2fa.backupBody' : 'auth.2fa.body')}</p>
       <div className="mt-5">
         <Label htmlFor="second-factor">{t(backup ? 'auth.2fa.backupLabel' : 'auth.2fa.label')}</Label>
         {backup ? (

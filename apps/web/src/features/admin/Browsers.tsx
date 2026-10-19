@@ -1,7 +1,7 @@
 import { Button, Input, useToast } from '@cloudbrowser/ui';
 import { useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
-import { post, useAdmin, useAdminAction, when, type InstanceDetail, type InstanceRow } from './data.js';
+import { ADMIN_PAGE, post, useAdmin, useAdminAction, useAdminPage, when, type InstanceDetail, type InstanceRow } from './data.js';
 import { OperationDialog } from './Lists.js';
 import { Json, Mono, PageTitle, Pill, ReasonDialog, statusTone, Table } from './ui.js';
 
@@ -10,7 +10,7 @@ export function BrowsersPage() {
   const query = params.get('q') ?? '';
   const [q, setQ] = useState(query);
   const navigate = useNavigate();
-  const rows = useAdmin<InstanceRow[]>(`/instances?q=${encodeURIComponent(query)}`);
+  const rows = useAdminPage<InstanceRow>(`/instances?q=${encodeURIComponent(query)}`, ADMIN_PAGE.browsers);
   return (
     <div>
       <PageTitle title="Browsers">
@@ -26,7 +26,8 @@ export function BrowsersPage() {
         </form>
       </PageTitle>
       <Table
-        rows={rows.data}
+        rows={rows.rows}
+        pager={rows.pager}
         rowKey={(r) => r.id}
         onRow={(r) => navigate(`/browsers/${r.id}`)}
         columns={['Browser', 'Status', 'Region', 'IP', 'Owner', 'Updated']}
