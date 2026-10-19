@@ -306,6 +306,11 @@ pnpm --filter @cloudbrowser/api exec wrangler d1 execute cloudbrowser --remote \
 
 ## 7. Operating knobs (SQL, no deploy)
 
+The default user caps allow two browsers and one running browser at a time. A separate limit
+allows three new browsers per rolling 24 hours: pending and successful creates count, including
+successful browsers deleted later; failed or canceled creates do not. The sidebar's browser
+count shows current browser slots, so it can be below two while the rolling creation limit is full.
+
 ```sql
 SELECT * FROM caps;                                            -- pilot limits from plan page 12
 UPDATE caps SET "limit" = 3 WHERE scope = 'user:default' AND metric = 'instances';

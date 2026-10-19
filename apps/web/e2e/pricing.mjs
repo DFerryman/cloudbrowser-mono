@@ -30,8 +30,8 @@ const instance = {
 const results = [];
 
 async function fixture({ trial = false, failed = false, noPrice = false, width = 1365, sizeGb = 10, totalBytes, status = 'sleeping', purgeAfter = null,
-  balanceMicros = trial ? 0 : 10_000_000, reservedMicros = 0, availableMicros = Math.max(0, balanceMicros - reservedMicros), mode = 'prepaid', trialEligible = false, trialSeconds = 600, busy = false, legacySnapshots = false, rootVolumeGb = 16 } = {}) {
-  const context = await browser.newContext({ viewport: { width, height: 1024 }, locale: 'en-US', hasTouch: width === 820 });
+  balanceMicros = trial ? 0 : 10_000_000, reservedMicros = 0, availableMicros = Math.max(0, balanceMicros - reservedMicros), mode = 'prepaid', trialEligible = false, trialSeconds = 600, busy = false, legacySnapshots = false, rootVolumeGb = 16, locale = 'en-US', maxBrowsers = 10 } = {}) {
+  const context = await browser.newContext({ viewport: { width, height: 1024 }, locale, hasTouch: width === 820 });
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   const errors = [];
@@ -50,7 +50,11 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
       if (request.method() !== 'GET') {
         const entry = { method: request.method(), path: url.pathname, body: request.postData() ? request.postDataJSON() : null };
         state.requests.push(entry);
-        if (state.reject) {
+        if (state.reject === 'creates_per_day' || state.reject === 'instances') {
+          status = state.reject === 'creates_per_day' ? 429 : 403;
+          body = { type: 'plan_limit', title: 'Plan limit reached', status, limit: state.reject };
+          state.reject = false;
+        } else if (state.reject) {
           if (state.reject === 'storage') state.storageGb = 100;
           else state.version = 'quote-2';
           state.reject = false;
@@ -59,7 +63,7 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
         } else body = { instanceId: 'new-browser', operationId: 'fixture-operation' };
       } else if (url.pathname === '/api/v1/me') body = {
         user: { id: 'fixture-user', name: 'Test user', email: 'fixture@example.test' },
-        entitlements: { billing: 'prepaid', maxBrowsers: 10, maxRunning: 10, idleTimeoutMaxS: 3600, ipChangesPerMonth: 1, maxStorageGb: 100 },
+        entitlements: { billing: 'prepaid', maxBrowsers, maxRunning: 10, idleTimeoutMaxS: 3600, ipChangesPerMonth: 1, maxStorageGb: 100 },
         usage: { browsers: failed ? 0 : 1, running: 0 },
       };
       else if (url.pathname === '/api/v1/regions') body = [{ id: 'syd1', name: 'Sydney', country: 'AU', city: 'Sydney', timezone: 'Australia/Sydney', enabled: true, acceptingNew: true, probeUrl: null }];
@@ -111,6 +115,21 @@ async function rejected(f, path, version = 'quote-1') {
 }
 
 try {
+  for (const [limit, message] of [
+    ['creates_per_day', '过去 24 小时的创建次数已达上限，请稍后再试。'],
+    ['instances', '浏览器数量已达上限，请先删除一个浏览器再创建。'],
+  ]) {
+    const limited = await fixture({ locale: 'zh-CN', maxBrowsers: 2 });
+    await limited.page.goto(`${origin}/browsers/new`);
+    await limited.page.getByText('已用 1 / 2 个浏览器', { exact: true }).waitFor();
+    limited.state.reject = limit;
+    await limited.page.getByRole('button', { name: '创建浏览器', exact: true }).click();
+    await limited.page.getByRole('alert').filter({ hasText: message }).waitFor();
+    assert.equal(limited.state.requests.length, 1, 'Limit failures must not retry automatically');
+    assert.equal(await limited.page.getByText('已达到账户上限。', { exact: true }).count(), 0);
+    await finish(limited, `Chinese creation errors distinguish ${limit} while the sidebar shows 1 of 2 browsers`);
+  }
+
   const create = await fixture();
   await create.page.goto(`${origin}/browsers/new`);
   await create.page.getByLabel('Name', { exact: true }).fill('Keep my entered name');

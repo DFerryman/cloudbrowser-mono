@@ -184,9 +184,10 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
   const [daily] = await db
     .select({ n: sql<number>`count(*)` })
     .from(operations)
-    .where(and(eq(operations.userId, userId), eq(operations.kind, 'create'), gte(operations.createdAt, new Date(now.getTime() - 86_400_000))));
+    // Pending and successful creates hold quota; a failed or canceled attempt gives it back.
+    .where(and(eq(operations.userId, userId), eq(operations.kind, 'create'), notInArray(operations.status, ['failed', 'canceled']), gte(operations.createdAt, new Date(now.getTime() - 86_400_000))));
   if (Number(daily?.n ?? 0) >= (c.get('creates_per_day') ?? Infinity)) {
-    throw problem(429, 'plan_limit', 'Too many new browsers today. Try again tomorrow.', { limit: 'creates_per_day' });
+    throw problem(429, 'plan_limit', `Your account allows ${c.get('creates_per_day')} new browsers in a rolling 24-hour period. Try again later.`, { limit: 'creates_per_day' });
   }
 
   await checkRegionRoom(db, regionId);

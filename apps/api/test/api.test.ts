@@ -1,5 +1,5 @@
 import { verifyViewerToken } from '@cloudbrowser/contracts';
-import { newArchiveKey } from '@cloudbrowser/db';
+import { createDb, newArchiveKey, operationRow, schema } from '@cloudbrowser/db';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import engine from '@cloudbrowser/engine';
 import app from '../src/index.js';
@@ -107,6 +107,36 @@ describe('browsers', () => {
     const third = await t.call('POST', '/api/v1/instances', { name: 'c', regionId: 'usw1', storageGb: 10, priceVersion: await quote('usw1') }, { 'idempotency-key': 'c' });
     expect(third.status).toBe(403);
     expect(third.body.type).toBe('plan_limit');
+  });
+
+  it('does not charge failed and canceled creates against the rolling daily limit, while keeping successful creates counted after deletion', async () => {
+    const body = { name: 'Work', regionId: 'tyo1', storageGb: 10, priceVersion: await quote() };
+    const first = await t.call('POST', '/api/v1/instances', body, { 'idempotency-key': 'daily-first' });
+    expect(first.status).toBe(202);
+    await t.settle();
+    const userId = (await t.call('GET', '/api/v1/me')).body.user.id;
+    const now = new Date();
+    for (const status of ['succeeded', 'failed', 'canceled']) {
+      await createDb(t.d1).insert(schema.operations).values({
+        ...operationRow({ instanceId: first.body.instanceId, userId, kind: 'create', now }),
+        status, finishedAt: now,
+      });
+    }
+    await t.call('POST', `/api/v1/instances/${first.body.instanceId}/stop`, undefined, { 'idempotency-key': 'daily-stop' });
+    await t.settle();
+    const before = await t.call('GET', '/api/v1/me');
+    expect(before.body).toMatchObject({ usage: { browsers: 1 }, entitlements: { maxBrowsers: 2 } });
+
+    const second = await t.call('POST', '/api/v1/instances', body, { 'idempotency-key': 'daily-second' });
+    expect(second.status).toBe(202);
+    await t.settle();
+    expect((await t.call('GET', `/api/v1/operations/${second.body.operationId}`)).body.status).toBe('succeeded');
+    await t.call('DELETE', `/api/v1/instances/${first.body.instanceId}`, undefined, { 'idempotency-key': 'daily-delete' });
+    await t.settle();
+    expect((await t.call('GET', '/api/v1/me')).body.usage.browsers).toBe(1);
+
+    const dailyLimit = await t.call('POST', '/api/v1/instances', body, { 'idempotency-key': 'daily-third' });
+    expect(dailyLimit).toMatchObject({ status: 429, body: { type: 'plan_limit', limit: 'creates_per_day' } });
   });
 
   it('opens, sleeps, wakes, changes IP and permanently deletes a browser', async () => {

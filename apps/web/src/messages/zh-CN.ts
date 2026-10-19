@@ -423,6 +423,8 @@ export const zhCN: Messages = {
   'error.operation_in_progress': '此浏览器有其他操作正在进行。',
   'error.invalid_state': '当前无法执行此操作。',
   'error.plan_limit': '已达到账户上限。',
+  'error.plan_limit.instances': '浏览器数量已达上限，请先删除一个浏览器再创建。',
+  'error.plan_limit.creates_per_day': '过去 24 小时的创建次数已达上限，请稍后再试。',
   'error.region_unavailable': '该地区暂时无法新建浏览器。',
   'error.capacity_unavailable': '正在等待资源，请几分钟后再试。',
   'error.spend_guard_active': '暂时无法新建浏览器。',
