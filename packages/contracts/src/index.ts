@@ -1,4 +1,5 @@
 export * from './regions.js';
+export * from './aws-regions.js';
 export * from './aws-provider.js';
 export * from './operations.js';
 export * from './instances.js';

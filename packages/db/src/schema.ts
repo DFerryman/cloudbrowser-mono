@@ -630,6 +630,21 @@ export const awsProviderRegions = sqliteTable('aws_provider_regions', {
   capacity: integer('capacity').notNull(), checkedAt: ts('checked_at'), lastError: text('last_error'),
 });
 
+/**
+ * Launch outcomes per region and zone. Owner: engine. Steers new browsers away from zones that
+ * just ran out of capacity, and tells users how a region is doing before they create there.
+ * Zone '' holds failures that are not tied to one zone.
+ */
+export const launchHealth = sqliteTable('launch_health', {
+  regionId: text('region_id').notNull(),
+  zone: text('zone').notNull(),
+  lastSuccessAt: ts('last_success_at'),
+  lastCapacityAt: ts('last_capacity_at'),
+  lastFailureAt: ts('last_failure_at'),
+  lastFailureClass: text('last_failure_class'),
+  lastFailure: text('last_failure'),
+}, (t) => [primaryKey({ columns: [t.regionId, t.zone] })]);
+
 /** One row (id 1): markup and balance thresholds, edited in the operator console. Owner: api (admin). */
 export const pricingSettings = sqliteTable('pricing_settings', {
   id: integer('id').primaryKey(),

@@ -13,15 +13,19 @@ export class FakeEc2 {
   addresses = new Map<string, Res & { publicIp: string; eni?: string; assoc?: string }>();
   enis = new Map<string, Res & { subnet: string; az: string; status: string; instance?: string }>();
   volumes = new Map<string, Res & { az: string; size: number; status: string; instance?: string; device?: string; snapshot?: string }>();
-  instances = new Map<string, Res & { state: string; az: string; type: string; eni: string; userData: string; protected: boolean; pendingDescribes: number }>();
+  instances = new Map<string, Res & { state: string; az: string; type: string; eni: string; userData: string; protected: boolean; pendingDescribes: number; stateReason?: { code: string; message: string } }>();
   snapshots = new Map<string, Res & { volume: string; size: number; status: string; describes: number }>();
   tokens = new Map<string, string>();
   calls: { action: string; params: Record<string, string> }[] = [];
   /** Return an error for a call, e.g. capacity for one instance type. */
   fail: (action: string, p: Record<string, string>) => { code: string; status?: number } | null = () => null;
+  /** A launch EC2 accepts and then terminates while pending, with this state reason. */
+  launchFailure: (p: Record<string, string>) => { code: string; message: string } | null = () => null;
+  /** CreateVolume accepts the request, then the volume fails (e.g. an unusable KMS key) and is deleted. */
+  volumeFailure: (p: Record<string, string>) => boolean = () => false;
   /** A delete may be accepted while its resource remains visible in subsequent Describe calls. */
   deferDeletes = false;
-  subnetAz: Record<string, string> = { 'subnet-a': 'ap-northeast-1a', 'subnet-c': 'ap-northeast-1c' };
+  subnetAz: Record<string, string> = { 'subnet-a': 'ap-northeast-1a', 'subnet-c': 'ap-northeast-1c', 'subnet-d': 'ap-northeast-1d' };
   quotas: Record<string, number> = { 'L-0263D0A3': 5, 'L-1216C47A': 16 };
   /** Volume modifications, newest last; each one reports `modifying` once, then `optimizing`. */
   modifications: { volume: string; target: number; state: string; describes: number; start: string }[] = [];
@@ -179,7 +183,7 @@ export class FakeEc2 {
       case 'CreateVolume': {
         const id = this.once(p.ClientToken && `vol:${p.ClientToken}`, () => {
           const id = this.id('vol');
-          this.volumes.set(id, { id, tags: this.tagsFrom(p, 'volume'), az: p.AvailabilityZone!, size: Number(p.Size), status: 'available', snapshot: p.SnapshotId });
+          this.volumes.set(id, { id, tags: this.tagsFrom(p, 'volume'), az: p.AvailabilityZone!, size: Number(p.Size), status: this.volumeFailure(p) ? 'error' : 'available', snapshot: p.SnapshotId });
           return id;
         });
         const v = this.volumes.get(id)!;
@@ -191,6 +195,8 @@ export class FakeEc2 {
           (v) => (ids.length ? ids.includes(v.id) : true) && this.match(v, f, { 'attachment.instance-id': (v) => (v as { instance?: string }).instance, 'attachment.device': (v) => (v as { device?: string }).device }),
         );
         if (ids.length && !rows.length) throw new Error('InvalidVolume.NotFound|400');
+        // A failed volume is reported once, then deleted by EC2.
+        for (const v of rows) if (v.status === 'error') queueMicrotask(() => this.volumes.delete(v.id));
         return `<volumeSet>${rows
           .map(
             (v) =>
@@ -242,7 +248,9 @@ export class FakeEc2 {
         const id = this.once(`i:${p.ClientToken}`, () => {
           const id = this.id('i');
           const root = this.id('vol');
+          const failure = this.launchFailure(p);
           this.instances.set(id, {
+            ...(failure ? { stateReason: failure } : {}),
             id,
             tags: this.tagsFrom(p, 'instance'),
             state: 'pending',
@@ -253,6 +261,11 @@ export class FakeEc2 {
             protected: p.DisableApiTermination === 'true',
             pendingDescribes: 1,
           });
+          if (failure) {
+            this.instances.get(id)!.state = 'terminated';
+            Object.assign(eni, { instance: undefined, status: 'available' });
+            return id;
+          }
           this.volumes.set(root, { id: root, tags: this.tagsFrom(p, 'volume'), az: eni.az, size: Number(p['BlockDeviceMapping.1.Ebs.VolumeSize']), status: 'in-use', instance: id, device: '/dev/sda1' });
           Object.assign(eni, { instance: id, status: 'in-use' });
           return id;
@@ -269,7 +282,7 @@ export class FakeEc2 {
         return `<reservationSet>${rows
           .map(
             (i) =>
-              `<item><instancesSet><item><instanceId>${i.id}</instanceId><instanceType>${i.type}</instanceType><instanceState><name>${i.state}</name></instanceState><placement><availabilityZone>${i.az}</availabilityZone></placement><cpuOptions><coreCount>1</coreCount><threadsPerCore>2</threadsPerCore></cpuOptions>${tagXml(i.tags)}</item></instancesSet></item>`,
+              `<item><instancesSet><item><instanceId>${i.id}</instanceId><instanceType>${i.type}</instanceType><instanceState><name>${i.state}</name></instanceState>${i.stateReason ? `<stateReason><code>${esc(i.stateReason.code)}</code><message>${esc(i.stateReason.message)}</message></stateReason>` : ''}<placement><availabilityZone>${i.az}</availabilityZone></placement><cpuOptions><coreCount>1</coreCount><threadsPerCore>2</threadsPerCore></cpuOptions>${tagXml(i.tags)}</item></instancesSet></item>`,
           )
           .join('')}</reservationSet>`;
       }

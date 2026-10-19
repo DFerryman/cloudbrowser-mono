@@ -1,4 +1,5 @@
 /** Live AWS catalog, quota and organization billing synchronization. No infrastructure mutations. */
+import { AWS_REGION_FACTS } from '@cloudbrowser/contracts';
 import { createDb, schema, type Db } from '@cloudbrowser/db';
 import { AwsApi, AwsExecutor, DEFAULT_INSTANCE_TYPES, Ec2Client, assumeRoleCredentials, xmlItems, xmlText, type AwsCredentials, type AwsRegionConfig, type XmlNode } from '@cloudbrowser/executors';
 import { and, eq, sql } from 'drizzle-orm';
@@ -66,11 +67,15 @@ export async function syncAwsProvider(env: Env, force = false) {
             name = metadata.Parameters?.find((p)=>p.Name.endsWith('/longName'))?.Value || name;
             country = metadata.Parameters?.find((p)=>p.Name.endsWith('/geolocationCountry'))?.Value || country;
           }
+          // Where the region's servers are: the browser's timezone and its IP's country and city.
+          // SSM has no city or timezone, and reports Hong Kong as CN where IP geolocation says HK.
+          const facts = AWS_REGION_FACTS[r.code];
+          const place = facts ? { country: facts.country, city: facts.city, timezone: facts.timezone } : { country, city: name, timezone: 'UTC' };
           // Publish discovery and its readiness marker atomically. Pricing must not see a new
           // region before it can tell that network discovery is still in progress.
           await db.batch([
-            db.insert(regions).values({id:regionId,name,country,city:name,timezone:'UTC',enabled:true,executor:'aws-ec2',providerRegion:r.code})
-              .onConflictDoUpdate({target:regions.id,set:{name,country}}),
+            db.insert(regions).values({id:regionId,name,...place,enabled:true,executor:'aws-ec2',providerRegion:r.code})
+              .onConflictDoUpdate({target:regions.id,set:facts ? {name,...place} : {name,country}}),
             db.insert(catalog).values({regionId,providerRegion:r.code,optInStatus:r.optIn,status:'syncing',capacity:0})
               .onConflictDoUpdate({target:catalog.regionId,set:{optInStatus:r.optIn}}),
           ]);
@@ -130,7 +135,9 @@ async function syncRegion(db: Db, env: Env, ec2: Ec2Client, credentials: () => P
   });
   const offered=DEFAULT_INSTANCE_TYPES.filter((type)=>offerings.some((o)=>xmlText(o,'instanceType')===type && xmlText(o,'location')! in config!.subnets));
   if (!offered.length) throw new Error('No supported browser machine is offered in the configured availability zones');
-  config={...config,instanceTypes:offered};
+  // Per zone, so a launch never asks a zone for a type it does not offer (EC2: Unsupported).
+  const zoneInstanceTypes=Object.fromEntries(Object.keys(config.subnets).map((zone)=>[zone,offered.filter((type)=>offerings.some((o)=>xmlText(o,'instanceType')===type && xmlText(o,'location')===zone))]));
+  config={...config,instanceTypes:offered,zoneInstanceTypes};
   const executor=new AwsExecutor({accessKeyId:env.AWS_ACCESS_KEY_ID!,secretAccessKey:env.AWS_SECRET_ACCESS_KEY!,credentials,mode:'readonly',regions:{[code]:config},appUrl:'',agentImage:'',browserImage:''});
   const ctx={operationId:'aws-provider-sync',step:'provider-sync',token:'provider-sync',tags:{'cb:managed':'true' as const,'cb:env':env.ENV_NAME ?? 'prod','cb:instance':'provider-sync','cb:op':'provider-sync','cb:gen':'0'},deadline};
   const quotas:{metric:string;limit:number;used:number}[]=await executor.quotas(ctx,code);

@@ -38,6 +38,25 @@ export class ExecutorError extends Error {
   }
 }
 
+/**
+ * The provider accepted a launch, but the VM ended before it ran (AWS: terminated while pending,
+ * with a state reason). Retrying with the same idempotency token would only return the same
+ * dead VM, so the caller must use a new token for the next launch.
+ */
+export class LaunchFailed extends ExecutorError {
+  constructor(
+    errorClass: ErrorClass,
+    readonly vmId: string,
+    readonly zone: string | null,
+    /** Provider reason code, e.g. `Server.InsufficientInstanceCapacity`. */
+    readonly reasonCode: string | null,
+    message: string,
+  ) {
+    super(errorClass, message);
+    this.name = 'LaunchFailed';
+  }
+}
+
 export interface OpContext {
   operationId: string;
   step: string;
@@ -98,6 +117,8 @@ export interface VmSpec {
   /** Single-use agent bootstrap token; the only secret in user data. */
   bootstrapToken: string;
   gatewayUrl: string;
+  /** IANA timezone of the region; the browser's clock uses it. */
+  timezone?: string;
   /** Maximum VM price in USD/hour confirmed for this operation; applies only to a new launch. */
   maxVmHour?: number;
   /** Current provider prices for all configured launch candidates, never an estimated fallback. */

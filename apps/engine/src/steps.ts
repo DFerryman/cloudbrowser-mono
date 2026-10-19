@@ -1,6 +1,6 @@
 import { ProviderPriceSheet, TRIAL, resourceMonthlyCostCents } from '@cloudbrowser/contracts';
-import { eventRow, newArchiveKey, newId, raiseAlert, schema, settleRunningStatements, sha256Hex, userCaps, type Db } from '@cloudbrowser/db';
-import { ExecutorError, type ExecutorKind, type ResourceKind } from '@cloudbrowser/executors';
+import { eventRow, launchHealthByRegion, newArchiveKey, newId, raiseAlert, recentCapacityAt, recordLaunch, schema, settleRunningStatements, sha256Hex, userCaps, type Db } from '@cloudbrowser/db';
+import { ExecutorError, LaunchFailed, type ExecutorKind, type ResourceKind, type VmRef } from '@cloudbrowser/executors';
 import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import {
   placementRef,
@@ -16,7 +16,7 @@ import { bootstrapToken, type CommandReply } from './agent.js';
 import { archiveObjectKey } from './archives.js';
 import { fencedInsert, operationFence } from './fencing.js';
 
-const { browserInstances, instanceHealth, ipAddresses, placements, resources, auditLog, events, agentCredentials, agentCommands, viewerSessions, backups, archiveKeys, providerPrices, regions } = schema;
+const { browserInstances, instanceHealth, ipAddresses, placements, resources, auditLog, events, agentCredentials, agentCommands, viewerSessions, backups, archiveKeys, providerPrices, regions, operations } = schema;
 
 /**
  * A new browser's data volume. The profile without caches is typically well under 2 GB, Chrome's
@@ -117,6 +117,78 @@ function result<T extends Record<string, unknown>>(env: StepEnv, step: string): 
   const r = env.results[step];
   if (!r) throw new Error(`missing result of step ${step}`);
   return r as T;
+}
+
+// --- launch attempts ---------------------------------------------------------------------------
+
+const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+const counter = (v: unknown) => (typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : 0);
+
+/**
+ * Token suffix of a create's interface, disk and VM. Moving to another zone (`z1`, ...) and
+ * relaunching after a VM died during launch (`l1`, ...) need new provider tokens: the old ones
+ * would only find the old zone's resources or the dead VM again.
+ */
+function attemptSuffix(env: StepEnv, step: 'create_nic' | 'create_volume' | 'create_vm'): string | undefined {
+  const zone = counter(env.op.params?.zoneAttempt);
+  const launch = step === 'create_vm' ? counter(env.op.params?.launch) : 0;
+  return `${zone ? `z${zone}` : ''}${launch ? `l${launch}` : ''}` || undefined;
+}
+
+async function saveParams(env: StepEnv, patch: Record<string, unknown>) {
+  env.op.params = { ...(env.op.params ?? {}), ...patch };
+  await env.deps.db.update(operations).set({ params: env.op.params }).where(and(eq(operations.id, env.op.id), operationFence(env)));
+}
+
+/** Zones ordered for a new VM: no recent capacity shortage first, otherwise configuration order. */
+async function zonesByHealth(env: StepEnv, zones: string[]): Promise<string[]> {
+  const rows = (await launchHealthByRegion(env.deps.db)).get(env.region.id) ?? [];
+  const health = new Map(rows.map((r) => [r.zone, r]));
+  const now = env.deps.now();
+  return zones.map((z, i) => ({ z, i, at: recentCapacityAt(health.get(z), now) })).sort((a, b) => a.at - b.at || a.i - b.i).map((x) => x.z);
+}
+
+/**
+ * What a failed launch teaches. A VM that EC2 terminated during launch is gone and the next
+ * launch needs its own token; a capacity shortage steers later browsers to other zones; any
+ * other provider failure (an unusable EBS key, a permission, a quota) marks the region as having
+ * a provider issue, so new browsers are refused there until a launch succeeds.
+ */
+async function learnFromLaunch(env: StepEnv, e: unknown, zone: string, vmToken: string) {
+  if (!(e instanceof ExecutorError)) return;
+  const { db, now } = env.deps;
+  if (e instanceof LaunchFailed) {
+    await db.update(resources).set({ providerId: e.vmId, state: 'deleted', deletedAt: now() })
+      .where(and(eq(resources.requestToken, vmToken), isNull(resources.providerId), operationFence(env)));
+    await saveParams(env, { launch: counter(env.op.params?.launch) + 1 });
+  }
+  if (e.errorClass === 'capacity') await recordLaunch(db, env.region.id, zone, { kind: 'capacity' }, now());
+  else if (e.errorClass === 'invalid' || e.errorClass === 'forbidden' || e.errorClass === 'quota') {
+    await recordLaunch(db, env.region.id, zone, { kind: 'failure', errorClass: e.errorClass, message: e.message }, now());
+  }
+}
+
+/**
+ * Capacity shortages are usually limited to one zone. A new browser has no data yet, so its
+ * empty disk and interface are left to the reaper and the create starts again in a zone it has
+ * not tried; the static IP moves with it. Returns when every zone was tried.
+ */
+async function moveCreateToAnotherZone(env: StepEnv, zone: string) {
+  const tried = [...new Set([...strings(env.op.params?.avoidZones), zone])];
+  if (!env.executor.zones(env.region.providerRegion).some((z) => !tried.includes(z))) return;
+  const { db, now } = env.deps;
+  const tokens = [env.ctx('create_nic', attemptSuffix(env, 'create_nic')).token, env.ctx('create_volume', attemptSuffix(env, 'create_volume')).token];
+  await db.batch([
+    db.update(resources).set({ state: 'superseded', releaseAfter: now() })
+      .where(and(eq(resources.instanceId, env.instance.id), inArray(resources.requestToken, tokens), operationFence(env))),
+    // EC2 refused every launch here, so no VM exists for this zone's token. A pending row would
+    // let the reconciler adopt the next zone's VM into it.
+    db.update(resources).set({ state: 'deleted', deletedAt: now() })
+      .where(and(eq(resources.requestToken, env.ctx('create_vm', attemptSuffix(env, 'create_vm')).token), isNull(resources.providerId), operationFence(env))),
+  ]);
+  // The runner saves these parameters when it restarts the steps.
+  env.op.params = { ...(env.op.params ?? {}), avoidZones: tried, zoneAttempt: counter(env.op.params?.zoneAttempt) + 1 };
+  throw new RestartFrom('create_nic', `no capacity in ${zone}`);
 }
 
 // --- shared steps ------------------------------------------------------------------------------
@@ -249,7 +321,12 @@ async function verifyIpFor(env: StepEnv, p: PlacementRow): Promise<StepOutcome> 
 
 async function ensureRunning(env: StepEnv): Promise<StepOutcome> {
   const p = await loadPlacement(env);
-  await env.executor.ensureRunning(env.ctx('ensure_running'), placementRef(p));
+  try {
+    await env.executor.ensureRunning(env.ctx('ensure_running'), placementRef(p));
+  } catch (e) {
+    if (e instanceof ExecutorError && e.errorClass === 'capacity') await recordLaunch(env.deps.db, env.region.id, p.zone, { kind: 'capacity' }, env.deps.now());
+    throw e;
+  }
   return {};
 }
 
@@ -376,19 +453,29 @@ async function finishCreate(env: StepEnv): Promise<StepOutcome> {
 
 async function createNic(env: StepEnv): Promise<StepOutcome> {
   const ip = result<{ allocationId: string; address: string }>(env, 'allocate_ip');
-  const ctx = env.ctx('create_nic');
+  const ctx = env.ctx('create_nic', attemptSuffix(env, 'create_nic'));
   await ledgerPending(env, 'network_interface', ctx.token, 1, null);
-  const nic = await env.executor.ensureNetworkInterface(ctx, env.region.providerRegion, ip);
+  // The interface fixes the zone of the disk and VM. A retried step finds its interface by token.
+  const avoid = strings(env.op.params?.avoidZones);
+  const zones = env.executor.zones(env.region.providerRegion);
+  const [zone] = await zonesByHealth(env, zones.some((z) => !avoid.includes(z)) ? zones.filter((z) => !avoid.includes(z)) : zones);
+  const nic = await env.executor.ensureNetworkInterface(ctx, env.region.providerRegion, ip, zone);
   await ledgerActive(env, ctx.token, nic.nicId, nic.zone);
   return { result: { nicId: nic.nicId, zone: nic.zone } };
 }
 
 async function createVolume(env: StepEnv): Promise<StepOutcome> {
   const { zone } = result<{ zone: string }>(env, 'create_nic');
-  const ctx = env.ctx('create_volume');
+  const ctx = env.ctx('create_volume', attemptSuffix(env, 'create_volume'));
   const sizeGb = await newVolumeGb(env);
   await ledgerPending(env, 'volume', ctx.token, 1, zone, sizeGb);
-  const vol = await env.executor.ensureVolume(ctx, env.region.providerRegion, zone, sizeGb);
+  let vol: Awaited<ReturnType<StepEnv['executor']['ensureVolume']>>;
+  try {
+    vol = await env.executor.ensureVolume(ctx, env.region.providerRegion, zone, sizeGb);
+  } catch (e) {
+    await learnFromLaunch(env, e, zone, ctx.token);
+    throw e;
+  }
   await ledgerActive(env, ctx.token, vol.volumeId, vol.zone);
   await env.deps.db.update(browserInstances).set({ storageGb: vol.sizeGb }).where(and(eq(browserInstances.id, env.instance.id), operationFence(env)));
   return { result: { volumeId: vol.volumeId, sizeGb: vol.sizeGb } };
@@ -429,17 +516,26 @@ async function createVm(env: StepEnv): Promise<StepOutcome> {
   const ip = result<{ allocationId: string; address: string }>(env, 'allocate_ip');
   const { nicId, zone } = result<{ nicId: string; zone: string }>(env, 'create_nic');
   const { volumeId } = result<{ volumeId: string }>(env, 'create_volume');
-  const ctx = env.ctx('create_vm');
+  const ctx = env.ctx('create_vm', attemptSuffix(env, 'create_vm'));
   await ledgerPending(env, 'vm', ctx.token, 1, zone);
-  const vm = await env.executor.ensureVm(ctx, env.region.providerRegion, {
-    ...await vmPricing(env, env.region.providerRegion),
-    zone,
-    nicId,
-    volumeId,
-    instanceId: env.instance.id,
-    bootstrapToken: await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, createTokenOperation(env), 1),
-    gatewayUrl: env.deps.gatewayUrl,
-  });
+  let vm: VmRef;
+  try {
+    vm = await env.executor.ensureVm(ctx, env.region.providerRegion, {
+      ...await vmPricing(env, env.region.providerRegion),
+      zone,
+      nicId,
+      volumeId,
+      instanceId: env.instance.id,
+      bootstrapToken: await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, createTokenOperation(env), 1),
+      gatewayUrl: env.deps.gatewayUrl,
+      timezone: env.region.timezone,
+    });
+  } catch (e) {
+    await learnFromLaunch(env, e, zone, ctx.token);
+    if (e instanceof ExecutorError && e.errorClass === 'capacity') await moveCreateToAnotherZone(env, zone);
+    throw e;
+  }
+  await recordLaunch(env.deps.db, env.region.id, vm.zone, { kind: 'success' }, env.deps.now());
   await ledgerActive(env, ctx.token, vm.vmId, vm.zone);
   await fencedInsert(env.deps.db, 'placements', {
       id: newId(),
@@ -859,7 +955,7 @@ async function recoverSnapshot(env: StepEnv): Promise<StepOutcome> {
   await env.executor.ensureStopped(env.ctx('snapshot_volume', 'stop'), placementRef(p)).catch((e) => { if (e instanceof OperationSuperseded) throw e; });
   const snap = await snapshotVolume(env, p, 'recover', env.ctx('snapshot_volume').token);
   const zones = env.executor.zones(p.providerRegion);
-  const target = zones.find((z) => z !== p.zone) ?? p.zone ?? zones[0]!;
+  const [target = p.zone ?? zones[0]!] = await zonesByHealth(env, zones.filter((z) => z !== p.zone));
   return { result: { snapshotId: snap.snapshotId, sizeGb: snap.sizeGb, zone: target, generation: p.generation + 1 } };
 }
 
@@ -901,17 +997,25 @@ async function recoverVm(env: StepEnv): Promise<StepOutcome> {
   const p = await loadPlacement(env);
   const { nicId } = result<{ nicId: string }>(env, 'create_nic');
   const { volumeId } = result<{ volumeId: string }>(env, 'restore_volume');
-  const ctx = env.ctx('create_vm');
+  const ctx = env.ctx('create_vm', attemptSuffix(env, 'create_vm'));
   await ledgerPending(env, 'vm', ctx.token, plan.generation, plan.zone);
-  const vm = await env.executor.ensureVm(ctx, p.providerRegion, {
-    ...await vmPricing(env, p.providerRegion),
-    zone: plan.zone,
-    nicId,
-    volumeId,
-    instanceId: env.instance.id,
-    bootstrapToken: await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, env.op.id, plan.generation),
-    gatewayUrl: env.deps.gatewayUrl,
-  });
+  let vm: VmRef;
+  try {
+    vm = await env.executor.ensureVm(ctx, p.providerRegion, {
+      ...await vmPricing(env, p.providerRegion),
+      zone: plan.zone,
+      nicId,
+      volumeId,
+      instanceId: env.instance.id,
+      bootstrapToken: await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, env.op.id, plan.generation),
+      gatewayUrl: env.deps.gatewayUrl,
+      timezone: env.region.timezone,
+    });
+  } catch (e) {
+    await learnFromLaunch(env, e, plan.zone, ctx.token);
+    throw e;
+  }
+  await recordLaunch(env.deps.db, env.region.id, vm.zone, { kind: 'success' }, env.deps.now());
   await ledgerActive(env, ctx.token, vm.vmId, vm.zone);
   await fencedInsert(env.deps.db, 'placements', {
       id: newId(),

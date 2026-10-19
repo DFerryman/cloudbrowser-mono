@@ -46,11 +46,16 @@ export async function reaperTick(deps: EngineDeps) {
     ctx: (step: string, extra?: string) => readContext(`reaper:${step}:${extra ?? ''}`, deps.envName),
   });
 
-  // 2. Failed creates: no user data ever existed, so everything they allocated goes.
+  // 2. Failed creates: no user data ever existed, so everything they allocated goes. Once the
+  //    provider confirmed the release, a failed browser is only revisited if a resource of it
+  //    reappears in the ledger: every pass lists the whole region, and EC2 throttles the account.
   const failed = await db
     .select({ id: browserInstances.id, regionId: browserInstances.regionId })
     .from(browserInstances)
-    .where(eq(browserInstances.status, 'failed'));
+    .where(and(eq(browserInstances.status, 'failed'), or(
+      isNull(browserInstances.providerReleasedAt),
+      sql`exists(select 1 from resources where instance_id = ${browserInstances.id} and state <> 'deleted')`,
+    )));
   for (const inst of failed) {
     await db.update(schema.browserReservations).set({ reservedMicros: 0, updatedAt: now }).where(eq(schema.browserReservations.instanceId, inst.id));
     const kinds = await db

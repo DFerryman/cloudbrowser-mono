@@ -916,6 +916,94 @@ describe('on the aws-ec2 executor', () => {
     expect(ec2.enis.size).toBe(0);
     expect(ec2.calls.filter((c) => /^(Terminate|Delete|Release)/.test(c.action)).length).toBeGreaterThan(0);
   });
+
+  async function onEc2() {
+    const { AwsExecutor } = await import('@cloudbrowser/executors');
+    const { FakeEc2 } = await import('../../../packages/executors/test/fake-ec2.js');
+    const ec2 = new FakeEc2();
+    w.executorOverride = (mode) =>
+      new AwsExecutor({
+        mode, accessKeyId: 'AKIDTEST', secretAccessKey: 'secret',
+        regions: { 'ap-northeast-1': { subnets: { 'ap-northeast-1a': 'subnet-a', 'ap-northeast-1c': 'subnet-c' }, securityGroupId: 'sg-1' } },
+        appUrl: 'https://app.test', agentImage: 'agent', browserImage: 'browser',
+        endpoint: () => 'https://ec2.test/', fetch: ec2.fetch, sleep: async () => {}, pollMs: 1,
+      });
+    const simulated = await w.executor('runtime').prices(readContext('prices', 'test'), 'ap-northeast-1');
+    const sheet = { ...simulated, source: 'aws-price-list' as const, instanceType: 'c7i-flex.large', vmHour: 0.11, instanceTypes: { 'c7i-flex.large': 0.11, 'c6i.large': 0.1, 'c5.large': 0.1 } };
+    await w.db.insert(schema.providerPrices).values({ regionId: 'tyo1', executor: 'aws-ec2', providerRegion: 'ap-northeast-1', sheet, fetchedAt: w.clock });
+    return ec2;
+  }
+  const health = () => w.db.select().from(schema.launchHealth);
+
+  it('moves a new browser to another zone when its zone has no capacity, and the reaper releases what it left behind', async () => {
+    const ec2 = await onEc2();
+    const subnetOf = (eni: string) => ec2.enis.get(eni)?.subnet;
+    ec2.fail = (a, p) => (a === 'RunInstances' && subnetOf(p['NetworkInterface.1.NetworkInterfaceId']!) === 'subnet-a' ? { code: 'InsufficientInstanceCapacity', status: 500 } : null);
+    expect(await w.settle(await w.newInstance())).toEqual({ state: 'succeeded' });
+    const p = (await w.placement())!;
+    expect(p.zone).toBe('ap-northeast-1c');
+    expect((await w.instance()).status).toBe('running');
+    // Same static IP, now on the new zone's interface.
+    expect(ec2.addresses.get(p.ipAllocationId!)).toMatchObject({ eni: p.networkId });
+    const left = (await w.db.select().from(resources).where(eq(resources.state, 'superseded'))).map((r) => r.kind).sort();
+    expect(left).toEqual(['network_interface', 'volume']);
+    // One VM row: the refused launch left none pending for the reconciler to adopt into.
+    expect((await w.db.select().from(resources).where(and(eq(resources.kind, 'vm'), ne(resources.state, 'deleted')))).map((r) => r.providerId)).toEqual([p.vmId]);
+    expect(await health()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ zone: 'ap-northeast-1a', lastCapacityAt: expect.any(Date) }),
+      expect.objectContaining({ zone: 'ap-northeast-1c', lastSuccessAt: expect.any(Date) }),
+    ]));
+
+    await reaperTick(w.deps('reaper'));
+    expect([...ec2.enis.values()].map((e) => e.az)).toEqual(['ap-northeast-1c']);
+    expect([...ec2.volumes.values()].filter((v) => v.tags['cb:kind'] === 'volume').map((v) => v.az)).toEqual(['ap-northeast-1c']);
+    expect(ec2.addresses.get(p.ipAllocationId!)).toMatchObject({ eni: p.networkId });
+
+    // The next browser starts in the zone that had room.
+    await w.newInstance('inst2');
+    ec2.fail = () => null;
+    expect(await w.settle((await w.db.select().from(operations).where(eq(operations.instanceId, 'inst2')))[0]!.id)).toEqual({ state: 'succeeded' });
+    expect((await w.placement('inst2'))!.zone).toBe('ap-northeast-1c');
+  });
+
+  it('fails at once with the provider reason when EC2 ends every launch, and marks the region', async () => {
+    const ec2 = await onEc2();
+    ec2.launchFailure = () => ({ code: 'Client.InvalidKMSKey.InvalidState', message: 'The KMS key provided is in an incorrect state' });
+    const result = await w.settle(await w.newInstance());
+    expect(result).toMatchObject({ state: 'failed' });
+    const inst = await w.instance();
+    expect(inst.status).toBe('failed');
+    expect(inst.status).not.toBe('waiting_capacity');
+    const [op] = await w.db.select().from(operations).where(eq(operations.instanceId, 'inst1'));
+    expect(op).toMatchObject({ errorClass: 'invalid', attempt: 0 });
+    const [step] = await w.db.select().from(schema.operationSteps).where(and(eq(schema.operationSteps.operationId, op!.id), eq(schema.operationSteps.step, 'create_vm')));
+    expect(step?.result).toMatchObject({ errorClass: 'invalid', error: expect.stringContaining('incorrect state') });
+    expect(await w.db.select().from(schema.alerts)).toEqual([expect.objectContaining({ severity: 'critical', title: 'invalid error in create (tyo1)', detail: expect.objectContaining({ message: expect.stringContaining('incorrect state') }) })]);
+    expect(await health()).toEqual([expect.objectContaining({ zone: 'ap-northeast-1a', lastFailureClass: 'invalid', lastFailure: expect.stringContaining('incorrect state') })]);
+    // The dead VM is not left in the ledger as an open resource.
+    expect((await w.db.select().from(resources).where(eq(resources.kind, 'vm')))).toEqual([expect.objectContaining({ state: 'deleted', providerId: [...ec2.instances.keys()][0] })]);
+
+    // The reaper releases what the failed create allocated, then leaves the browser alone.
+    await reaperTick(w.deps('reaper'));
+    expect((await w.instance()).providerReleasedAt).toBeInstanceOf(Date);
+    expect(ec2.addresses.size + ec2.enis.size + ec2.volumes.size).toBe(0);
+    const calls = ec2.calls.length;
+    await reaperTick(w.deps('reaper'));
+    expect(ec2.calls.length).toBe(calls);
+  });
+
+  it('relaunches with a new token after a VM ended during launch for a transient reason', async () => {
+    const ec2 = await onEc2();
+    let dies = 1;
+    ec2.launchFailure = () => (dies-- > 0 ? { code: 'Server.InternalError', message: 'Internal error on launch' } : null);
+    expect(await w.settle(await w.newInstance())).toEqual({ state: 'succeeded' });
+    expect(ec2.instances.size).toBe(2);
+    const p = (await w.placement())!;
+    expect(ec2.instances.get(p.vmId!)?.state).toBe('running');
+    expect(ec2.instances.get(p.vmId!)?.tags['cb:token']).toMatch(/:create_vm:1:l1$/);
+    const vms = await w.db.select().from(resources).where(eq(resources.kind, 'vm'));
+    expect(vms.map((r) => r.state).sort()).toEqual(['active', 'deleted']);
+  });
 });
 
 describe.each([

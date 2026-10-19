@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { AwsExecutor, bootstrapScript, ExecutorError, FakeExecutor, MemoryFakeStore, type CredentialMode, type Executor, type OpContext, type Placement, type ResourceKind } from '../src/index.js';
+import { AwsExecutor, bootstrapScript, ExecutorError, FakeExecutor, LaunchFailed, launchFailureClass, MemoryFakeStore, type CredentialMode, type Executor, type OpContext, type Placement, type ResourceKind } from '../src/index.js';
 import { FakeEc2 } from './fake-ec2.js';
 
 const REGION = 'ap-northeast-1';
@@ -135,6 +135,58 @@ describe('aws-ec2 executor', () => {
     await expect(ex.ensureVm(ctx('create_vm', 'op2:create_vm:1'), REGION, {
       instanceId: 'inst2', zone: 'ap-northeast-1a', nicId: [...ec2.enis.keys()][0]!, volumeId: 'vol-x', bootstrapToken: 't', gatewayUrl: 'wss://g',
     })).rejects.toMatchObject({ errorClass: 'capacity' });
+  });
+
+  it('reports why a VM ended during launch, and a new token launches a new VM', async () => {
+    const { ex, ec2 } = setup();
+    ec2.launchFailure = () => ({ code: 'Client.InvalidKMSKey.InvalidState', message: 'The KMS key provided is in an incorrect state' });
+    const ip = await ex.allocateIp(ctx('allocate_ip'), REGION);
+    const nic = await ex.ensureNetworkInterface(ctx('create_nic'), REGION, ip);
+    const vol = await ex.ensureVolume(ctx('create_volume'), REGION, nic.zone, 20);
+    const spec = { instanceId: 'inst1', zone: nic.zone, nicId: nic.nicId, volumeId: vol.volumeId, bootstrapToken: 't', gatewayUrl: 'wss://g' };
+    const first = await ex.ensureVm(ctx('create_vm'), REGION, spec).catch((e: unknown) => e);
+    expect(first).toBeInstanceOf(LaunchFailed);
+    expect(first).toMatchObject({ errorClass: 'invalid', reasonCode: 'Client.InvalidKMSKey.InvalidState', zone: 'ap-northeast-1a' });
+    expect(String((first as Error).message)).toContain('incorrect state');
+    // The same token only ever returns the same dead VM.
+    const again = await ex.ensureVm(ctx('create_vm'), REGION, spec).catch((e: LaunchFailed) => e.vmId);
+    expect(again).toBe((first as LaunchFailed).vmId);
+    expect(ec2.instances.size).toBe(1);
+
+    ec2.launchFailure = () => ({ code: 'Server.InsufficientInstanceCapacity', message: 'Insufficient capacity.' });
+    await expect(ex.ensureVm(ctx('create_vm', 'op1:create_vm:1:l1'), REGION, spec)).rejects.toMatchObject({ errorClass: 'capacity' });
+    ec2.launchFailure = () => null;
+    const vm = await ex.ensureVm(ctx('create_vm', 'op1:create_vm:1:l2'), REGION, spec);
+    expect(ec2.instances.get(vm.vmId)?.state).toBe('running');
+    expect(launchFailureClass('Server.InternalError')).toBe('retryable');
+    expect(launchFailureClass('Client.VolumeLimitExceeded')).toBe('quota');
+  });
+
+  it('fails a volume that EBS could not create instead of building on it', async () => {
+    const { ex, ec2 } = setup();
+    ec2.volumeFailure = () => true;
+    await expect(ex.ensureVolume(ctx('create_volume'), REGION, 'ap-northeast-1a', 20)).rejects.toMatchObject({ errorClass: 'invalid', message: expect.stringContaining('encryption key') });
+  });
+
+  it('launches only machine types the zone offers, and prefers zones that offer one', async () => {
+    const ec2 = new FakeEc2();
+    const ex = new AwsExecutor({
+      mode: 'runtime', accessKeyId: 'AKIDTEST', secretAccessKey: 'secret',
+      regions: { [REGION]: {
+        subnets: { 'ap-northeast-1a': 'subnet-a', 'ap-northeast-1c': 'subnet-c', 'ap-northeast-1d': 'subnet-d' }, securityGroupId: 'sg-1',
+        instanceTypes: ['c7i-flex.large', 'c6i.large'],
+        zoneInstanceTypes: { 'ap-northeast-1a': [], 'ap-northeast-1c': ['c6i.large'], 'ap-northeast-1d': ['c7i-flex.large', 'c6i.large'] },
+      } },
+      appUrl: 'https://app.example.com', agentImage: 'a', browserImage: 'b', endpoint: () => 'https://ec2.test/', fetch: ec2.fetch, sleep: async () => {}, pollMs: 1,
+    });
+    expect(ex.zones(REGION)).toEqual(['ap-northeast-1c', 'ap-northeast-1d']);
+    const ip = await ex.allocateIp(ctx('allocate_ip'), REGION);
+    const nic = await ex.ensureNetworkInterface(ctx('create_nic'), REGION, ip);
+    expect(nic.zone).toBe('ap-northeast-1c');
+    const vol = await ex.ensureVolume(ctx('create_volume'), REGION, nic.zone, 20);
+    const vm = await ex.ensureVm(ctx('create_vm'), REGION, { instanceId: 'inst1', zone: nic.zone, nicId: nic.nicId, volumeId: vol.volumeId, bootstrapToken: 't', gatewayUrl: 'wss://g' });
+    expect(vm.instanceType).toBe('c6i.large');
+    expect(ec2.calls.filter((c) => c.action === 'RunInstances').map((c) => c.params.InstanceType)).toEqual(['c6i.large']);
   });
 
   it('classifies provider errors', async () => {
@@ -356,6 +408,17 @@ describe('first-boot script', () => {
     const line = script.split('\n').find((l) => l.startsWith('printf'))!.replace('>/etc/cloudbrowser/agent.json', '');
     const out = execFileSync('bash', ['-c', line]).toString();
     expect(JSON.parse(out)).toEqual({ instanceId: 'inst1', gatewayUrl: "wss://connect.example.com/it's", bootstrapToken: 'tok' });
+  });
+
+  it('gives the browser the region timezone, and only a plain zone name', () => {
+    const input = { instanceId: 'i', gatewayUrl: 'wss://g', bootstrapToken: 't', appUrl: 'https://a', agentImage: 'a', browserImage: 'b' };
+    expect(bootstrapScript({ ...input, timezone: 'Asia/Tokyo' })).toContain('\nBROWSER_TZ=Asia/Tokyo\n');
+    expect(bootstrapScript({ ...input, timezone: 'America/Argentina/Buenos_Aires' })).toContain('\nBROWSER_TZ=America/Argentina/Buenos_Aires\n');
+    expect(bootstrapScript({ ...input, timezone: 'Asia/Tokyo\nAGENT_IMAGE=evil' })).toContain('\nBROWSER_TZ=UTC\n');
+    expect(bootstrapScript(input)).toContain('\nBROWSER_TZ=UTC\n');
+    // The browser container receives it as TZ, which Chrome uses for its clock.
+    const env = readFileSync(new URL('../../../images/vm/files/bin/cloudbrowser-browser-env', import.meta.url), 'utf8');
+    expect(env).toContain('TZ=${BROWSER_TZ:-UTC}');
   });
 
   it.each(['legacy', 'current'])('starts supervisor as root with the %s browser unit while Chrome remains unprivileged', (version) => {

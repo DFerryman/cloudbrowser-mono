@@ -29,7 +29,8 @@ import type { FakeRecord, FakeStore } from './store.js';
  */
 export type Fault = ErrorClass | 'timeout_after_success';
 
-export type FaultPlan = (method: keyof Executor, ctx: OpContext) => Fault | null;
+/** A specific provider error (e.g. a `LaunchFailed`) may be returned to be thrown as is. */
+export type FaultPlan = (method: keyof Executor, ctx: OpContext) => Fault | ExecutorError | null;
 
 export interface FakeExecutorOptions {
   store: FakeStore;
@@ -111,6 +112,7 @@ export class FakeExecutor implements Executor {
     if (this.delayMs > 0 && MUTATING.has(method)) await new Promise((r) => setTimeout(r, this.delayMs));
     await ctx.assertActive?.();
     const fault = this.faults(method, ctx);
+    if (fault instanceof ExecutorError) throw fault;
     if (fault && fault !== 'timeout_after_success') {
       throw new ExecutorError(fault, `${method}: injected ${fault}`);
     }

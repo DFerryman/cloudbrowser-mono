@@ -117,9 +117,14 @@ async function runOwnedOperation(deps: EngineDeps, operationId: string): Promise
 
   const journal = await db.select().from(operationSteps).where(eq(operationSteps.operationId, op.id));
   if (op.kind === 'create' && typeof op.params?.resumeCreateFrom === 'string') {
-    const [source] = await db.select({ instanceId: operations.instanceId, kind: operations.kind }).from(operations).where(eq(operations.id, op.params.resumeCreateFrom));
+    const resumeFrom = op.params.resumeCreateFrom;
+    const [source] = await db.select({ instanceId: operations.instanceId, kind: operations.kind, params: operations.params }).from(operations).where(eq(operations.id, resumeFrom));
     if (!source || source.instanceId !== op.instanceId || source.kind !== 'create') return fail(deps, op, env, 'invalid', 'The saved creation does not belong to this browser.');
-    const saved = await db.select().from(operationSteps).where(and(eq(operationSteps.operationId, op.params.resumeCreateFrom), eq(operationSteps.status, 'succeeded')));
+    // Resumed steps use the saved creation's tokens, including its zone move and relaunch count.
+    for (const key of ['zoneAttempt', 'launch', 'avoidZones']) {
+      if (op.params?.[key] === undefined && source.params?.[key] !== undefined) op.params = { ...op.params, [key]: source.params[key] };
+    }
+    const saved = await db.select().from(operationSteps).where(and(eq(operationSteps.operationId, resumeFrom), eq(operationSteps.status, 'succeeded')));
     // Refresh bootstrap validity and agent verification; the resumed VM must authenticate after this wake.
     for (const row of saved) if (['allocate_ip', 'screen_ip', 'create_nic', 'create_volume', 'create_vm'].includes(row.step) && !journal.some((j) => j.step === row.step)) journal.push(row);
   }

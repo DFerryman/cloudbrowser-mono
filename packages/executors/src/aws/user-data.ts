@@ -16,6 +16,8 @@ export interface BootstrapInput {
   appUrl: string;
   agentImage: string;
   browserImage: string;
+  /** IANA timezone for the browser (e.g. Asia/Tokyo); UTC when absent or malformed. */
+  timezone?: string;
 }
 
 const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -23,6 +25,8 @@ const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 export function bootstrapScript(input: BootstrapInput): string {
   const agentJson = JSON.stringify({ instanceId: input.instanceId, gatewayUrl: input.gatewayUrl, bootstrapToken: input.bootstrapToken });
   const echo = `${input.appUrl.replace(/\/$/, '')}/api/echo/ip`;
+  // Written into an env file: only a plain zone name may pass, never a newline or a quote.
+  const timezone = input.timezone && /^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+){0,2}$/.test(input.timezone) ? input.timezone : 'UTC';
   return `#!/bin/bash
 # Nevazu first boot. Also on the serial console (EC2: Actions → Monitor → Get system log).
 set -euo pipefail
@@ -36,6 +40,7 @@ cat >/etc/cloudbrowser/cloudbrowser.env <<'ENV'
 AGENT_IMAGE=${input.agentImage}
 BROWSER_IMAGE=${input.browserImage}
 ECHO_URL=${echo}
+BROWSER_TZ=${timezone}
 ENV
 umask 022
 

@@ -344,7 +344,8 @@ alerts.
 | IP check fails with a CORS error from origin `null` | Agent logs; `GET /api/echo/ip` response | The fresh `about:blank` context needs `Access-Control-Allow-Origin: *` on the public IP echo endpoint |
 | *Failed* right after create, alert `forbidden` | /admin → Alerts | Missing key on that Worker, or the key belongs to another IAM user |
 | *Failed*, alert `invalid`: "AWS region … is not configured" | engine logs | `AWS_REGIONS` missing or not valid JSON |
-| *Waiting for capacity* | /admin → Operations | No capacity for any of the three instance types in the zone; it keeps retrying (a waking browser moves to another zone after 30 minutes) |
+| *Failed* within a minute of create, alert `invalid` with "ended during launch: …" or "EBS could not create volume …" | /admin → Alerts (the message carries EC2's state reason); `launch_health` in D1 | The region's EBS encryption key is unusable: `aws ec2 get-ebs-default-kms-key-id --region …`, that key's state and key policy, and any organization SCP regional restriction, which must also allow the KMS calls EC2 makes on the role's behalf there (`kms:CreateGrant`, `kms:Decrypt`, `kms:GenerateDataKeyWithoutPlaintext`, `kms:ReEncrypt*`, `kms:DescribeKey`). New browsers in that region are refused for 6 hours or until a launch there succeeds |
+| *Waiting for capacity* | /admin → Operations | No capacity for any of the three instance types in any zone of the region. A new browser first moves to the region's other zones (the reaper releases the empty disk and interface it leaves), then keeps retrying; a waking browser moves to another zone after 30 minutes. A VM that EC2 ends during launch is relaunched with a new token, never retried as the same dead VM |
 | Alert `quota` | Service Quotas | vCPU or Elastic IP limit (step 2) |
 | Running, but the live view stays black | browser devtools console; api config | TURN key missing on the api; gateway domain or viewer keys wrong |
 | Chrome fills only part of the desktop, with black space on the right | Browser supervisor configuration and `openbox` process | Preserve the upstream Openbox program when replacing the Chrome configuration; `--start-maximized` needs a window manager |
@@ -396,7 +397,5 @@ on all three Workers (step 6), then switch `usw1` as in step 8.
 ## Not done yet
 
 - A pre-built golden image (`images/vm`, Packer), so new browsers skip the first-boot install.
-- Trying another zone when a zone has no capacity at create time. Today a new browser tries the
-  other instance types in the first zone, then retries; `recover` moves existing browsers.
 - After a confirmed IP change, the live view needs one sleep and wake to advertise the new IP.
 - Signed images (cosign) that the agent checks before running them.

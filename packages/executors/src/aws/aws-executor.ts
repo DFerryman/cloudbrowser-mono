@@ -9,7 +9,9 @@
  */
 import {
   ExecutorError,
+  LaunchFailed,
   type BindingCheck,
+  type ErrorClass,
   type Capabilities,
   type CredentialMode,
   type Executor,
@@ -40,6 +42,11 @@ export interface AwsRegionConfig {
   securityGroupId: string;
   /** Tried in order on a capacity error. 2 vCPU / 4 GB by default (see DEFAULT_INSTANCE_TYPES). */
   instanceTypes?: string[];
+  /**
+   * Which of `instanceTypes` each zone offers (DescribeInstanceTypeOfferings). Without it every
+   * zone is assumed to offer every type.
+   */
+  zoneInstanceTypes?: Record<string, string[]>;
   /** Pin an AMI; by default the latest Canonical Ubuntu 24.04 LTS (amd64) image. */
   ami?: string;
 }
@@ -120,6 +127,22 @@ function filters(f: Record<string, string | string[]>): Params {
     (Array.isArray(values) ? values : [values]).forEach((v, j) => (out[`Filter.${i + 1}.Value.${j + 1}`] = v));
   });
   return out;
+}
+
+/** How long a just-launched VM or volume may be invisible to Describe calls (eventual consistency). */
+const VISIBILITY_GRACE_MS = 90_000;
+
+/**
+ * What a VM that ended during launch means, from its EC2 state reason. Only a capacity shortage
+ * is worth retrying elsewhere; the `Client.*` reasons (an unusable EBS encryption key, a
+ * permission boundary, a missing snapshot) repeat on every launch until an operator fixes them.
+ */
+export function launchFailureClass(code: string | null): ErrorClass {
+  if (!code) return 'retryable';
+  if (code === 'Server.InsufficientInstanceCapacity') return 'capacity';
+  if (code === 'Server.InternalError') return 'retryable';
+  if (code === 'Client.VolumeLimitExceeded') return 'quota';
+  return 'invalid';
 }
 
 const RUN_STATES: Record<string, RunState> = {
@@ -329,8 +352,13 @@ export class AwsExecutor implements Executor {
     });
   }
 
+  /** Zones that offer at least one launch candidate, in configuration order. */
   zones(region: string): string[] {
-    return Object.keys(this.region(region).subnets);
+    const cfg = this.region(region);
+    const all = Object.keys(cfg.subnets);
+    const types = cfg.instanceTypes?.length ? cfg.instanceTypes : DEFAULT_INSTANCE_TYPES;
+    const offered = cfg.zoneInstanceTypes ? all.filter((z) => cfg.zoneInstanceTypes![z]?.some((t) => types.includes(t))) : all;
+    return offered.length ? offered : all;
   }
 
   async allocateIp(ctx: OpContext, region: string): Promise<IpAllocation> {
@@ -345,7 +373,7 @@ export class AwsExecutor implements Executor {
   async ensureNetworkInterface(ctx: OpContext, region: string, ip: IpAllocation, zone?: string): Promise<NetworkInterfaceRef> {
     this.authorize('ensureNetworkInterface');
     const cfg = this.region(region);
-    const az = zone ?? Object.keys(cfg.subnets)[0]!;
+    const az = zone ?? this.zones(region)[0]!;
     const subnet = cfg.subnets[az];
     if (!subnet) throw new ExecutorError('invalid', `no subnet configured for ${az}`);
     let eni = await this.byToken(ctx, region, 'DescribeNetworkInterfaces', 'networkInterfaceSet');
@@ -391,7 +419,27 @@ export class AwsExecutor implements Executor {
         ...tagSpec(1, 'volume', this.requireTags(ctx, 'volume')),
       });
     }
-    return { volumeId: text(vol, 'volumeId')!, zone: text(vol, 'availabilityZone') ?? zone, sizeGb: Number(text(vol, 'size') ?? sizeGb) };
+    const volumeId = text(vol, 'volumeId')!;
+    await this.volumeCreated(ctx, region, volumeId);
+    return { volumeId, zone: text(vol, 'availabilityZone') ?? zone, sizeGb: Number(text(vol, 'size') ?? sizeGb) };
+  }
+
+  /**
+   * CreateVolume only starts the work. An encrypted volume whose KMS key EC2 cannot use goes from
+   * `creating` to `error` and is then deleted, so wait for `available` before building on it.
+   */
+  private async volumeCreated(ctx: OpContext, region: string, volumeId: string) {
+    const since = Date.now();
+    let seen = false;
+    await this.waitFor(ctx, `volume ${volumeId} to be created`, async () => {
+      const v = await this.volume(ctx, region, volumeId);
+      const status = text(v ?? undefined, 'status');
+      if (status === 'available' || status === 'in-use') return true;
+      seen ||= !!v;
+      // Not visible yet right after CreateVolume is normal; gone after being seen is a failure.
+      if (status === 'creating' || (!v && !seen && Date.now() - since < VISIBILITY_GRACE_MS)) return null;
+      throw new ExecutorError('invalid', `EBS could not create volume ${volumeId} in ${region} (${v ? status : 'it disappeared'}). Check that the EBS encryption key is usable there.`);
+    });
   }
 
   async ensureVm(ctx: OpContext, region: string, spec: VmSpec): Promise<VmRef> {
@@ -401,6 +449,7 @@ export class AwsExecutor implements Executor {
       'instance-state-name': ['pending', 'running', 'stopping', 'stopped'],
     });
     let vmId = text(items(inst ?? undefined, 'instancesSet')[0], 'instanceId');
+    let launchedAt: number | null = null;
     if (!vmId) {
       const configuredTypes = cfg.instanceTypes?.length ? cfg.instanceTypes : DEFAULT_INSTANCE_TYPES;
       let types = configuredTypes.map((type, index) => ({ type, index }));
@@ -420,6 +469,12 @@ export class AwsExecutor implements Executor {
         types = types.filter(({ type }) => spec.instanceTypePrices![type]! <= cap);
         if (!types.length) throw new ExecutorError('capacity', 'No launch candidate fits the confirmed VM hourly price.');
       }
+      // A type this zone does not offer fails with Unsupported; skip it instead of asking.
+      const zoneTypes = cfg.zoneInstanceTypes?.[spec.zone];
+      if (zoneTypes) {
+        types = types.filter(({ type }) => zoneTypes.includes(type));
+        if (!types.length) throw new ExecutorError('capacity', `No allowed machine type is offered in ${spec.zone}.`);
+      }
       const ami = cfg.ami ?? (await this.latestUbuntu(ctx, region));
       const userData = bootstrapScript({
         instanceId: spec.instanceId,
@@ -428,6 +483,7 @@ export class AwsExecutor implements Executor {
         appUrl: this.opts.appUrl,
         agentImage: this.opts.agentImage,
         browserImage: this.opts.browserImage,
+        ...(spec.timezone ? { timezone: spec.timezone } : {}),
       });
       for (const [attempt, { type, index }] of types.entries()) {
         try {
@@ -464,13 +520,20 @@ export class AwsExecutor implements Executor {
         }
       }
       if (!vmId) throw new ExecutorError('unknown_outcome', 'RunInstances returned no instance id');
+      launchedAt = Date.now();
     }
     const id = vmId;
     // The data volume can only be attached once the VM is running (or stopped).
     const started = await this.waitFor(ctx, `VM ${id} to start`, async () => {
       const i = await this.instance(ctx, region, id);
       const state = this.stateOf(i);
-      if (state === 'terminating' || state === 'terminated' || state === 'missing') throw new ExecutorError('capacity', `VM ${id} ended while starting`);
+      // DescribeInstances may not know a VM for a few seconds after RunInstances returned it.
+      if (state === 'missing' && launchedAt !== null && Date.now() - launchedAt < VISIBILITY_GRACE_MS) return null;
+      if (state === 'terminating' || state === 'terminated' || state === 'missing') {
+        const code = text(i ?? undefined, 'stateReason', 'code') ?? null;
+        const reason = text(i ?? undefined, 'stateReason', 'message') ?? (state === 'missing' ? 'it is no longer visible' : 'no reason given');
+        throw new LaunchFailed(launchFailureClass(code), id, text(i ?? undefined, 'placement', 'availabilityZone') ?? spec.zone, code, `VM ${id} ended during launch: ${reason}`);
+      }
       if (state !== 'running' && state !== 'stopped') return null;
       const instanceType = text(i ?? undefined, 'instanceType');
       if (!instanceType) throw new ExecutorError('retryable', `DescribeInstances returned no type for VM ${id}`);
@@ -552,7 +615,9 @@ export class AwsExecutor implements Executor {
         ...tagSpec(1, 'volume', this.requireTags(ctx, 'volume')),
       });
     }
-    return { volumeId: text(vol, 'volumeId')!, zone: text(vol, 'availabilityZone') ?? zone, sizeGb: Number(text(vol, 'size') ?? sizeGb) };
+    const volumeId = text(vol, 'volumeId')!;
+    await this.volumeCreated(ctx, region, volumeId);
+    return { volumeId, zone: text(vol, 'availabilityZone') ?? zone, sizeGb: Number(text(vol, 'size') ?? sizeGb) };
   }
 
   async resizeVolume(ctx: OpContext, region: string, volumeId: string, sizeGb: number): Promise<ResizeState> {
