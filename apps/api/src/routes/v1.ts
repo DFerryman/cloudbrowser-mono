@@ -32,7 +32,7 @@ import { currentBurn, instancePrice, regionPrice, requirePrice, storageLimits } 
 import { instanceUsage, monthOf } from '../usage.js';
 import { billingRoute, PageQuery } from './billing.js';
 import { enqueueOperation, notifyUser, replayed, requireIdempotencyKey } from '../ops.js';
-import { problem } from '../problem.js';
+import { problem, ProblemError } from '../problem.js';
 import { toInstances, toOperation } from '../views.js';
 import { eventsRoute } from './events.js';
 import { resizeQuota } from '../storage.js';
@@ -99,6 +99,16 @@ async function wakeOperation(db: AppEnv['Variables']['db'], row: typeof browserI
   const [source] = await db.select({ params: operations.params }).from(operations).where(and(eq(operations.id, resume), eq(operations.instanceId, row.id)));
   const maxVmHour = source?.params?.maxVmHour;
   return { kind: 'create' as const, params: { resumeCreateFrom: resume, storageGb: row.storageGb, ...(typeof maxVmHour === 'number' ? { maxVmHour } : {}) } };
+}
+
+/**
+ * The wake already queued for a browser, if any. The browser reads sleeping until the engine picks
+ * the operation up, so a second open in that gap (another click, another tab) must join it.
+ */
+async function queuedWake(db: AppEnv['Variables']['db'], instanceId: string) {
+  const [op] = await db.select({ id: operations.id, kind: operations.kind }).from(operations)
+    .where(and(eq(operations.instanceId, instanceId), isNull(operations.finishedAt)));
+  return op && ['start', 'create', 'recover'].includes(op.kind) ? op.id : null;
 }
 
 async function oneInstance(db: AppEnv['Variables']['db'], id: string) {
@@ -606,17 +616,25 @@ v1.openapi(
 
     let operationId: string | null = null;
     if (row.status === 'sleeping') {
-      await admitStart(db, user.id, row.id, row.regionId);
-      const wake = await wakeOperation(db, row);
-      const r = await enqueueOperation(c, {
-        instanceId: row.id,
-        kind: wake.kind,
-        key: key ? `session-open:${sessionId}` : null,
-        route: 'open',
-        params: { reason: 'open', ...wake.params },
-        before: [db.update(browserInstances).set({ desiredState: 'running', updatedAt: new Date() }).where(eq(browserInstances.id, row.id))],
-      });
-      operationId = r.operationId;
+      operationId = await queuedWake(db, row.id);
+      if (!operationId) {
+        await admitStart(db, user.id, row.id, row.regionId);
+        const wake = await wakeOperation(db, row);
+        try {
+          const r = await enqueueOperation(c, {
+            instanceId: row.id,
+            kind: wake.kind,
+            key: key ? `session-open:${sessionId}` : null,
+            route: 'open',
+            params: { reason: 'open', ...wake.params },
+            before: [db.update(browserInstances).set({ desiredState: 'running', updatedAt: new Date() }).where(eq(browserInstances.id, row.id))],
+          });
+          operationId = r.operationId;
+        } catch (e) {
+          // Two opens at the same moment: the one that lost the race joins the winner's wake.
+          if (!(e instanceof ProblemError && e.type === 'operation_in_progress') || !(operationId = await queuedWake(db, row.id))) throw e;
+        }
+      }
       await requireViewerCredit(db, user.id, row.id);
     } else {
       const [[op]] = await Promise.all([

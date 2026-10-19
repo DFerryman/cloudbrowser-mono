@@ -8,7 +8,7 @@ import { useI18n, useRelativeTime } from '../../lib/i18n.js';
 import { CreateProgress } from './CreateProgress.js';
 import { DeleteBrowserDialog } from './DeleteBrowser.js';
 import { useLifecycle, useUpdateInstance } from './hooks.js';
-import { STATUS_TONE, statusKey } from './status.js';
+import { shownStatus, STATUS_TONE, statusKey } from './status.js';
 import { TrialBadge } from './Trial.js';
 import { useBilling } from '../billing/hooks.js';
 import { canSpend, canUseBrowser } from '../billing/access.js';
@@ -30,6 +30,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
   const recoverable = deleted && i.purgeAfter !== null && Date.parse(i.purgeAfter) > Date.now();
   const failed = i.status === 'failed';
   const creating = i.status === 'creating';
+  const status = shownStatus(i);
 
   let primary: React.ReactNode;
   if (recoverable) {
@@ -53,7 +54,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
   } else {
     primary = (
       <Button variant="primary" className="flex-1 justify-center" disabled={creating || !canUseBrowser(billing.data, i)} onClick={() => navigate(`/b/${i.id}`)}>
-        {i.status === 'sleeping' ? t('browsers.wakeOpen') : t('browsers.open')}
+        {status === 'sleeping' ? t('browsers.wakeOpen') : t('browsers.open')}
       </Button>
     );
   }
@@ -65,7 +66,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
           {i.name}
         </h2>
       </div>
-      <StatusBadge className="mt-1" tone={STATUS_TONE[i.status]} label={t(statusKey(i.status))} />
+      <StatusBadge className="mt-1" tone={STATUS_TONE[status]} label={t(statusKey(status))} />
       <TrialBadge className="mt-1" trial={i.trial} />
       <RegionIpChip
         className="mt-3"
@@ -120,7 +121,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
           <MenuItem disabled={failed} onSelect={() => navigate(`/browsers/${i.id}/usage`)}>
             <BarChart3 /> {t('manage.usage')}
           </MenuItem>
-          <MenuItem disabled={deleted || failed || i.status === 'sleeping' || (lifecycle.isPending && lifecycle.variables.action === 'stop')} onSelect={() => void run(lifecycle.mutateAsync({ id: i.id, action: 'stop' }))}>
+          <MenuItem disabled={deleted || failed || status === 'sleeping' || (lifecycle.isPending && lifecycle.variables.action === 'stop')} onSelect={() => void run(lifecycle.mutateAsync({ id: i.id, action: 'stop' }))}>
             <Moon /> {t('browsers.sleepNow')}
           </MenuItem>
           <MenuSeparator />

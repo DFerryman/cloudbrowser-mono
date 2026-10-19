@@ -5,7 +5,7 @@ import { ArrowLeft } from 'lucide-react';
 import { Link, NavLink, Outlet, useNavigate, useOutletContext, useParams } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
 import { useInstance } from './hooks.js';
-import { STATUS_TONE, statusKey } from './status.js';
+import { shownStatus, STATUS_TONE, statusKey } from './status.js';
 import { TrialBadge, TrialNotice } from './Trial.js';
 import { useBilling } from '../billing/hooks.js';
 import { canUseBrowser } from '../billing/access.js';
@@ -36,7 +36,7 @@ export function BrowserLayout() {
         <div className="min-w-0">
           <h1 className="truncate text-xl font-semibold">{i.name}</h1>
           <div className="mt-1.5 flex flex-wrap items-center gap-3">
-            <StatusBadge tone={STATUS_TONE[i.status]} label={t(statusKey(i.status))} />
+            <StatusBadge tone={STATUS_TONE[shownStatus(i)]} label={t(statusKey(shownStatus(i)))} />
             <RegionIpChip
               country={region.country}
               city={region.city}
@@ -48,7 +48,7 @@ export function BrowserLayout() {
           </div>
         </div>
         <Button variant="primary" onClick={() => navigate(`/b/${i.id}`)} disabled={i.status === 'deleting' || i.status === 'failed' || !canUseBrowser(billing.data, i)}>
-          {i.status === 'sleeping' ? t('browsers.wakeOpen') : t('browsers.open')}
+          {shownStatus(i) === 'sleeping' ? t('browsers.wakeOpen') : t('browsers.open')}
         </Button>
       </div>
       <TrialNotice trial={i.trial} />

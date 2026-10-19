@@ -22,7 +22,7 @@ const mime = { '.html': 'text/html', '.js': 'application/javascript', '.css': 't
 const results = [];
 const problem = (status, detail) => ({ status, contentType: 'application/problem+json', body: JSON.stringify({ type: 'invalid_state', title: detail, detail, status }) });
 
-async function fixture({ holdHeartbeat = false, heartbeatDenied = false, holdConnect = false, holdOpen = false } = {}) {
+async function fixture({ holdHeartbeat = false, heartbeatDenied = false, holdConnect = false, holdOpen = false, instance = {} } = {}) {
   const context = await browser.newContext({ viewport: { width: 1365, height: 1024 }, locale: 'en-US' });
   await context.addInitScript(() => {
     window.fixtureSockets = [];
@@ -58,7 +58,7 @@ async function fixture({ holdHeartbeat = false, heartbeatDenied = false, holdCon
       else if (url.pathname === '/api/v1/instances/i1' && req.method() === 'GET') body = {
         id: 'i1', name: 'Fixture browser', regionId: 'syd1', status: 'running', desiredState: 'running',
         idleTimeoutS: 600, screen: 'auto', ipAddress: '192.0.2.1', createdAt: new Date().toISOString(),
-        lastIpCheck: { ok: true }, lastActiveAt: new Date().toISOString(), currentOperation: null,
+        lastIpCheck: { ok: true }, lastActiveAt: new Date().toISOString(), currentOperation: null, ...instance,
       };
       else if (url.pathname === '/api/v1/instances/i1/sessions') {
         state.opens++;
@@ -155,6 +155,14 @@ try {
   assert.ok(stalledOpen.state.openKeys[0]);
   assert.equal(stalledOpen.state.openKeys[0], stalledOpen.state.openKeys[1], 'a timeout retry must reuse the same open intent');
   await finish(stalledOpen, 'stalled session creation times out visibly and its Retry can create a fresh request');
+
+  // The wake is queued but the engine has not picked it up: the browser still reads sleeping.
+  const queuedWake = await fixture({ instance: { status: 'sleeping', currentOperation: { id: 'op1', kind: 'start', status: 'queued', step: null } } });
+  await queuedWake.page.getByText('Starting your browser…', { exact: true }).waitFor();
+  await queuedWake.page.waitForTimeout(300);
+  assert.equal(await queuedWake.page.getByRole('button', { name: 'Wake', exact: true }).count(), 0, 'a queued wake must not offer Wake again');
+  assert.equal(queuedWake.state.opens, 1);
+  await finish(queuedWake, 'a browser whose wake is queued shows it waking, without a second Wake');
 
   console.log(JSON.stringify({ passed: results.length, results }, null, 2));
 } finally {

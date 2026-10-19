@@ -190,6 +190,47 @@ describe('browsers', () => {
     expect(replacement.status).toBe(202);
   });
 
+  it('joins a queued wake when the browser is opened again before the engine starts it', async () => {
+    const created = await t.call('POST', '/api/v1/instances', { name: 'Work', regionId: 'tyo1', storageGb: 10, priceVersion: await quote('tyo1') }, { 'idempotency-key': 'c1' });
+    await t.settle();
+    const id = created.body.instanceId;
+    const starts = () => (t.d1.sqlite.prepare("SELECT count(*) AS n FROM operations WHERE instance_id = ? AND kind = 'start'").get(id) as { n: number }).n;
+    // Hold queue deliveries: until the engine picks a wake up, the browser still reads sleeping.
+    const queue = t.env.OPERATIONS as { send: (b: { operationId: string }) => Promise<void> };
+    const deliver = queue.send;
+    const held: { operationId: string }[] = [];
+    const sleep = async (key: string) => {
+      await t.call('POST', `/api/v1/instances/${id}/stop`, undefined, { 'idempotency-key': key });
+      await t.settle();
+      expect((await t.call('GET', `/api/v1/instances/${id}`)).body.status).toBe('sleeping');
+      queue.send = async (b) => void held.push(b);
+    };
+    const wake = async () => {
+      queue.send = deliver;
+      for (const b of held.splice(0)) await deliver(b);
+      await t.settle();
+      expect((await t.call('GET', `/api/v1/instances/${id}`)).body.status).toBe('running');
+    };
+
+    await sleep('s1');
+    const first = await t.call('POST', `/api/v1/instances/${id}/sessions`, undefined, { 'idempotency-key': 'open-1' });
+    expect(first.status).toBe(201);
+    expect((await t.call('GET', `/api/v1/instances/${id}`)).body).toMatchObject({ status: 'sleeping', currentOperation: { id: first.body.operationId, kind: 'start' } });
+    // A second click or another tab in that gap joins the same wake instead of answering 409.
+    const second = await t.call('POST', `/api/v1/instances/${id}/sessions`, undefined, { 'idempotency-key': 'open-2' });
+    expect(second).toMatchObject({ status: 201, body: { operationId: first.body.operationId } });
+    await wake();
+    expect(starts()).toBe(1);
+
+    // Two opens at the same moment share one wake too.
+    await sleep('s2');
+    const both = await Promise.all(['open-3', 'open-4'].map((k) => t.call('POST', `/api/v1/instances/${id}/sessions`, undefined, { 'idempotency-key': k })));
+    expect(both.map((r) => r.status)).toEqual([201, 201]);
+    expect(both[0]!.body.operationId).toBe(both[1]!.body.operationId);
+    await wake();
+    expect(starts()).toBe(2);
+  });
+
   it('opens, sleeps, wakes, changes IP and permanently deletes a browser', async () => {
     const created = await t.call('POST', '/api/v1/instances', { name: 'Work', regionId: 'tyo1', storageGb: 10, priceVersion: await quote('tyo1') }, { 'idempotency-key': 'c1' });
     await t.settle();

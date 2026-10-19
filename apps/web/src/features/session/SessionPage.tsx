@@ -29,7 +29,7 @@ import type { MessageKey } from '../../messages/en.js';
 import { keys, queryClient } from '../../lib/query.js';
 import { CreateProgress } from '../instances/CreateProgress.js';
 import { useInstance, useLifecycle, useVerifyIp } from '../instances/hooks.js';
-import { STATUS_TONE, statusKey } from '../instances/status.js';
+import { shownStatus, STATUS_TONE, statusKey } from '../instances/status.js';
 
 const HEARTBEAT_MS = 15_000;
 const IDLE_WARNING_MS = 60_000;
@@ -269,7 +269,7 @@ export function SessionPage() {
   } else if (openError || connectionError) {
     overlay = <Overlay message={connectionErrorMessage(openError ?? connectionError)} action={<Button onClick={() => void open()}>{t('common.retry')}</Button>} />;
   } else if (i) {
-    switch (i.status) {
+    switch (shownStatus(i)) {
       case 'creating':
         overlay = <Overlay message={t('overlay.creating')} body={<CreateProgress instance={i} tone="dark" />} />;
         break;
@@ -379,7 +379,7 @@ export function SessionPage() {
         ) : null}
         <div className="ml-auto flex items-center gap-0.5">
           {i && i.status !== 'running' ? (
-            <StatusBadge className="mr-2 hidden text-zinc-300 md:inline-flex" tone={STATUS_TONE[i.status]} label={t(statusKey(i.status))} />
+            <StatusBadge className="mr-2 hidden text-zinc-300 md:inline-flex" tone={STATUS_TONE[shownStatus(i)]} label={t(statusKey(shownStatus(i)))} />
           ) : connect.data?.mode === 'webrtc' && stats ? (
             <ConnectionIndicator stats={stats} picture={streaming ? t(`session.picture.${streaming}` as MessageKey) : null} />
           ) : connect.data?.mode === 'simulated' ? (
