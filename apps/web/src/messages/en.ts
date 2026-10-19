@@ -97,6 +97,11 @@ export const en = {
   'create.footer.noCredit': 'No credit needed for the trial.',
   'create.footer.need': 'Needs {amount} of available credit.',
   'create.footer.available': 'Available credit: {amount}',
+  'create.footer.monthly': '2 h/day, about {amount}/month',
+  'create.footer.monthlyHint': '30-day estimate, including IP and storage. Data transfer extra.',
+  'create.noInventory': 'No regions currently have space for a new browser. Please try again later.',
+  'create.regionUnavailable': 'This region has no space for a new browser. Choose another region or try again later.',
+  'create.regionsFailed': 'Could not refresh regional availability. Please try again.',
   'create.creating': 'Creating…',
   'create.atLimit': 'You have {max} of {max} browsers. Delete one, or ask us for more during the pilot.',
 

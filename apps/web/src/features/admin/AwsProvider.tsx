@@ -6,6 +6,7 @@ import type { AwsProviderSettings } from '@cloudbrowser/contracts';
 
 type Provider = {
   settings: AwsProviderSettings;
+  inventorySummary?: {existingBrowsers:number;committedMicros:number};
   state: { accountId:string|null;managementAccountId:string|null;organizationId:string|null;connection:Record<string,unknown>|null;billing:{month:string;spendMicros:number;organizationSpendMicros?:number;byAccount?:Record<string,number>;byRegion?:Record<string,number>;budgetMicros:number|null;estimated:boolean;accounts:Record<string,unknown>[];credits:Record<string,unknown>[]|null;auxiliaryErrors:Record<string,string>}|null;billingAt:string|null;catalogAt:string|null;lastError:string|null;lastErrorAt:string|null;syncLeaseUntil:string };
   regions:{regionId:string;providerRegion:string;name:string;optInStatus:string;status:string;quotas:{metric:string;used:number;limit:number}[]|null;checkedAt:string|null;lastError:string|null;price:{fetchedAt:string|null;lastError:string|null};inventory?:{available:number;quota_available:number;monthly_unit_micros:number;budget_remaining_micros:number;availability:string}}[];
 };
@@ -22,6 +23,10 @@ export function AwsProviderPage() {
   const {settings,state,regions}=query.data;
   const form=draft ?? settings;
   const billing=state.billing;
+  const budget=settings.monthlyBudgetMicros ?? billing?.budgetMicros ?? null;
+  const noBudgetStock=settings.inventoryMode==='budget' && budget!==null
+    && regions.some((r)=>r.inventory?.availability==='ready' && r.inventory.quota_available>0)
+    && !regions.some((r)=>(r.inventory?.available ?? 0)>0);
   return <div className="space-y-6">
     <PageTitle title="AWS Provider"><Button disabled={refresh.isPending} onClick={()=>refresh.mutate(undefined,{onSuccess:()=>toast('AWS synchronization queued'),onError:(e)=>toast(e.message,'error')})}>Sync from AWS</Button></PageTitle>
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -30,7 +35,13 @@ export function AwsProviderPage() {
       <Tile label={`AWS cost this month${billing?.estimated ? ' (estimated by AWS)' : ''}`} value={billing ? usd(billing.spendMicros) : 'Unavailable'} />
       <Tile label="Organization cost this month" value={billing?.organizationSpendMicros!==undefined ? usd(billing.organizationSpendMicros):'Unavailable'} />
       <Tile label="Project monthly budget" value={form.monthlyBudgetMicros !== null ? usd(form.monthlyBudgetMicros) : billing?.budgetMicros !== null && billing?.budgetMicros !== undefined ? `${usd(billing.budgetMicros)} (AWS Budgets)` : 'Not configured'} />
+      {query.data.inventorySummary ? <Tile label={`Estimated existing commitments (${query.data.inventorySummary.existingBrowsers} ${query.data.inventorySummary.existingBrowsers===1 ? 'browser' : 'browsers'})`} value={usd(query.data.inventorySummary.committedMicros)} /> : null}
     </div>
+    {noBudgetStock && query.data.inventorySummary ? <p role="status" className="rounded-[var(--radius-control)] border border-border bg-surface p-3 text-sm">
+      New browser inventory is limited by the project budget, while AWS quotas still have room.
+      {' '}Budget: {usd(budget!)}; month-to-date cost: {usd(billing?.spendMicros ?? 0)}; existing commitments: {usd(query.data.inventorySummary?.committedMicros ?? 0)} (estimated at {settings.estimatedHoursPerDay} running hours/day).
+      {' '}Commitments are estimates, not money already charged. Increase the project budget or choose quota-only inventory below to allow more browsers.
+    </p> : null}
     <section className="space-y-2 text-sm">
       <h2 className="font-medium">Authorization & synchronization</h2>
       <p>Organization: <Mono>{state.organizationId ?? '—'}</Mono> · Regions checked: {when(state.catalogAt)} · Billing checked: {when(state.billingAt)}</p>

@@ -130,10 +130,12 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
     }
   };
 
-  const blocked = create.isPending || pricing.isFetching || pricing.isError || !b || b.frozen || atLimit || needsCredit || !price?.available || !price.version;
+  const regionAvailable = regions.data?.find((r) => r.id === regionId)?.acceptingNew === true;
+  const blocked = create.isPending || pricing.isFetching || pricing.isError || regions.isError || !regionAvailable || !b || b.frozen || atLimit || needsCredit || !price?.available || !price.version;
   const notice = error
     ?? (atLimit && me.data ? t('create.atLimit', { max: me.data.entitlements.maxBrowsers }) : null)
-    ?? (b?.frozen ? t('billing.frozen') : null);
+    ?? (b?.frozen ? t('billing.frozen') : null)
+    ?? (regions.isError ? t('create.regionsFailed') : regions.data && !regionAvailable ? t(regions.data.some((r) => r.acceptingNew) ? 'create.regionUnavailable' : 'create.noInventory') : null);
 
   return (
     <Dialog
@@ -150,7 +152,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
             </p>
           ) : null}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <FundingStatus trial={trial} needsCredit={needsCredit} needed={b ? minimumSpendBalance(b) + reserve : 0} />
+            <CreateSummary pricing={price} trial={trial} needsCredit={needsCredit} needed={b ? minimumSpendBalance(b) + reserve : 0} />
             <div className="flex gap-2 sm:shrink-0">
               <Button className="flex-1 justify-center sm:flex-none" onClick={onClose}>
                 {t('common.cancel')}
@@ -371,21 +373,24 @@ function TrialCost({ pricing, minutes, days, gb }: { pricing: RegionPricing; min
   );
 }
 
-/** Left of the actions: whether the balance covers this browser, and where to add credit. */
-function FundingStatus({ trial, needsCredit, needed }: { trial: boolean; needsCredit: boolean; needed: number }) {
+/** Keep the selected region's monthly example visible beside the confirmation action. */
+function CreateSummary({ pricing, trial, needsCredit, needed }: { pricing?: RegionPricing; trial: boolean; needsCredit: boolean; needed: number }) {
   const { t, locale } = useI18n();
   const { data: b } = useBilling();
   if (!b) return <span />;
   if (trial) return <p className="text-sm text-muted">{t('create.footer.noCredit')}</p>;
-  if (needsCredit && !b.frozen) {
-    return (
-      <p className="text-sm">
+  const estimate = pricing?.available && pricing.rates
+    ? browserEstimate(pricing.rates, { storageGb: pricing.defaultStorageGb, rootVolumeGb: pricing.rootVolumeGb, backups: false }) : null;
+  return (
+    <div className="min-w-0 space-y-1">
+      <p className="text-sm font-medium tabular-nums">{estimate ? t('create.footer.monthly', { amount: money(estimate.runningHour * 2 * 30 + estimate.alwaysOnMonth, locale) }) : t('price.unavailable')}</p>
+      {estimate ? <p className="text-xs text-muted">{t('create.footer.monthlyHint')}</p> : null}
+      {needsCredit && !b.frozen ? <p className="text-xs">
         <span className="text-error">{t('create.footer.need', { amount: money(needed, locale) })}</span>{' '}
         <Link to="/billing" className="font-medium whitespace-nowrap text-accent hover:underline">
           {t('create.addCredit')}
         </Link>
-      </p>
-    );
-  }
-  return <p className="text-sm text-muted">{t('create.footer.available', { amount: money(b.availableMicros, locale) })}</p>;
+      </p> : null}
+    </div>
+  );
 }

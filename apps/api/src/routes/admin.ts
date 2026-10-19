@@ -67,7 +67,8 @@ adminRoute.get('/aws-provider', async (c) => {
   const inventory=await awsInventory(db);
   const rows=await db.select().from(schema.awsProviderRegions).innerJoin(regions,eq(regions.id,schema.awsProviderRegions.regionId));
   const sheets=new Map((await db.select().from(providerPrices)).map((r)=>[r.regionId,r]));
-  return c.json({settings,state,regions:rows.map((r)=>({...r.aws_provider_regions,name:r.regions.name,enabled:r.regions.enabled,inventory:inventory.get(r.regions.id),price:{fetchedAt:sheets.get(r.regions.id)?.fetchedAt,lastError:sheets.get(r.regions.id)?.lastError},config:undefined}))});
+  const [commitments]=await db.all<{n:number;micros:number}>(sql`SELECT COUNT(*) n, COALESCE(SUM(monthly_micros),0) micros FROM aws_browser_commitments`);
+  return c.json({settings,state,inventorySummary:{existingBrowsers:Number(commitments?.n ?? 0),committedMicros:Number(commitments?.micros ?? 0)},regions:rows.map((r)=>({...r.aws_provider_regions,name:r.regions.name,enabled:r.regions.enabled,inventory:inventory.get(r.regions.id),price:{fetchedAt:sheets.get(r.regions.id)?.fetchedAt,lastError:sheets.get(r.regions.id)?.lastError},config:undefined}))});
 });
 adminRoute.put('/aws-provider/settings',async(c)=>{
   const {reason,...settings}=await body(c,AwsProviderSettings.extend({reason:z.string().trim().min(3).max(500)}));

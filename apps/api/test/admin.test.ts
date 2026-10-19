@@ -28,6 +28,7 @@ it('audits shared AWS inventory policy changes and validates the running-time as
   const initial=await callAdmin('GET','/api/v1/admin/aws-provider');
   expect(initial.status).toBe(200);
   expect(initial.body.settings.estimatedHoursPerDay).toBe(24);
+  expect(initial.body.inventorySummary).toEqual({existingBrowsers:0,committedMicros:0});
   const policy={inventoryMode:'budget',monthlyBudgetMicros:200_000_000,estimatedHoursPerDay:24,reason:'Set the shared project inventory budget'};
   expect((await callAdmin('PUT','/api/v1/admin/aws-provider/settings',{...policy,estimatedHoursPerDay:25})).status).toBe(400);
   expect((await callAdmin('PUT','/api/v1/admin/aws-provider/settings',policy)).status).toBe(200);

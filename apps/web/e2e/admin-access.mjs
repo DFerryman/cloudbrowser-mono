@@ -64,14 +64,15 @@ async function fixture(mode = 'allowed') {
           refundMicros: 0, creditMicros: 0, estimatedFeesMicros: 0, projectedAwsCents: null }, balances: { totalMicros: 0, negativeMicros: 0 },
       };
       else if (url.pathname === '/api/v1/admin/aws-provider') body = {
-        settings: { inventoryMode: 'budget', monthlyBudgetMicros: 200_000_000, estimatedHoursPerDay: 24 },
+        settings: { inventoryMode: 'budget', monthlyBudgetMicros: mode === 'budget-empty' ? 50_000_000 : 200_000_000, estimatedHoursPerDay: 24 },
+        inventorySummary: { existingBrowsers: 1, committedMicros: 87_920_000 },
         state: { accountId: '123456789012', managementAccountId: '210987654321', organizationId: 'o-test',
           connection: { runtimeAuthorization: 'sts-assume-role', automaticSessionRefresh: true, baseCredentialRotation: 'operator-managed' },
           billing: { month: '2026-10', spendMicros: 5_000_000, budgetMicros: 50_000_000, estimated: true, accounts: [], credits: [], auxiliaryErrors: {} },
           billingAt: new Date().toISOString(), catalogAt: new Date().toISOString(), lastError: null },
         regions: [{ regionId: 'eu-central-1', providerRegion: 'eu-central-1', name: 'Europe (Frankfurt)', optInStatus: 'opt-in-not-required', status: 'ready',
           quotas: [{ metric: 'static_ips', used: 1, limit: 5 }], checkedAt: new Date().toISOString(), price: { fetchedAt: new Date().toISOString(), lastError: null },
-          inventory: { available: 3, quota_available: 4, monthly_unit_micros: 60_000_000, budget_remaining_micros: 195_000_000, availability: 'ready' } }],
+          inventory: { available: mode === 'budget-empty' ? 0 : 3, quota_available: 4, monthly_unit_micros: 60_000_000, budget_remaining_micros: 195_000_000, availability: 'ready' } }],
       };
       // The lookalike-host case is an ordinary signed-out app. Every ordinary v1 endpoint is
       // protected, including the billing query mounted alongside /me. Returning an arbitrary
@@ -135,6 +136,12 @@ try {
   await provider.page.getByText('static_ips: 1 / 5', { exact: true }).waitFor();
   noOrdinaryLogin(provider);
   await finish(provider, 'AWS Provider displays dynamic regions, quota inventory, budget policy and session renewal status');
+
+  const budgetEmpty = await fixture('budget-empty');
+  await budgetEmpty.page.goto(`${admin.origin}/aws-provider`);
+  await budgetEmpty.page.getByRole('status').filter({ hasText: 'New browser inventory is limited by the project budget' }).waitFor();
+  await budgetEmpty.page.getByText('Estimated existing commitments (1 browser)', { exact: true }).waitFor();
+  await finish(budgetEmpty, 'operator console distinguishes budget reservations from billed cost and explains zero stock');
 
   for (const [legacy, target] of [
     ['/admin?from=legacy#overview', '/?from=legacy#overview'],

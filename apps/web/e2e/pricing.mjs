@@ -38,7 +38,7 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
   page.on('pageerror', (error) => errors.push(error.message));
   const i = { ...instance, storageGb: sizeGb, status, purgeAfter, ...(legacySnapshots ? { backupsEnabled: true } : {}), ...(busy ? { currentOperation: { id: 'busy-op', kind: 'start', status: 'running' } } : {}), ...(failed ? { status: 'failed' } : {}), ...(trial ? { storageGb: 2, trial: { state: trialSeconds > 0 ? 'active' : 'ended', secondsLeft: trialSeconds, reclaimAt: null } } : {}) };
   const fsTotalBytes = totalBytes === undefined ? i.storageGb * 1024 ** 3 * 0.93 : totalBytes;
-  const state = { extraRegion: false, version: 'quote-1', storageGb: 10, requests: [], reads: [], priceReads: 0, reject: false };
+  const state = { stockAvailable: true, extraRegion: false, version: 'quote-1', storageGb: 10, requests: [], reads: [], priceReads: 0, reject: false };
   await context.route('**/*', async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -66,7 +66,7 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
         entitlements: { billing: 'prepaid', maxBrowsers, maxRunning: 10, idleTimeoutMaxS: 3600, ipChangesPerMonth: 1, maxStorageGb: 100 },
         usage: { browsers: failed ? 0 : 1, running: 0 },
       };
-      else if (url.pathname === '/api/v1/regions') body = [{ id: 'syd1', name: 'Sydney', country: 'AU', city: 'Sydney', timezone: 'Australia/Sydney', enabled: true, acceptingNew: true, probeUrl: null }];
+      else if (url.pathname === '/api/v1/regions') body = [{ id: 'syd1', name: 'Sydney', country: 'AU', city: 'Sydney', timezone: 'Australia/Sydney', enabled: true, acceptingNew: state.stockAvailable, probeUrl: null, ...(!state.stockAvailable ? { inventory: { available: 0, checkedAt: new Date().toISOString(), status: 'ready', constraint: 'quota_and_budget' } } : {}) }];
       else if (url.pathname === '/api/v1/pricing') {
         state.priceReads++;
         const newer = state.version === 'quote-2';
@@ -91,7 +91,7 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
       else if (url.pathname.endsWith('/sessions') || url.pathname.endsWith('/transactions')) body = [];
       else throw new Error(`Unhandled fixture route: ${request.method()} ${url.pathname}`);
       if (request.method() === 'GET' && state.extraRegion && url.pathname === '/api/v1/regions') body.push({ id: 'eu-central-1', name: 'Europe (Frankfurt)', country: 'DE', city: 'Frankfurt', timezone: 'UTC', enabled: true, acceptingNew: true, probeUrl: null, inventory: { available: 4, checkedAt: new Date().toISOString(), status: 'ready', constraint: 'quota_and_budget' } });
-      if (request.method() === 'GET' && state.extraRegion && url.pathname === '/api/v1/pricing') body.push({ ...body[0], regionId: 'eu-central-1' });
+      if (request.method() === 'GET' && state.extraRegion && url.pathname === '/api/v1/pricing') body.push({ ...body[0], regionId: 'eu-central-1', rates: body[0].rates ? { ...body[0].rates, compute: 120_000 } : null });
       return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
     }
     let file = resolve(dist, `.${decodeURIComponent(url.pathname)}`);
@@ -122,6 +122,7 @@ try {
     const limited = await fixture({ locale: 'zh-CN', maxBrowsers: 2 });
     await limited.page.goto(`${origin}/browsers/new`);
     await limited.page.getByText('已用 1 / 2 个浏览器', { exact: true }).waitFor();
+    await limited.page.getByText('每天 2 小时，约 US$12.98/月', { exact: true }).waitFor();
     limited.state.reject = 'instances';
     await limited.page.getByRole('button', { name: '创建浏览器', exact: true }).click();
     await limited.page.getByRole('alert').filter({ hasText: message }).waitFor();
@@ -132,11 +133,13 @@ try {
 
   const create = await fixture();
   await create.page.goto(`${origin}/browsers/new`);
+  await create.page.getByText('2 h/day, about $12.98/month', { exact: true }).waitFor();
   await create.page.getByLabel('Name', { exact: true }).fill('Keep my entered name');
   create.state.reject = true;
   await create.page.getByRole('button', { name: 'Create browser', exact: true }).click();
   await rejected(create, '/api/v1/instances');
   assert.equal(await create.page.getByLabel('Name', { exact: true }).inputValue(), 'Keep my entered name');
+  await create.page.getByText('2 h/day, about $25.96/month', { exact: true }).waitFor();
   // The replacement quote is shown (region row and running total), and its compute-only part in the details.
   await create.page.getByText('$0.2191/h', { exact: true }).first().waitFor();
   await create.page.getByRole('button', { name: 'Price details', exact: true }).click();
@@ -154,6 +157,7 @@ try {
   await rejected(capacity, '/api/v1/instances');
   assert.equal(capacity.state.requests[0].body.storageGb, 10);
   await capacity.page.getByText('Dedicated IP and 116 GB of storage', { exact: true }).waitFor();
+  await capacity.page.getByText('2 h/day, about $21.98/month', { exact: true }).waitFor();
   await capacity.page.getByRole('button', { name: 'Create browser', exact: true }).click();
   await capacity.page.waitForURL('**/browsers');
   assert.equal(capacity.state.requests[1].body.storageGb, 100);
@@ -164,10 +168,24 @@ try {
   await dynamic.page.goto(`${origin}/browsers/new`);
   await dynamic.page.getByText('4 available', { exact: true }).waitFor();
   await dynamic.page.getByText('Europe (Frankfurt)', { exact: true }).click();
+  await dynamic.page.getByText('2 h/day, about $14.18/month', { exact: true }).waitFor();
   await dynamic.page.getByRole('button', { name: 'Create browser', exact: true }).click();
   await dynamic.page.waitForURL('**/browsers');
   assert.equal(dynamic.state.requests[0].body.regionId, 'eu-central-1');
   await finish(dynamic, 'an API-discovered region outside the legacy list shows live stock and can be selected for creation');
+
+  const noStock = await fixture();
+  noStock.state.stockAvailable = false;
+  await noStock.page.goto(`${origin}/browsers/new`);
+  await noStock.page.getByRole('alert').filter({ hasText: 'No regions currently have space for a new browser.' }).waitFor();
+  await noStock.page.getByText('2 h/day, about $12.98/month', { exact: true }).waitFor();
+  assert.equal(await noStock.page.getByRole('button', { name: 'Create browser', exact: true }).isDisabled(), true);
+  assert.equal(noStock.state.requests.length, 0);
+  noStock.state.stockAvailable = true;
+  await noStock.page.reload();
+  await noStock.page.getByRole('button', { name: 'Create browser', exact: true }).waitFor();
+  assert.equal(await noStock.page.getByRole('button', { name: 'Create browser', exact: true }).isEnabled(), true);
+  await finish(noStock, 'no inventory disables creation with a clear message and new inventory restores the action');
 
   for (const action of ['storage', 'ip']) {
     const f = await fixture({ width: action === 'storage' ? 820 : 1365 });
@@ -279,6 +297,10 @@ try {
   await phone.page.goto(`${origin}/browsers/new`);
   await phone.page.getByRole('dialog').waitFor();
   await phone.page.getByText('2 vCPU', { exact: false }).waitFor();
+  const monthly = phone.page.getByText('2 h/day, about $12.98/month', { exact: true });
+  await monthly.waitFor();
+  const footer = await monthly.boundingBox();
+  assert.ok(footer && footer.y + footer.height <= 1024, 'Monthly estimate stays visible beside confirmation on mobile');
   assert.equal(phone.state.requests.length, 0);
   await finish(phone, 'phone billing and create quote fit the viewport without mutations');
 

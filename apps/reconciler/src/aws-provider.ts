@@ -66,10 +66,14 @@ export async function syncAwsProvider(env: Env, force = false) {
             name = metadata.Parameters?.find((p)=>p.Name.endsWith('/longName'))?.Value || name;
             country = metadata.Parameters?.find((p)=>p.Name.endsWith('/geolocationCountry'))?.Value || country;
           }
-          await db.insert(regions).values({id:regionId,name,country,city:name,timezone:'UTC',enabled:true,executor:'aws-ec2',providerRegion:r.code})
-            .onConflictDoUpdate({target:regions.id,set:{name,country}});
-          await db.insert(catalog).values({regionId,providerRegion:r.code,optInStatus:r.optIn,status:'syncing',capacity:0})
-            .onConflictDoUpdate({target:catalog.regionId,set:{optInStatus:r.optIn}});
+          // Publish discovery and its readiness marker atomically. Pricing must not see a new
+          // region before it can tell that network discovery is still in progress.
+          await db.batch([
+            db.insert(regions).values({id:regionId,name,country,city:name,timezone:'UTC',enabled:true,executor:'aws-ec2',providerRegion:r.code})
+              .onConflictDoUpdate({target:regions.id,set:{name,country}}),
+            db.insert(catalog).values({regionId,providerRegion:r.code,optInStatus:r.optIn,status:'syncing',capacity:0})
+              .onConflictDoUpdate({target:catalog.regionId,set:{optInStatus:r.optIn}}),
+          ]);
           if (!['opt-in-not-required','opted-in'].includes(r.optIn)) {
             await db.update(catalog).set({status:'not-enabled',capacity:0,checkedAt:now,lastError:'AWS region is not enabled for this account'}).where(eq(catalog.regionId,regionId));
             continue;
