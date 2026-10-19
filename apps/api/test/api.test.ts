@@ -113,6 +113,14 @@ describe('browsers', () => {
     expect(fourth).toMatchObject({ status: 403, body: { type: 'plan_limit', limit: 'instances' } });
   });
 
+  it('pauses creates after the 10-minute cap and says when to try again', async () => {
+    t.d1.sqlite.exec(`UPDATE caps SET "limit" = 2 WHERE scope = 'global' AND metric = 'creates_per_10_min'`);
+    for (const k of ['a', 'b']) expect((await t.call('POST', '/api/v1/instances', { name: k, regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': k })).status).toBe(202);
+    const third = await t.call('POST', '/api/v1/instances', { name: 'c', regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': 'c' });
+    expect(third).toMatchObject({ status: 503, body: { type: 'creation_frozen', limit: 'create_rate' } });
+    expect(third.body.detail).toMatch(/Try again in about (9|10) minutes\./);
+  });
+
   it('runs every browser a user owns at the same time: there is no separate running limit', async () => {
     const ids: string[] = [];
     for (const k of ['a', 'b', 'c']) {

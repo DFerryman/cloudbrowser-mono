@@ -430,6 +430,7 @@ export const en = {
   'error.capacity_unavailable': 'Waiting for capacity. Try again in a few minutes.',
   'error.spend_guard_active': 'New browsers are temporarily unavailable.',
   'error.creation_frozen': 'New browsers are temporarily unavailable.',
+  'error.creation_frozen.create_rate': 'Many browsers were created in the last 10 minutes. Try again in a few minutes.',
   'error.viewer_unavailable': 'The live view is not available yet.',
   'error.rate_limited': 'Too many requests. Wait a moment and try again.',
   'error.hours_exhausted': 'This month’s active hours are used up. Your browsers keep their data and IP.',

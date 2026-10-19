@@ -190,11 +190,13 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
   const total = await count(db, HOLDS_SLOT);
   if (!providerManaged && total >= (global.get('instances') ?? Infinity)) throw problem(503, 'region_unavailable');
   const [recent] = await db
-    .select({ n: sql<number>`count(*)` })
+    .select({ n: sql<number>`count(*)`, oldest: sql<number | null>`min(${operations.createdAt})` })
     .from(operations)
     .where(and(eq(operations.kind, 'create'), gte(operations.createdAt, new Date(now.getTime() - 600_000))));
   if (Number(recent?.n ?? 0) >= (global.get('creates_per_10_min') ?? Infinity)) {
-    throw problem(503, 'creation_frozen', 'New browsers are temporarily unavailable.');
+    // A pause, not a freeze: room returns as the oldest create in the window ages out.
+    const minutes = Math.max(1, Math.ceil((Number(recent?.oldest ?? now.getTime()) + 600_000 - now.getTime()) / 60_000));
+    throw problem(503, 'creation_frozen', `Many browsers were created in the last 10 minutes. Try again in about ${minutes} minute${minutes === 1 ? '' : 's'}.`, { limit: 'create_rate' });
   }
 }
 

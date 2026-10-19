@@ -432,6 +432,7 @@ export const zhCN: Messages = {
   'error.capacity_unavailable': '正在等待资源，请几分钟后再试。',
   'error.spend_guard_active': '暂时无法新建浏览器。',
   'error.creation_frozen': '暂时无法新建浏览器。',
+  'error.creation_frozen.create_rate': '最近 10 分钟内新建的浏览器较多，请过几分钟再试。',
   'error.viewer_unavailable': '实时画面暂不可用。',
   'error.rate_limited': '请求过于频繁，请稍后再试。',
   'error.hours_exhausted': '本月的活跃时长已用完。浏览器的数据和 IP 会保留。',
