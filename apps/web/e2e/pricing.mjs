@@ -50,8 +50,8 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
       if (request.method() !== 'GET') {
         const entry = { method: request.method(), path: url.pathname, body: request.postData() ? request.postDataJSON() : null };
         state.requests.push(entry);
-        if (state.reject === 'creates_per_day' || state.reject === 'instances') {
-          status = state.reject === 'creates_per_day' ? 429 : 403;
+        if (state.reject === 'instances') {
+          status = 403;
           body = { type: 'plan_limit', title: 'Plan limit reached', status, limit: state.reject };
           state.reject = false;
         } else if (state.reject) {
@@ -115,19 +115,17 @@ async function rejected(f, path, version = 'quote-1') {
 }
 
 try {
-  for (const [limit, message] of [
-    ['creates_per_day', '过去 24 小时的创建次数已达上限，请稍后再试。'],
-    ['instances', '浏览器数量已达上限，请先删除一个浏览器再创建。'],
-  ]) {
-    const limited = await fixture({ locale: 'zh-CN', maxBrowsers: 2 });
+  {
+    const message = '浏览器数量已达上限，请先删除一个浏览器再创建。';
+    const limited = await fixture({ locale: 'zh-CN', maxBrowsers: 5 });
     await limited.page.goto(`${origin}/browsers/new`);
-    await limited.page.getByText('已用 1 / 2 个浏览器', { exact: true }).waitFor();
-    limited.state.reject = limit;
+    await limited.page.getByText('已用 1 / 5 个浏览器', { exact: true }).waitFor();
+    limited.state.reject = 'instances';
     await limited.page.getByRole('button', { name: '创建浏览器', exact: true }).click();
     await limited.page.getByRole('alert').filter({ hasText: message }).waitFor();
     assert.equal(limited.state.requests.length, 1, 'Limit failures must not retry automatically');
     assert.equal(await limited.page.getByText('已达到账户上限。', { exact: true }).count(), 0);
-    await finish(limited, `Chinese creation errors distinguish ${limit} while the sidebar shows 1 of 2 browsers`);
+    await finish(limited, 'Chinese browser-count errors explain the cap while the sidebar shows 1 of 5 browsers');
   }
 
   const create = await fixture();

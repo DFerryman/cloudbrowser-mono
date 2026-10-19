@@ -181,15 +181,6 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
     if (!quote) throw problem(503, 'price_unavailable', 'Prices for this region are unavailable.');
     await admitSpend(db, userId, 'create a browser', quote.requiredMicros);
   }
-  const [daily] = await db
-    .select({ n: sql<number>`count(*)` })
-    .from(operations)
-    // Pending and successful creates hold quota; a failed or canceled attempt gives it back.
-    .where(and(eq(operations.userId, userId), eq(operations.kind, 'create'), notInArray(operations.status, ['failed', 'canceled']), gte(operations.createdAt, new Date(now.getTime() - 86_400_000))));
-  if (Number(daily?.n ?? 0) >= (c.get('creates_per_day') ?? Infinity)) {
-    throw problem(429, 'plan_limit', `Your account allows ${c.get('creates_per_day')} new browsers in a rolling 24-hour period. Try again later.`, { limit: 'creates_per_day' });
-  }
-
   await checkRegionRoom(db, regionId);
   const total = await count(db, HOLDS_SLOT);
   if (total >= (global.get('instances') ?? Infinity)) throw problem(503, 'region_unavailable');

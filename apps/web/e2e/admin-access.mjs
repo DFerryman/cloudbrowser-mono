@@ -36,6 +36,10 @@ async function fixture(mode = 'allowed') {
   const requests = [];
   const errors = [];
   const navigations = [];
+  const caps = [
+    { scope: 'user:default', metric: 'instances', limit: 5 },
+    { scope: 'user:fixture-user', metric: 'instances', limit: 2 },
+  ];
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('framenavigated', (frame) => { if (frame === page.mainFrame()) navigations.push(frame.url()); });
   await context.route('**/*', async (route) => {
@@ -50,6 +54,14 @@ async function fixture(mode = 'allowed') {
       return route.fulfill({ contentType: 'text/html', body: `<h1>Local Access ${url.pathname.endsWith('/logout') ? 'logout' : 'login'} fixture</h1>` });
     }
     if (url.pathname.startsWith('/api/')) {
+      if (mode === 'limits' && url.pathname === '/api/v1/admin/caps' && request.method() === 'PUT') {
+        const change = request.postDataJSON();
+        assert.equal(change.scope, 'user:default');
+        assert.equal(change.metric, 'instances');
+        assert.ok(Number.isInteger(change.limit) && change.limit >= 0);
+        caps[0].limit = change.limit;
+        return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true }) });
+      }
       assert.equal(request.method(), 'GET', `Unexpected API mutation: ${request.method()} ${url.pathname}`);
       let body = [];
       let status = 200;
@@ -58,6 +70,7 @@ async function fixture(mode = 'allowed') {
         status = mode === 'unauthenticated' ? 401 : mode === 'forbidden' ? 403 : 200;
         body = status === 200 ? { email: 'operator@example.test' } : { type: status === 401 ? 'unauthenticated' : 'forbidden', status };
       } else if (url.pathname === '/api/v1/admin/overview') body = overview;
+      else if (url.pathname === '/api/v1/admin/caps') body = caps;
       else if (url.pathname === '/api/v1/admin/pricing') body = {
         settings: { markupPercent: 120, minBalanceMicros: 1_000_000, lowBalanceMicros: 2_000_000, paymentFeeBps: 0, paymentFeeFixedCents: 0 },
         regions: [], month: { month: '2026-10', revenueMicros: 0, costMicros: 0, grossMarginMicros: 0, byItem: {}, topupMicros: 0, topups: 0,
@@ -115,6 +128,24 @@ try {
   await pricing.page.getByLabel('Markup (% of AWS cost)', { exact: true }).waitFor();
   noOrdinaryLogin(pricing);
   await finish(pricing, 'pricing deep link stays inside the Access-protected console');
+
+  const limits = await fixture('limits');
+  await limits.page.goto(`${admin.origin}/limits`);
+  const defaultLimit = limits.page.getByLabel('Browser instance limit', { exact: true });
+  await defaultLimit.waitFor();
+  assert.equal(await defaultLimit.inputValue(), '5');
+  await defaultLimit.fill('7');
+  const saved = limits.page.waitForResponse((response) => response.request().method() === 'PUT' && response.url().endsWith('/api/v1/admin/caps'));
+  await limits.page.getByRole('button', { name: 'Save default browser limit', exact: true }).click();
+  const response = await saved;
+  assert.equal(response.status(), 200);
+  assert.deepEqual(response.request().postDataJSON(), { scope: 'user:default', metric: 'instances', limit: 7 });
+  await limits.page.reload();
+  await defaultLimit.waitFor();
+  assert.equal(await defaultLimit.inputValue(), '7', 'Default account limit must persist after reloading');
+  await limits.page.getByText('user:fixture-user', { exact: true }).waitFor();
+  noOrdinaryLogin(limits);
+  await finish(limits, 'operator can edit and reload the default five-browser account cap without changing per-account overrides');
 
   for (const [legacy, target] of [
     ['/admin?from=legacy#overview', '/?from=legacy#overview'],

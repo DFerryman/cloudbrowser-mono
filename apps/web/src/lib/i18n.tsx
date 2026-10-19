@@ -41,7 +41,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     };
     const errorMessage = (e: unknown) => {
       if (e instanceof ApiError) {
-        // A browser count cap and a rolling creation cap need different translated explanations.
+        // Prefer a translated explanation for the specific limit when one is available.
         const limitKey = `error.${e.problem.type}.${e.problem.limit}` as MessageKey;
         const key = limitKey in en ? limitKey : `error.${e.problem.type}` as MessageKey;
         return locale === 'en' && e.problem.detail ? e.problem.detail : t(key in en ? key : 'error.internal');

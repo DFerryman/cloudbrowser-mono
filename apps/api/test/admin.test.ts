@@ -214,6 +214,19 @@ describe('admin console', () => {
     expect(audit).toEqual(expect.arrayContaining(['flag.creation_freeze', 'cap.set']));
   });
 
+  it('edits the default browser limit while preserving individual overrides and rejecting obsolete daily limits', async () => {
+    expect((await callAdmin('PUT', '/api/v1/admin/caps', { scope: 'user:default', metric: 'creates_per_day', limit: 3 }, IP)).status).toBe(400);
+    expect((await callAdmin('PUT', '/api/v1/admin/caps', { scope: 'user:default', metric: 'instances', limit: 6 }, IP)).status).toBe(200);
+    await signIn(t, 'user@example.com');
+    expect((await t.call('GET', '/api/v1/me')).body.entitlements.maxBrowsers).toBe(6);
+    expect((await callAdmin('PUT', '/api/v1/admin/caps', { scope: `user:${owner}`, metric: 'instances', limit: 2 }, IP)).status).toBe(200);
+    expect((await t.call('GET', '/api/v1/me')).body.entitlements.maxBrowsers).toBe(2);
+    await callAdmin('PUT', '/api/v1/admin/caps', { scope: 'user:default', metric: 'instances', limit: 7 }, IP);
+    expect((await t.call('GET', '/api/v1/me')).body.entitlements.maxBrowsers).toBe(2);
+    expect((await callAdmin('DELETE', '/api/v1/admin/caps', { scope: `user:${owner}`, metric: 'instances' }, IP)).status).toBe(200);
+    expect((await t.call('GET', '/api/v1/me')).body.entitlements.maxBrowsers).toBe(7);
+  });
+
   it('lists users with their plan and suspends all of a user’s browsers', async () => {
     t.d1.sqlite.prepare('INSERT INTO invites (email) VALUES (?)').run(ADMIN_EMAIL);
     await signIn(t, ADMIN_EMAIL);

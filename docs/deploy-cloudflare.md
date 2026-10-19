@@ -306,10 +306,12 @@ pnpm --filter @cloudbrowser/api exec wrangler d1 execute cloudbrowser --remote \
 
 ## 7. Operating knobs (SQL, no deploy)
 
-The default user caps allow two browsers and one running browser at a time. A separate limit
-allows three new browsers per rolling 24 hours: pending and successful creates count, including
-successful browsers deleted later; failed or canceled creates do not. The sidebar's browser
-count shows current browser slots, so it can be below two while the rolling creation limit is full.
+The default user caps allow five browsers and one running browser at a time. There is no per-user
+daily creation quota. Migration `0010` sets the shared browser default to five, preserves individual
+account overrides and removes obsolete daily creation settings. AWS regional quotas, capacity
+checks, short-term global rate limits, the spend guard and the circuit breaker still apply.
+In the operator console, **Limits & switches → Default browsers per account** changes the shared
+default immediately. The Caps table's `user:<id>` / `instances` row overrides it for one account.
 
 ```sql
 SELECT * FROM caps;                                            -- pilot limits from plan page 12

@@ -358,6 +358,7 @@ const CapBody = z.object({
 adminRoute.put('/caps', async (c) => {
   const db = c.get('db');
   const { scope, metric, limit } = await body(c, CapBody);
+  if (metric === 'creates_per_day') throw problem(400, 'validation_failed', 'Daily creation limits are no longer supported. Set the instances limit instead.');
   if (limit === undefined) throw problem(400, 'validation_failed', 'limit is required');
   const [before] = await db.select().from(caps).where(and(eq(caps.scope, scope), eq(caps.metric, metric)));
   await db.insert(caps).values({ scope, metric, limit }).onConflictDoUpdate({ target: [caps.scope, caps.metric], set: { limit } });

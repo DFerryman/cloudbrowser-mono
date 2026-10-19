@@ -422,7 +422,6 @@ export const en = {
   'error.invalid_state': 'That is not possible right now.',
   'error.plan_limit': 'You have reached your account’s limit.',
   'error.plan_limit.instances': 'You have reached your browser count limit. Delete a browser before creating another.',
-  'error.plan_limit.creates_per_day': 'You have reached the creation limit for the past 24 hours. Try again later.',
   'error.region_unavailable': 'New browsers are temporarily unavailable in this region.',
   'error.capacity_unavailable': 'Waiting for capacity. Try again in a few minutes.',
   'error.spend_guard_active': 'New browsers are temporarily unavailable.',
