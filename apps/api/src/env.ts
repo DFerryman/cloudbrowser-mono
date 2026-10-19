@@ -7,6 +7,7 @@ export interface Env {
   ASSETS: Fetcher;
   /** The engine Worker (worker mode): synchronous calls such as IP checks. */
   ENGINE: Fetcher;
+  AWS_PROVIDER?: Fetcher;
   /** Operation dispatch to the engine (Cloudflare Queues). */
   OPERATIONS: Queue<OperationMessage>;
   /** Per-user SSE fan-out: the EventHub Durable Object hosted by the engine Worker. */

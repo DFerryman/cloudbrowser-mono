@@ -1,3 +1,4 @@
+import { useRegionInfo } from './hooks.js';
 import { IDLE_TIMEOUT_OPTIONS_S, SCREEN_SIZES, type BrowserLocale, type Instance, type RegionPricing } from '@cloudbrowser/contracts';
 import { Button, cn, Dialog, Input, Label, Pagination, Section, Select, useToast } from '@cloudbrowser/ui';
 import { ShieldAlert, ShieldCheck } from 'lucide-react';
@@ -12,7 +13,7 @@ import { canSpend } from '../billing/access.js';
 import { BalanceRequired } from '../billing/BalanceRequired.js';
 import { useManagedInstance } from './BrowserLayout.js';
 import { useLifecycle, useMe, useRecentSessions, useUpdateInstance, useVerifyIp } from './hooks.js';
-import { regionInfo } from './status.js';
+
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -38,7 +39,7 @@ export function SettingsPage() {
   const pagerLabels = usePagerLabels(false);
   const pricing = usePricing();
   const billing = useBilling();
-  const region = regionInfo(i.regionId);
+  const region = useRegionInfo(i.regionId);
   const [name, setName] = useState(i.name);
   const [ipQuote, setIpQuote] = useState<RegionPricing | null>(null);
   const [ipError, setIpError] = useState<string | null>(null);
@@ -60,7 +61,7 @@ export function SettingsPage() {
       <Section title={t('settings.identity')}>
         <dl>
           <Row label={t('settings.region')}>
-            {t(`create.region.${i.regionId}`)} <span className="text-muted">· {t('settings.regionPermanent')}</span>
+            {region.name} <span className="text-muted">· {t('settings.regionPermanent')}</span>
           </Row>
           <Row label={t('settings.ip')}>
             <span className="font-mono">{i.ipAddress ?? t('browsers.reservingIp')}</span>

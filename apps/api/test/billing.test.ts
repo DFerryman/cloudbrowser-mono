@@ -413,14 +413,18 @@ describe('billing failure and concurrency regressions', () => {
     const id = await browser();
     const start = Date.now();
     await meterUsage(at(start));
+    // Initial metering may charge the milliseconds since creation on a busy test runner.
+    const balanceBefore = await balance();
+    const chargedBefore = charged();
     t.d1.sqlite.exec(`UPDATE instance_health SET net_tx_bytes = 1000000000, net_tx_billed_bytes = 0 WHERE instance_id = '${id}';
       CREATE TRIGGER meter_fault BEFORE INSERT ON usage_records BEGIN SELECT RAISE(ABORT, 'usage unavailable'); END;`);
     await expect(meterUsage(at(start + 60_000))).rejects.toThrow(/usage unavailable/);
     expect(sqlOne(`SELECT base_metered_at AS cursor, net_tx_billed_bytes AS tx FROM instance_health WHERE instance_id = '${id}'`)).toEqual({ cursor: start, tx: 0 });
-    expect(await balance()).toBe(10_000_000);
+    expect(await balance()).toBe(balanceBefore);
+    expect(charged()).toBe(chargedBefore);
     t.d1.sqlite.exec('DROP TRIGGER meter_fault');
     const done = await meterUsage(at(start + 60_000));
-    expect(done.chargedMicros).toBe(charged());
+    expect(done.chargedMicros).toBe(charged() - chargedBefore);
     expect(charged()).toBeGreaterThan(100_000); // the unbilled transfer survived rollback
     expect(10_000_000 - await balance()).toBe(charged());
     await meterUsage(at(start + 60_000));

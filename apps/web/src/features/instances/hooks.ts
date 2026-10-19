@@ -1,3 +1,4 @@
+import { REGION_INFO } from '@cloudbrowser/contracts';
 import type { Accepted, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, Region } from '@cloudbrowser/contracts';
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api.js';
@@ -5,7 +6,7 @@ import { keys, queryClient } from '../../lib/query.js';
 import { refreshChangedPrices } from '../billing/hooks.js';
 
 export const useMe = () => useQuery({ queryKey: keys.me, queryFn: () => api<Me>('GET', '/me') });
-export const useRegions = () => useQuery({ queryKey: keys.regions, queryFn: () => api<Region[]>('GET', '/regions'), staleTime: 60_000 });
+export const useRegions = () => useQuery({ queryKey: keys.regions, queryFn: () => api<Region[]>('GET', '/regions'), staleTime: 30_000, refetchInterval: 30_000 });
 export const useInstances = () => useQuery({ queryKey: keys.instances, queryFn: () => api<Instance[]>('GET', '/instances') });
 export const useInstance = (id: string) =>
   useQuery({ queryKey: keys.instance(id), queryFn: () => api<Instance>('GET', `/instances/${id}`) });
@@ -28,6 +29,7 @@ export const useInstanceUsage = (id: string, month: string) =>
   useQuery({ queryKey: keys.instanceUsage(id, month), queryFn: () => api<InstanceUsage>('GET', `/instances/${id}/usage?month=${month}`), refetchInterval: 60_000 });
 
 const refresh = (instanceId?: string) => {
+  void queryClient.invalidateQueries({ queryKey: keys.regions });
   void queryClient.invalidateQueries({ queryKey: keys.instances });
   void queryClient.invalidateQueries({ queryKey: keys.me });
   void queryClient.invalidateQueries({ queryKey: keys.billing });
@@ -95,4 +97,10 @@ export function useResizeStorage() {
     onError: refreshChangedPrices,
     onSettled: (_d, _e, v) => refresh(v.id),
   });
+}
+
+export function useRegionInfo(id: string) {
+  const regions = useRegions();
+  const row = regions.data?.find((r) => r.id === id);
+  return row ?? { id, name: id, ...(REGION_INFO[id] ?? { country: '', city: id, timezone: 'UTC' }) };
 }

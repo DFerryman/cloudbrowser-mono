@@ -1,3 +1,4 @@
+import { useRegionInfo } from './hooks.js';
 import type { Instance } from '@cloudbrowser/contracts';
 import { Button, Card, Menu, MenuItem, MenuSeparator, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
 import { BarChart3, Moon, MoreHorizontal, Pencil, Settings, Trash2 } from 'lucide-react';
@@ -5,7 +6,7 @@ import { useNavigate } from 'react-router';
 import { useI18n, useRelativeTime } from '../../lib/i18n.js';
 import { CreateProgress } from './CreateProgress.js';
 import { useLifecycle, useUpdateInstance } from './hooks.js';
-import { regionInfo, STATUS_TONE, statusKey } from './status.js';
+import { STATUS_TONE, statusKey } from './status.js';
 import { TrialBadge } from './Trial.js';
 import { useBilling } from '../billing/hooks.js';
 import { canSpend, canUseBrowser } from '../billing/access.js';
@@ -19,7 +20,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
   const lifecycle = useLifecycle();
   const update = useUpdateInstance();
   const billing = useBilling();
-  const region = regionInfo(i.regionId);
+  const region = useRegionInfo(i.regionId);
   const run = (p: Promise<unknown>) => p.catch((e) => toast(errorMessage(e), 'error'));
 
   const deleted = i.status === 'deleting';

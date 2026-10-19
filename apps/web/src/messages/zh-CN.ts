@@ -61,6 +61,7 @@ export const zhCN: Messages = {
 
   'create.title': '新建浏览器',
   'create.name': '名称',
+  'create.region.stock': '库存：{count} 个',
   'create.region': '地区',
   'create.region.syd1': '澳大利亚悉尼',
   'create.region.syd1.hint': '澳大利亚 IP',
@@ -97,6 +98,11 @@ export const zhCN: Messages = {
   'create.footer.noCredit': '免费试用无需充值。',
   'create.footer.need': '需要 {amount} 可用余额。',
   'create.footer.available': '可用余额：{amount}',
+  'create.footer.monthly': '每天 2 小时，约 {amount}/月',
+  'create.footer.monthlyHint': '按 30 天估算，含 IP 和存储，流量另计。',
+  'create.noInventory': '当前各地区暂无新增名额，请稍后再试。',
+  'create.regionUnavailable': '所选地区暂无新增名额，请选择其它地区或稍后再试。',
+  'create.regionsFailed': '暂时无法刷新地区库存，请稍后再试。',
   'create.creating': '正在创建…',
   'create.atLimit': '你已拥有 {max} / {max} 个浏览器。试用期间可删除一个，或联系我们增加名额。',
 
@@ -407,6 +413,7 @@ export const zhCN: Messages = {
   'error.operation_in_progress': '此浏览器有其他操作正在进行。',
   'error.invalid_state': '当前无法执行此操作。',
   'error.plan_limit': '已达到账户上限。',
+  'error.plan_limit.instances': '浏览器数量已达上限，请先删除一个浏览器再创建。',
   'error.region_unavailable': '该地区暂时无法新建浏览器。',
   'error.capacity_unavailable': '正在等待资源，请几分钟后再试。',
   'error.spend_guard_active': '暂时无法新建浏览器。',

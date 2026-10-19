@@ -5,3 +5,6 @@ export { MemoryFakeStore, D1FakeStore, type FakeStore, type FakeRecord } from '.
 export { AwsExecutor, DEFAULT_INSTANCE_TYPES, DEFAULT_ROOT_VOLUME_GB, type AwsExecutorOptions, type AwsRegionConfig } from './aws/aws-executor.js';
 export { bootstrapScript, type BootstrapInput } from './aws/user-data.js';
 export { parseXml } from './aws/xml.js';
+export { AwsApi, assumeRoleCredentials, type AwsCredentials, type AwsCredentialProvider } from './aws/authorization.js';
+export { Ec2Client } from './aws/client.js';
+export { items as xmlItems, text as xmlText, type XmlNode } from './aws/xml.js';

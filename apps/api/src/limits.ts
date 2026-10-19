@@ -1,5 +1,5 @@
 import { MICROS_PER_USD, TRIAL, type Entitlements } from '@cloudbrowser/contracts';
-import { billingRequired, convertTrialStatements, prepaidBalance, reservationQuote, reservationWrite, pricingSettings, schema, userCaps as sharedUserCaps, type Db } from '@cloudbrowser/db';
+import { awsInventory, billingRequired, convertTrialStatements, prepaidBalance, reservationQuote, reservationWrite, pricingSettings, schema, userCaps as sharedUserCaps, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, ne, notInArray, sql } from 'drizzle-orm';
 import { storageLimits } from './pricing.js';
 import { problem } from './problem.js';
@@ -131,6 +131,11 @@ export async function regionAcceptingNew(db: Db, regionId: string): Promise<bool
 async function checkRegionRoom(db: Db, regionId: string) {
   const [region] = await db.select().from(regions).where(eq(regions.id, regionId));
   if (!region?.enabled) throw problem(409, 'region_unavailable', 'This region is not available.');
+  const inventory = (await awsInventory(db)).get(regionId);
+  if (inventory) {
+    if (inventory.available < 1) throw problem(409, 'region_unavailable', 'No inventory is currently available in this region.');
+    return;
+  }
   const regionCaps = await capsFor(db, [`region:${regionId}`]);
   const global = await capsFor(db, ['global']);
   const inRegion = await count(db, and(eq(browserInstances.regionId, regionId), HOLDS_SLOT));
@@ -159,6 +164,7 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
   if (freeze?.value === 'true') throw problem(503, 'creation_frozen', 'New browsers are temporarily unavailable.');
 
   const global = await capsFor(db, ['global']);
+  const providerManaged = (await awsInventory(db)).has(regionId);
   const [spend] = await db
     .select()
     .from(spendSnapshots)
@@ -166,7 +172,7 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
     .orderBy(desc(spendSnapshots.takenAt))
     .limit(1);
   const budget = global.get('spend_budget_cents');
-  if (spend && budget !== undefined && spend.projectedCents >= budget) {
+  if (!providerManaged && spend && budget !== undefined && spend.projectedCents >= budget) {
     throw problem(503, 'spend_guard_active', 'New browsers are temporarily unavailable.');
   }
 
@@ -181,17 +187,9 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
     if (!quote) throw problem(503, 'price_unavailable', 'Prices for this region are unavailable.');
     await admitSpend(db, userId, 'create a browser', quote.requiredMicros);
   }
-  const [daily] = await db
-    .select({ n: sql<number>`count(*)` })
-    .from(operations)
-    .where(and(eq(operations.userId, userId), eq(operations.kind, 'create'), gte(operations.createdAt, new Date(now.getTime() - 86_400_000))));
-  if (Number(daily?.n ?? 0) >= (c.get('creates_per_day') ?? Infinity)) {
-    throw problem(429, 'plan_limit', 'Too many new browsers today. Try again tomorrow.', { limit: 'creates_per_day' });
-  }
-
   await checkRegionRoom(db, regionId);
   const total = await count(db, HOLDS_SLOT);
-  if (total >= (global.get('instances') ?? Infinity)) throw problem(503, 'region_unavailable');
+  if (!providerManaged && total >= (global.get('instances') ?? Infinity)) throw problem(503, 'region_unavailable');
   const [recent] = await db
     .select({ n: sql<number>`count(*)` })
     .from(operations)
@@ -230,11 +228,12 @@ export async function admitStart(db: Db, userId: string, instanceId: string, reg
     });
   }
   const regionCaps = await capsFor(db, [`region:${regionId}`]);
-  if ((await count(db, and(eq(browserInstances.regionId, regionId), others))) >= (regionCaps.get('running') ?? Infinity)) {
+  const providerManaged = (await awsInventory(db)).has(regionId);
+  if (!providerManaged && (await count(db, and(eq(browserInstances.regionId, regionId), others))) >= (regionCaps.get('running') ?? Infinity)) {
     throw problem(503, 'capacity_unavailable', 'This region is busy right now. Try again in a few minutes.');
   }
   const global = await capsFor(db, ['global']);
-  if ((await count(db, others)) >= (global.get('running') ?? Infinity)) {
+  if (!providerManaged && (await count(db, others)) >= (global.get('running') ?? Infinity)) {
     throw problem(503, 'capacity_unavailable', 'We are busy right now. Try again in a few minutes.');
   }
 }

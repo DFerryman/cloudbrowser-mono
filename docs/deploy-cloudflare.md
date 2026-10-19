@@ -306,6 +306,13 @@ pnpm --filter @cloudbrowser/api exec wrangler d1 execute cloudbrowser --remote \
 
 ## 7. Operating knobs (SQL, no deploy)
 
+The default user caps remain two browsers and one running browser at a time. There is no per-user
+daily creation quota. Migration `0010` removes obsolete daily creation settings; migration `0011`
+reverts its separate browser-default change to the original value, preserving individual user
+overrides and newer operator settings. Regional caps, AWS quota checks, short-term global rate
+limits, the spend guard and the circuit breaker still apply. The operator console's existing
+Caps table controls the `user:default` / `instances` default and `user:<id>` overrides.
+
 ```sql
 SELECT * FROM caps;                                            -- pilot limits from plan page 12
 UPDATE caps SET "limit" = 3 WHERE scope = 'user:default' AND metric = 'instances';

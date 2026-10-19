@@ -6,11 +6,11 @@
  */
 import { raiseAlert, schema } from '@cloudbrowser/db';
 import type { ExecutorKind } from '@cloudbrowser/executors';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { placementRef } from './context.js';
 import { readContext, type EngineDeps } from './context.js';
 
-const { regions, providerPrices, placements } = schema;
+const { regions, providerPrices, placements, awsProviderRegions, alerts } = schema;
 
 export const PRICE_MAX_AGE_MS = 12 * 3_600_000;
 /** After a failed refresh, wait this long before trying again. */
@@ -23,17 +23,37 @@ export async function refreshPrices(deps: EngineDeps, opts: { force?: boolean } 
   const summary = { refreshed: [] as string[], failed: [] as { regionId: string; error: string }[] };
   const all = await db.select().from(regions);
   const stored = new Map((await db.select().from(providerPrices)).map((p) => [p.regionId, p]));
+  const catalog = new Map((await db.select().from(awsProviderRegions)).map((r) => [r.regionId, r]));
+  const openPriceAlerts = new Set((await db.select({ key: alerts.dedupeKey }).from(alerts)
+    .where(and(eq(alerts.source, 'engine'), isNull(alerts.acknowledgedAt), sql`${alerts.dedupeKey} LIKE 'prices:%'`))).map((a) => a.key));
+  const resolveAlert = async (regionId: string, resolution: 'prices_recovered' | 'region_not_active', configurationOnly = false) => {
+    if (!openPriceAlerts.has(`prices:${regionId}`)) return;
+    await db.update(alerts).set({ acknowledgedAt: now, acknowledgedBy: `engine:${resolution}`,
+      detail: sql`json_set(COALESCE(${alerts.detail}, '{}'), '$.resolution', ${resolution}, '$.resolvedAt', ${now.toISOString()})`,
+    }).where(and(eq(alerts.source, 'engine'), eq(alerts.dedupeKey, `prices:${regionId}`), isNull(alerts.acknowledgedAt),
+      configurationOnly ? sql`json_extract(${alerts.detail}, '$.error') LIKE '%is not configured (AWS_REGIONS)%'` : undefined));
+  };
   for (const r of all) {
     const row = stored.get(r.id);
     let configurationKey: string | undefined;
     const sameProvider = row?.executor === r.executor && row.providerRegion === r.providerRegion;
     try {
-      const executor = deps.executor(r.executor as ExecutorKind);
-      configurationKey = executor.pricingConfigKey(r.providerRegion);
       const machines = await db.select().from(placements).where(and(
         eq(placements.executor, r.executor), eq(placements.providerRegion, r.providerRegion),
         inArray(placements.status, ['current', 'building']),
       ));
+      const discovered = catalog.get(r.id);
+      if (r.executor === 'aws-ec2' && discovered && (discovered.status !== 'ready' || !discovered.config) && !machines.length) {
+        // Account opt-in and initial network preparation are handled by the Provider sync.
+        // Keep pricing retained browsers even if their region is later disabled.
+        await resolveAlert(r.id, 'region_not_active', true);
+        if (row?.lastError?.includes('is not configured (AWS_REGIONS)')) await db.update(providerPrices)
+          .set({ lastError: null, lastErrorAt: null }).where(eq(providerPrices.regionId, r.id));
+        continue;
+      }
+      const executor = deps.executor(r.executor as ExecutorKind);
+      await executor.prepareRegion?.(r.providerRegion);
+      configurationKey = executor.pricingConfigKey(r.providerRegion);
       // Older browsers retain their machine. Discover its type using read-only calls so costs do
       // not silently change to the new default's price when defaults are right-sized.
       for (const p of machines.filter((p) => !p.instanceType && p.vmId)) {
@@ -50,12 +70,14 @@ export async function refreshPrices(deps: EngineDeps, opts: { force?: boolean } 
       const fresh = row?.fetchedAt && now.getTime() - row.fetchedAt.getTime() < PRICE_MAX_AGE_MS
         && sameProvider && row.configurationKey === configurationKey
         && historicalTypes.every((t) => quotedTypes?.[t] !== undefined);
+      if (fresh && !row.lastError) await resolveAlert(r.id, 'prices_recovered');
       const backingOff = sameProvider && row?.configurationKey === configurationKey
         && row.lastErrorAt && now.getTime() - row.lastErrorAt.getTime() < RETRY_AFTER_MS;
       if (!opts.force && (fresh || backingOff)) continue;
       const sheet = await executor.prices(readContext('prices', deps.envName), r.providerRegion, historicalTypes);
       const values = { executor: r.executor, providerRegion: r.providerRegion, configurationKey, sheet, fetchedAt: now, lastError: null, lastErrorAt: null };
       await db.insert(providerPrices).values({ regionId: r.id, ...values }).onConflictDoUpdate({ target: providerPrices.regionId, set: values });
+      await resolveAlert(r.id, 'prices_recovered');
       summary.refreshed.push(r.id);
     } catch (e) {
       const error = (e as Error).message.slice(0, 500);

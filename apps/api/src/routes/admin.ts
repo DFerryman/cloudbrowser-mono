@@ -4,8 +4,8 @@
  * written to `audit_log` with the admin's stable Access subject and email. Internal:
  * not part of the public OpenAPI document.
  */
-import { OPERATION_STEPS, PricingSettings, UsageItem, costRates, customerRates, type OperationKind } from '@cloudbrowser/contracts';
-import { newId, priceSheets, pricingSettings, schema, type Db } from '@cloudbrowser/db';
+import { AwsProviderSettings, OPERATION_STEPS, PricingSettings, UsageItem, costRates, customerRates, type OperationKind } from '@cloudbrowser/contracts';
+import { awsInventory, newId, priceSheets, pricingSettings, schema, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, isNotNull, isNull, like, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
@@ -60,6 +60,34 @@ const audit = (db: Db, c: Context<AppEnv>, action: string, target: string, detai
 // --- session -----------------------------------------------------------------------------------
 
 adminRoute.get('/session', (c) => c.json({ email: c.get('user').email }));
+
+adminRoute.get('/aws-provider', async (c) => {
+  const db=c.get('db');
+  const [settings]=await db.select().from(schema.awsProviderSettings);
+  const [state]=await db.select().from(schema.awsProviderState);
+  const inventory=await awsInventory(db);
+  const rows=await db.select().from(schema.awsProviderRegions).innerJoin(regions,eq(regions.id,schema.awsProviderRegions.regionId));
+  const sheets=new Map((await db.select().from(providerPrices)).map((r)=>[r.regionId,r]));
+  const [commitments]=await db.all<{n:number;micros:number}>(sql`SELECT COUNT(*) n, COALESCE(SUM(monthly_micros),0) micros FROM aws_browser_commitments`);
+  return c.json({settings,state,inventorySummary:{existingBrowsers:Number(commitments?.n ?? 0),committedMicros:Number(commitments?.micros ?? 0)},regions:rows.map((r)=>({...r.aws_provider_regions,name:r.regions.name,enabled:r.regions.enabled,inventory:inventory.get(r.regions.id),price:{fetchedAt:sheets.get(r.regions.id)?.fetchedAt,lastError:sheets.get(r.regions.id)?.lastError},config:undefined}))});
+});
+adminRoute.put('/aws-provider/settings',async(c)=>{
+  const {reason,...settings}=await body(c,AwsProviderSettings.extend({reason:z.string().trim().min(3).max(500)}));
+  const db=c.get('db');
+  const [before]=await db.select().from(schema.awsProviderSettings);
+  await db.batch([
+    db.update(schema.awsProviderSettings).set({...settings,updatedAt:new Date(),updatedBy:actor(c)}).where(eq(schema.awsProviderSettings.id,1)),
+    audit(db,c,'aws-provider.settings','aws-provider',{before,after:settings,reason}),
+  ]);
+  return c.json({saved:true});
+});
+adminRoute.post('/aws-provider/refresh',async(c)=>{
+  if (!c.env.AWS_PROVIDER) throw problem(503,'internal','AWS Provider service is not configured.');
+  const result=await c.env.AWS_PROVIDER.fetch('https://provider/aws/refresh',{method:'POST'});
+  if (!result.ok) throw problem(503,'internal','AWS synchronization could not be queued.');
+  await audit(c.get('db'),c,'aws-provider.refresh','aws-provider',{});
+  return c.json({queued:true},202);
+});
 
 // --- overview ----------------------------------------------------------------------------------
 
@@ -373,6 +401,7 @@ const CapBody = z.object({
 adminRoute.put('/caps', async (c) => {
   const db = c.get('db');
   const { scope, metric, limit } = await body(c, CapBody);
+  if (metric === 'creates_per_day') throw problem(400, 'validation_failed', 'Daily creation limits are no longer supported. Set the instances limit instead.');
   if (limit === undefined) throw problem(400, 'validation_failed', 'limit is required');
   const [before] = await db.select().from(caps).where(and(eq(caps.scope, scope), eq(caps.metric, metric)));
   await db.insert(caps).values({ scope, metric, limit }).onConflictDoUpdate({ target: [caps.scope, caps.metric], set: { limit } });

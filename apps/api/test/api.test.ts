@@ -1,5 +1,5 @@
 import { verifyViewerToken } from '@cloudbrowser/contracts';
-import { newArchiveKey } from '@cloudbrowser/db';
+import { createDb, newArchiveKey, operationRow, schema } from '@cloudbrowser/db';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import engine from '@cloudbrowser/engine';
 import app from '../src/index.js';
@@ -22,6 +22,7 @@ describe('auth', () => {
     expect(me.status).toBe(200);
     expect(me.body.user.email).toBe('pilot@example.com');
     expect(me.body.entitlements.maxBrowsers).toBe(2);
+    expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM caps WHERE metric = 'creates_per_day'").get()).toEqual({ n: 0 });
   });
 
   it('throttles sign-in code requests', async () => {
@@ -101,12 +102,47 @@ describe('browsers', () => {
     expect(op.body.status).toBe('succeeded');
   });
 
-  it('enforces the plan limits', async () => {
-    for (const k of ['a', 'b']) await t.call('POST', '/api/v1/instances', { name: k, regionId: 'usw1', storageGb: 10, priceVersion: await quote('usw1') }, { 'idempotency-key': k });
+  it('keeps the original two-browser account limit and rejects a third', async () => {
+    for (const k of ['a', 'b']) {
+      const created = await t.call('POST', '/api/v1/instances', { name: k, regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': k });
+      expect(created.status).toBe(202);
+    }
     await t.settle();
-    const third = await t.call('POST', '/api/v1/instances', { name: 'c', regionId: 'usw1', storageGb: 10, priceVersion: await quote('usw1') }, { 'idempotency-key': 'c' });
-    expect(third.status).toBe(403);
-    expect(third.body.type).toBe('plan_limit');
+    expect((await t.call('GET', '/api/v1/me')).body.usage.browsers).toBe(2);
+    const third = await t.call('POST', '/api/v1/instances', { name: 'c', regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': 'c' });
+    expect(third).toMatchObject({ status: 403, body: { type: 'plan_limit', limit: 'instances' } });
+  });
+
+  it('allows replacement browsers regardless of daily create history or obsolete daily-cap settings', async () => {
+    const body = { name: 'Work', regionId: 'tyo1', storageGb: 10, priceVersion: await quote() };
+    const first = await t.call('POST', '/api/v1/instances', body, { 'idempotency-key': 'daily-first' });
+    expect(first.status).toBe(202);
+    await t.settle();
+    const userId = (await t.call('GET', '/api/v1/me')).body.user.id;
+    // These are inside the old daily window but outside the retained global ten-minute guard.
+    const now = new Date(Date.now() - 60 * 60_000);
+    t.d1.sqlite.exec("INSERT INTO caps(scope, metric, \"limit\") VALUES ('user:default', 'creates_per_day', 3)");
+    for (const status of ['succeeded', 'succeeded', 'succeeded', 'failed', 'canceled']) {
+      await createDb(t.d1).insert(schema.operations).values({
+        ...operationRow({ instanceId: first.body.instanceId, userId, kind: 'create', now }),
+        status, finishedAt: now,
+      });
+    }
+    await t.call('POST', `/api/v1/instances/${first.body.instanceId}/stop`, undefined, { 'idempotency-key': 'daily-stop' });
+    await t.settle();
+    const before = await t.call('GET', '/api/v1/me');
+    expect(before.body).toMatchObject({ usage: { browsers: 1 }, entitlements: { maxBrowsers: 2 } });
+
+    const second = await t.call('POST', '/api/v1/instances', body, { 'idempotency-key': 'daily-second' });
+    expect(second.status).toBe(202);
+    await t.settle();
+    expect((await t.call('GET', `/api/v1/operations/${second.body.operationId}`)).body.status).toBe('succeeded');
+    await t.call('DELETE', `/api/v1/instances/${first.body.instanceId}`, undefined, { 'idempotency-key': 'daily-delete' });
+    await t.settle();
+    expect((await t.call('GET', '/api/v1/me')).body.usage.browsers).toBe(1);
+
+    const replacement = await t.call('POST', '/api/v1/instances', body, { 'idempotency-key': 'daily-third' });
+    expect(replacement.status).toBe(202);
   });
 
   it('opens, sleeps, wakes, changes IP and permanently deletes a browser', async () => {

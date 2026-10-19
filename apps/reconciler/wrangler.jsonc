@@ -8,6 +8,10 @@
   "preview_urls": false,
   "triggers": { "crons": ["*/5 * * * *"] },
   "vars": { "ENV_NAME": "prod" },
+  "queues": {
+    "producers": [{ "binding": "AWS_PROVIDER_JOBS", "queue": "cloudbrowser-aws-provider" }],
+    "consumers": [{ "queue": "cloudbrowser-aws-provider", "max_batch_size": 1, "max_retries": 3, "retry_delay": 300 }]
+  },
   "d1_databases": [
     {
       "binding": "DB",

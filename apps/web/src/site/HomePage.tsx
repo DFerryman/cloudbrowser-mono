@@ -92,9 +92,9 @@ export function HomePage() {
           <ul className="grid gap-3 sm:grid-cols-3">
             {REGIONS.map((id) => (
               <li key={id} className="rounded-[var(--radius-control)] border border-border bg-surface px-4 py-3">
-                <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] font-medium text-muted">{REGION_INFO[id].country}</span>
+                <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] font-medium text-muted">{REGION_INFO[id]?.country}</span>
                 <p className="mt-2 text-sm font-medium">{t(regionKey(id))}</p>
-                <p className="text-xs text-subtle">{REGION_INFO[id].timezone}</p>
+                <p className="text-xs text-subtle">{REGION_INFO[id]?.timezone}</p>
               </li>
             ))}
           </ul>

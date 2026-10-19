@@ -85,6 +85,7 @@ export async function enqueueOperation(
   try {
     await db.batch(stmts as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
   } catch (e) {
+    if (String(e).includes('aws_inventory_unavailable')) throw problem(409, 'region_unavailable', 'Regional inventory changed. Refresh the region list and try again.');
     // A concurrent request with the same key won the race: answer like it did.
     if (input.key) {
       const again = await replayed(db, user.id, input.key, input.route);

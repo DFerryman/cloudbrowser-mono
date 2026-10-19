@@ -59,6 +59,7 @@ export const en = {
 
   'create.title': 'New browser',
   'create.name': 'Name',
+  'create.region.stock': '{count} available',
   'create.region': 'Region',
   'create.region.syd1': 'Sydney, Australia',
   'create.region.syd1.hint': 'Australian IP',
@@ -95,6 +96,11 @@ export const en = {
   'create.footer.noCredit': 'No credit needed for the trial.',
   'create.footer.need': 'Needs {amount} of available credit.',
   'create.footer.available': 'Available credit: {amount}',
+  'create.footer.monthly': '2 h/day, about {amount}/month',
+  'create.footer.monthlyHint': '30-day estimate, including IP and storage. Data transfer extra.',
+  'create.noInventory': 'No regions currently have space for a new browser. Please try again later.',
+  'create.regionUnavailable': 'This region has no space for a new browser. Choose another region or try again later.',
+  'create.regionsFailed': 'Could not refresh regional availability. Please try again.',
   'create.creating': 'Creating…',
   'create.atLimit': 'You have {max} of {max} browsers. Delete one, or ask us for more during the pilot.',
 
@@ -405,6 +411,7 @@ export const en = {
   'error.operation_in_progress': 'Another action is still running for this browser.',
   'error.invalid_state': 'That is not possible right now.',
   'error.plan_limit': 'You have reached your account’s limit.',
+  'error.plan_limit.instances': 'You have reached your browser count limit. Delete a browser before creating another.',
   'error.region_unavailable': 'New browsers are temporarily unavailable in this region.',
   'error.capacity_unavailable': 'Waiting for capacity. Try again in a few minutes.',
   'error.spend_guard_active': 'New browsers are temporarily unavailable.',
