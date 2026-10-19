@@ -80,3 +80,10 @@ it('gives the last slot to exactly one of two people creating at the same moment
   const region=(await t.call('GET','/api/v1/regions',undefined,{cookie:cookies[0]!})).body.find((r:{id:string})=>r.id==='tyo1');
   expect(region).toMatchObject({acceptingNew:false,availability:'unavailable',availabilityReason:'no_stock',inventory:{available:0}});
 });
+
+it('ends with a clean schema: the view has only the current columns and users have no running cap',()=>{
+  const {d1}=setup();
+  const columns=(d1.sqlite.prepare('PRAGMA table_info(aws_region_inventory)').all() as {name:string}[]).map((c)=>c.name);
+  expect(columns).toEqual(['region_id','checked_at','status','quota_available','availability']);
+  expect(d1.sqlite.prepare("SELECT COUNT(*) n FROM caps WHERE metric='running' AND scope LIKE 'user:%'").get()).toEqual({n:0});
+});
