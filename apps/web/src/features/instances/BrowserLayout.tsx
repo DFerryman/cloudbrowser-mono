@@ -63,7 +63,7 @@ export function BrowserLayout() {
             className={({ isActive }) =>
               cn(
                 '-mb-px border-b-2 px-1 py-3 mr-4 text-sm font-medium whitespace-nowrap transition-colors',
-                isActive ? 'border-fg font-semibold text-fg' : 'border-transparent text-muted hover:text-fg',
+                isActive ? 'border-indigo font-semibold text-fg' : 'border-transparent text-muted hover:text-fg',
               )
             }
           >

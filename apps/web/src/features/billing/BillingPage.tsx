@@ -14,11 +14,11 @@ import { DailyCharges } from './DailyCharges.js';
 import { currentMonth, monthLabel, recentMonths, useAccountUsage, useBilling, useCheckout, usePortal, useTransactions } from './hooks.js';
 
 const ITEM_COLOR: Record<UsageItem, string> = {
-  compute: 'bg-fg',
-  ip: 'bg-fg/55',
-  storage: 'bg-fg/30',
-  snapshot: 'bg-sleeping',
-  transfer: 'bg-fg/60',
+  compute: 'bg-indigo',
+  ip: 'bg-teal',
+  storage: 'bg-violet',
+  snapshot: 'bg-sky',
+  transfer: 'bg-amber',
 };
 
 /**
@@ -97,7 +97,8 @@ function BalanceCard({ state }: { state: BillingState }) {
   const topUp = (productId: string) => checkout.mutate(productId, { onError: (e) => toast(errorMessage(e), 'error') });
 
   return (
-    <Card className="flex flex-col p-5">
+    <Card id="top-up" className="relative flex scroll-mt-6 flex-col overflow-hidden p-5">
+      <span className="absolute inset-x-0 top-0 h-[3px] bg-gradient-to-r from-teal to-indigo" aria-hidden />
       <div className="flex items-start justify-between gap-3">
         <Eyebrow as="h2">{t('billing.balance')}</Eyebrow>
         {state.enabled ? (

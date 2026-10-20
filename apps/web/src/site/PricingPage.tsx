@@ -1,18 +1,21 @@
 import { REGION_AREAS, browserEstimate, type PublicPricing, type RegionId } from '@cloudbrowser/contracts';
-import { Button, Card, cn, Eyebrow, Hint, Label, Select, Skeleton } from '@cloudbrowser/ui';
-import { ArrowRight, ChevronDown, Gift } from 'lucide-react';
-import { useEffect, useId, useState } from 'react';
+import { Button, Card, cn, Eyebrow, Hint, Menu, MenuItem, MenuLabel, Skeleton } from '@cloudbrowser/ui';
+import { ArrowRight, Check, ChevronDown, ChevronsUpDown, Gift, MapPin, Minus, Plus } from 'lucide-react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { regionPlace } from '../features/instances/region-names.js';
 import type { MessageKey } from '../messages/en.js';
 import { useI18n } from '../lib/i18n.js';
 import { money } from '../lib/money.js';
+import { TONE, toneFor } from '../lib/tones.js';
 import { usePublicPricing, useSignedIn } from './hooks.js';
 import { container, PublicHero } from './PublicShell.js';
 
 type RegionPrice = PublicPricing['regions'][number];
 /** Typical live-view traffic per hour of watching, for the estimate (the docs say 0.5–1.5 GB). */
 const GB_PER_HOUR = 1;
+/** A region a visitor can price and a user can create in: open, taking new browsers, priced. */
+const supported = (r: RegionPrice) => r.available && r.acceptingNew && !!r.rates;
 
 /**
  * Prepaid pricing for visitors: what a browser costs running and asleep in each region, the unit
@@ -26,11 +29,10 @@ export function PricingPage() {
   const regions = pricing.data?.regions ?? [];
   const [regionId, setRegionId] = useState<RegionId | null>(null);
   useEffect(() => {
-    if (!regionId && regions.length) setRegionId((regions.find((r) => r.available && r.acceptingNew) ?? regions[0]!).regionId);
+    if (!regionId && regions.length) setRegionId((regions.find(supported) ?? regions[0]!).regionId);
   }, [regions, regionId]);
   const region = regions.find((r) => r.regionId === regionId);
   const m = (v: number) => money(v, locale);
-  const selectId = useId();
   // Many regions: one list grouped by continent, each option with its running price.
   const groups = [...REGION_AREAS, null].map((area) => [area, regions.filter((r) => r.area === area).sort((a, b) => regionPlace(a, locale).localeCompare(regionPlace(b, locale)))] as const).filter(([, list]) => list.length);
   const trialRegion = regions.find((r) => r.regionId === pricing.data?.trial.regionId);
@@ -46,20 +48,9 @@ export function PricingPage() {
           <Card className="p-6 text-sm text-muted">{t('pricing.unavailable')}</Card>
         ) : (
           <>
-            <div className="mb-6 max-w-md">
-              <Label htmlFor={selectId}>{t('pricing.region')}</Label>
-              <Select id={selectId} value={regionId ?? ''} onChange={(e) => setRegionId(e.target.value)}>
-                {groups.map(([area, list]) => (
-                  <optgroup key={area ?? 'other'} label={area ? t(`area.${area}` as MessageKey) : t('area.other')}>
-                    {list.map((r) => (
-                      <option key={r.regionId} value={r.regionId}>
-                        {regionPlace(r, locale)}
-                        {r.rates ? ` · ${t('price.perHour', { amount: m(browserEstimate(r.rates, { storageGb: r.defaultStorageGb, rootVolumeGb: r.rootVolumeGb, backups: false }).runningTotalHour) })}` : ''}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-              </Select>
+            <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+              <RegionMenu groups={groups} value={region} onChange={setRegionId} />
+              <p className="text-xs text-subtle">{t('pricing.regionHint')}</p>
             </div>
             {region ? <RegionCard region={region} /> : null}
           </>
@@ -67,9 +58,9 @@ export function PricingPage() {
       </section>
 
       {region?.rates && pricing.data ? (
-        <section className={`${container} grid gap-4 pb-16 lg:grid-cols-2`}>
-          <UnitRates region={region} model={pricing.data.model} />
+        <section className={`${container} grid gap-4 pb-16`}>
           <Estimator region={region} />
+          <UnitRates region={region} model={pricing.data.model} />
         </section>
       ) : null}
 
@@ -130,15 +121,16 @@ function RegionCard({ region }: { region: RegionPrice }) {
     { label: t('pricing.transfer'), hint: t('pricing.transferHint'), value: m(region.rates.transfer), unit: t('pricing.unit.gb') },
   ];
   return (
-    <Card className="overflow-hidden border-fg">
-      <div className="grid divide-y divide-border md:grid-cols-[1.4fr_1fr_1fr] md:divide-x md:divide-y-0">
-        {cells.map((c) => (
-          <div key={c.label} className="p-6 md:p-8">
-            <Eyebrow as="h2">{c.label}</Eyebrow>
-            <p className={cn('mt-4 font-semibold tracking-tight tabular-nums', c.strong ? 'text-[44px] leading-none md:text-[56px]' : 'text-[28px] leading-none')}>
-              {c.value} <span className="text-sm font-normal tracking-normal text-subtle">{c.unit}</span>
+    <Card className="relative overflow-hidden border-border-strong">
+      <span className="absolute inset-x-0 top-0 h-[3px] bg-gradient-to-r from-indigo via-violet to-teal" aria-hidden />
+      <div className="grid grid-cols-2 md:grid-cols-[1.4fr_1fr_1fr]">
+        {cells.map((c, n) => (
+          <div key={c.label} className={cn('p-4 md:border-l md:p-8 md:first:border-l-0', n === 0 ? 'col-span-2 border-b md:col-span-1 md:border-b-0' : 'border-l first-of-type:border-l-0', n === 1 && 'border-l-0')}>
+            <Eyebrow as="h2" className={cn(c.strong && 'text-indigo')}>{c.label}</Eyebrow>
+            <p className={cn('mt-3 font-semibold tracking-tight tabular-nums md:mt-4', c.strong ? 'text-[40px] leading-none md:text-[56px]' : 'text-[22px] leading-none md:text-[28px]')}>
+              {c.value} <span className="text-xs font-normal tracking-normal text-subtle md:text-sm">{c.unit}</span>
             </p>
-            <Hint className="mt-3">{c.hint}</Hint>
+            <Hint className={cn('mt-2 md:mt-3', !c.strong && 'hidden sm:block')}>{c.hint}</Hint>
           </div>
         ))}
       </div>
@@ -166,16 +158,16 @@ function UnitRates({ region, model }: { region: RegionPrice; model: PublicPricin
     [t('pricing.rate.transfer'), c?.transfer, model.transferMarkupPercent, r.transfer, t('pricing.unit.gb')],
   ];
   return (
-    <Card className="min-w-0 p-6" data-testid="pricing-model">
+    <Card className="min-w-0 p-5 md:p-6" data-testid="pricing-model">
       <h2 className="text-base font-semibold">{t('pricing.model')}</h2>
       <p className="mt-1 text-sm text-muted">{t('pricing.modelIntro')}</p>
-      <div className="mt-3 overflow-x-auto">
-        <table className="w-full min-w-[420px] text-sm">
+      <div className="mt-3">
+        <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-xs text-subtle">
               <th className="py-2 pr-3 font-medium">{t('pricing.model.item')}</th>
-              <th className="py-2 pr-3 text-right font-medium">{t('pricing.model.cost')}</th>
-              <th className="py-2 pr-3 text-right font-medium">{t('pricing.model.markup')}</th>
+              <th className="hidden py-2 pr-3 text-right font-medium sm:table-cell">{t('pricing.model.cost')}</th>
+              <th className="hidden py-2 pr-3 text-right font-medium sm:table-cell">{t('pricing.model.markup')}</th>
               <th className="py-2 text-right font-medium">{t('pricing.model.price')}</th>
             </tr>
           </thead>
@@ -183,8 +175,8 @@ function UnitRates({ region, model }: { region: RegionPrice; model: PublicPricin
             {rows.map(([label, cost, markup, price, unit]) => (
               <tr key={label}>
                 <td className="py-2.5 pr-3 text-muted">{label}</td>
-                <td className="py-2.5 pr-3 text-right tabular-nums">{cost === undefined ? '—' : m(cost)}</td>
-                <td className="py-2.5 pr-3 text-right tabular-nums">× {(markup / 100).toFixed(2)}</td>
+                <td className="hidden py-2.5 pr-3 text-right tabular-nums sm:table-cell">{cost === undefined ? '—' : m(cost)}</td>
+                <td className="hidden py-2.5 pr-3 text-right tabular-nums sm:table-cell">× {(markup / 100).toFixed(2)}</td>
                 <td className="py-2.5 text-right font-medium tabular-nums">
                   {m(price)} <span className="text-xs font-normal text-subtle">{unit}</span>
                 </td>
@@ -202,28 +194,182 @@ function UnitRates({ region, model }: { region: RegionPrice; model: PublicPricin
   );
 }
 
+/**
+ * The region list as a dropdown, grouped by continent with each running price. Regions that
+ * cannot take a browser (closed, out of stock, unpriced) are grayed out and cannot be chosen.
+ */
+function RegionMenu({ groups, value, onChange }: { groups: (readonly [string | null, RegionPrice[]])[]; value?: RegionPrice; onChange: (id: RegionId) => void }) {
+  const { t, locale } = useI18n();
+  const hourly = (r: RegionPrice) => (r.rates ? t('price.perHour', { amount: money(browserEstimate(r.rates, { storageGb: r.defaultStorageGb, rootVolumeGb: r.rootVolumeGb, backups: false }).runningTotalHour, locale) }) : null);
+  return (
+    <div className="w-full max-w-md">
+      <p className="mb-1.5 text-[13px] font-medium">{t('pricing.region')}</p>
+      <Menu
+        align="start"
+        className="w-[var(--radix-dropdown-menu-trigger-width)] max-h-[min(420px,var(--radix-dropdown-menu-content-available-height))]"
+        trigger={
+          <button type="button" className="flex h-12 w-full items-center gap-3 border border-border-strong bg-bg px-3 text-left transition-colors hover:border-fg/60 focus-visible:border-fg data-[state=open]:border-fg">
+            {value ? (
+              <>
+                <span className={cn('grid size-7 shrink-0 place-items-center font-mono text-[11px] font-semibold text-white', TONE[toneFor(value.regionId)].bg)}>{value.country}</span>
+                <span className="min-w-0 flex-1 truncate text-sm font-medium">{regionPlace(value, locale)}</span>
+                <span className="shrink-0 text-xs text-muted tabular-nums">{hourly(value)}</span>
+              </>
+            ) : (
+              <span className="flex flex-1 items-center gap-2 text-sm text-subtle"><MapPin className="size-4" /> {t('pricing.choose')}</span>
+            )}
+            <ChevronsUpDown className="size-4 shrink-0 text-subtle" aria-hidden />
+          </button>
+        }
+      >
+        {groups.map(([area, list]) => (
+          <div key={area ?? 'other'}>
+            <MenuLabel>{area ? t(`area.${area}` as MessageKey) : t('area.other')}</MenuLabel>
+            {list.map((r) => {
+              const ok = supported(r);
+              return (
+                <MenuItem key={r.regionId} disabled={!ok} onSelect={() => onChange(r.regionId)}>
+                  <span className={cn('w-7 shrink-0 font-mono text-[11px] font-medium', ok ? TONE[toneFor(r.regionId)].text : 'text-subtle')}>{r.country}</span>
+                  <span className={cn('min-w-0 flex-1 truncate', !ok && 'text-subtle')}>{regionPlace(r, locale)}</span>
+                  <span className="shrink-0 text-xs text-muted tabular-nums">{ok ? hourly(r) : t('pricing.regionUnsupported')}</span>
+                  {value?.regionId === r.regionId ? <Check className="text-indigo" aria-hidden /> : <span className="w-4" />}
+                </MenuItem>
+              );
+            })}
+          </div>
+        ))}
+      </Menu>
+    </div>
+  );
+}
+
+const PRESETS = [
+  { key: 'light', hours: 1, days: 20 },
+  { key: 'daily', hours: 3, days: 30 },
+  { key: 'work', hours: 8, days: 22 },
+  { key: 'always', hours: 24, days: 30 },
+] as const;
+
+/**
+ * What a month would cost: pick a usage pattern (or tune hours, days, browsers and how much of
+ * the time the live view is watched) and the total, its parts and the per-day figure follow.
+ */
 function Estimator({ region }: { region: RegionPrice }) {
   const { t, locale } = useI18n();
-  const id = useId();
-  const [hours, setHours] = useState(2);
+  const [hours, setHours] = useState(3);
+  const [days, setDays] = useState(30);
+  const [count, setCount] = useState(1);
+  const [watching, setWatching] = useState(50);
   const m = (v: number) => money(v, locale);
   const e = browserEstimate(region.rates!, { storageGb: region.defaultStorageGb, rootVolumeGb: region.rootVolumeGb, backups: false });
-  const running = e.runningHour * hours * 30;
-  const transfer = region.rates!.transfer * GB_PER_HOUR * hours * 30;
+  const running = e.runningHour * hours * days * count;
+  const kept = e.alwaysOnMonth * count;
+  const transfer = region.rates!.transfer * GB_PER_HOUR * (watching / 100) * hours * days * count;
+  const total = running + kept + transfer;
+  const parts = [
+    { key: 'running', label: t('pricing.part.running'), value: running, tone: 'indigo' as const },
+    { key: 'kept', label: t('pricing.part.kept'), value: kept, tone: 'violet' as const },
+    { key: 'transfer', label: t('pricing.part.transfer'), value: transfer, tone: 'teal' as const },
+  ];
+  const preset = PRESETS.find((p) => p.hours === hours && p.days === days)?.key ?? null;
+
   return (
-    <Card className="p-6">
-      <h2 className="text-base font-semibold">{t('pricing.estimate')}</h2>
-      <div className="mt-4 flex items-center justify-between gap-3">
-        <label htmlFor={id} className="text-sm text-muted">
-          {t('pricing.hoursPerDay')}
-        </label>
-        <span className="font-mono text-sm font-medium">{t('pricing.hoursValue', { n: hours })}</span>
+    <Card className="overflow-hidden border-border-strong" data-testid="pricing-estimator">
+      <div className="grid lg:grid-cols-[1.25fr_1fr]">
+        <div className="p-5 md:p-8">
+          <h2 className="text-lg font-semibold tracking-tight md:text-xl">{t('pricing.estimate')}</h2>
+          <p className="mt-1 text-sm text-muted">{t('pricing.estimateIntro')}</p>
+          <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4" role="radiogroup" aria-label={t('pricing.estimate')}>
+            {PRESETS.map((p) => (
+              <button
+                key={p.key}
+                type="button"
+                role="radio"
+                aria-checked={preset === p.key}
+                onClick={() => { setHours(p.hours); setDays(p.days); }}
+                className={cn(
+                  'border px-3 py-2.5 text-left transition-colors',
+                  preset === p.key ? 'border-indigo bg-indigo/10' : 'border-border hover:border-border-strong hover:bg-surface',
+                )}
+              >
+                <span className={cn('block text-sm font-semibold', preset === p.key && 'text-indigo')}>{t(`pricing.preset.${p.key}`)}</span>
+                <span className="block text-[11px] text-subtle tabular-nums">{t('pricing.presetHint', { hours: p.hours, days: p.days })}</span>
+              </button>
+            ))}
+          </div>
+          <div className="mt-6 space-y-5">
+            <Slider label={t('pricing.hoursPerDay')} value={hours} min={1} max={24} onChange={setHours} display={t('pricing.hoursValue', { n: hours })} />
+            <Slider label={t('pricing.daysPerMonth')} value={days} min={1} max={30} onChange={setDays} display={t('pricing.daysValue', { n: days })} />
+            <Slider label={t('pricing.watching')} value={watching} min={0} max={100} step={10} onChange={setWatching} display={t('pricing.watchingValue', { n: watching })} />
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-sm text-muted">{t('pricing.browsers')}</span>
+              <div className="flex items-center border border-border-strong">
+                <button type="button" className="grid size-9 place-items-center text-muted hover:bg-surface-2 hover:text-fg disabled:opacity-40" disabled={count <= 1} onClick={() => setCount((c) => Math.max(1, c - 1))} aria-label="−">
+                  <Minus className="size-4" />
+                </button>
+                <span className="w-10 text-center font-mono text-sm font-medium tabular-nums" aria-live="polite">{count}</span>
+                <button type="button" className="grid size-9 place-items-center text-muted hover:bg-surface-2 hover:text-fg disabled:opacity-40" disabled={count >= 20} onClick={() => setCount((c) => Math.min(20, c + 1))} aria-label="+">
+                  <Plus className="size-4" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="relative flex flex-col justify-between gap-6 overflow-hidden border-t border-border bg-surface p-5 md:p-8 lg:border-t-0 lg:border-l">
+          <div className="pointer-events-none absolute -top-24 -right-24 size-64 bg-indigo/15 blur-3xl" aria-hidden />
+          <div className="relative">
+            <Eyebrow>{t('pricing.perMonth')}</Eyebrow>
+            <p className="mt-2 text-[44px] font-semibold leading-none tracking-tight tabular-nums md:text-[56px]" aria-live="polite">{m(total)}</p>
+            <p className="mt-2 text-sm text-muted tabular-nums">
+              {t('pricing.perDay', { amount: m(days ? total / days : 0) })}
+              {count > 1 ? <> · {t('pricing.perBrowser', { amount: m(total / count) })}</> : null}
+            </p>
+          </div>
+          <div className="relative">
+            <div className="flex h-3 w-full overflow-hidden bg-surface-2" aria-hidden>
+              {parts.map((p) => (
+                <span key={p.key} className={cn('h-full transition-[width] duration-300 ease-out', TONE[p.tone].bg)} style={{ width: `${total ? (p.value / total) * 100 : 0}%` }} />
+              ))}
+            </div>
+            <dl className="mt-4 space-y-2 text-sm">
+              {parts.map((p) => (
+                <div key={p.key} className="flex items-center justify-between gap-3">
+                  <dt className="flex items-center gap-2 text-muted">
+                    <span className={cn('size-2.5', TONE[p.tone].bg)} aria-hidden /> {p.label}
+                  </dt>
+                  <dd className="font-medium tabular-nums">{m(p.value)}</dd>
+                </div>
+              ))}
+            </dl>
+            <Hint className="mt-4">{t('pricing.estimateNote')}</Hint>
+          </div>
+        </div>
       </div>
-      <input id={id} type="range" min={0} max={24} step={1} value={hours} onChange={(ev) => setHours(Number(ev.target.value))} className="mt-2 w-full accent-[var(--color-fg)]" />
-      <p className="mt-4 text-2xl font-semibold tracking-tight tabular-nums">{t('pricing.estimateTotal', { amount: m(running + e.alwaysOnMonth) })}</p>
-      <p className="mt-1 text-sm text-muted">{t('pricing.estimateBreakdown', { running: m(running), kept: m(e.alwaysOnMonth), transfer: m(transfer) })}</p>
-      <Hint className="mt-3">{t('pricing.estimateNote')}</Hint>
     </Card>
+  );
+}
+
+function Slider({ label, value, min, max, step = 1, onChange, display }: { label: string; value: number; min: number; max: number; step?: number; onChange: (v: number) => void; display: ReactNode }) {
+  const id = useId();
+  const pct = ((value - min) / (max - min)) * 100;
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-3">
+        <label htmlFor={id} className="text-sm text-muted">{label}</label>
+        <span className="font-mono text-sm font-medium tabular-nums">{display}</span>
+      </div>
+      <input
+        id={id}
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(ev) => onChange(Number(ev.target.value))}
+        className="cb-range mt-2 w-full"
+        style={{ '--cb-range': `${pct}%` } as React.CSSProperties}
+      />
+    </div>
   );
 }
 

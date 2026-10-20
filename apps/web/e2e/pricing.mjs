@@ -223,6 +223,8 @@ try {
   await create.page.getByText('2 h/day, about $25.96/month', { exact: true }).waitFor();
   // The replacement quote is shown (region row and running total), and its compute-only part in the details.
   await create.page.getByText('$0.2191/h', { exact: true }).first().waitFor();
+  // The cost is folded away until asked for; the summary line still shows the running price.
+  await create.page.getByRole('button', { name: /Show cost/ }).click();
   await create.page.getByRole('button', { name: 'Price details', exact: true }).click();
   await create.page.getByText('$0.20/h', { exact: true }).first().waitFor();
   await create.page.getByRole('button', { name: 'Create browser', exact: true }).click();
@@ -237,6 +239,7 @@ try {
   await capacity.page.getByRole('button', { name: 'Create browser', exact: true }).click();
   await rejected(capacity, '/api/v1/instances');
   assert.equal(capacity.state.requests[0].body.storageGb, 10);
+  await capacity.page.getByRole('button', { name: /Show cost/ }).click();
   await capacity.page.getByText('Dedicated IP and 116 GB of storage', { exact: true }).waitFor();
   await capacity.page.getByText('2 h/day, about $21.98/month', { exact: true }).waitFor();
   await capacity.page.getByRole('button', { name: 'Create browser', exact: true }).click();
@@ -498,6 +501,7 @@ try {
   assert.equal(await phone.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await phone.page.goto(`${origin}/browsers/new`);
   await phone.page.getByRole('dialog').waitFor();
+  await phone.page.getByRole('button', { name: /Show cost/ }).click();
   await phone.page.getByText('2 vCPU', { exact: false }).waitFor();
   const monthly = phone.page.getByText('2 h/day, about $12.98/month', { exact: true });
   await monthly.waitFor();
@@ -525,6 +529,8 @@ try {
   const comparable = await fixture({ sizeGb: 20, status: 'running' });
   await comparable.page.goto(`${origin}/browsers/new`);
   // A new browser is quoted all-in (compute, IP and the 10 GB default) in its region row and the cost summary.
+  await comparable.page.getByText('$0.1096/h running', { exact: true }).waitFor();
+  await comparable.page.getByRole('button', { name: /Show cost/ }).click();
   await comparable.page.getByText('$0.1096/h', { exact: true }).first().waitFor();
   assert.equal(await comparable.page.getByText('$0.1096/h', { exact: true }).count(), 2);
   await comparable.page.getByText('Dedicated IP and 26 GB of storage', { exact: true }).waitFor();

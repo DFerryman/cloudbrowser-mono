@@ -1,7 +1,7 @@
 import { CreateInstanceBody, DEFAULT_REGION, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
-import { Button, cn, Dialog, Hint, Input, Label } from '@cloudbrowser/ui';
+import { Button, cn, Hint, Input, Label, SidePanel } from '@cloudbrowser/ui';
 import { DocsLink } from '../../app/DocsLink.js';
-import { AlertCircle, ChevronRight, Gift, Wallet } from 'lucide-react';
+import { AlertCircle, ChevronDown, ChevronRight, Gift, Plus, Wallet } from 'lucide-react';
 import { useEffect, useId, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
@@ -36,9 +36,12 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
   const [regionId, setRegionId] = useState<Region['id']>(DEFAULT_REGION);
   const [plan, setPlan] = useState<Plan>('paid');
   const [error, setError] = useState<string | null>(null);
+  // The cost stays folded away so the panel reads cleanly; one click shows the whole estimate.
+  const [costOpen, setCostOpen] = useState(false);
 
   useEffect(() => {
     if (open) {
+      setCostOpen(false);
       setName(initialInstance?.name ?? `Browser ${(instances.data?.length ?? 0) + 1}`);
       if (initialInstance) setRegionId(initialInstance.regionId);
       setError(null);
@@ -96,10 +99,17 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
     ?? (regions.isError ? t('create.regionsFailed') : regions.data && !regionAvailable ? t(regions.data.some((r) => r.acceptingNew) ? 'create.regionUnavailable' : 'create.noInventory') : null);
 
   return (
-    <Dialog
+    <SidePanel
       open={open}
       onOpenChange={(o) => !o && onClose()}
       title={t('create.title')}
+      description={t('create.subtitle')}
+      icon={<Plus />}
+      storageKey="nevazu.create.width"
+      minWidth={460}
+      maxWidth={1040}
+      defaultWidth={640}
+      resizeLabel={t('create.resize')}
       closeLabel={t('common.cancel')}
       footer={
         <div className="space-y-3">
@@ -161,22 +171,43 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
           />
         </fieldset>
 
-        <section aria-labelledby={`${formId}-cost`} className="rounded-[var(--radius-card)] border border-border bg-surface p-4">
-          <h3 id={`${formId}-cost`} className="text-sm font-semibold">
-            {t('create.cost', { region: (() => { const r = regions.data?.find((x) => x.id === regionId); return r ? regionPlace(r, locale) : regionId; })() })}
-          </h3>
-          {!price ? (
-            <p className="mt-2 text-sm text-muted">{pricing.isError ? t('price.unavailable') : t('common.loading')}</p>
-          ) : !price.rates ? (
-            <p className="mt-2 text-sm text-muted">{t('price.unavailable')}</p>
-          ) : trial && b ? (
-            <TrialCost pricing={price} minutes={b.trial.minutes} days={b.trial.keptDays} gb={b.trial.storageGb} />
-          ) : (
-            <PaidCost pricing={price} reserve={reserve} />
-          )}
+        <section aria-labelledby={`${formId}-cost`} className="border border-border">
+          <button
+            type="button"
+            className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-surface"
+            aria-expanded={costOpen}
+            aria-controls={`${formId}-cost-body`}
+            onClick={() => setCostOpen((o) => !o)}
+          >
+            <span className="min-w-0 flex-1">
+              <span id={`${formId}-cost`} className="block truncate text-sm font-semibold">
+                {t('create.cost', { region: (() => { const r = regions.data?.find((x) => x.id === regionId); return r ? regionPlace(r, locale) : regionId; })() })}
+              </span>
+              <span className="block truncate text-xs text-muted tabular-nums">
+                {trial ? t('trial.free') : price?.rates ? t('create.cost.summary', { amount: money(browserEstimate(price.rates, { storageGb: price.defaultStorageGb, rootVolumeGb: price.rootVolumeGb, backups: false }).runningTotalHour, locale) }) : pricing.isError ? t('price.unavailable') : t('common.loading')}
+              </span>
+            </span>
+            <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-indigo">
+              {costOpen ? t('create.cost.hide') : t('create.cost.show')}
+              <ChevronDown className={cn('size-4 transition-transform duration-200', costOpen && 'rotate-180')} aria-hidden />
+            </span>
+          </button>
+          {costOpen ? (
+            <div id={`${formId}-cost-body`} className="border-t border-border bg-surface px-4 pb-4 pt-1 [animation:cb-in_150ms_var(--ease-out)]">
+              {!price ? (
+                <p className="mt-2 text-sm text-muted">{pricing.isError ? t('price.unavailable') : t('common.loading')}</p>
+              ) : !price.rates ? (
+                <p className="mt-2 text-sm text-muted">{t('price.unavailable')}</p>
+              ) : trial && b ? (
+                <TrialCost pricing={price} minutes={b.trial.minutes} days={b.trial.keptDays} gb={b.trial.storageGb} />
+              ) : (
+                <PaidCost pricing={price} reserve={reserve} />
+              )}
+            </div>
+          ) : null}
         </section>
       </form>
-    </Dialog>
+    </SidePanel>
   );
 }
 
@@ -186,11 +217,11 @@ function Choice({ name, checked, onChange, icon, title, hint }: { name: string; 
     <label
       className={cn(
         'relative flex cursor-pointer gap-3 border p-3 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent',
-        checked ? 'border-fg bg-surface' : 'border-border hover:border-border-strong',
+        checked ? 'border-indigo bg-indigo/5' : 'border-border hover:border-border-strong',
       )}
     >
       <input type="radio" name={name} className="sr-only" checked={checked} onChange={onChange} />
-      <span className={cn('mt-0.5 grid size-7 shrink-0 place-items-center', checked ? 'bg-fg text-bg' : 'bg-surface-2 text-muted')} aria-hidden>
+      <span className={cn('mt-0.5 grid size-7 shrink-0 place-items-center', checked ? 'bg-indigo text-white' : 'bg-surface-2 text-muted')} aria-hidden>
         {icon}
       </span>
       <span className="min-w-0">
@@ -265,7 +296,7 @@ function CreateSummary({ pricing, trial, needsCredit, needed }: { pricing?: Regi
   return (
     <div className="min-w-0 space-y-1">
       <p className="text-sm font-medium tabular-nums">{estimate ? t('create.footer.monthly', { amount: money(estimate.runningHour * 2 * 30 + estimate.alwaysOnMonth, locale) }) : t('price.unavailable')}</p>
-      {estimate ? <p className="text-xs text-muted">{t('create.footer.monthlyHint')}</p> : null}
+      {estimate ? <p className="hidden text-xs text-muted sm:block">{t('create.footer.monthlyHint')}</p> : null}
       {needsCredit && !b.frozen ? <p className="text-xs">
         <span className="text-error">{t('create.footer.need', { amount: money(needed, locale) })}</span>{' '}
         <Link to="/billing" className="font-medium whitespace-nowrap text-accent hover:underline">

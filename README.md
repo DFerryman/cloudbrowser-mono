@@ -48,15 +48,13 @@ Requirements: Node 22.13+ and pnpm 10.
 pnpm install
 cp apps/api/.dev.vars.example apps/api/.dev.vars          # set BETTER_AUTH_SECRET; APP_URL is localhost
 pnpm db:migrate:local
-pnpm --filter @cloudbrowser/api exec wrangler d1 execute cloudbrowser --local \
-  --persist-to ../../.wrangler/state --command "INSERT INTO invites (email) VALUES ('you@example.com')"
 
 pnpm --filter @cloudbrowser/web build                     # the api Worker serves apps/web/dist
 cd apps/api && pnpm exec wrangler dev -c wrangler.jsonc -c ../engine/wrangler.jsonc \
   --persist-to ../../.wrangler/state
 ```
 
-Open http://localhost:8787 for the public site, or http://localhost:8787/sign-in to sign in with the invited email. `wrangler dev` simulates Email
+Open http://localhost:8787 for the public site, or http://localhost:8787/sign-in to sign in with any email (sign-up is open unless the operator turns on the `invite_only` switch). `wrangler dev` simulates Email
 Service sends (the message is printed in the log) and, with `ENVIRONMENT=development`, the 6-digit
 code is also logged. Queues, the Durable Object and the rate limiters all run locally. For frontend work with hot reload,
 also run `pnpm --filter @cloudbrowser/web dev` (Vite on :5173 proxies `/api` to :8787).
@@ -70,7 +68,7 @@ Billing: browsers draw per minute from a prepaid balance, at the AWS list price 
 simulator's price sheet is used. Paid browsers also reserve seven days of fixed IP/disk costs;
 the reserve remains unspent balance, and only available credit can fund use. At exhaustion,
 access stops immediately and the reserve funds seven days of retention before permanent deletion.
-The one ten-minute trial is exempt. Missing Creem settings disable top-ups, not prepaid checks.
+The one free trial (30 minutes by default; operator setting `trial_minutes`) is exempt. Missing Creem settings disable top-ups, not prepaid checks.
 An explicit `billing_required=false` is only a local test/pilot override. To try Creem test mode locally, put
 `CREEM_API_BASE=https://test-api.creem.io`, `CREEM_API_KEY`, `CREEM_WEBHOOK_SECRET` and
 `CREEM_TOPUP_PRODUCTS` (one-time product ids, comma-separated) in `apps/api/.dev.vars`, and expose

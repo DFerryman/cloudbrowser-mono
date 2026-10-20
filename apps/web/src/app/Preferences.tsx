@@ -1,19 +1,38 @@
 import { cn, Menu, MenuItem } from '@cloudbrowser/ui';
-import { Check, Globe, Monitor, Moon, Sun } from 'lucide-react';
+import { Check, Languages, Monitor, Moon, Sun } from 'lucide-react';
 import { useI18n } from '../lib/i18n.js';
 import { useTheme, type Theme } from '../lib/theme.js';
 
 const THEME_ICON = { system: Monitor, light: Sun, dark: Moon } as const;
 const iconButton =
-  'inline-flex h-8 items-center gap-1.5 px-2 text-[13px] font-medium text-muted transition-colors hover:bg-surface-2 hover:text-fg [&_svg]:size-4';
+  'inline-flex h-8 min-w-8 items-center justify-center gap-1.5 px-2 text-[13px] font-medium text-muted transition-colors hover:bg-surface-2 hover:text-fg [&_svg]:size-4';
 
-/** Language switch: one click toggles between the two supported languages. */
-export function LanguageButton({ className }: { className?: string }) {
+const LANGUAGES = [
+  { locale: 'en', label: 'English', short: 'EN' },
+  { locale: 'zh-CN', label: '简体中文', short: '中' },
+] as const;
+
+/** Language switch for the public pages: an icon that opens the list of languages. */
+export function LanguageButton({ className, align = 'end' }: { className?: string; align?: 'start' | 'end' }) {
   const { locale, setLocale, t } = useI18n();
   return (
-    <button type="button" className={cn(iconButton, className)} onClick={() => setLocale(locale === 'en' ? 'zh-CN' : 'en')} aria-label={t('nav.language')}>
-      <Globe aria-hidden /> <span>{locale === 'en' ? '中文' : 'EN'}</span>
-    </button>
+    <Menu
+      align={align}
+      className="min-w-40"
+      trigger={
+        <button type="button" className={cn(iconButton, className)} aria-label={t('nav.language')} title={t('nav.language')}>
+          <Languages aria-hidden />
+        </button>
+      }
+    >
+      {LANGUAGES.map((l) => (
+        <MenuItem key={l.locale} onSelect={() => setLocale(l.locale)}>
+          <span className="w-6 font-mono text-[11px] text-subtle" aria-hidden>{l.short}</span>
+          <span className="flex-1" lang={l.locale}>{l.label}</span>
+          {locale === l.locale ? <Check className="text-indigo" aria-hidden /> : null}
+        </MenuItem>
+      ))}
+    </Menu>
   );
 }
 

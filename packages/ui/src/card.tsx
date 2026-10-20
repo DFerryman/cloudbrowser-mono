@@ -29,7 +29,7 @@ export function Eyebrow({ className, as: Tag = 'p', ...props }: HTMLAttributes<H
 /** Every app page opens the same way: eyebrow, title, one line of context, and its actions. */
 export function PageHeader({ eyebrow, title, description, actions, className }: { eyebrow?: ReactNode; title: ReactNode; description?: ReactNode; actions?: ReactNode; className?: string }) {
   return (
-    <header className={cn('mb-8 flex flex-wrap items-end justify-between gap-x-6 gap-y-4 border-b border-border pb-6', className)}>
+    <header className={cn('mb-5 flex flex-wrap items-end justify-between gap-x-6 gap-y-3 border-b border-border pb-4 md:mb-8 md:pb-6', className)}>
       <div className="min-w-0">
         {eyebrow ? <Eyebrow className="mb-2">{eyebrow}</Eyebrow> : null}
         <h1 className="text-2xl font-semibold tracking-tight md:text-[32px] md:leading-tight">{title}</h1>

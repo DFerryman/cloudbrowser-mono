@@ -25,11 +25,11 @@ export function PublicShell() {
     { to: '/status', label: t('nav.status') },
   ];
   const linkClass = ({ isActive }: { isActive: boolean }) =>
-    cn('flex h-16 items-center border-b-2 px-3 text-[13px] font-medium transition-colors', isActive ? 'border-fg text-fg' : 'border-transparent text-muted hover:text-fg');
+    cn('flex h-16 items-center border-b-2 px-3 text-[13px] font-medium transition-colors', isActive ? 'border-indigo text-fg' : 'border-transparent text-muted hover:text-fg');
 
   return (
     <div className="flex min-h-dvh flex-col">
-      <header className="sticky top-0 z-30 border-b border-border bg-bg/90 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-border bg-bg/75 backdrop-blur-xl backdrop-saturate-150">
         <div className="mx-auto flex h-16 w-full max-w-[1200px] items-center gap-2 px-4 md:px-8">
           <Link to="/" aria-label={t('nav.home')} className="mr-4">
             <Logo />
@@ -42,7 +42,7 @@ export function PublicShell() {
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-1">
-            <LanguageButton className="hidden sm:inline-flex" />
+            <LanguageButton />
             <ThemeButton />
             {signedIn ? (
               <Button variant="primary" size="sm" onClick={() => navigate('/browsers')}>
@@ -112,7 +112,10 @@ function Footer() {
       <div className="border-t border-border">
         <div className="mx-auto flex w-full max-w-[1200px] flex-wrap items-center justify-between gap-2 px-4 py-5 md:px-8">
           <p className="text-xs text-subtle">{t('footer.rights', { year: new Date().getFullYear() })}</p>
-          <LanguageButton />
+          <span className="flex items-center gap-1">
+            <LanguageButton />
+            <ThemeButton />
+          </span>
         </div>
       </div>
     </footer>
