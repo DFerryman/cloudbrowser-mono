@@ -196,6 +196,12 @@ workflow.
 - `ghcr.io/dferryman/cloudbrowser-agent:main`: the agent and the VM's systemd units, scripts and
   firewall rules
 
+A VM takes both images at its first boot only; waking it does not pull them again. A new build
+therefore reaches new browsers, and an existing browser only when it gets a new VM: operator
+console → the browser → **Recover** (same IP and data; put it to sleep first, so Chrome closes
+cleanly instead of with the VM). Its agent version
+is in D1 (`instance_health.agent_version`, reported at each `ready`).
+
 **(you)** New packages are private, and VMs pull without a password. Make both public once: GitHub
 → your profile → **Packages** → `cloudbrowser-browser` → Package settings → Danger Zone → **Change
 visibility → Public**. Then the same for `cloudbrowser-agent`. They contain no secrets.

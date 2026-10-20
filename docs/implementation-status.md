@@ -130,7 +130,7 @@ Cloudflare deployment.
   heartbeat as a backstop).
 - **Agent** (`services/agent`, Go): outbound tunnel with reconnect and backoff, credential stored
   0600, `ready`/heartbeat/IP-check events, commands (`prepare_shutdown` with the profile archive,
-  `restore_archive`, `ip_check`, `restart_chrome`, `set_firewall`), IP check from a throwaway Chrome browser context over CDP,
+  `restore_archive`, `ip_check`, `restart_chrome`, `set_firewall`), IP check from a hidden page in a throwaway Chrome browser context over CDP (never a visible window),
   fail-closed nftables switch, neko relay, CDP `Input.insertText` for IME. Tested against a fake
   gateway and against a real headless Chromium.
 - **Engine ↔ agent**: `issue_bootstrap` stores only the token's hash; `await_agent` needs a `ready`

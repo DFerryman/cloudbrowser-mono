@@ -26,8 +26,9 @@ import (
 // Version is reported in `ready`. 0.2.1 also reports failed viewer input relays; 0.2.2 runs IP
 // checks in a hidden page instead of a window that flashed onto the user's screen, and finishes
 // commands and delivers their replies across a gateway reconnect, and reports its final data-out
-// count in the shutdown reply.
-const Version = "0.2.2"
+// count in the shutdown reply. 0.2.3 waits for Chrome to take the hidden page instead of opening a
+// visible one when Chrome has no window yet (the check at every wake).
+const Version = "0.2.3"
 
 // Browser is Chrome as the agent controls it through CDP.
 type Browser interface {

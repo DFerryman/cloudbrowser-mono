@@ -2,14 +2,20 @@ package chrome
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // Runs against a real Chrome when CHROME_BIN is set, e.g.
@@ -60,5 +66,121 @@ func TestChromeAgainstRealBrowser(t *testing.T) {
 	case <-done:
 	case <-time.After(20 * time.Second):
 		t.Fatal("chrome did not exit after Browser.close")
+	}
+}
+
+// fakeDevTools answers an IP check's DevTools calls the way Chrome 155 does: hidden pages are
+// refused until Chrome has a page of its own. It counts the pages asked for without hidden.
+type fakeDevTools struct {
+	mu      sync.Mutex
+	hasPage bool
+	refused int
+	visible int
+}
+
+func (f *fakeDevTools) counts() (refused, visible int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.refused, f.visible
+}
+
+func (f *fakeDevTools) openWindow() {
+	f.mu.Lock()
+	f.hasPage = true
+	f.mu.Unlock()
+}
+
+func newFakeDevTools(t *testing.T, ip string) (*fakeDevTools, string) {
+	f := &fakeDevTools{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/json/version" {
+			fmt.Fprintf(w, `{"webSocketDebuggerUrl":"ws://%s/devtools/browser/fake"}`, r.Host)
+			return
+		}
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		for {
+			_, data, err := conn.Read(r.Context())
+			if err != nil {
+				return
+			}
+			var req struct {
+				ID     int64          `json:"id"`
+				Method string         `json:"method"`
+				Params map[string]any `json:"params"`
+			}
+			_ = json.Unmarshal(data, &req)
+			resp := map[string]any{"id": req.ID, "result": map[string]any{}}
+			switch req.Method {
+			case "Target.createBrowserContext":
+				resp["result"] = map[string]any{"browserContextId": "context"}
+			case "Target.createTarget":
+				f.mu.Lock()
+				switch {
+				case req.Params["hidden"] != true:
+					f.visible++
+					resp["result"] = map[string]any{"targetId": "visible"}
+				case !f.hasPage:
+					f.refused++
+					delete(resp, "result")
+					resp["error"] = map[string]any{"code": -32000, "message": "Hidden target can be created only when remote debugging is enabled"}
+				default:
+					resp["result"] = map[string]any{"targetId": "hidden"}
+				}
+				f.mu.Unlock()
+			case "Target.attachToTarget":
+				resp["result"] = map[string]any{"sessionId": "session"}
+			case "Runtime.evaluate":
+				resp["result"] = map[string]any{"result": map[string]any{"type": "string", "value": ip}}
+			}
+			b, _ := json.Marshal(resp)
+			if err := conn.Write(r.Context(), websocket.MessageText, b); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return f, srv.URL
+}
+
+// At wake the IP check runs before Chrome has restored its first window. It waits for Chrome to
+// take the hidden page and never asks for a visible one, which in a new browser context is a
+// window of its own that flashed onto the user's screen.
+func TestIPCheckWaitsForChromeWindow(t *testing.T) {
+	f, endpoint := newFakeDevTools(t, "203.0.113.7")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() {
+		for ctx.Err() == nil {
+			if refused, _ := f.counts(); refused >= 3 {
+				f.openWindow()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	ips, err := New(endpoint).ObservedIPs(ctx, []string{"https://a.example/ip", "https://b.example/ip"})
+	if err != nil || len(ips) != 2 || ips[0] != "203.0.113.7" || ips[1] != "203.0.113.7" {
+		t.Fatalf("observed %v %v", ips, err)
+	}
+	if refused, visible := f.counts(); refused < 3 || visible != 0 {
+		t.Fatalf("refused %d hidden pages, asked for %d visible ones", refused, visible)
+	}
+}
+
+// A Chrome that never opens a window fails the check with its reason, still without a visible page.
+func TestIPCheckWithoutChromeWindow(t *testing.T) {
+	f, endpoint := newFakeDevTools(t, "203.0.113.7")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := New(endpoint).ObservedIPs(ctx, []string{"https://a.example/ip"})
+	if err == nil || !strings.Contains(err.Error(), "Hidden target can be created only") {
+		t.Fatalf("err %v", err)
+	}
+	if _, visible := f.counts(); visible != 0 {
+		t.Fatalf("asked for %d visible pages", visible)
 	}
 }

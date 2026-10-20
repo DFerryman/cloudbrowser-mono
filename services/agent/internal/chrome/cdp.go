@@ -169,22 +169,39 @@ func (c *Chrome) Close(ctx context.Context) error {
 	return err
 }
 
-// createHiddenPage opens about:blank in the browser context without showing it. A page in a new
-// browser context otherwise gets a window of its own, which flashed onto the user's screen at
-// every IP check. Hidden targets are never shown; a Chrome that refuses one gets the old,
-// visible page rather than no check.
+// hiddenPageRetry is how often a refused hidden page is asked for again.
+const hiddenPageRetry = 250 * time.Millisecond
+
+// createHiddenPage opens about:blank in the browser context without showing it. A visible page in
+// a new browser context gets a window of its own, which flashes onto the user's screen, so there
+// is no visible fallback. Chrome refuses hidden targets while it has no page of its own ("Hidden
+// target can be created only when remote debugging is enabled"): at wake the agent checks as soon
+// as DevTools answers, often before Chrome has restored its first window, and after a restart
+// Chrome is briefly without one. The request is repeated until Chrome takes it or the check's
+// time is up.
 func (c *Chrome) createHiddenPage(ctx context.Context, browserContextID string) (string, error) {
-	var t struct {
-		TargetID string `json:"targetId"`
-	}
 	params := map[string]any{"url": "about:blank", "browserContextId": browserContextID, "background": true, "focus": false, "hidden": true}
-	err := c.CDP.Call(ctx, "", "Target.createTarget", params, &t)
-	if err != nil && ctx.Err() == nil {
-		delete(params, "hidden")
-		delete(params, "focus")
-		err = c.CDP.Call(ctx, "", "Target.createTarget", params, &t)
+	var refused error
+	for {
+		var t struct {
+			TargetID string `json:"targetId"`
+		}
+		err := c.CDP.Call(ctx, "", "Target.createTarget", params, &t)
+		if err == nil {
+			return t.TargetID, nil
+		}
+		if ctx.Err() == nil {
+			refused = err // Chrome's reason says more than the deadline that follows it
+		}
+		select {
+		case <-ctx.Done():
+			if refused != nil {
+				return "", refused
+			}
+			return "", ctx.Err()
+		case <-time.After(hiddenPageRetry):
+		}
 	}
-	return t.TargetID, err
 }
 
 // ObservedIPs loads each echo URL in a throwaway browser context, so the request takes Chrome's
