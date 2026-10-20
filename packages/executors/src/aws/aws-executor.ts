@@ -831,24 +831,32 @@ export class AwsExecutor implements Executor {
         out.push({ providerId: id, kind, region, zone, state, tags: tagsOf(node), ...(Number.isInteger(sizeGb) && sizeGb > 0 ? { sizeGb } : {}) });
       }
     };
-    for (const r of await this.readAll(ctx, region, 'DescribeInstances', 'reservationSet', f)) {
+    // The five listings are independent: read them together rather than one after another.
+    const [reservations, volumes, interfaces, addresses, snapshots] = await Promise.all([
+      this.readAll(ctx, region, 'DescribeInstances', 'reservationSet', f),
+      this.readAll(ctx, region, 'DescribeVolumes', 'volumeSet', f),
+      this.readAll(ctx, region, 'DescribeNetworkInterfaces', 'networkInterfaceSet', f),
+      this.readAll(ctx, region, 'DescribeAddresses', 'addressesSet', f),
+      this.readAll(ctx, region, 'DescribeSnapshots', 'snapshotSet', { 'Owner.1': 'self', ...f }),
+    ]);
+    for (const r of reservations) {
       for (const i of items(r, 'instancesSet')) {
         const state = text(i, 'instanceState', 'name') ?? '';
         if (state !== 'terminated') add('vm', text(i, 'instanceId'), i, state, text(i, 'placement', 'availabilityZone') ?? null);
       }
     }
-    for (const v of await this.readAll(ctx, region, 'DescribeVolumes', 'volumeSet', f)) {
+    for (const v of volumes) {
       // Include root disks: termination requests and DeleteOnTermination are asynchronous, so a
       // remaining root disk must still block confirmation that the browser's data is gone.
       add('volume', text(v, 'volumeId'), v, text(v, 'status') ?? '', text(v, 'availabilityZone') ?? null);
     }
-    for (const n of await this.readAll(ctx, region, 'DescribeNetworkInterfaces', 'networkInterfaceSet', f)) {
+    for (const n of interfaces) {
       add('network_interface', text(n, 'networkInterfaceId'), n, text(n, 'status') ?? '', text(n, 'availabilityZone') ?? null);
     }
-    for (const a of await this.readAll(ctx, region, 'DescribeAddresses', 'addressesSet', f)) {
+    for (const a of addresses) {
       add('ip', text(a, 'allocationId'), a, text(a, 'associationId') ? 'associated' : 'allocated', null);
     }
-    for (const s of await this.readAll(ctx, region, 'DescribeSnapshots', 'snapshotSet', { 'Owner.1': 'self', ...f })) {
+    for (const s of snapshots) {
       add('snapshot', text(s, 'snapshotId'), s, text(s, 'status') ?? '', null);
     }
     return out;

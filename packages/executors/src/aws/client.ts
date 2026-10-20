@@ -69,6 +69,11 @@ export function classify(code: string, status: number): ErrorClass {
   return 'invalid';
 }
 
+/** Pauses before a read-only call is sent again after a transient failure. */
+const READ_RETRY_MS = [250, 1_000];
+/** One read-only request; Describe calls answer in well under a second when AWS is healthy. */
+const READ_TIMEOUT_MS = 12_000;
+
 /** An EC2 error with its provider code, e.g. `InvalidVolume.NotFound`. */
 export class Ec2Error extends ExecutorError {
   constructor(
@@ -145,6 +150,21 @@ export class Ec2Client {
    * have happened is `unknown_outcome` (look up before retrying); a read is just `retryable`.
    */
   async call(region: string, action: string, params: Params, deadline: number, mutating: boolean, assertActive?: () => Promise<void>): Promise<XmlNode> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.callOnce(region, action, params, deadline, mutating, assertActive);
+      } catch (e) {
+        // A read changes nothing at AWS, so a transient failure (a timeout, a 5xx such as
+        // Cloudflare's 520 on the way to AWS, throttling) is retried while the deadline allows.
+        // One slow Describe used to fail the whole reconcile run. Writes are left to the journal.
+        const wait = READ_RETRY_MS[attempt];
+        if (mutating || wait === undefined || !(e instanceof ExecutorError) || e.errorClass !== 'retryable' || deadline - Date.now() < wait + 2_000) throw e;
+        await new Promise((resolve) => setTimeout(resolve, wait));
+      }
+    }
+  }
+
+  private async callOnce(region: string, action: string, params: Params, deadline: number, mutating: boolean, assertActive?: () => Promise<void>): Promise<XmlNode> {
     try {
       return await this.send(region, action, params, deadline, mutating, assertActive);
     } catch (e) {
@@ -179,7 +199,8 @@ export class Ec2Client {
     if (requestRemaining <= 0) throw new ExecutorError(mutating ? 'unknown_outcome' : 'retryable', `${action}: deadline passed`);
     let res: Response;
     try {
-      res = await (this.opts.fetch ?? fetch)(req, { signal: AbortSignal.timeout(Math.min(requestRemaining, 30_000)) });
+      // A read that hangs gives up sooner, leaving time to retry it within the same deadline.
+      res = await (this.opts.fetch ?? fetch)(req, { signal: AbortSignal.timeout(Math.min(requestRemaining, mutating ? 30_000 : READ_TIMEOUT_MS)) });
     } catch (e) {
       throw new ExecutorError(mutating ? 'unknown_outcome' : 'retryable', `${action}: ${(e as Error).message}`);
     }
