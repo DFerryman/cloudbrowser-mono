@@ -2,14 +2,14 @@ import type { HTMLAttributes, ReactNode } from 'react';
 import { cn } from './cn.js';
 
 export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('border border-border bg-bg', className)} {...props} />;
+  return <div className={cn('border border-border/70 bg-bg', className)} {...props} />;
 }
 
 /** A titled block of a page: the title and its action sit above a hairline, the content below. */
 export function Section({ title, description, action, children, className }: { title: string; description?: string; action?: ReactNode; children: ReactNode; className?: string }) {
   return (
     <Card className={cn('p-0', className)}>
-      <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+      <div className="flex items-start justify-between gap-3 px-5 pt-4 pb-1">
         <div className="min-w-0">
           <h2 className="text-[15px] font-semibold">{title}</h2>
           {description ? <p className="mt-1 max-w-prose text-xs leading-relaxed text-subtle">{description}</p> : null}
@@ -29,7 +29,7 @@ export function Eyebrow({ className, as: Tag = 'p', ...props }: HTMLAttributes<H
 /** Every app page opens the same way: eyebrow, title, one line of context, and its actions. */
 export function PageHeader({ eyebrow, title, description, actions, className }: { eyebrow?: ReactNode; title: ReactNode; description?: ReactNode; actions?: ReactNode; className?: string }) {
   return (
-    <header className={cn('mb-5 flex flex-wrap items-end justify-between gap-x-6 gap-y-3 border-b border-border pb-4 md:mb-8 md:pb-6', className)}>
+    <header className={cn('mb-5 flex flex-wrap items-end justify-between gap-x-6 gap-y-3 md:mb-7', className)}>
       <div className="min-w-0">
         {eyebrow ? <Eyebrow className="mb-2">{eyebrow}</Eyebrow> : null}
         <h1 className="text-2xl font-semibold tracking-tight md:text-[32px] md:leading-tight">{title}</h1>

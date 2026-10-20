@@ -11,7 +11,7 @@ import { TONE, type Tone } from '../../lib/tones.js';
 import type { MessageKey } from '../../messages/en.js';
 import { fundedHours, isLowBalance, runwayLabel } from '../billing/access.js';
 import { useBilling } from '../billing/hooks.js';
-import { BrowserCard, BrowserRow } from './BrowserCard.js';
+import { BrowserCard, BrowserRow, ROW_COLUMNS } from './BrowserCard.js';
 import { CreateDialog } from './CreateDialog.js';
 import { useInstances, useMe, useRegions } from './hooks.js';
 import { regionSearchText } from './region-names.js';
@@ -145,7 +145,7 @@ export function BrowsersPage() {
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={t('browsers.search')}
                 aria-label={t('browsers.search')}
-                className="h-9 w-full border border-border bg-bg pr-8 pl-9 text-sm outline-none transition-colors placeholder:text-subtle hover:border-border-strong focus-visible:border-indigo"
+                className="h-9 w-full bg-surface pr-8 pl-9 text-sm outline-none ring-indigo/60 transition-[background-color,box-shadow] placeholder:text-subtle hover:bg-surface-2 focus-visible:bg-bg focus-visible:ring-2"
               />
               {query ? (
                 <button type="button" className="absolute top-1/2 right-2 grid size-6 -translate-y-1/2 place-items-center text-subtle hover:text-fg" onClick={() => setQuery('')} aria-label={t('browsers.clearFilters')}>
@@ -154,7 +154,7 @@ export function BrowsersPage() {
               ) : null}
             </div>
             <div className="flex items-center gap-2">
-              <div className="flex min-w-0 flex-1 border border-border" role="tablist" aria-label={t('browsers.title')}>
+              <div className="flex min-w-0 flex-1 gap-0.5 bg-surface p-0.5" role="tablist" aria-label={t('browsers.title')}>
                 {(['all', 'running', 'sleeping', 'attention'] as const).map((f) => (
                   <button
                     key={f}
@@ -163,19 +163,19 @@ export function BrowsersPage() {
                     aria-selected={filter === f}
                     onClick={() => setFilter(f)}
                     className={cn(
-                      'flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 px-2.5 text-[13px] font-medium whitespace-nowrap transition-colors sm:flex-none',
-                      filter === f ? 'bg-fg text-bg' : 'text-muted hover:bg-surface hover:text-fg',
+                      'flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 px-2.5 text-[13px] font-medium whitespace-nowrap transition-colors sm:flex-none',
+                      filter === f ? 'bg-bg text-fg shadow-[0_1px_3px_rgb(0_0_0/0.12)]' : 'text-muted hover:text-fg',
                       f === 'attention' && counts.attention > 0 && filter !== f && 'text-error',
                     )}
                   >
                     <span className="truncate">{t(`browsers.filter.${f}` as MessageKey)}</span>
-                    <span className={cn('font-mono text-[11px] tabular-nums', filter === f ? 'text-bg/70' : 'text-subtle')}>{counts[f]}</span>
+                    <span className={cn('font-mono text-[11px] tabular-nums', filter === f ? 'text-indigo' : 'text-subtle')}>{counts[f]}</span>
                   </button>
                 ))}
               </div>
               <Menu
                 trigger={
-                  <Button size="icon" variant="ghost" className="size-9 border border-border" aria-label={t('browsers.sort')} title={t('browsers.sort')}>
+                  <Button size="icon" variant="ghost" className="size-9 bg-surface hover:bg-surface-2" aria-label={t('browsers.sort')} title={t('browsers.sort')}>
                     <ArrowDownUp />
                   </Button>
                 }
@@ -187,9 +187,9 @@ export function BrowsersPage() {
                   </MenuItem>
                 ))}
               </Menu>
-              <div className="hidden border border-border sm:flex" role="radiogroup" aria-label={t('browsers.view.grid')}>
+              <div className="hidden gap-0.5 bg-surface p-0.5 sm:flex" role="radiogroup" aria-label={t('browsers.view.grid')}>
                 {([['grid', LayoutGrid], ['list', List]] as const).map(([v, Icon]) => (
-                  <button key={v} type="button" role="radio" aria-checked={view === v} onClick={() => setView(v)} title={t(`browsers.view.${v}`)} aria-label={t(`browsers.view.${v}`)} className={cn('grid size-9 place-items-center transition-colors [&_svg]:size-4', view === v ? 'bg-surface-2 text-fg' : 'text-subtle hover:text-fg')}>
+                  <button key={v} type="button" role="radio" aria-checked={view === v} onClick={() => setView(v)} title={t(`browsers.view.${v}`)} aria-label={t(`browsers.view.${v}`)} className={cn('grid size-8 place-items-center transition-colors [&_svg]:size-4', view === v ? 'bg-bg text-fg shadow-[0_1px_3px_rgb(0_0_0/0.12)]' : 'text-subtle hover:text-fg')}>
                     <Icon />
                   </button>
                 ))}
@@ -209,17 +209,17 @@ export function BrowsersPage() {
               ))}
             </div>
           ) : (
-            <Card className="divide-y divide-border">
-              <div className="hidden grid-cols-[minmax(0,1.3fr)_minmax(0,1.4fr)_minmax(0,0.8fr)_auto] gap-4 bg-surface px-4 py-2 text-[11px] font-semibold tracking-[0.12em] text-subtle uppercase lg:grid">
-                <span>{t('browsers.col.name')}</span>
+            <div className="divide-y divide-border/70">
+              <div className={cn('hidden gap-4 bg-surface px-4 py-2.5 text-[11px] font-semibold tracking-[0.12em] text-subtle uppercase lg:grid', ROW_COLUMNS)}>
+                <span className="pl-11">{t('browsers.col.name')}</span>
                 <span>{t('browsers.col.where')}</span>
                 <span>{t('browsers.col.used')}</span>
-                <span className="w-40" />
+                <span />
               </div>
               {paged.rows.map((i) => (
                 <BrowserRow key={i.id} instance={i} />
               ))}
-            </Card>
+            </div>
           )}
           <Pagination className="mt-4" page={paged.page} pages={paged.pages} onPage={paged.setPage} labels={pagerLabels} />
         </>
@@ -243,7 +243,6 @@ function StatTile({ tone, icon: Icon, label, value, note, onClick, to, active, w
 }) {
   const body: ReactNode = (
     <>
-      <span className={cn('absolute inset-x-0 top-0 h-0.5', TONE[tone].bg, !active && 'opacity-70')} aria-hidden />
       <span className="flex items-center gap-2">
         <span className={cn('hidden size-7 shrink-0 place-items-center sm:grid', active ? cn(TONE[tone].bg, 'text-white') : cn(TONE[tone].soft, TONE[tone].text))} aria-hidden>
           <Icon className="size-4" />
@@ -255,8 +254,8 @@ function StatTile({ tone, icon: Icon, label, value, note, onClick, to, active, w
     </>
   );
   const cls = cn(
-    'relative flex min-w-0 flex-col overflow-hidden border bg-bg p-3 text-left transition-[border-color,background-color] sm:p-4',
-    active ? cn(TONE[tone].border, TONE[tone].soft) : 'border-border hover:border-border-strong',
+    'relative flex min-w-0 flex-col overflow-hidden p-3 text-left transition-[background-color,box-shadow] sm:p-4',
+    active ? cn(TONE[tone].soft, 'ring-1 ring-inset', TONE[tone].ring) : 'bg-surface hover:bg-surface-2',
     className,
   );
   if (to) return <Link to={to} className={cls}>{body}</Link>;

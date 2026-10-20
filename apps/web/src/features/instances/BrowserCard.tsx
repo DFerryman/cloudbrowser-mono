@@ -78,18 +78,19 @@ function useBrowserActions(i: Instance) {
     );
   };
 
+  // Fixed slots, so the buttons line up from row to row whichever of them a browser offers.
   const quick = (
     <>
       {status === 'running' ? (
         <Button size="icon" variant="ghost" aria-label={t('browsers.sleepNow')} title={t('browsers.sleepNow')} disabled={stopping} onClick={() => void run(lifecycle.mutateAsync({ id: i.id, action: 'stop' }))}>
           <Moon />
         </Button>
-      ) : null}
+      ) : <span className="size-8 shrink-0" aria-hidden />}
       {!deleted && !failed ? (
         <Button size="icon" variant="ghost" aria-label={t('browsers.settings')} title={t('browsers.settings')} onClick={() => navigate(`/browsers/${i.id}/settings`)}>
           <Settings />
         </Button>
-      ) : null}
+      ) : <span className="size-8 shrink-0" aria-hidden />}
     </>
   );
 
@@ -206,7 +207,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
   const tone = TONE[toneFor(i.regionId)];
 
   return (
-    <Card className="group relative flex flex-col overflow-hidden p-5 transition-[border-color,box-shadow] duration-200 hover:border-border-strong hover:shadow-[0_18px_40px_-28px_rgb(0_0_0/0.35)]">
+    <Card className="group relative flex flex-col overflow-hidden border-border/70 p-5 transition-[border-color,box-shadow] duration-200 hover:border-border-strong hover:shadow-[0_18px_40px_-28px_rgb(0_0_0/0.35)]">
       <span className={cn('absolute inset-x-0 top-0 h-[3px]', a.status === 'running' ? 'bg-running' : tone.bg, a.status !== 'running' && 'opacity-60')} aria-hidden />
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 flex-1 items-center gap-3">
@@ -221,13 +222,12 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
         <StatusBadge pill className="mt-0.5 shrink-0" tone={STATUS_TONE[a.status]} label={t(statusKey(a.status))} />
       </div>
       <TrialBadge className="mt-2" trial={i.trial} />
-      <div className="mt-4 border border-border bg-surface px-3 py-2.5">
+      <div className="mt-4 bg-surface px-3 py-2.5">
         <RegionIpChip
           className="text-[14px]"
           country={region.country}
           city={region.city}
           ip={i.ipAddress}
-          dedicatedLabel={t('browsers.dedicated')}
           copyLabel={t('browsers.copyIp')}
           pendingLabel={t('browsers.reservingIp')}
         />
@@ -245,7 +245,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
       ) : null}
 
       <div className="min-h-4 flex-1" />
-      <div className="-mx-5 -mb-5 flex items-center gap-1 border-t border-border bg-surface/60 px-4 py-3">
+      <div className="mt-4 flex items-center gap-1">
         {a.primary('flex-1 justify-center')}
         {a.quick}
         {a.menu(() => setEditing(true))}
@@ -253,6 +253,9 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
     </Card>
   );
 }
+
+/** The list's columns, shared by its header and every row so they line up. */
+export const ROW_COLUMNS = 'lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1.5fr)_minmax(0,1fr)_248px]';
 
 /** One browser as a dense row: for many browsers, and for phones where cards would mean scrolling. */
 export function BrowserRow({ instance: i }: { instance: Instance }) {
@@ -262,7 +265,7 @@ export function BrowserRow({ instance: i }: { instance: Instance }) {
   const [editing, setEditing] = useState(false);
   const tone = TONE[toneFor(i.regionId)];
   return (
-    <div className="group flex flex-col gap-2 px-3 py-3 transition-colors hover:bg-surface sm:px-4 lg:grid lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1.4fr)_minmax(0,0.8fr)_auto] lg:items-center lg:gap-4" data-testid="browser-row">
+    <div className={cn('group flex flex-col gap-2 px-3 py-3 transition-colors hover:bg-surface sm:px-4 lg:grid lg:items-center lg:gap-4', ROW_COLUMNS)} data-testid="browser-row">
       <div className="flex min-w-0 items-center gap-3">
         <span className={cn('grid size-8 shrink-0 place-items-center font-mono text-[11px] font-semibold', tone.soft, tone.text)} aria-hidden>
           {region.country || '··'}
@@ -281,12 +284,12 @@ export function BrowserRow({ instance: i }: { instance: Instance }) {
         {a.creating ? <div className="mt-2"><CreateProgress instance={i} /></div> : null}
         <StopNotice instance={i} className="mt-2" />
       </div>
-      <div className="hidden min-w-0 lg:block">
-        <StatusBadge pill tone={STATUS_TONE[a.status]} label={t(statusKey(a.status))} />
-        <p className="mt-1 truncate text-xs text-subtle"><UsedLine instance={i} /></p>
+      <div className="hidden min-w-0 items-center gap-3 lg:flex">
+        <StatusBadge pill className="w-[92px] shrink-0" tone={STATUS_TONE[a.status]} label={t(statusKey(a.status))} />
+        <span className="truncate text-xs text-subtle"><UsedLine instance={i} /></span>
       </div>
       <div className="hidden items-center justify-end gap-0.5 lg:flex">
-        {a.primary('h-8 px-3 text-[13px]')}
+        {a.primary('h-8 w-[140px] justify-center px-3 text-[13px]')}
         {a.quick}
         {a.menu(() => setEditing(true))}
       </div>

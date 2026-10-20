@@ -42,7 +42,7 @@ export function AccountPage() {
               <Passkeys />
             </div>
           </div>
-          <div className="flex flex-wrap gap-2 border-t border-border pt-5">
+          <div className="flex flex-wrap gap-2 pt-3">
             <Button onClick={() => void signOut({ everywhere: true })}>
               {t('account.signOutEverywhere')}
             </Button>

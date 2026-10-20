@@ -85,7 +85,7 @@ function StorageCard({ instance: i, pricing }: { instance: Instance; pricing: Re
         ) : null}
       </div>
 
-      <div className="mt-5 border-t border-border pt-4">
+      <div className="mt-5">
         <h3 className="mb-2 text-sm font-medium">{t('storage.grow')}</h3>
         {blocked ? (
           <p className="text-sm text-muted">{blocked}</p>

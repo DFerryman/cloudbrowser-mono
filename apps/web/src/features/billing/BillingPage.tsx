@@ -118,7 +118,7 @@ function BalanceCard({ state }: { state: BillingState }) {
           <dd className="mt-0.5 text-base font-semibold tabular-nums">{m(state.reservedMicros)}</dd>
         </div>
       </dl>
-      <Hint className="mt-1 border-t border-border pt-3">
+      <Hint className="mt-1 pt-2">
         {t('billing.reserveHint')} <DocsLink to="billing#held" />
       </Hint>
 
@@ -161,7 +161,7 @@ function BalanceCard({ state }: { state: BillingState }) {
         </div>
       ) : null}
 
-      <div className="mt-5 space-y-1 border-t border-border pt-4 text-sm">
+      <div className="mt-4 space-y-1 bg-surface p-3 text-sm">
         <p>{state.burnHourMicros > 0 ? t('billing.burnShort', { amount: m(state.burnHourMicros) }) : t('billing.burnNone')}</p>
         {hours !== null ? (
           <p className="text-muted">
@@ -211,7 +211,7 @@ function MonthCard({ totals, month, className }: { totals: UsageTotals; month: s
       <Eyebrow as="h2">{t('billing.thisMonth')}</Eyebrow>
       <p className="mt-3 text-[44px] leading-none font-semibold tracking-tight tabular-nums">{money(totals.totalMicros, locale)}</p>
       <p className="mt-2 text-sm text-muted">{monthLabel(month, locale)}</p>
-      <div className="mt-6 border-t border-border pt-4">
+      <div className="mt-6">
         <ItemBreakdown totals={totals} />
       </div>
       <DailyCharges days={days} />

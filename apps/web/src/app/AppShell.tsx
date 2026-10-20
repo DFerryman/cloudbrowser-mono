@@ -114,7 +114,7 @@ export function AppShell() {
     cn(
       'group relative flex items-center gap-3 px-2.5 py-2 text-sm transition-colors',
       collapsed && 'justify-center px-0',
-      isActive ? 'bg-surface-2 font-semibold text-fg' : 'font-medium text-muted hover:bg-surface hover:text-fg',
+      isActive ? 'bg-bg font-semibold text-fg shadow-[0_1px_2px_rgb(0_0_0/0.06)]' : 'font-medium text-muted hover:bg-bg/60 hover:text-fg',
     );
 
   const account = me.data ? (
@@ -154,7 +154,7 @@ export function AppShell() {
     <div className="flex min-h-dvh flex-col md:flex-row">
       <aside
         style={collapsed ? undefined : { width: sidebar.width }}
-        className={cn('sticky top-0 hidden h-dvh shrink-0 flex-col border-r border-border bg-bg md:flex', collapsed ? 'w-[68px] p-2.5' : 'p-3', !sidebar.dragging && 'transition-[width] duration-200 ease-out')}
+        className={cn('sticky top-0 hidden h-dvh shrink-0 flex-col bg-surface md:flex', collapsed ? 'w-[68px] p-2.5' : 'p-3', !sidebar.dragging && 'transition-[width] duration-200 ease-out')}
       >
         {!collapsed ? <ResizeHandle {...sidebar.handleProps} edge="right" dragging={sidebar.dragging} label={t('nav.resize')} /> : null}
         <div className={cn('flex items-center gap-2 py-2', collapsed ? 'justify-center' : 'px-1.5')}>
@@ -205,7 +205,7 @@ export function AppShell() {
 
         <div className="mt-auto flex flex-col gap-2">
           {me.data && b && !collapsed ? (
-            <div className="relative overflow-hidden border border-border bg-surface p-3.5">
+            <div className="relative overflow-hidden bg-bg p-3.5 shadow-[0_1px_2px_rgb(0_0_0/0.06)]">
               <div className="pointer-events-none absolute -top-10 -right-10 size-28 bg-teal/20 blur-2xl" aria-hidden />
               <Link to="/billing" className="relative block">
                 <Eyebrow>{t('nav.balanceLabel')}</Eyebrow>
@@ -229,13 +229,13 @@ export function AppShell() {
                 </div>
               </div>
               {b.mode === 'prepaid' ? (
-                <Link to="/billing#top-up" className="relative mt-3 flex h-8 items-center justify-center gap-1.5 border border-teal/50 text-xs font-semibold text-teal transition-colors hover:bg-teal hover:text-white">
+                <Link to="/billing#top-up" className="relative mt-3 flex h-8 items-center justify-center gap-1.5 bg-teal/10 text-xs font-semibold text-teal transition-colors hover:bg-teal hover:text-white">
                   <Plus className="size-3.5" /> {t('nav.addCredit')}
                 </Link>
               ) : null}
             </div>
           ) : me.data && b && collapsed ? (
-            <Link to="/billing" title={`${t('nav.balanceLabel')}: ${money(b.balanceMicros, locale)}`} className={cn('grid h-10 place-items-center border border-border text-[11px] font-semibold tabular-nums transition-colors hover:border-border-strong', isLowBalance(b) ? 'text-error' : 'text-teal')}>
+            <Link to="/billing" title={`${t('nav.balanceLabel')}: ${money(b.balanceMicros, locale)}`} className={cn('grid h-10 place-items-center bg-bg text-[11px] font-semibold tabular-nums transition-colors hover:bg-surface-2', isLowBalance(b) ? 'text-error' : 'text-teal')}>
               {money(b.balanceMicros, locale).replace(/\.\d+$/, '')}
             </Link>
           ) : (
@@ -255,7 +255,7 @@ export function AppShell() {
           <Logo />
         </Link>
         {b ? (
-          <Link to="/billing" className={cn('ml-auto border border-border px-2 py-1 font-mono text-xs font-semibold tabular-nums', isLowBalance(b) ? 'text-error' : 'text-teal')}>
+          <Link to="/billing" className={cn('ml-auto bg-surface px-2 py-1 font-mono text-xs font-semibold tabular-nums', isLowBalance(b) ? 'text-error' : 'text-teal')}>
             {money(b.balanceMicros, locale)}
           </Link>
         ) : <span className="ml-auto" />}

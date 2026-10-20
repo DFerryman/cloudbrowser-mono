@@ -15,7 +15,7 @@ import { regionPlace } from './region-names.js';
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="grid gap-1 border-b border-border py-2.5 last:border-0 sm:grid-cols-[160px_1fr] sm:gap-4">
+    <div className="grid gap-1 border-b border-border/50 py-2.5 last:border-0 sm:grid-cols-[160px_1fr] sm:gap-4">
       <dt className="text-sm text-muted">{label}</dt>
       <dd className="min-w-0 text-sm">{children}</dd>
     </div>
