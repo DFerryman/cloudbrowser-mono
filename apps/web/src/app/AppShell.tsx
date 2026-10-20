@@ -1,6 +1,6 @@
 import { cn, Eyebrow, Menu, MenuItem, MenuSeparator, PageHeader as Header, Skeleton } from '@cloudbrowser/ui';
 import { BookOpen, Globe, LayoutGrid, LogOut, UserRound, Wallet } from 'lucide-react';
-import { NavLink, Navigate, Outlet, useLocation } from 'react-router';
+import { Link, NavLink, Navigate, Outlet, useLocation } from 'react-router';
 import { fundedHours, isLowBalance, runwayLabel } from '../features/billing/access.js';
 import { BillingBanner } from '../features/billing/BillingBanner.js';
 import { useBilling } from '../features/billing/hooks.js';
@@ -16,10 +16,14 @@ export function Logo({ compact }: { compact?: boolean }) {
   const { t } = useI18n();
   return (
     <span className="flex items-center gap-2.5 text-[15px] font-semibold tracking-tight">
-      {/* A square in a square: a browser window, drawn in ink. */}
-      <span className="grid size-6 place-items-center bg-fg" aria-hidden>
-        <span className="size-2.5 border-2 border-bg" />
-      </span>
+      <img
+        src="/nevazu-logo.png"
+        alt=""
+        aria-hidden="true"
+        width={32}
+        height={16}
+        className={cn('h-auto w-8 shrink-0 object-contain', compact && 'w-6 lg:w-8')}
+      />
       <span className={cn(compact && 'hidden lg:inline')}>{t('app.name')}</span>
     </span>
   );
@@ -88,7 +92,9 @@ export function AppShell() {
     <div className="flex min-h-dvh flex-col md:flex-row">
       <aside className="sticky top-0 hidden h-dvh w-16 shrink-0 flex-col border-r border-border bg-bg p-3 md:flex lg:w-64">
         <div className="px-2 py-2.5">
-          <Logo compact />
+          <Link to="/" aria-label={t('nav.home')} className="inline-flex">
+            <Logo compact />
+          </Link>
         </div>
         <nav className="mt-8 flex flex-col gap-0.5">
           {nav.map((n) => (
@@ -128,7 +134,9 @@ export function AppShell() {
       </aside>
 
       <header className="sticky top-0 z-30 flex h-14 items-center gap-2 border-b border-border bg-bg px-4 md:hidden">
-        <Logo />
+        <Link to="/" aria-label={t('nav.home')} className="inline-flex">
+          <Logo />
+        </Link>
         <nav className="ml-auto flex items-center gap-1">
           {nav.map((n) => (
             <NavLink key={n.to} to={n.to} className={linkClass} aria-label={n.label}>
