@@ -32,34 +32,38 @@ capture:
           keyframe-max-dist: "25"
           min-quantizer: "4"
           max-quantizer: "20"
+      # Every lower level stays at 3/4 of the desktop or more, so page text remains readable
+      # (the viewer's MIN_LEGIBLE_SCALE is 0.7): under pressure the picture trades frame rate and
+      # fine detail, never legibility.
       high:
+        width: "round(width * 7 / 16) * 2"
+        height: "round(height * 7 / 16) * 2"
+        fps: 25
+        gst_encoder: vp8enc
+        gst_params:
+          <<: *vp8
+          target-bitrate: "round(1500000)"
+          max-quantizer: "26"
+      medium:
         width: "round(width * 3 / 8) * 2"
         height: "round(height * 3 / 8) * 2"
-        fps: 25
+        fps: 20
         gst_encoder: vp8enc
         gst_params:
           <<: *vp8
-          target-bitrate: "round(1200000)"
-          max-quantizer: "30"
-      medium:
-        width: "round(width / 4) * 2"
-        height: "round(height / 4) * 2"
-        fps: 25
-        gst_encoder: vp8enc
-        gst_params:
-          <<: *vp8
-          target-bitrate: "round(700000)"
-          max-quantizer: "40"
+          target-bitrate: "round(1000000)"
+          keyframe-max-dist: "20"
+          max-quantizer: "32"
       low:
-        width: "round(width / 4) * 2"
-        height: "round(height / 4) * 2"
+        width: "round(width * 3 / 8) * 2"
+        height: "round(height * 3 / 8) * 2"
         fps: 15
         gst_encoder: vp8enc
         gst_params:
           <<: *vp8
-          target-bitrate: "round(350000)"
+          target-bitrate: "round(650000)"
           keyframe-max-dist: "15"
-          max-quantizer: "50"
+          max-quantizer: "36"
 server:
   bind: "127.0.0.1:8080"   # reached only by the agent on the same VM
 webrtc:

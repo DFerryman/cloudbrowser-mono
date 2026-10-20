@@ -22,30 +22,34 @@ describe('picture quality controller', () => {
     expect(c.quality).toBe('full');
   });
 
-  it('steps down one level after about 4 s of trouble, and again if trouble continues', () => {
+  it('steps down one level after about 6 s of trouble, and again if trouble continues', () => {
     const c = new QualityController('full', 0);
-    expect(run(c, 10_000, 20, bad)).toEqual([[12, 'high'], [18, 'medium'], [24, 'low']]);
+    expect(run(c, 10_000, 24, bad)).toEqual([[14, 'high'], [22, 'medium'], [30, 'low']]);
     expect(c.quality).toBe('low');
     // Never below the lowest level.
-    expect(run(c, 30_000, 10, bad)).toEqual([]);
+    expect(run(c, 34_000, 10, bad)).toEqual([]);
   });
 
-  it('ignores a single bad reading and the settling time after a switch', () => {
+  it('ignores short bursts of trouble and the settling time after a switch', () => {
     const c = new QualityController('full', 0);
     expect(c.observe(bad(2_000))).toBeNull(); // still settling after the start
     expect(c.observe(bad(6_000))).toBeNull();
-    expect(c.observe(good(8_000))).toBeNull();
-    expect(c.observe(bad(10_000))).toBeNull();
+    expect(c.observe(bad(8_000))).toBeNull();
+    expect(c.observe(good(10_000))).toBeNull();
+    expect(c.observe(bad(12_000))).toBeNull();
     expect(c.quality).toBe('full');
   });
 
-  it('treats dropped frames or growing delay alone as trouble', () => {
+  it('treats badly dropped frames or growing delay alone as trouble', () => {
     const slow = new QualityController('full', 0);
-    expect(run(slow, 10_000, 4, (at) => good(at, 10))).toEqual([[12, 'high']]);
+    expect(run(slow, 10_000, 6, (at) => good(at, 10))).toEqual([[14, 'high']]);
+    // A few dropped frames are not trouble.
+    const fine = new QualityController('full', 0);
+    expect(run(fine, 10_000, 30, (at) => good(at, 18))).toEqual([]);
     // Delay growing well past the path's usual round trip, at the level that path allows.
     const delayed = new QualityController('full', 0);
-    expect(run(delayed, 0, 20, rtt(300))).toEqual([[4, 'medium']]);
-    expect(run(delayed, 20_000, 6, rtt(600))).toEqual([[22, 'low']]);
+    expect(run(delayed, 0, 20, rtt(400))).toEqual([[4, 'medium']]);
+    expect(run(delayed, 20_000, 8, rtt(800))).toEqual([[24, 'low']]);
     // The low level runs at 15 fps on purpose.
     const low = new QualityController('low', 0);
     expect(run(low, 10_000, 20, (at) => good(at, 15))).toEqual([]);
@@ -54,15 +58,16 @@ describe('picture quality controller', () => {
   it('treats a missing frame rate as unknown, but no packets at all as trouble', () => {
     const c = new QualityController('full', 0);
     expect(run(c, 10_000, 60, (at) => good(at, null))).toEqual([]);
-    expect(run(c, 70_000, 6, (at) => ({ ...good(at, null), stalled: true }))).toEqual([[72_000 / 1000, 'high']]);
+    expect(run(c, 70_000, 8, (at) => ({ ...good(at, null), stalled: true }))).toEqual([[74, 'high']]);
   });
 
-  it('lowers the sharpest level on a long path to stay smooth, keeping 25 fps', () => {
+  it('keeps full quality on ordinary paths and caps only clearly long ones', () => {
     const near = new QualityController('full', 0);
-    expect(run(near, 0, 120, rtt(120))).toEqual([]);
+    expect(run(near, 0, 120, rtt(160))).toEqual([]);
+    // 200 ms (the round trip that once ended in an unreadable picture) keeps a sharp 25 fps picture.
     const far = new QualityController('full', 0);
     expect(run(far, 0, 120, rtt(200))).toEqual([[4, 'high']]);
-    // Even a very long path stops at medium: low's 15 fps is only for a struggling connection.
+    // Even a very long path stops at medium: low is only for a struggling connection.
     const farther = new QualityController('full', 0);
     expect(run(farther, 0, 120, rtt(500))).toEqual([[4, 'medium']]);
   });
@@ -70,21 +75,37 @@ describe('picture quality controller', () => {
   it('settles a longer path at the level it allows, and returns to full when the path shortens', () => {
     const c = new QualityController('full', 0);
     run(c, 10_000, 20, good);
-    // The network changes to one with 330 ms round trips: down to medium, not to low.
-    expect(run(c, 30_000, 240, rtt(330))).toEqual([[32, 'high'], [36, 'medium']]);
+    // The network changes to one with 360 ms round trips: down to medium, not to low.
+    expect(run(c, 30_000, 240, rtt(360))).toEqual([[34, 'medium']]);
     // Back on a short path the picture returns a step at a time.
     expect(run(c, 270_000, 60, good).map(([, q]) => q)).toEqual(['high', 'full']);
   });
 
   it('does not flap on a path near a threshold, and ignores a single slow reading', () => {
     const c = new QualityController('full', 0);
-    expect(run(c, 0, 30, rtt(170))).toEqual([[4, 'high']]);
-    // 135 ms is below the 150 ms threshold but not clearly: the cap stays.
-    expect(run(c, 30_000, 60, rtt(135))).toEqual([]);
+    expect(run(c, 0, 30, rtt(200))).toEqual([[4, 'high']]);
+    // 165 ms is below the 180 ms threshold but not clearly: the cap stays.
+    expect(run(c, 30_000, 60, rtt(165))).toEqual([]);
     expect(run(c, 90_000, 30, rtt(100)).map(([, q]) => q)).toEqual(['full']);
     // One slow reading on a short path is not a long path.
     const spike = new QualityController('full', 0);
-    expect(run(spike, 0, 60, (at) => rtt(at === 20_000 ? 260 : 60)(at))).toEqual([]);
+    expect(run(spike, 0, 60, (at) => rtt(at === 20_000 ? 340 : 60)(at))).toEqual([]);
+  });
+
+  it('never adapts below the lowest level whose picture keeps text readable', () => {
+    // An older image whose lower levels are half-size pictures of the desktop.
+    const scales: Record<string, number> = { full: 1, high: 0.75, medium: 0.5, low: 0.5 };
+    const c = new QualityController('full', 0);
+    const sample = (at: number): QualitySample => ({ ...bad(at), scale: scales[c.quality]! });
+    const switches = run(c, 10_000, 60, sample).map(([, q]) => q);
+    // Down to medium, found unreadable, back to high, and held there however bad it gets.
+    expect(switches).toEqual(['high', 'medium', 'high']);
+    expect(c.quality).toBe('high');
+    // A steady connection still returns to full.
+    expect(run(c, 70_000, 60, (at) => ({ ...good(at), scale: scales[c.quality]! })).map(([, q]) => q)).toEqual(['full']);
+    // The current ladder stays readable at every level.
+    const current = new QualityController('full', 0);
+    expect(run(current, 10_000, 40, (at) => ({ ...bad(at), scale: 0.75 })).map(([, q]) => q)).toEqual(['high', 'medium', 'low']);
   });
 
   it('returns one level at a time after a quiet period, never above the preferred level', () => {
@@ -92,7 +113,7 @@ describe('picture quality controller', () => {
     expect(c.quality).toBe('low');
     const switches = run(c, 10_000, 60, good);
     expect(switches.map(([, q]) => q)).toEqual(['medium', 'high']);
-    expect(switches[0]![0]).toBeGreaterThanOrEqual(24);
+    expect(switches[0]![0]).toBeGreaterThanOrEqual(22);
     expect(c.quality).toBe('high');
   });
 
@@ -100,12 +121,12 @@ describe('picture quality controller', () => {
     const c = new QualityController('full', 0, 'high');
     let t = 10_000;
     const advance = (seconds: number, sample: (at: number) => QualitySample) => { const s = run(c, t, seconds, sample); t += seconds * 1000; return s; };
-    expect(advance(20, good)).toEqual([[26, 'full']]);
-    expect(advance(6, bad).map(([, q]) => q)).toEqual(['high']);
-    // Twice the usual wait (30 s instead of 15 s) before the next try.
+    expect(advance(20, good)).toEqual([[22, 'full']]);
+    expect(advance(8, bad).map(([, q]) => q)).toEqual(['high']);
+    // Twice the usual wait (24 s instead of 12 s) before the next try.
     const retry = advance(40, good);
     expect(retry).toHaveLength(1);
-    expect(retry[0]![0] - 34).toBeGreaterThanOrEqual(30);
+    expect(retry[0]![0] - 34).toBeGreaterThanOrEqual(24);
   });
 });
 

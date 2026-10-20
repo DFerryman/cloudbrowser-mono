@@ -18,22 +18,28 @@ export interface QualitySample {
   /** Video freezes since the previous reading. */
   freezes: number;
   rttMs: number | null;
+  /**
+   * Width of the decoded picture over the remote desktop's width (1 = full size); null when
+   * either is unknown. Below MIN_LEGIBLE_SCALE ordinary page text blurs when the picture is
+   * enlarged back to the desktop's size.
+   */
+  scale?: number | null;
 }
 
 /** neko encodes at a constant rate whatever is on screen (images/browser/neko.yaml). */
-const EXPECTED_FPS: Record<VideoQuality, number> = { full: 25, high: 25, medium: 25, low: 15 };
+const EXPECTED_FPS: Record<VideoQuality, number> = { full: 25, high: 25, medium: 20, low: 15 };
 /** A switch restarts the stream at a keyframe; readings right after it say little. */
 const SETTLE_MS = 4_000;
-/** Consecutive bad readings (about 4 s) before stepping down. */
-const BAD_READINGS = 2;
-const UPGRADE_AFTER_MS = 15_000;
+/** Consecutive bad readings (about 6 s) before stepping down: brief hiccups keep the picture. */
+const BAD_READINGS = 3;
+const UPGRADE_AFTER_MS = 12_000;
 /** A step up that turns bad this soon was too much: wait twice as long before the next one. */
 const PROBATION_MS = 20_000;
 const MAX_UPGRADE_WAIT_MS = 120_000;
-const LOSS_LIMIT = 0.05;
-const FPS_SHARE = 0.6;
+const LOSS_LIMIT = 0.06;
+const FPS_SHARE = 0.5;
 /** Queueing on a saturated link shows as round trips well above the best recent one. */
-const RTT_RISE_MS = 250;
+const RTT_RISE_MS = 300;
 /**
  * The best round trip is taken over the last minute of readings, so a path that simply got
  * longer (another network, another relay) becomes the new normal instead of looking congested.
@@ -42,18 +48,26 @@ const RTT_WINDOW = 30;
 /**
  * A long round trip caps the picture even while nothing is lost: smaller frames reach the
  * screen sooner, and fewer packets go missing that would take a whole round trip to resend.
- * The cap stops at medium, which keeps 25 fps; only a struggling connection gets low's 15 fps.
- * Above 150 ms is also where the toolbar's indicator turns poor (stats.ts).
+ * The bands are wide so that ordinary paths keep the sharpest picture and only a clearly long
+ * one gives some of it up. The cap stops at medium; only a struggling connection gets low.
  */
 const LATENCY_CAPS: readonly { aboveMs: number; quality: VideoQuality }[] = [
-  { aboveMs: 150, quality: 'high' },
-  { aboveMs: 250, quality: 'medium' },
+  { aboveMs: 180, quality: 'high' },
+  { aboveMs: 320, quality: 'medium' },
 ];
 /** A cap lifts only once the round trip is this far below its threshold, so a path near one does not flap. */
 const LATENCY_HYSTERESIS_MS = 30;
 /** The path's round trip is the median of the last readings (about 10 s): one spike is not a long path. */
 const LATENCY_READINGS = 5;
 const LATENCY_MIN_READINGS = 3;
+/**
+ * The smallest picture, relative to the desktop, that keeps ordinary page text readable. The
+ * ladder in images/browser/neko.yaml stays above it; an older image whose lower levels are
+ * half-size pictures is held at the lowest level that is still readable.
+ */
+export const MIN_LEGIBLE_SCALE = 0.7;
+/** Consecutive readings below MIN_LEGIBLE_SCALE before a level is ruled out; a resize can mislead one. */
+const ILLEGIBLE_READINGS = 2;
 
 /**
  * Chooses the live view's picture level from what the viewer receives. neko 3.0.8's own
@@ -62,7 +76,9 @@ const LATENCY_MIN_READINGS = 3;
  * A good connection keeps the sharpest level at full frame rate. A long round trip lowers the
  * sharpest level allowed to keep the view smooth (LATENCY_CAPS). Below that, it steps down after a
  * few seconds of dropped frames, loss, freezes or growing delay, and probes one level up again
- * after a quiet period, never above the preferred level or the path's cap.
+ * after a quiet period, never above the preferred level or the path's cap. It never goes below
+ * the lowest level whose picture keeps text readable (MIN_LEGIBLE_SCALE): a clear picture at a
+ * lower frame rate is worth more than a smooth one nobody can read.
  */
 export class QualityController {
   private level: number;
@@ -75,6 +91,9 @@ export class QualityController {
   private rtts: number[] = [];
   /** Index into VIDEO_QUALITIES of the sharpest level the path's round trip allows; 0 is no cap. */
   private latencyCap = 0;
+  /** Index of the lowest level allowed: a level whose picture proved too small to read is ruled out. */
+  private floor = VIDEO_QUALITIES.length - 1;
+  private illegible = 0;
 
   constructor(maxQuality: VideoQuality, now: number, current: VideoQuality = maxQuality) {
     this.max = VIDEO_QUALITIES.indexOf(maxQuality);
@@ -100,7 +119,14 @@ export class QualityController {
     if (s.rttMs !== null) this.rtts = [...this.rtts, s.rttMs].slice(-RTT_WINDOW);
     this.updateLatencyCap();
     if (s.at < this.settleUntil) return null;
-    const ceiling = Math.max(this.max, this.latencyCap);
+    if (s.scale != null && s.scale < MIN_LEGIBLE_SCALE && this.level > 0) {
+      if (++this.illegible >= ILLEGIBLE_READINGS) {
+        this.floor = Math.min(this.floor, this.level - 1);
+        this.illegible = 0;
+        return this.move(this.level - 1, s.at);
+      }
+    } else this.illegible = 0;
+    const ceiling = Math.min(Math.max(this.max, this.latencyCap), Math.max(this.max, this.floor));
     if (this.level < ceiling) {
       // A long path: go straight to what it allows rather than waiting for frames to suffer. Its
       // round trip is the new baseline for growing delay, as on a path that simply got longer.
@@ -113,7 +139,7 @@ export class QualityController {
       || (s.rttMs !== null && bestRtt !== null && s.rttMs > bestRtt + RTT_RISE_MS);
     if (struggling) {
       this.goodSince = null;
-      if (++this.bad < BAD_READINGS || this.level === VIDEO_QUALITIES.length - 1) return null;
+      if (++this.bad < BAD_READINGS || this.level >= Math.max(this.max, this.floor)) return null;
       this.stepUpFailed(s.at);
       return this.move(this.level + 1, s.at);
     }

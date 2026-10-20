@@ -772,6 +772,7 @@ export class RemoteBrowser {
       lossRate: lost + received > 0 ? lost / (lost + received) : 0,
       freezes: Math.max(0, counters.freezes - before.freezes),
       rttMs: stats.rttMs,
+      scale: stats.width && this.remoteScreen?.width ? stats.width / this.remoteScreen.width : null,
     });
     if (next) this.selectVideo(next);
   }
