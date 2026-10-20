@@ -1,4 +1,3 @@
-import { Card } from '@cloudbrowser/ui';
 import { LifeBuoy, Receipt, ShieldAlert } from 'lucide-react';
 import { useI18n } from '../lib/i18n.js';
 import { SECURITY_EMAIL, SUPPORT_EMAIL } from '../lib/site.js';
@@ -13,18 +12,20 @@ export function ContactPage() {
   ] as const;
   return (
     <>
-      <PublicHero title={t('contact.title')} subtitle={t('contact.subtitle')} />
-      <section className={`${container} grid gap-4 pb-16 md:grid-cols-3`}>
+      <PublicHero eyebrow={t('footer.contact')} title={t('contact.title')} subtitle={t('contact.subtitle')} />
+      <section className={`${container} pb-20`}>
+        <div className="grid gap-px border border-border bg-border md:grid-cols-3">
         {cards.map(({ key, icon: Icon, email }) => (
-          <Card key={key} className="p-6">
-            <Icon className="size-5 text-accent" aria-hidden />
-            <h2 className="mt-3 font-semibold">{t(`contact.${key}.title`)}</h2>
-            <p className="mt-1 text-sm text-muted">{t(`contact.${key}.body`)}</p>
-            <a href={`mailto:${email}`} className="mt-4 inline-block text-sm font-medium text-accent hover:underline">
+          <div key={key} className="flex flex-col bg-bg p-8">
+            <Icon className="size-5" aria-hidden />
+            <h2 className="mt-8 text-lg font-semibold tracking-tight">{t(`contact.${key}.title`)}</h2>
+            <p className="mt-2 flex-1 text-sm leading-relaxed text-muted">{t(`contact.${key}.body`)}</p>
+            <a href={`mailto:${email}`} className="mt-6 inline-block border-t border-border pt-4 font-mono text-sm font-medium hover:underline">
               {email}
             </a>
-          </Card>
+          </div>
         ))}
+        </div>
       </section>
     </>
   );

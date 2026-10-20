@@ -359,7 +359,7 @@ export function SessionPage() {
   );
 
   return (
-    <div ref={frameRef} className="fixed inset-0 flex h-dvh flex-col overflow-hidden overscroll-none bg-frame text-zinc-100" style={visibleHeight === null ? undefined : { height: visibleHeight }}>
+    <div ref={frameRef} className="cb-dark fixed inset-0 flex h-dvh flex-col overflow-hidden overscroll-none bg-frame text-zinc-100" style={visibleHeight === null ? undefined : { height: visibleHeight }}>
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-zinc-800 px-2">
         <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.back')} onClick={() => navigate('/browsers')}>
           <ArrowLeft />
@@ -562,7 +562,7 @@ function ConnectionIndicator({ stats, picture }: { stats: ViewerStats; picture: 
 function Overlay({ message, body, action, busy }: { message: string; body?: ReactNode; action?: ReactNode; busy?: boolean }) {
   return (
     <div className="absolute inset-0 grid place-items-center bg-frame/80 p-4">
-      <div role="status" className="w-full max-w-md rounded-[var(--radius-card)] border border-zinc-800 bg-zinc-900 p-6 text-center shadow-xl">
+      <div role="status" className="w-full max-w-md border border-zinc-700 bg-zinc-950 p-8 text-center">
         {busy ? <div className="mx-auto mb-4 size-6 animate-spin rounded-full border-2 border-zinc-600 border-t-zinc-200" aria-hidden /> : null}
         <p className="text-base leading-relaxed text-zinc-100">{message}</p>
         {body ? <div className="mt-4 flex justify-center text-left">{body}</div> : null}

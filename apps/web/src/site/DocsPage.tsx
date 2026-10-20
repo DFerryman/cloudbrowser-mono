@@ -1,4 +1,4 @@
-import { cn, Input } from '@cloudbrowser/ui';
+import { cn, Eyebrow, Input } from '@cloudbrowser/ui';
 import { Search } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Link, Navigate, NavLink, useParams } from 'react-router';
@@ -25,22 +25,23 @@ export function DocsPage() {
   const toc = headings(article);
 
   return (
-    <div className={`${container} grid gap-8 py-10 md:grid-cols-[220px_1fr] lg:grid-cols-[220px_1fr_180px]`}>
-      <aside className="md:sticky md:top-20 md:self-start">
-        <p className="mb-3 text-xs font-semibold tracking-wide text-muted uppercase">{t('docs.title')}</p>
+    <div className={`${container} grid gap-10 py-10 md:grid-cols-[220px_1fr] md:py-16 lg:grid-cols-[220px_1fr_200px] lg:gap-14`}>
+      {/* min-w-0: on phones the article list scrolls sideways inside the page, never the page itself. */}
+      <aside className="min-w-0 md:sticky md:top-24 md:self-start">
+        <Eyebrow className="mb-4">{t('docs.title')}</Eyebrow>
         <div className="relative mb-3">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-subtle" aria-hidden />
           <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t('docs.search')} aria-label={t('docs.search')} className="pl-8" />
         </div>
-        <nav className="flex gap-1 overflow-x-auto md:flex-col">
+        <nav className="-mx-4 flex gap-1 overflow-x-auto border-b border-border px-4 md:mx-0 md:flex-col md:gap-0 md:border-b-0 md:border-l md:px-0">
           {matches.map((a) => (
             <NavLink
               key={a.slug}
               to={`/docs/${a.slug}`}
               className={({ isActive }) =>
                 cn(
-                  'shrink-0 rounded-[var(--radius-control)] px-2.5 py-1.5 text-sm whitespace-nowrap transition-colors md:whitespace-normal',
-                  isActive ? 'bg-surface-2 font-medium text-fg' : 'text-muted hover:bg-surface-2 hover:text-fg',
+                  '-mb-px shrink-0 border-b-2 px-2.5 py-2 text-sm whitespace-nowrap transition-colors md:mb-0 md:-ml-px md:border-b-0 md:border-l-2 md:px-4 md:whitespace-normal',
+                  isActive ? 'border-fg font-semibold text-fg' : 'border-transparent text-muted hover:text-fg',
                 )
               }
             >
@@ -51,14 +52,14 @@ export function DocsPage() {
         </nav>
       </aside>
       <article className="min-w-0 max-w-[68ch]">
-        <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">{article.title}</h1>
-        <p className="mt-2 mb-6 text-base text-muted">{article.summary}</p>
+        <h1 className="text-3xl font-semibold tracking-tight md:text-[44px] md:leading-[1.08]">{article.title}</h1>
+        <p className="mt-4 mb-10 border-b border-border pb-8 text-lg leading-relaxed text-muted">{article.summary}</p>
         <ArticleBody article={article} />
       </article>
       {toc.length > 1 ? (
-        <nav className="hidden lg:sticky lg:top-20 lg:block lg:self-start" aria-label={t('docs.onThisPage')}>
-          <p className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">{t('docs.onThisPage')}</p>
-          <ul className="space-y-1.5 text-sm">
+        <nav className="hidden lg:sticky lg:top-24 lg:block lg:self-start" aria-label={t('docs.onThisPage')}>
+          <Eyebrow className="mb-4">{t('docs.onThisPage')}</Eyebrow>
+          <ul className="space-y-2.5 border-l border-border pl-4 text-[13px]">
             {toc.map((h) => (
               <li key={anchor(h)}>
                 <Link to={`#${anchor(h)}`} className="text-muted hover:text-fg">

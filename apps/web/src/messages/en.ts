@@ -536,6 +536,8 @@ export const en = {
   'home.f.billing.body': 'No subscription. Top up once and usage is taken from your balance.',
   'home.f.devices.title': 'Any device',
   'home.f.devices.body': 'Desktop, tablet or phone, with a software keyboard and touch gestures.',
+  'home.how.eyebrow': 'Three steps',
+  'home.regions.eyebrow': 'Where',
   'home.how.title': 'How it works',
   'home.how.1.title': 'Create a browser',
   'home.how.1.body': 'Pick a region. Its dedicated IP stays with the browser.',

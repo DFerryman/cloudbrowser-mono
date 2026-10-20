@@ -538,6 +538,8 @@ export const zhCN: Messages = {
   'home.f.billing.body': '无需订阅。充值一次，用量从余额中扣除。',
   'home.f.devices.title': '任何设备',
   'home.f.devices.body': '电脑、平板或手机均可使用，支持软键盘和触控手势。',
+  'home.how.eyebrow': '三个步骤',
+  'home.regions.eyebrow': '地区',
   'home.how.title': '使用方式',
   'home.how.1.title': '创建浏览器',
   'home.how.1.body': '选择地区，独享 IP 会一直跟随这个浏览器。',

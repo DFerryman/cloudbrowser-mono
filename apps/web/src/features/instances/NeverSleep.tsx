@@ -46,7 +46,7 @@ export function NeverSleepDialog({ instance: i, open, onClose }: { instance: Ins
           <p>{t('neverSleep.credit', { available: m(q.availableMicros), required: m(q.requiredMicros) })}</p>
           <p className="text-muted">{t('neverSleep.stops')}</p>
           {q.reason ? (
-            <p role="alert" className="rounded-md border border-error/40 bg-error/10 p-3 text-error">
+            <p role="alert" className="border-l-2 border-error bg-error/5 p-3 text-error">
               {t(`neverSleep.reason.${q.reason}` as MessageKey, { required: m(q.requiredMicros), available: m(q.availableMicros) })}
               {q.reason === 'no_topup' || q.reason === 'insufficient_credit' ? <> <Link to="/billing" className="underline">{t('neverSleep.addCredit')}</Link></> : null}
             </p>

@@ -213,23 +213,23 @@ function RegionRow({ region, place, checked, disabled, recommended, onChange, re
   return (
     <label
       className={cn(
-        'relative flex items-center gap-3 px-3 py-3 transition-colors has-[:focus-visible]:bg-accent/5',
+        'relative flex items-center gap-3 px-3 py-3 transition-colors has-[:focus-visible]:bg-surface-2',
         disabled ? 'cursor-not-allowed opacity-55' : 'cursor-pointer',
-        checked && !disabled ? 'bg-accent/5' : !disabled && 'hover:bg-surface',
+        checked && !disabled ? 'bg-surface shadow-[inset_2px_0_0_0_var(--color-fg)]' : !disabled && 'hover:bg-surface',
       )}
     >
       <input type="radio" name="region" value={region.id} className="peer sr-only" checked={checked} disabled={disabled} onChange={onChange} />
-      <span className={cn('grid size-4 shrink-0 place-items-center rounded-full border', checked && !disabled ? 'border-accent' : 'border-border')} aria-hidden>
-        {checked && !disabled ? <span className="size-2 rounded-full bg-accent" /> : null}
+      <span className={cn('grid size-4 shrink-0 place-items-center rounded-full border', checked && !disabled ? 'border-fg' : 'border-border-strong')} aria-hidden>
+        {checked && !disabled ? <span className="size-2 rounded-full bg-fg" /> : null}
       </span>
-      <span className="w-7 shrink-0 rounded bg-surface-2 py-0.5 text-center font-mono text-[11px] font-medium text-muted" aria-hidden>
+      <span className="w-7 shrink-0 border border-border py-0.5 text-center font-mono text-[11px] font-medium text-muted" aria-hidden>
         {region.country}
       </span>
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center gap-1.5">
           <span className="truncate text-sm font-medium">{place}</span>
           {recommended ? (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-accent/10 px-1.5 py-0.5 text-[11px] font-medium text-accent">
+            <span className="inline-flex shrink-0 items-center gap-1 border border-fg px-1.5 py-0.5 text-[10px] font-semibold tracking-wider uppercase">
               <Sparkles className="size-3" aria-hidden />
               {t('create.region.recommended')}
             </span>

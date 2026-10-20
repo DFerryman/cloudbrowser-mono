@@ -34,10 +34,10 @@ export function Table<T>({
     <div>
     <div className="overflow-x-auto rounded-[var(--radius-card)] border border-border">
       <table className="w-full text-left text-sm">
-        <thead className="bg-surface text-xs text-muted">
+        <thead className="bg-surface text-[11px] tracking-wider text-subtle uppercase">
           <tr>
             {columns.map((c) => (
-              <th key={c} className="px-3 py-2 font-medium whitespace-nowrap">
+              <th key={c} className="px-3 py-2.5 font-semibold whitespace-nowrap">
                 {c}
               </th>
             ))}
@@ -90,9 +90,9 @@ export const statusTone = (s: string): 'ok' | 'warn' | 'bad' | 'muted' =>
 
 export function Tile({ label, value, tone }: { label: string; value: ReactNode; tone?: 'bad' | 'warn' }) {
   return (
-    <div className="rounded-[var(--radius-card)] border border-border bg-surface p-4">
-      <div className="text-xs text-muted">{label}</div>
-      <div className={cn('mt-1 text-2xl font-semibold tabular-nums', tone === 'bad' && 'text-error', tone === 'warn' && 'text-starting')}>{value}</div>
+    <div className="border border-border bg-bg p-5">
+      <div className="text-[11px] font-semibold tracking-[0.12em] text-subtle uppercase">{label}</div>
+      <div className={cn('mt-3 text-[28px] leading-none font-semibold tracking-tight tabular-nums', tone === 'bad' && 'text-error', tone === 'warn' && 'text-starting')}>{value}</div>
     </div>
   );
 }
@@ -154,8 +154,8 @@ export function ReasonDialog({
 
 export function PageTitle({ title, children }: { title: string; children?: ReactNode }) {
   return (
-    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-      <h1 className="text-lg font-semibold">{title}</h1>
+    <div className="mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-border pb-4">
+      <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
       {children}
     </div>
   );

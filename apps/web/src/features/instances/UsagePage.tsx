@@ -136,5 +136,5 @@ export function UsagePage() {
 
 function NowBadge() {
   const { t } = useI18n();
-  return <span className="rounded-full bg-accent/10 px-1.5 py-px text-[11px] font-medium text-accent">{t('usage.now')}</span>;
+  return <span className="border border-fg px-1.5 py-px text-[10px] font-semibold tracking-wider uppercase">{t('usage.now')}</span>;
 }

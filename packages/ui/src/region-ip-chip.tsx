@@ -54,14 +54,14 @@ export function RegionIpChip({
         <span className="italic">{pendingLabel}</span>
       )}
       {ip ? (
-        <button type="button" onClick={copy} aria-label={copyLabel} title={copyLabel} className="rounded p-0.5 hover:bg-surface-2/60">
+        <button type="button" onClick={copy} aria-label={copyLabel} title={copyLabel} className="p-0.5 hover:bg-surface-2/60">
           {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
         </button>
       ) : null}
       {dedicatedLabel && ip ? (
         <span
           className={cn(
-            'rounded border px-1.5 py-px text-xs font-medium',
+            'border px-1.5 py-px text-[11px] font-medium uppercase tracking-wider',
             tone === 'dark' ? 'border-zinc-700 text-zinc-300' : 'border-border text-muted',
           )}
         >

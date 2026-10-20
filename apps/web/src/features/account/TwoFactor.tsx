@@ -145,7 +145,7 @@ function SetupDialog({ onClose }: { onClose: () => void }) {
 }
 
 function StepNumber({ n }: { n: number }) {
-  return <span className="grid size-6 shrink-0 place-items-center rounded-full bg-accent/10 text-xs font-semibold text-accent" aria-hidden>{n}</span>;
+  return <span className="grid size-6 shrink-0 place-items-center bg-fg font-mono text-xs font-semibold text-bg" aria-hidden>{n}</span>;
 }
 
 /** The setup key in groups of four, for apps that cannot scan. */
@@ -211,7 +211,7 @@ function SavedCodes({ codes, onDone }: { codes: string[]; onDone: () => void }) 
         </Button>
       </div>
       <label className="flex cursor-pointer items-start gap-2.5 text-sm">
-        <input type="checkbox" className="mt-0.5 size-4 accent-[var(--color-accent)]" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
+        <input type="checkbox" className="mt-0.5 size-4 accent-[var(--color-fg)]" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
         <span>{t('twofa.saved')}</span>
       </label>
       <div className="flex justify-end border-t border-border pt-4">

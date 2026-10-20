@@ -30,13 +30,13 @@ export function BrowserLayout() {
   ];
   return (
     <>
-      <Link to="/browsers" className="mb-3 inline-flex items-center gap-1 text-sm text-muted hover:text-fg">
+      <Link to="/browsers" className="mb-4 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted hover:text-fg">
         <ArrowLeft className="size-4" aria-hidden /> {t('manage.back')}
       </Link>
-      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div className="min-w-0">
-          <h1 className="truncate text-xl font-semibold">{i.name}</h1>
-          <div className="mt-1.5 flex flex-wrap items-center gap-3">
+          <h1 className="truncate text-2xl font-semibold tracking-tight md:text-[32px] md:leading-tight">{i.name}</h1>
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
             <StatusBadge tone={STATUS_TONE[shownStatus(i)]} label={t(statusKey(shownStatus(i)))} />
             <RegionIpChip
               country={region.country}
@@ -48,22 +48,22 @@ export function BrowserLayout() {
             <TrialBadge trial={i.trial} />
           </div>
         </div>
-        <Button variant="primary" onClick={() => navigate(`/b/${i.id}`)} disabled={i.status === 'deleting' || i.status === 'failed' || !canUseBrowser(billing.data, i)}>
+        <Button variant="primary" size="lg" onClick={() => navigate(`/b/${i.id}`)} disabled={i.status === 'deleting' || i.status === 'failed' || !canUseBrowser(billing.data, i)}>
           {shownStatus(i) === 'sleeping' ? t('browsers.wakeOpen') : t('browsers.open')}
         </Button>
       </div>
       <TrialNotice trial={i.trial} />
       <StopNotice instance={i} className="mb-4 max-w-3xl text-sm" />
       {i.status !== 'deleting' && i.status !== 'failed' ? <BalanceRequired instance={i} /> : null}
-      <nav className="mb-6 flex gap-1 overflow-x-auto border-b border-border" aria-label={i.name}>
+      <nav className="mb-8 flex gap-2 overflow-x-auto border-b border-border" aria-label={i.name}>
         {tabs.map((tab) => (
           <NavLink
             key={tab.to}
             to={tab.to}
             className={({ isActive }) =>
               cn(
-                '-mb-px border-b-2 px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors',
-                isActive ? 'border-accent text-fg' : 'border-transparent text-muted hover:text-fg',
+                '-mb-px border-b-2 px-1 py-3 mr-4 text-sm font-medium whitespace-nowrap transition-colors',
+                isActive ? 'border-fg font-semibold text-fg' : 'border-transparent text-muted hover:text-fg',
               )
             }
           >

@@ -12,7 +12,7 @@ export function Menu({ trigger, children, align = 'end' }: { trigger: ReactNode;
         <M.Content
           align={align}
           sideOffset={4}
-          className="z-50 min-w-44 rounded-[var(--radius-control)] border border-border bg-bg p-1 shadow-lg [animation:cb-in_150ms_var(--ease-out)]"
+          className="z-50 min-w-48 border border-border-strong bg-bg py-1 shadow-[0_8px_24px_-12px_rgb(0_0_0/0.25)] [animation:cb-in_150ms_var(--ease-out)]"
         >
           {children}
         </M.Content>
@@ -37,7 +37,7 @@ export function MenuItem({
       disabled={disabled}
       onSelect={onSelect}
       className={cn(
-        'flex cursor-default items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-none select-none data-[disabled]:opacity-50 data-[highlighted]:bg-surface-2 [&_svg]:size-4',
+        'flex cursor-default items-center gap-2.5 px-3 py-2 text-sm outline-none select-none data-[disabled]:opacity-40 data-[highlighted]:bg-surface-2 [&_svg]:size-4',
         danger && 'text-error',
       )}
     >

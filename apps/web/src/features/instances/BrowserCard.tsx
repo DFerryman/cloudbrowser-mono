@@ -23,7 +23,7 @@ export function StopNotice({ instance: i, className }: { instance: Instance; cla
   const { t, locale } = useI18n();
   if (!i.stopReason && !i.deletesAt) return null;
   return (
-    <div className={cn('mt-3 rounded-md border border-error/40 bg-error/10 p-2.5 text-xs text-error', className)} role="status" data-testid="stop-notice">
+    <div className={cn('mt-3 border-l-2 border-error bg-error/5 px-3 py-2.5 text-xs text-error', className)} role="status" data-testid="stop-notice">
       {i.stopReason ? <p>{t(`browsers.stopped.${i.stopReason}` as MessageKey)}</p> : null}
       {i.deletesAt ? <p className={i.stopReason ? 'mt-1 font-medium' : 'font-medium'}>{t('browsers.deletesAt', { date: new Date(i.deletesAt).toLocaleString(locale) })}</p> : null}
     </div>
@@ -68,31 +68,32 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
       </Button>
     );
   } else {
+    // Ink for the browsers already awake; waking one is a step further, so it is an outline.
     primary = (
-      <Button variant="primary" className="flex-1 justify-center" disabled={creating || !canUseBrowser(billing.data, i)} onClick={() => navigate(`/b/${i.id}`)}>
+      <Button variant={status === 'sleeping' ? 'secondary' : 'primary'} className="flex-1 justify-center" disabled={creating || !canUseBrowser(billing.data, i)} onClick={() => navigate(`/b/${i.id}`)}>
         {status === 'sleeping' ? t('browsers.wakeOpen') : t('browsers.open')}
       </Button>
     );
   }
 
   return (
-    <Card className="flex flex-col p-4">
-      <div className="flex items-start justify-between gap-2">
-        <h2 className="truncate text-base font-semibold" title={i.name}>
+    <Card className="flex flex-col p-5 transition-colors hover:border-border-strong">
+      <div className="flex items-start justify-between gap-3">
+        <h2 className="truncate text-lg font-semibold tracking-tight" title={i.name}>
           {i.name}
         </h2>
+        <StatusBadge className="shrink-0 pt-0.5 text-[13px]" tone={STATUS_TONE[status]} label={t(statusKey(status))} />
       </div>
-      <StatusBadge className="mt-1" tone={STATUS_TONE[status]} label={t(statusKey(status))} />
       <TrialBadge className="mt-1" trial={i.trial} />
       <RegionIpChip
-        className="mt-3"
+        className="mt-5 text-[15px]"
         country={region.country}
         city={region.city}
         ip={i.ipAddress}
         copyLabel={t('browsers.copyIp')}
         pendingLabel={t('browsers.reservingIp')}
       />
-      <p className="mt-1 text-xs text-subtle">
+      <p className="mt-1.5 text-xs text-subtle">
         {recoverable && i.purgeAfter
           ? t('browsers.recoverableUntil', { date: new Date(i.purgeAfter).toLocaleDateString(locale) })
           : deleted
@@ -114,7 +115,8 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
         <p className="mt-3 text-sm text-muted">{i.statusReason}</p>
       ) : null}
 
-      <div className="mt-auto flex items-center gap-2 pt-4">
+      <div className="min-h-5 flex-1" />
+      <div className="-mx-5 -mb-5 flex items-center gap-2 border-t border-border px-5 py-4">
         {primary}
         <Menu
           trigger={

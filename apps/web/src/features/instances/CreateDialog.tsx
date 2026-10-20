@@ -185,12 +185,12 @@ function Choice({ name, checked, onChange, icon, title, hint }: { name: string; 
   return (
     <label
       className={cn(
-        'relative flex cursor-pointer gap-3 rounded-[var(--radius-control)] border p-3 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent',
-        checked ? 'border-accent bg-accent/5' : 'border-border hover:bg-surface',
+        'relative flex cursor-pointer gap-3 border p-3 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent',
+        checked ? 'border-fg bg-surface' : 'border-border hover:border-border-strong',
       )}
     >
       <input type="radio" name={name} className="sr-only" checked={checked} onChange={onChange} />
-      <span className={cn('mt-0.5 grid size-7 shrink-0 place-items-center rounded-full', checked ? 'bg-accent text-accent-fg' : 'bg-surface-2 text-muted')} aria-hidden>
+      <span className={cn('mt-0.5 grid size-7 shrink-0 place-items-center', checked ? 'bg-fg text-bg' : 'bg-surface-2 text-muted')} aria-hidden>
         {icon}
       </span>
       <span className="min-w-0">

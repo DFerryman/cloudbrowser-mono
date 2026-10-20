@@ -36,8 +36,8 @@ export function DailyCharges({ days }: { days: { day: string; totalMicros: numbe
                 <td className="py-3 text-right tabular-nums">
                   <span className="block [overflow-wrap:anywhere]">{money(day.totalMicros, locale)}</span>
                   {sorted.length > 1 && max > 0 ? (
-                    <div className="mt-1 ml-auto h-1 w-20 max-w-full overflow-hidden rounded-full bg-surface-2" aria-hidden>
-                      <div className="h-full rounded-full bg-accent/50" style={{ width: `${Math.max(0, day.totalMicros / max * 100)}%` }} />
+                    <div className="mt-1 ml-auto h-1 w-20 max-w-full overflow-hidden bg-surface-2" aria-hidden>
+                      <div className="h-full bg-fg/70" style={{ width: `${Math.max(0, day.totalMicros / max * 100)}%` }} />
                     </div>
                   ) : null}
                 </td>

@@ -5,7 +5,7 @@ import { useTheme, type Theme } from '../lib/theme.js';
 
 const THEME_ICON = { system: Monitor, light: Sun, dark: Moon } as const;
 const iconButton =
-  'inline-flex h-8 items-center gap-1.5 rounded-[var(--radius-control)] px-2 text-sm text-muted transition-colors hover:bg-surface-2 hover:text-fg [&_svg]:size-4';
+  'inline-flex h-8 items-center gap-1.5 px-2 text-[13px] font-medium text-muted transition-colors hover:bg-surface-2 hover:text-fg [&_svg]:size-4';
 
 /** Language switch: one click toggles between the two supported languages. */
 export function LanguageButton({ className }: { className?: string }) {
@@ -46,7 +46,7 @@ export function ThemeItems() {
         return (
           <MenuItem key={v} onSelect={() => setTheme(v)}>
             <Icon /> <span className="flex-1">{t(`theme.${v}`)}</span>
-            {theme === v ? <Check className="text-accent" aria-hidden /> : null}
+            {theme === v ? <Check aria-hidden /> : null}
           </MenuItem>
         );
       })}

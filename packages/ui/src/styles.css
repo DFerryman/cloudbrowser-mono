@@ -1,8 +1,11 @@
 /*
- * Design tokens (page 1, "Visual style"). Neutrals are the zinc scale, one blue accent, status
- * colors always paired with an icon and a label. Light and dark follow the system setting unless
- * `data-theme="light"` or `data-theme="dark"` on <html> picks one. `subtle` is for secondary
- * explanations: softer than `muted`, still at least 4.5:1 against the page.
+ * Design tokens (page 1, "Visual style"): minimal and square. Corners are sharp everywhere (only
+ * status dots and spinners are round). Neutrals carry the layout; primary actions are solid ink
+ * (`fg`), and the one blue accent is kept for links, focus and progress so it stays meaningful.
+ * Hierarchy comes from size and weight: small uppercase eyebrows, tight headings, tabular figures.
+ * Status colors are always paired with an icon and a label. Light and dark follow the system
+ * setting unless `data-theme="light"` or `data-theme="dark"` on <html> picks one. `subtle` is for
+ * secondary explanations: softer than `muted`, still at least 4.5:1 against the page.
  */
 @theme {
   --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
@@ -10,26 +13,47 @@
   --font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --text-xs: 12px;
+  --text-xs--line-height: 1.5;
   --text-sm: 14px;
+  --text-sm--line-height: 1.5;
   --text-base: 16px;
-  --text-lg: 20px;
-  --text-xl: 24px;
-  --text-2xl: 32px;
+  --text-base--line-height: 1.55;
+  --text-lg: 18px;
+  --text-lg--line-height: 1.45;
+  --text-xl: 22px;
+  --text-xl--line-height: 1.3;
+  --text-2xl: 30px;
+  --text-2xl--line-height: 1.2;
+  --text-3xl: 40px;
+  --text-3xl--line-height: 1.1;
+  --text-4xl: 56px;
+  --text-4xl--line-height: 1.04;
 
-  --radius-control: 8px;
-  --radius-card: 12px;
+  /* Square: every radius utility, the named ones included, draws a sharp corner. */
+  --radius: 0;
+  --radius-xs: 0;
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-2xl: 0;
+  --radius-3xl: 0;
+  --radius-4xl: 0;
+  --radius-control: 0;
+  --radius-card: 0;
 
   --color-bg: var(--cb-bg);
   --color-surface: var(--cb-surface);
   --color-surface-2: var(--cb-surface-2);
   --color-border: var(--cb-border);
+  --color-border-strong: var(--cb-border-strong);
   --color-fg: var(--cb-fg);
   --color-muted: var(--cb-muted);
   --color-subtle: var(--cb-subtle);
   --color-accent: var(--cb-accent);
   --color-accent-fg: #ffffff;
   --color-running: #16a34a;
-  --color-starting: #f59e0b;
+  --color-starting: #d97706;
   --color-sleeping: #a1a1aa;
   --color-error: #dc2626;
   --color-frame: #09090b;
@@ -39,39 +63,56 @@
 
 :root {
   --cb-bg: #ffffff;
-  --cb-surface: #fafafa;
-  --cb-surface-2: #f4f4f5;
-  --cb-border: #e4e4e7;
-  --cb-fg: #09090b;
-  --cb-muted: #52525b;
-  --cb-subtle: #6b6b74;
-  --cb-accent: #2563eb;
+  --cb-surface: #f7f7f7;
+  --cb-surface-2: #efefef;
+  --cb-border: #e5e5e5;
+  --cb-border-strong: #c7c7c7;
+  --cb-fg: #0a0a0a;
+  --cb-muted: #4f4f4f;
+  --cb-subtle: #6e6e6e;
+  --cb-accent: #2557d6;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
-    --cb-bg: #09090b;
-    --cb-surface: #18181b;
-    --cb-surface-2: #27272a;
-    --cb-border: #27272a;
-    --cb-fg: #fafafa;
-    --cb-muted: #a1a1aa;
-    --cb-subtle: #8e8e98;
-    --cb-accent: #3b82f6;
+    --cb-bg: #0a0a0a;
+    --cb-surface: #121212;
+    --cb-surface-2: #1c1c1c;
+    --cb-border: #262626;
+    --cb-border-strong: #3d3d3d;
+    --cb-fg: #f5f5f5;
+    --cb-muted: #a8a8a8;
+    --cb-subtle: #8f8f8f;
+    --cb-accent: #5b8cff;
     color-scheme: dark;
   }
 }
 
 :root[data-theme='dark'] {
-  --cb-bg: #09090b;
-  --cb-surface: #18181b;
-  --cb-surface-2: #27272a;
-  --cb-border: #27272a;
-  --cb-fg: #fafafa;
-  --cb-muted: #a1a1aa;
-  --cb-subtle: #8e8e98;
-  --cb-accent: #3b82f6;
+  --cb-bg: #0a0a0a;
+  --cb-surface: #121212;
+  --cb-surface-2: #1c1c1c;
+  --cb-border: #262626;
+  --cb-border-strong: #3d3d3d;
+  --cb-fg: #f5f5f5;
+  --cb-muted: #a8a8a8;
+  --cb-subtle: #8f8f8f;
+  --cb-accent: #5b8cff;
+  color-scheme: dark;
+}
+
+/* Always dark, whatever the page theme: the live view's frame and its overlays. */
+.cb-dark {
+  --cb-bg: #0a0a0a;
+  --cb-surface: #121212;
+  --cb-surface-2: #1c1c1c;
+  --cb-border: #262626;
+  --cb-border-strong: #3d3d3d;
+  --cb-fg: #f5f5f5;
+  --cb-muted: #a8a8a8;
+  --cb-subtle: #8f8f8f;
+  --cb-accent: #5b8cff;
   color-scheme: dark;
 }
 
@@ -83,6 +124,17 @@
     font-family: var(--font-sans);
     font-size: var(--text-sm);
     -webkit-font-smoothing: antialiased;
+    font-feature-settings: 'cv11', 'ss01';
+  }
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
+  ::selection {
+    background: var(--color-fg);
+    color: var(--color-bg);
   }
   :focus-visible {
     outline: 2px solid var(--color-accent);

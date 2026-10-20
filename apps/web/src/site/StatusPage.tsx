@@ -7,9 +7,9 @@ import { usePublicStatus } from './hooks.js';
 import { container, PublicHero } from './PublicShell.js';
 
 const LOOK: Record<ComponentStatus, { icon: typeof CheckCircle2; color: string; banner: string }> = {
-  operational: { icon: CheckCircle2, color: 'text-running', banner: 'border-running/40 bg-running/10' },
-  degraded: { icon: AlertTriangle, color: 'text-starting', banner: 'border-starting/40 bg-starting/10' },
-  outage: { icon: XCircle, color: 'text-error', banner: 'border-error/40 bg-error/10' },
+  operational: { icon: CheckCircle2, color: 'text-running', banner: 'border-l-running' },
+  degraded: { icon: AlertTriangle, color: 'text-starting', banner: 'border-l-starting' },
+  outage: { icon: XCircle, color: 'text-error', banner: 'border-l-error' },
 };
 
 /** Live service status from the api's own checks; refreshed every minute. */
@@ -23,24 +23,24 @@ export function StatusPage() {
 
   return (
     <>
-      <PublicHero title={t('status.title')} />
+      <PublicHero eyebrow={t('nav.status')} title={t('status.title')} />
       <section className={`${container} space-y-6 pb-16`}>
         {status.isPending ? (
           <Skeleton className="h-20" />
         ) : (
-          <div role="status" className={cn('flex items-center gap-3 rounded-[var(--radius-card)] border px-5 py-4', LOOK[overall].banner)}>
-            <Overall className={cn('size-6 shrink-0', LOOK[overall].color)} aria-hidden />
+          <div role="status" className={cn('flex items-center gap-4 border border-l-4 border-border px-6 py-6', LOOK[overall].banner)}>
+            <Overall className={cn('size-7 shrink-0', LOOK[overall].color)} aria-hidden />
             <div>
-              <p className="font-semibold">{status.isError ? t('status.unreachable') : t(`status.all.${overall}`)}</p>
+              <p className="text-xl font-semibold tracking-tight">{status.isError ? t('status.unreachable') : t(`status.all.${overall}`)}</p>
               {s ? <Hint>{t('status.checked', { time: new Date(s.checkedAt).toLocaleTimeString(locale) })}</Hint> : null}
             </div>
           </div>
         )}
-        {s?.creationPaused ? <p className="rounded-[var(--radius-control)] border border-border bg-surface px-4 py-3 text-sm">{t('status.paused')}</p> : null}
+        {s?.creationPaused ? <p className="border-l-2 border-starting bg-surface px-4 py-3 text-sm">{t('status.paused')}</p> : null}
         {s ? (
           <div className="grid gap-4 md:grid-cols-2">
             <Card className="p-5">
-              <h2 className="text-base font-semibold">{t('status.components')}</h2>
+              <h2 className="text-[15px] font-semibold">{t('status.components')}</h2>
               <ul className="mt-3 divide-y divide-border">
                 {s.components.map((c) => (
                   <Row key={c.id} label={t(`status.component.${c.id}`)} status={c.status} />
@@ -48,7 +48,7 @@ export function StatusPage() {
               </ul>
             </Card>
             <Card className="p-5">
-              <h2 className="text-base font-semibold">{t('status.regions')}</h2>
+              <h2 className="text-[15px] font-semibold">{t('status.regions')}</h2>
               <ul className="mt-3 divide-y divide-border">
                 {s.regions.map((r) => (
                   <Row

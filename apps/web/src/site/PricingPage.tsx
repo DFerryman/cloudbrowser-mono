@@ -1,5 +1,5 @@
 import { REGION_AREAS, browserEstimate, type PublicPricing, type RegionId } from '@cloudbrowser/contracts';
-import { Button, Card, cn, Hint, Label, Select, Skeleton } from '@cloudbrowser/ui';
+import { Button, Card, cn, Eyebrow, Hint, Label, Select, Skeleton } from '@cloudbrowser/ui';
 import { ArrowRight, ChevronDown, Gift } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
@@ -37,7 +37,7 @@ export function PricingPage() {
 
   return (
     <>
-      <PublicHero title={t('pricing.title')} subtitle={t('pricing.subtitle')} />
+      <PublicHero eyebrow={t('nav.pricing')} title={t('pricing.title')} subtitle={t('pricing.subtitle')} />
 
       <section className={`${container} pb-12`}>
         {pricing.isPending ? (
@@ -46,7 +46,7 @@ export function PricingPage() {
           <Card className="p-6 text-sm text-muted">{t('pricing.unavailable')}</Card>
         ) : (
           <>
-            <div className="mb-4 max-w-md">
+            <div className="mb-6 max-w-md">
               <Label htmlFor={selectId}>{t('pricing.region')}</Label>
               <Select id={selectId} value={regionId ?? ''} onChange={(e) => setRegionId(e.target.value)}>
                 {groups.map(([area, list]) => (
@@ -75,12 +75,12 @@ export function PricingPage() {
 
       <section className="border-y border-border bg-surface py-16">
         <div className={container}>
-          <h2 className="text-xl font-semibold tracking-tight md:text-2xl">{t('pricing.how')}</h2>
-          <ol className="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+          <h2 className="text-2xl font-semibold tracking-tight md:text-[40px] md:leading-tight">{t('pricing.how')}</h2>
+          <ol className="mt-10 grid gap-8 sm:grid-cols-2 lg:grid-cols-4">
             {([1, 2, 3, 4] as const).map((n) => (
-              <li key={n}>
-                <span className="grid size-8 place-items-center rounded-full bg-accent/10 font-mono text-sm font-semibold text-accent">{n}</span>
-                <h3 className="mt-3 font-semibold">{t(`pricing.how.${n}.title`)}</h3>
+              <li key={n} className="border-t-2 border-fg pt-5">
+                <span className="font-mono text-sm font-medium">{String(n).padStart(2, '0')}</span>
+                <h3 className="mt-4 text-base font-semibold">{t(`pricing.how.${n}.title`)}</h3>
                 <p className="mt-1 text-sm leading-relaxed text-muted">{t(`pricing.how.${n}.body`, { days: pricing.data?.retentionDays ?? 7 })}</p>
               </li>
             ))}
@@ -97,9 +97,9 @@ export function PricingPage() {
 
       {pricing.data ? (
         <section className={`${container} pt-16`}>
-          <Card className="flex flex-col gap-4 border-accent/30 bg-accent/5 p-6 sm:flex-row sm:items-center sm:justify-between">
+          <Card className="flex flex-col gap-4 border-fg p-6 sm:flex-row sm:items-center sm:justify-between md:p-8">
             <div className="flex gap-3">
-              <Gift className="mt-0.5 size-5 shrink-0 text-accent" aria-hidden />
+              <Gift className="mt-0.5 size-5 shrink-0" aria-hidden />
               <div>
                 <h2 className="font-semibold">{t('pricing.trial.title')}</h2>
                 <p className="mt-1 text-sm text-muted">
@@ -130,19 +130,19 @@ function RegionCard({ region }: { region: RegionPrice }) {
     { label: t('pricing.transfer'), hint: t('pricing.transferHint'), value: m(region.rates.transfer), unit: t('pricing.unit.gb') },
   ];
   return (
-    <Card className="overflow-hidden">
-      <div className="grid divide-y divide-border md:grid-cols-3 md:divide-x md:divide-y-0">
+    <Card className="overflow-hidden border-fg">
+      <div className="grid divide-y divide-border md:grid-cols-[1.4fr_1fr_1fr] md:divide-x md:divide-y-0">
         {cells.map((c) => (
-          <div key={c.label} className="p-6">
-            <p className="text-sm font-medium text-muted">{c.label}</p>
-            <p className={cn('mt-2 font-semibold tracking-tight tabular-nums', c.strong ? 'text-[32px] leading-none' : 'text-2xl')}>
-              {c.value} <span className="text-sm font-normal text-subtle">{c.unit}</span>
+          <div key={c.label} className="p-6 md:p-8">
+            <Eyebrow as="h2">{c.label}</Eyebrow>
+            <p className={cn('mt-4 font-semibold tracking-tight tabular-nums', c.strong ? 'text-[44px] leading-none md:text-[56px]' : 'text-[28px] leading-none')}>
+              {c.value} <span className="text-sm font-normal tracking-normal text-subtle">{c.unit}</span>
             </p>
-            <Hint className="mt-2">{c.hint}</Hint>
+            <Hint className="mt-3">{c.hint}</Hint>
           </div>
         ))}
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-surface px-6 py-3 text-xs text-subtle">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-surface px-6 py-3 font-mono text-xs text-muted md:px-8">
         <span>{region.machine ? t('pricing.machine', { vcpu: region.machine.vcpu, memory: region.machine.memoryGb, gb: region.defaultStorageGb + region.rootVolumeGb }) : null}</span>
         {!region.acceptingNew ? <span className="font-medium text-starting">{t('pricing.notAccepting')}</span> : null}
       </div>
@@ -166,7 +166,7 @@ function UnitRates({ region, model }: { region: RegionPrice; model: PublicPricin
     [t('pricing.rate.transfer'), c?.transfer, model.transferMarkupPercent, r.transfer, t('pricing.unit.gb')],
   ];
   return (
-    <Card className="p-6" data-testid="pricing-model">
+    <Card className="min-w-0 p-6" data-testid="pricing-model">
       <h2 className="text-base font-semibold">{t('pricing.model')}</h2>
       <p className="mt-1 text-sm text-muted">{t('pricing.modelIntro')}</p>
       <div className="mt-3 overflow-x-auto">
@@ -219,7 +219,7 @@ function Estimator({ region }: { region: RegionPrice }) {
         </label>
         <span className="font-mono text-sm font-medium">{t('pricing.hoursValue', { n: hours })}</span>
       </div>
-      <input id={id} type="range" min={0} max={24} step={1} value={hours} onChange={(ev) => setHours(Number(ev.target.value))} className="mt-2 w-full accent-[var(--color-accent)]" />
+      <input id={id} type="range" min={0} max={24} step={1} value={hours} onChange={(ev) => setHours(Number(ev.target.value))} className="mt-2 w-full accent-[var(--color-fg)]" />
       <p className="mt-4 text-2xl font-semibold tracking-tight tabular-nums">{t('pricing.estimateTotal', { amount: m(running + e.alwaysOnMonth) })}</p>
       <p className="mt-1 text-sm text-muted">{t('pricing.estimateBreakdown', { running: m(running), kept: m(e.alwaysOnMonth), transfer: m(transfer) })}</p>
       <Hint className="mt-3">{t('pricing.estimateNote')}</Hint>

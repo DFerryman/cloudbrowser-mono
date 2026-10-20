@@ -66,13 +66,13 @@ function StorageCard({ instance: i, pricing }: { instance: Instance; pricing: Re
           <span className="text-muted">{pct !== null ? t('storage.used', { used: bytes(s.usedBytes), total: bytes(s.totalBytes) }) : t('storage.usedUnknown')}</span>
         </div>
         <div
-          className="h-2 overflow-hidden rounded-full bg-surface-2"
+          className="h-2 overflow-hidden bg-surface-2"
           role="progressbar"
           aria-valuenow={pct === null ? undefined : Math.round(pct)}
           aria-valuemin={0}
           aria-valuemax={100}
         >
-          <div className={cn('h-full rounded-full', pct !== null && pct >= 90 ? 'bg-error' : pct !== null && pct >= 75 ? 'bg-starting' : 'bg-accent')} style={{ width: `${pct ?? 0}%` }} />
+          <div className={cn('h-full', pct !== null && pct >= 90 ? 'bg-error' : pct !== null && pct >= 75 ? 'bg-starting' : 'bg-fg')} style={{ width: `${pct ?? 0}%` }} />
         </div>
         {capacityPending && (i.status === 'sleeping' || i.status === 'running') ? (
           <p role="status" className="mt-2 text-sm text-starting">

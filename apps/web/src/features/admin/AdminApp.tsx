@@ -32,13 +32,13 @@ function Gate() {
     const status = session.error instanceof ApiError ? session.error.status : null;
     return (
       <Centered>
-        <Shield className="mx-auto size-8 text-accent" aria-hidden />
+        <Shield className="mx-auto size-8" aria-hidden />
         <h1 className="text-base font-semibold text-fg">{t('shell.title')}</h1>
         <p className="max-w-sm">{t(status === 403 ? 'shell.denied' : status === 401 ? 'shell.expired' : 'shell.unverified')}</p>
         <div className="flex flex-wrap justify-center gap-3">
-          {status !== 403 ? <a href={ACCESS_LOGIN_URL} className="rounded-[var(--radius-control)] bg-accent px-3 py-2 font-medium text-white">{t('shell.signIn')}</a> : null}
+          {status !== 403 ? <a href={ACCESS_LOGIN_URL} className="bg-fg px-4 py-2.5 font-medium text-bg hover:bg-fg/85">{t('shell.signIn')}</a> : null}
           {status !== 401 && status !== 403 ? <Button onClick={() => void session.refetch()}>{t('shell.retry')}</Button> : null}
-          <a href={ACCESS_LOGOUT_URL} className="rounded-[var(--radius-control)] border border-border px-3 py-2 font-medium text-fg">{t('shell.signOut')}</a>
+          <a href={ACCESS_LOGOUT_URL} className="border border-border-strong px-4 py-2.5 font-medium text-fg hover:border-fg">{t('shell.signOut')}</a>
         </div>
         <LanguageToggle />
         <a href={APP_URL} className="block text-accent hover:underline">
@@ -82,7 +82,7 @@ function Console({ session }: { session: AdminSession }) {
     <div className="flex min-h-dvh flex-col md:flex-row">
       <aside className="border-b border-border bg-surface p-3 md:sticky md:top-0 md:h-dvh md:w-52 md:shrink-0 md:border-r md:border-b-0">
         <div className="flex items-center gap-2 px-2 py-2 text-sm font-semibold">
-          <Shield className="size-4 text-accent" aria-hidden /> {t('shell.title')}
+          <Shield className="size-4" aria-hidden /> {t('shell.title')}
         </div>
         <nav className="mt-2 flex gap-1 overflow-x-auto md:flex-col">
           {NAV.map(([to, label]) => (
@@ -91,7 +91,7 @@ function Console({ session }: { session: AdminSession }) {
               to={`/${to}`}
               end={to === ''}
               className={({ isActive }) =>
-                cn('rounded-[var(--radius-control)] px-2.5 py-1.5 text-sm whitespace-nowrap', isActive ? 'bg-surface-2 font-medium' : 'text-muted hover:bg-surface-2 hover:text-fg')
+                cn('relative px-3 py-2 text-sm whitespace-nowrap', isActive ? 'bg-surface-2 font-semibold text-fg md:before:absolute md:before:inset-y-0 md:before:left-0 md:before:w-0.5 md:before:bg-fg' : 'text-muted hover:bg-surface hover:text-fg')
               }
             >
               {t(label)}
@@ -106,12 +106,12 @@ function Console({ session }: { session: AdminSession }) {
           <a href={APP_URL} className="block text-accent hover:underline">
             {t('shell.backToApp')}
           </a>
-          <a href={ACCESS_LOGOUT_URL} className="flex w-fit items-center gap-2 rounded-[var(--radius-control)] border border-border px-3 py-2 text-sm font-medium text-fg hover:bg-surface-2">
+          <a href={ACCESS_LOGOUT_URL} className="flex w-fit items-center gap-2 border border-border-strong px-3 py-2 text-sm font-medium text-fg hover:border-fg">
             <LogOut className="size-4" aria-hidden /> {t('shell.signOut')}
           </a>
         </div>
       </aside>
-      <main className="min-w-0 flex-1 p-4 md:p-6">
+      <main className="min-w-0 flex-1 p-4 md:p-8">
         <Routes>
           <Route index element={<OverviewPage />} />
           <Route path="alerts" element={<AlertsPage />} />

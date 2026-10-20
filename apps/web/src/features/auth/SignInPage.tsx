@@ -92,34 +92,34 @@ export function SignInPage() {
           </div>
         </div>
         {signedOut ? (
-          <p role="status" className="mb-3 flex items-center gap-2 rounded-[var(--radius-control)] border border-running/30 bg-running/10 px-3 py-2 text-sm">
+          <p role="status" className="mb-3 flex items-center gap-2 border-l-2 border-running bg-bg px-3 py-2.5 text-sm">
             <CheckCircle2 className="size-4 shrink-0 text-running" aria-hidden /> {t('auth.signedOut')}
           </p>
         ) : null}
-        <Card className="p-6">
+        <Card className="border-fg p-8">
           {step === 'second-factor' ? (
             <SecondFactor onSignedIn={enter} onRestart={restart} />
           ) : (
             <>
-              <h1 className="text-lg font-semibold">{t('auth.title')}</h1>
-              <p className="mt-1 text-xs leading-relaxed text-subtle">{step === 'email' ? t('auth.subtitle') : t('auth.codeSent', { email })}</p>
+              <h1 className="text-2xl font-semibold tracking-tight">{t('auth.title')}</h1>
+              <p className="mt-2 text-sm leading-relaxed text-muted">{step === 'email' ? t('auth.subtitle') : t('auth.codeSent', { email })}</p>
               {step === 'email' ? (
-                <form onSubmit={sendCode} className="mt-5 space-y-4">
+                <form onSubmit={sendCode} className="mt-8 space-y-4">
                   <div>
                     <Label htmlFor="email">{t('auth.email')}</Label>
                     <Input id="email" type="email" autoComplete="email" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)} />
                   </div>
-                  <Button type="submit" variant="primary" className="w-full justify-center" disabled={busy}>
+                  <Button type="submit" variant="primary" size="lg" className="w-full justify-center" disabled={busy}>
                     {t('auth.sendCode')}
                   </Button>
                 </form>
               ) : (
-                <form onSubmit={signIn} className="mt-5 space-y-4">
+                <form onSubmit={signIn} className="mt-8 space-y-4">
                   <div>
                     <Label htmlFor="code">{t('auth.code')}</Label>
                     <CodeInput id="code" value={code} onChange={setCode} />
                   </div>
-                  <Button type="submit" variant="primary" className="w-full justify-center" disabled={busy || code.length !== 6}>
+                  <Button type="submit" variant="primary" size="lg" className="w-full justify-center" disabled={busy || code.length !== 6}>
                     {t('auth.signIn')}
                   </Button>
                   <button type="button" className="w-full text-center text-sm text-muted hover:text-fg" onClick={() => restart()}>
@@ -207,11 +207,11 @@ function SecondFactor({ onSignedIn, onRestart }: { onSignedIn: () => void; onRes
 
   return (
     <form onSubmit={verify}>
-      <span className="mb-3 grid size-10 place-items-center rounded-full bg-accent/10 text-accent" aria-hidden>
+      <span className="mb-4 grid size-10 place-items-center border border-fg" aria-hidden>
         <ShieldCheck className="size-5" />
       </span>
-      <h1 className="text-lg font-semibold">{t('auth.2fa.title')}</h1>
-      <p className="mt-1 text-xs leading-relaxed text-subtle">{t(backup ? 'auth.2fa.backupBody' : 'auth.2fa.body')}</p>
+      <h1 className="text-2xl font-semibold tracking-tight">{t('auth.2fa.title')}</h1>
+      <p className="mt-2 text-sm leading-relaxed text-muted">{t(backup ? 'auth.2fa.backupBody' : 'auth.2fa.body')}</p>
       <div className="mt-5">
         <Label htmlFor="second-factor">{t(backup ? 'auth.2fa.backupLabel' : 'auth.2fa.label')}</Label>
         {backup ? (
@@ -232,7 +232,7 @@ function SecondFactor({ onSignedIn, onRestart }: { onSignedIn: () => void; onRes
         )}
       </div>
       <label className="mt-4 flex cursor-pointer items-start gap-2.5 text-sm">
-        <input type="checkbox" className="mt-0.5 size-4 accent-[var(--color-accent)]" checked={trust} onChange={(e) => setTrust(e.target.checked)} />
+        <input type="checkbox" className="mt-0.5 size-4 accent-[var(--color-fg)]" checked={trust} onChange={(e) => setTrust(e.target.checked)} />
         <span>
           {t('auth.2fa.trust')}
           <span className="block text-xs text-muted">{t('auth.2fa.trustHint')}</span>
