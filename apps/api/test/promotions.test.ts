@@ -16,17 +16,32 @@ async function user(email = 'user@example.com') {
 }
 
 let browsers = 0;
-/** A browser with `minutes` of metered running time today (what the engine's meter records). */
-function browser(userId: string, minutes: number) {
+/** A browser of the user's, with `minutes` of live-view use (see `view`). */
+function browser(userId: string, minutes = 0) {
   const id = `inst_${++browsers}`;
   const now = Date.now();
   t.d1.sqlite.prepare(`INSERT INTO browser_instances (id, user_id, name, region_id, status, desired_state, idle_timeout_s, locale, screen, video_quality, video_auto, fingerprint, created_at, updated_at)
     VALUES (?, ?, 'b', 'tyo1', 'sleeping', 'stopped', 1800, 'en-US', '1280x800', 'full', 1, '{}', ?, ?)`).run(id, userId, now, now);
-  run(id, userId, minutes);
+  if (minutes) view(id, userId, minutes);
   return id;
 }
+// Sessions are laid end to end after the task started (the seed counts from the migration).
+let clock = Date.now() + 1_000;
+let sessions = 0;
+/**
+ * One live-view session of `minutes`. Ended cleanly by default; `abandoned` is a tab closed without
+ * ending: its last heartbeat is at `minutes`, and the browser only stamped `ended_at` when it slept,
+ * `abandoned` minutes later.
+ */
+function view(instanceId: string, userId: string, minutes: number, abandoned = 0) {
+  const from = clock;
+  const seen = from + minutes * 60_000;
+  clock = seen + abandoned * 60_000 + 60_000;
+  t.d1.sqlite.prepare(`INSERT INTO viewer_sessions (id, instance_id, user_id, started_at, last_seen_at, ended_at) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(`vs_${++sessions}`, instanceId, userId, from, abandoned ? seen : seen, abandoned ? seen + abandoned * 60_000 : seen);
+}
 function run(instanceId: string, userId: string, minutes: number) {
-  // One row per minute, as the meter adds 1/60 h at a time (floating point included).
+  // Billed running time, one row-update per minute as the meter adds 1/60 h at a time.
   for (let i = 0; i < minutes; i++) {
     t.d1.sqlite.prepare(`INSERT INTO usage_records (instance_id, user_id, region_id, item, day, unit_price_micros, unit_cost_micros, quantity, amount_micros, cost_micros, charged_micros, updated_at)
       VALUES (?, ?, 'tyo1', 'compute', ?, 0, 100000, ?, 0, 0, 0, ?)
@@ -47,33 +62,60 @@ afterEach(() => vi.unstubAllGlobals());
 describe('promotions', () => {
   it('ships the first-browser task: one browser used for 20 minutes earns $5 once', async () => {
     const id = await user();
-    expect(await promotions()).toEqual([expect.objectContaining({ id: SEED, status: 'pending', progress: 0, target: 20, rewardMicros: 5_000_000, criterion: 'browser_running_minutes', actionUrl: '/browsers/new' })]);
+    expect(await promotions()).toEqual([expect.objectContaining({ id: SEED, status: 'pending', progress: 0, target: 20, rewardMicros: 5_000_000, criterion: 'browser_used_minutes', actionUrl: '/browsers/new' })]);
 
-    // Two browsers with 15 minutes each are not one browser with 20.
-    const first = browser(id, 15);
+    // Running with nobody watching is not use.
+    const first = browser(id);
+    run(first, id, 45);
+    expect((await promotions())[0]).toMatchObject({ status: 'pending', progress: 0 });
+
+    // Two browsers used 15 minutes each are not one browser used for 20.
+    view(first, id, 10);
+    view(first, id, 5);
     browser(id, 15);
     expect((await promotions())[0]).toMatchObject({ status: 'pending', progress: 15 });
+    // A tab closed without ending counts until its last heartbeat + 1 minute, not until the
+    // browser slept 30 minutes later.
+    view(first, id, 3, 30);
+    expect((await promotions())[0]).toMatchObject({ status: 'pending', progress: 19 });
     expect((await prepaidBalance(createDb(t.d1), id)).balanceMicros).toBe(0);
 
-    run(first, id, 5);
+    view(first, id, 1);
     expect((await promotions())[0]).toMatchObject({ status: 'completed', progress: 20 });
     expect((await prepaidBalance(createDb(t.d1), id)).balanceMicros).toBe(5_000_000);
     const tx = (await t.call('GET', '/api/v1/billing/transactions')).body;
-    expect(tx).toEqual([expect.objectContaining({ kind: 'promotion', amountMicros: 5_000_000, description: 'Run your first browser for 20 minutes' })]);
+    expect(tx).toEqual([expect.objectContaining({ kind: 'promotion', amountMicros: 5_000_000, description: 'Use your first browser for 20 minutes' })]);
 
     // Opening the page again, more use, and the cron never pay twice.
-    run(first, id, 30);
+    view(first, id, 30);
     await promotions();
-    await promotionSweep(null, createDb(t.d1));
+    await promotionSweep(null, createDb(t.d1), new Date(clock));
     expect((await prepaidBalance(createDb(t.d1), id)).balanceMicros).toBe(5_000_000);
+  });
+
+  it('does not count use from before the task started', async () => {
+    const id = await user();
+    const b = browser(id);
+    t.d1.sqlite.prepare(`INSERT INTO viewer_sessions (id, instance_id, user_id, started_at, last_seen_at, ended_at) VALUES ('old', ?, ?, ?, ?, ?)`)
+      .run(b, id, Date.now() - 86_400_000, Date.now() - 86_400_000 + 3_600_000, Date.now() - 86_400_000 + 3_600_000);
+    expect((await promotions())[0]).toMatchObject({ status: 'pending', progress: 0 });
+  });
+
+  it('can measure billed running time instead, when an operator chooses it', async () => {
+    const id = await user();
+    const [seed] = (await callAdmin('GET', '/api/v1/admin/promotions')).body;
+    const { id: _, createdAt: _c, updatedAt: _u, updatedBy: _b, completions: _n, credited: _r, paidMicros: _p, ...input } = seed;
+    expect((await callAdmin('PUT', `/api/v1/admin/promotions/${SEED}`, { ...input, criterion: 'browser_running_minutes', reason: 'Count running time' })).status).toBe(200);
+    run(browser(id), id, 20);
+    expect((await promotions())[0]).toMatchObject({ status: 'completed', progress: 20 });
   });
 
   it('credits finished tasks from the cron without the user opening the page', async () => {
     const id = await user();
     browser(id, 21);
-    expect(await promotionSweep(null, createDb(t.d1))).toEqual({ completed: 1, credited: 1 });
+    expect(await promotionSweep(null, createDb(t.d1), new Date(clock))).toEqual({ completed: 1, credited: 1 });
     expect((await prepaidBalance(createDb(t.d1), id)).balanceMicros).toBe(5_000_000);
-    expect(await promotionSweep(null, createDb(t.d1))).toEqual({ completed: 0, credited: 0 });
+    expect(await promotionSweep(null, createDb(t.d1), new Date(clock))).toEqual({ completed: 0, credited: 0 });
   });
 
   it('lets operators configure tasks: criterion, reward, budget, top-up requirement and window', async () => {

@@ -5,11 +5,16 @@ import { z } from 'zod';
  * what counts as done from these criteria and set a target in the criterion's unit.
  */
 export const PromotionCriterion = z.enum([
-  /** One browser has run for `target` minutes in total (boot and shutdown included). */
+  /**
+   * One browser has been used for `target` minutes in total: its live view open, over any number
+   * of sessions. Only one viewer can be open per browser, so time is never counted twice.
+   */
+  'browser_used_minutes',
+  /** One browser has run for `target` minutes in total (billed time: boot and shutdown included). */
   'browser_running_minutes',
   /** All the user's browsers together have run for `target` minutes. */
   'total_running_minutes',
-  /** The live view has been open for `target` minutes in total. */
+  /** The live view has been open for `target` minutes in total, across all browsers. */
   'live_view_minutes',
   /** `target` browsers created (deleted ones count; failed creates do not). */
   'browsers_created',
@@ -24,6 +29,7 @@ export type PromotionCriterion = z.infer<typeof PromotionCriterion>;
 
 /** The unit each criterion's target and progress are counted in. */
 export const PROMOTION_UNIT: Record<PromotionCriterion, 'minutes' | 'browsers' | 'usd' | 'step' | 'passkeys'> = {
+  browser_used_minutes: 'minutes',
   browser_running_minutes: 'minutes',
   total_running_minutes: 'minutes',
   live_view_minutes: 'minutes',

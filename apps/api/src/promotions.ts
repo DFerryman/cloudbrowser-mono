@@ -19,6 +19,8 @@ type Completion = typeof promotionCompletions.$inferSelect;
 
 /** Users whose running time may have changed since the previous sweep (with slack for a missed run). */
 const RECENT_USAGE_MS = 30 * 60_000;
+/** How long after its last recorded heartbeat a viewer session is counted as still open. */
+const HEARTBEAT_SLACK_MS = 60_000;
 /** Completions recorded or credited per sweep. */
 const SWEEP_LIMIT = 200;
 
@@ -26,6 +28,14 @@ export const promotionReference = (taskId: string, userId: string) => `promotion
 
 /** Minutes from hours, rounded to 0.001 first so 20 × (1/60 h) is 20, not 19. */
 const minutes = (hours: SQL) => sql`CAST(round(${hours} * 60, 3) AS INTEGER)`;
+
+/**
+ * Minutes a set of viewer sessions was open. The viewer heartbeats every 15 s and stamps
+ * `last_seen_at` at most once a minute, so a session really ended within about a minute of it. A tab
+ * closed without saying so is only given `ended_at` when the browser later sleeps (up to its idle
+ * timeout later), so the end is capped at the last heartbeat + 1 minute.
+ */
+const viewedMinutes = sql`CAST(round(sum(max(0, min(coalesce(ended_at, last_seen_at + ${HEARTBEAT_SLACK_MS}), last_seen_at + ${HEARTBEAT_SLACK_MS}) - started_at)) / 60000.0, 3) AS INTEGER)`;
 
 /**
  * One row per user `(user_id, value)` with the task's progress in its criterion's unit. `users`
@@ -43,9 +53,12 @@ function progressSql(task: TaskRow, users: (column: SQL) => SQL): SQL {
     case 'total_running_minutes':
       return sql`SELECT user_id, ${minutes(sql`sum(quantity)`)} AS value FROM usage_records
         WHERE item = 'compute' AND day >= ${day} AND ${users(sql`user_id`)} GROUP BY user_id`;
+    case 'browser_used_minutes':
+      return sql`SELECT user_id, max(value) AS value FROM (SELECT user_id, ${viewedMinutes} AS value FROM viewer_sessions
+        WHERE started_at >= ${from} AND ${users(sql`user_id`)} GROUP BY user_id, instance_id) GROUP BY user_id`;
     case 'live_view_minutes':
-      return sql`SELECT user_id, CAST(round(sum(max(0, coalesce(ended_at, last_seen_at) - started_at)) / 60000.0, 3) AS INTEGER) AS value
-        FROM viewer_sessions WHERE started_at >= ${from} AND ${users(sql`user_id`)} GROUP BY user_id`;
+      return sql`SELECT user_id, ${viewedMinutes} AS value FROM viewer_sessions
+        WHERE started_at >= ${from} AND ${users(sql`user_id`)} GROUP BY user_id`;
     case 'browsers_created':
       return sql`SELECT user_id, count(*) AS value FROM browser_instances
         WHERE status <> 'failed' AND created_at >= ${from} AND ${users(sql`user_id`)} GROUP BY user_id`;
@@ -161,18 +174,20 @@ export async function userPromotions(env: Env | null, db: Db, userId: string, no
 
 /**
  * Cron: completes and credits tasks finished since the last run without the user opening the
- * page. Running-time criteria only look at users metered in the last half hour.
+ * page. Time-based criteria only look at users active in the last half hour.
  */
 export async function promotionSweep(env: Env | null, db: Db, now = new Date()) {
   const tasks = await taskMap(db);
   let completed = 0;
   for (const task of tasks.values()) {
     if (!isOpen(task, now)) continue;
-    const usage = task.criterion === 'browser_running_minutes' || task.criterion === 'total_running_minutes';
+    // Time-based criteria only look at users active recently (the page catches everyone else).
     const recent = now.getTime() - RECENT_USAGE_MS;
-    const users = usage
+    const users = task.criterion === 'browser_running_minutes' || task.criterion === 'total_running_minutes'
       ? (col: SQL) => sql`${col} IN (SELECT DISTINCT user_id FROM usage_records WHERE item = 'compute' AND updated_at >= ${recent})`
-      : () => sql`1`;
+      : task.criterion === 'browser_used_minutes' || task.criterion === 'live_view_minutes'
+        ? (col: SQL) => sql`${col} IN (SELECT DISTINCT user_id FROM viewer_sessions WHERE last_seen_at >= ${recent} OR ended_at >= ${recent})`
+        : () => sql`1`;
     const candidates = await db.all<{ user_id: string; value: number }>(sql`SELECT p.user_id, p.value FROM (${progressSql(task, users)}) AS p
       WHERE p.value >= ${task.target}
         AND NOT EXISTS (SELECT 1 FROM promotion_completions c WHERE c.task_id = ${task.id} AND c.user_id = p.user_id)

@@ -38,18 +38,22 @@ CREATE INDEX `promotion_completions_user_idx` ON `promotion_completions` (`user_
 --> statement-breakpoint
 CREATE INDEX `promotion_completions_pending_idx` ON `promotion_completions` (`credited_at`);
 --> statement-breakpoint
--- The first task: create a browser and keep it running for 20 minutes in total, for $5 of credit.
-INSERT OR IGNORE INTO `promotion_tasks` (`id`, `title`, `description`, `action_url`, `criterion`, `target`, `reward_micros`, `enabled`, `requires_topup`, `sort_order`, `created_at`, `updated_at`, `updated_by`) VALUES (
+-- The first task: create a browser and use it (its live view open) for 20 minutes in total, for $5
+-- of credit. Counted from launch, so activity before this release does not pay out at once. The
+-- budget of 1,000 accounts ($5,000) is a safety net the operator can raise or remove.
+INSERT OR IGNORE INTO `promotion_tasks` (`id`, `title`, `description`, `action_url`, `criterion`, `target`, `reward_micros`, `enabled`, `requires_topup`, `sort_order`, `starts_at`, `max_completions`, `created_at`, `updated_at`, `updated_by`) VALUES (
 	'first-browser-20-minutes',
-	'{"en":"Run your first browser for 20 minutes","zh-CN":"让你的第一个浏览器运行 20 分钟"}',
-	'{"en":"Create a browser and use it for a total of 20 minutes, in one go or over several sessions. $5 of credit is added to your balance as soon as you finish.","zh-CN":"创建一个浏览器，累计使用满 20 分钟（可一次用完，也可分多次）。完成后，$5 额度会立即加入你的余额。"}',
+	'{"en":"Use your first browser for 20 minutes","zh-CN":"使用你的第一个浏览器 20 分钟"}',
+	'{"en":"Create a browser, open it and use it for a total of 20 minutes, in one go or over several sessions. Time counts while the browser is open on your screen. $5 of credit is added to your balance as soon as you finish.","zh-CN":"创建一个浏览器并打开使用，累计满 20 分钟（可一次用完，也可分多次）。浏览器画面在你屏幕上打开期间计时。完成后，$5 额度会立即加入你的余额。"}',
 	'/browsers/new',
-	'browser_running_minutes',
+	'browser_used_minutes',
 	20,
 	5000000,
 	1,
 	0,
 	0,
+	unixepoch() * 1000,
+	1000,
 	unixepoch() * 1000,
 	unixepoch() * 1000,
 	'migration'

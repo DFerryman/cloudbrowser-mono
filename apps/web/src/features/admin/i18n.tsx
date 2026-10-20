@@ -244,7 +244,8 @@ const M = {
   'promo.descZh': ['说明：用户需要做什么（中文）', 'What the user does (Chinese)'],
   'promo.descEn': ['说明：用户需要做什么（英文）', 'What the user does (English)'],
   'promo.criterion': ['完成判定', 'How completion is decided'],
-  'promo.criterion.browser_running_minutes': ['任意一个浏览器累计运行达到目标分钟数（按计费的运行时间，含启动和关机，可分多次）。', 'Any one browser has run for the target minutes in total (billed running time, boot and shutdown included, over any number of sessions).'],
+  'promo.criterion.browser_used_minutes': ['任意一个浏览器的实时画面累计打开达到目标分钟数（可分多次）。这是「使用」的计量：每个浏览器同一时间只有一个画面，不会重复计时；未正常关闭的标签页按最后一次心跳 + 1 分钟截止。浏览器在后台运行而无人观看的时间不计入。', 'Any one browser\'s live view has been open for the target minutes in total (over any number of sessions). This is what "used" means: one viewer per browser at a time, so nothing counts twice; a tab closed without ending counts until its last heartbeat + 1 minute. Running with nobody watching does not count.'],
+  'promo.criterion.browser_running_minutes': ['任意一个浏览器累计运行达到目标分钟数（按计费的运行时间，含启动和关机，以及无人观看的运行时间；反复唤醒/休眠也会累积）。', 'Any one browser has run for the target minutes in total (billed running time: boot and shutdown, and running with nobody watching, count too; repeated wake/sleep cycles add up).'],
   'promo.criterion.total_running_minutes': ['用户所有浏览器的运行时间合计达到目标分钟数。', 'All the user\'s browsers together have run for the target minutes.'],
   'promo.criterion.live_view_minutes': ['实时画面累计打开达到目标分钟数。', 'The live view has been open for the target minutes in total.'],
   'promo.criterion.browsers_created': ['累计创建的浏览器数（已删除的也算，创建失败的不算）。', 'Browsers created (deleted ones count, failed creates do not).'],
@@ -383,7 +384,7 @@ export type AdminKey = keyof typeof M;
 
 /** Statuses, kinds and severities shown as pills. Unknown values are shown as they are. */
 const TERMS: Record<string, string> = {
-  browser_running_minutes: '单个浏览器运行分钟数', total_running_minutes: '全部浏览器运行分钟数', live_view_minutes: '实时画面分钟数',
+  browser_used_minutes: '单个浏览器使用分钟数', browser_running_minutes: '单个浏览器运行分钟数', total_running_minutes: '全部浏览器运行分钟数', live_view_minutes: '实时画面分钟数',
   browsers_created: '创建浏览器数', topup_usd: '充值金额', two_factor_enabled: '开启两步验证', passkeys_added: '添加通行密钥', promotion: '优惠活动奖励',
   running: '运行中', creating: '创建中', starting: '启动中', stopping: '正在休眠', sleeping: '休眠中', waiting_capacity: '等待容量',
   provider_issue: '云服务故障', needs_attention: '需处理', failed: '失败', deleting: '删除中', purged: '已清除', succeeded: '成功',

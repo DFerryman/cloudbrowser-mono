@@ -32,7 +32,7 @@ const EMPTY: PromotionTaskInput = {
   title: { en: '', 'zh-CN': '' },
   description: { en: '', 'zh-CN': '' },
   actionUrl: '/browsers/new',
-  criterion: 'browser_running_minutes',
+  criterion: 'browser_used_minutes',
   target: 20,
   rewardMicros: 5_000_000,
   enabled: false,

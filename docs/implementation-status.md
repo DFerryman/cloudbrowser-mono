@@ -258,13 +258,15 @@ Cloudflare deployment.
 - **Promotions**: a *Promotions* entry at the bottom of the dashboard sidebar (with a count of
   pending tasks; a fifth tab on phones) lists the user's tasks with progress, and the ones they
   completed. Operators define tasks in the console (*Promotions*): English and Chinese wording, the
-  in-app link for the Start button, how completion is decided (`browser_running_minutes` for one
-  browser, `total_running_minutes`, `live_view_minutes`, `browsers_created`, `topup_usd` net of
+  in-app link for the Start button, how completion is decided (`browser_used_minutes`: one
+  browser's live view open, capped at the last heartbeat + 1 minute; `browser_running_minutes`,
+  `total_running_minutes`, `live_view_minutes`, `browsers_created`, `topup_usd` net of
   refunds, `two_factor_enabled`, `passkeys_added`) and its target, the reward, a start and end time,
   a budget (max. accounts), and an optional paid-top-up requirement against throwaway accounts.
   The api records each completion once (`promotion_completions`) and credits the reward as a
   `promotion` balance transaction (reference `promotion:<task>:<user>`), when the user opens the page
-  and from the 5-minute cron. Seeded task: one browser used for 20 minutes in total earns $5.
+  and from the 5-minute cron. Seeded task: one browser used (live view open) for 20 minutes in total
+  from launch earns $5, for up to 1,000 accounts.
 - **Images** (`images/`): browser and agent containers are built and published to GHCR. The
   pre-built Packer golden VM image remains planned.
 - **Web** (`apps/web`, `packages/ui`): design tokens from page 1, app shell, sign-in (with the

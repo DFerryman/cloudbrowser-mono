@@ -45,8 +45,8 @@ const instances = [
   { ...base, id: 'b5', name: 'Social SG', regionId: 'ap-southeast-1', status: 'starting', ipAddress: '203.0.113.90', lastActiveAt: ago(30), currentOperation: { id: 'o', kind: 'start', status: 'running' } },
 ];
 const promotions = [
-  { id: 'first-browser-20-minutes', title: { en: 'Run your first browser for 20 minutes', 'zh-CN': '让你的第一个浏览器运行 20 分钟' }, description: { en: 'Create a browser and use it for a total of 20 minutes, in one go or over several sessions. $5 of credit is added to your balance as soon as you finish.', 'zh-CN': '创建一个浏览器，累计使用满 20 分钟（可一次用完，也可分多次）。完成后，$5 额度会立即加入你的余额。' },
-    actionUrl: '/browsers/new', criterion: 'browser_running_minutes', target: 20, progress: 12, rewardMicros: 5_000_000, status: 'pending', needsTopup: false, completedAt: null, endsAt: null },
+  { id: 'first-browser-20-minutes', title: { en: 'Use your first browser for 20 minutes', 'zh-CN': '使用你的第一个浏览器 20 分钟' }, description: { en: 'Create a browser and use it for a total of 20 minutes, in one go or over several sessions. $5 of credit is added to your balance as soon as you finish.', 'zh-CN': '创建一个浏览器，累计使用满 20 分钟（可一次用完，也可分多次）。完成后，$5 额度会立即加入你的余额。' },
+    actionUrl: '/browsers/new', criterion: 'browser_used_minutes', target: 20, progress: 12, rewardMicros: 5_000_000, status: 'pending', needsTopup: false, completedAt: null, endsAt: null },
   { id: 'two-factor', title: { en: 'Turn on two-step verification', 'zh-CN': '开启两步验证' }, description: { en: 'Protect your account with an authenticator app.', 'zh-CN': '用验证器应用保护你的账户。' },
     actionUrl: '/account', criterion: 'two_factor_enabled', target: 1, progress: 1, rewardMicros: 1_000_000, status: 'completed', needsTopup: false, completedAt: ago(2000), endsAt: null },
 ];
