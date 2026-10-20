@@ -24,7 +24,8 @@ import (
 )
 
 // Version is reported in `ready`. 0.2.1 also reports failed viewer input relays; 0.2.2 runs IP
-// checks in a hidden page instead of a window that flashed onto the user's screen.
+// checks in a hidden page instead of a window that flashed onto the user's screen, and finishes
+// commands and delivers their replies across a gateway reconnect.
 const Version = "0.2.2"
 
 // Browser is Chrome as the agent controls it through CDP.
@@ -283,7 +284,14 @@ func (a *Agent) handle(ctx context.Context, in protocol.Incoming) {
 	case "turn":
 		a.log.Info("turn credentials received", "servers", len(in.IceServers))
 	case "command":
-		go a.command(ctx, in)
+		// A command outlives the tunnel it arrived on. Bound to the tunnel, a reconnect during a
+		// shutdown canceled the archive and lost the reply, and the engine waited for one that never
+		// came while the browser showed "Going to sleep". Each command has its own time limits.
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), commandLimit)
+		go func() {
+			defer cancel()
+			a.command(cctx, in)
+		}()
 	case "viewer_open":
 		a.openViewer(ctx, in.SessionID, in.RelayID)
 	case "viewer_close":
@@ -345,8 +353,30 @@ func (a *Agent) command(ctx context.Context, in protocol.Incoming) {
 	default:
 		reply.OK, reply.Error = false, "unknown command "+in.Kind
 	}
-	if err := a.write(ctx, reply); err != nil {
-		a.log.Warn("reply", "err", err)
+	a.deliver(reply)
+}
+
+// commandLimit bounds any one command (restoring a large archive is the longest); replyWait is how
+// long its reply waits for the tunnel to come back.
+const (
+	commandLimit = 15 * time.Minute
+	replyWait    = 3 * time.Minute
+)
+
+// deliver sends a reply on the current tunnel, retrying until a reconnected one takes it: the
+// gateway delivers a command once, so a reply lost with its tunnel would never be asked for again.
+func (a *Agent) deliver(reply protocol.Reply) {
+	deadline := time.Now().Add(replyWait)
+	for {
+		err := a.write(context.Background(), reply)
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			a.log.Warn("reply", "command", reply.CommandID, "err", err)
+			return
+		}
+		time.Sleep(time.Second)
 	}
 }
 

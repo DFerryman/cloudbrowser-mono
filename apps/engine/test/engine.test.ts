@@ -710,6 +710,20 @@ describe('backups, restore and recover', () => {
     expect((await w.instance()).status).toBe('running');
   });
 
+  it('stops the VM anyway when the agent never answers an archiving shutdown', async () => {
+    w.agentMode = 'gateway';
+    w.archives = { presignPut: async (k) => `https://r2.test/put/${k}`, presignGet: async (k) => `https://r2.test/get/${k}` };
+    const stop = await w.enqueue('inst1', 'stop');
+    expect((await runOperation(w.deps(), stop)).state).toBe('deferred');
+    // The reply was lost with the agent's tunnel: the archive wait (5 min) must end before the
+    // operation's deadline, or the browser stays on "Going to sleep" and the stop is retried.
+    w.advance(5 * 60_000 + 10_000);
+    expect(await w.settle(stop)).toEqual({ state: 'succeeded' });
+    expect((await w.instance()).status).toBe('sleeping');
+    const [b] = await w.db.select().from(backups).where(eq(backups.kind, 'archive'));
+    expect(b?.status).not.toBe('complete');
+  });
+
   it('archives the profile through the agent when the browser goes to sleep', async () => {
     w.agentMode = 'gateway';
     w.archives = { presignPut: async (k) => `https://r2.test/put/${k}`, presignGet: async (k) => `https://r2.test/get/${k}` };

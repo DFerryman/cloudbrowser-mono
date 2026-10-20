@@ -334,3 +334,46 @@ func TestAgentReportsHostAndGrowsTheDataFileSystem(t *testing.T) {
 		t.Fatalf("grown %v", h.grown)
 	}
 }
+
+// slowCloseBrowser holds Chrome's close until the test releases it.
+type slowCloseBrowser struct {
+	fakeBrowser
+	entered, release chan struct{}
+}
+
+func (b *slowCloseBrowser) Close(ctx context.Context) error {
+	close(b.entered)
+	select {
+	case <-b.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// A reconnect in the middle of a shutdown must neither cancel it nor lose its reply: the gateway
+// delivers a command once, and the engine otherwise waits for a reply that never arrives.
+func TestCommandReplySurvivesReconnect(t *testing.T) {
+	g, srv := newGateway(t)
+	browser := &slowCloseBrowser{fakeBrowser: fakeBrowser{ip: "203.0.113.7"}, entered: make(chan struct{}), release: make(chan struct{})}
+	a := New(Config{
+		InstanceID: "inst1", GatewayURL: "ws" + srv.URL[len("http"):], BootstrapToken: "boot",
+		StateDir: t.TempDir(), Generation: 1, Heartbeat: time.Hour,
+	}, browser, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = a.Run(ctx) }()
+
+	<-g.auths
+	first := <-g.conns
+	send(t, first, map[string]any{"t": "command", "id": "stop-1", "kind": "prepare_shutdown", "payload": map[string]any{}})
+	<-browser.entered
+	first.CloseNow()
+	<-g.auths
+	second := <-g.conns
+	close(browser.release)
+	r := readUntil(t, second, func(m map[string]any) bool { return m["t"] == "reply" })
+	if r["commandId"] != "stop-1" || r["ok"] != true {
+		t.Fatalf("reply %v", r)
+	}
+}

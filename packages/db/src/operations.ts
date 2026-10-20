@@ -1,13 +1,18 @@
 import { newId } from './ids.js';
 
-/** Deadlines per operation kind, in minutes (page 10, "Operations"). */
+/**
+ * Deadlines per operation kind, in minutes (page 10, "Operations"). A stop or delete waits up to
+ * 5 minutes for the agent's archive and then stops the VM anyway, which EC2 may take up to 10
+ * minutes to finish before it is forced: their deadline must leave room for both. At 5 minutes it
+ * expired first, the fallback never ran, and the browser stayed on "Going to sleep".
+ */
 export const OPERATION_DEADLINE_MIN: Record<string, number> = {
   create: 20,
   start: 15,
-  stop: 5,
+  stop: 20,
   recover: 60,
   restore: 60,
-  delete: 5,
+  delete: 20,
   undelete: 5,
   purge: 60,
   resize_volume: 30,
