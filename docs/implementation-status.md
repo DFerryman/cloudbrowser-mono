@@ -241,6 +241,20 @@ Cloudflare deployment.
   stale asynchronous responses cannot overwrite a replacement session. Authorization uses one
   current D1 batch and an existing one-second grant for relay bursts; stop/delete RPC revocation
   and hard trial/funding deadlines remain enforced. Same-session reconnects do not report take-over.
+- **Files into the browser** (agent 0.3.0): files and images pasted (Ctrl+V / Cmd+V, or the
+  toolbar's Upload button) or dragged onto the view travel to the VM as acknowledged base64 chunks
+  on the viewer socket (`FILE_TRANSFER` in contracts: up to 10 files, 50 MB, three chunks in
+  flight). The agent writes them to `/data/browser/uploads` (Chrome sees `/data/uploads`; cleared at
+  each wake, pruned after 24 h). A paste sets the browser's X clipboard with xclip in the browser
+  container (one PNG as an image, other images re-encoded to PNG by the viewer, anything else as a
+  `text/uri-list` that Chrome pastes as files), then the viewer sends Ctrl+V; neko's echo of that
+  clipboard is not relayed back. A drop is CDP `Input.dispatchDragEvent` with the files at the
+  drop point on the visible tab. Browsers on an older agent answer neither, and the viewer says so
+  after 20 s.
+- **Rotated view on phones**: a toolbar button on touch devices turns the view a quarter clockwise
+  for a phone held sideways in portrait orientation; the remote screen takes the turned shape, and
+  pointer, touch, wheel and drop input are mapped through the turn. The choice is remembered per
+  device.
 - **Images** (`images/`): browser and agent containers are built and published to GHCR. The
   pre-built Packer golden VM image remains planned.
 - **Web** (`apps/web`, `packages/ui`): design tokens from page 1, app shell, sign-in (with the

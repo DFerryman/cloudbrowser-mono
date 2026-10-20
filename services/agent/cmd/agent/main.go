@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -48,6 +49,9 @@ func main() {
 		nftDir       = flag.String("nft-dir", "/etc/cloudbrowser/nft", "nftables rule files; empty disables firewall switching")
 		fakeEgressIP = flag.String("fake-egress-ip", "", "development: no Chrome; report this address as what Chrome sees")
 		gateway      = flag.String("gateway", "", "override the gateway URL from user data")
+		uploadDir    = flag.String("upload-dir", "", "where files viewers paste or drop are written; empty disables them")
+		uploadInside = flag.String("upload-browser-dir", "", "the same directory as Chrome sees it in the browser container")
+		clipboard    = flag.String("clipboard-exec", "", "command prefix that runs a command in the browser container (xclip sets its clipboard), e.g. docker exec -i -u neko browser")
 	)
 	flag.Parse()
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -94,16 +98,19 @@ func main() {
 	}
 
 	a := agent.New(agent.Config{
-		InstanceID:     ud.InstanceID,
-		GatewayURL:     ud.GatewayURL,
-		BootstrapToken: ud.BootstrapToken,
-		Generation:     ud.Generation,
-		StateDir:       *stateDir,
-		ProfileDir:     *profileDir,
-		DataDir:        *dataDir,
-		Host:           hostFor(*fakeEgressIP),
-		EchoURLs:       strings.Split(*echo, ","),
-		ExpectedIP:     *expectedIP,
+		InstanceID:       ud.InstanceID,
+		GatewayURL:       ud.GatewayURL,
+		BootstrapToken:   ud.BootstrapToken,
+		Generation:       ud.Generation,
+		StateDir:         *stateDir,
+		ProfileDir:       *profileDir,
+		DataDir:          *dataDir,
+		Host:             hostFor(*fakeEgressIP),
+		EchoURLs:         strings.Split(*echo, ","),
+		ExpectedIP:       *expectedIP,
+		UploadDir:        *uploadDir,
+		UploadBrowserDir: *uploadInside,
+		Clipboard:        clipboardFor(*clipboard),
 	}, browser, nk, fw, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -167,6 +174,31 @@ func (f fakeBrowser) ObservedIPs(context.Context, []string) ([]string, error) {
 	return []string{f.ip}, nil
 }
 func (f fakeBrowser) InsertText(context.Context, string) error { return nil }
+func (f fakeBrowser) DropFiles(context.Context, int, int, []string) (bool, error) {
+	return true, nil
+}
+
+// execClipboard sets the X clipboard inside the browser container with xclip, as neko does. xclip
+// reads the data, then forks to serve it until another program owns the clipboard; its output goes
+// to /dev/null so the command returns once the data is read.
+type execClipboard struct{ prefix []string }
+
+func clipboardFor(prefix string) agent.Clipboard {
+	if fields := strings.Fields(prefix); len(fields) > 0 {
+		return execClipboard{fields}
+	}
+	return nil
+}
+
+func (c execClipboard) SetClipboard(ctx context.Context, mime string, data []byte) error {
+	args := append(append([]string{}, c.prefix[1:]...), "sh", "-c", `exec xclip -selection clipboard -target "$0" -in >/dev/null 2>&1`, mime)
+	cmd := exec.CommandContext(ctx, c.prefix[0], args...)
+	cmd.Stdin = bytes.NewReader(data)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("xclip: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
 
 // hostFor is the VM itself, except in local development runs (no data volume to grow).
 func hostFor(fakeEgressIP string) agent.Host {

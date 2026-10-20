@@ -293,6 +293,43 @@ try {
   assert.deepEqual((await snapshot(dp)).wire.map((frame) => frame.event), expectedOrder, 'Queued text must not overtake keys or mouse input');
   assert.deepEqual((await snapshot(dp)).held, []);
   check('one FIFO across pointer/wheel/key/IME boundaries and WebSocket backpressure, without using the unreliable data channel');
+  // Files: a drop lands where the pointer let go; a paste puts them on the remote clipboard, then Ctrl+V.
+  await clear(dp);
+  await dp.evaluate(({ x, y }) => window.touchHarness.dropFile(x, y, 'notes.md', '# Notes'), point);
+  await dp.waitForFunction(() => window.touchHarness.transfers()[0]?.done);
+  let sent = (await dp.evaluate(() => window.touchHarness.transfers()))[0];
+  const dropAt = inputCalls(await snapshot(dp), 'move').at(-1).args;
+  assert.deepEqual(sent, { action: 'drop', x: Math.round(dropAt[0]), y: Math.round(dropAt[1]), names: ['notes.md'], text: '# Notes', done: true });
+  await dp.waitForTimeout(20);
+  assert.ok(!(await snapshot(dp)).wire.some((frame) => frame.event === 'control/keydown' && frame.payload.keysym === 0x76), 'A drop must not paste');
+  check('a dropped file reaches the agent with the remote drop point');
+  await clear(dp);
+  await dp.evaluate(() => window.touchHarness.pasteFile('notes.txt', 'hello', 'text/plain'));
+  await dp.waitForFunction(() => window.touchHarness.snapshot().wire.some((frame) => frame.event === 'control/keydown' && frame.payload.keysym === 0x76));
+  sent = (await dp.evaluate(() => window.touchHarness.transfers()))[0];
+  assert.deepEqual({ action: sent.action, names: sent.names, text: sent.text, done: sent.done, x: sent.x }, { action: 'paste', names: ['notes.txt'], text: 'hello', done: true, x: undefined });
+  state = await snapshot(dp);
+  assert.deepEqual(state.wire.filter((f) => f.event.startsWith('control/key')).map((f) => [f.event, f.payload.keysym]),
+    [['control/keydown', 0xffe3], ['control/keydown', 0x76], ['control/keyup', 0x76], ['control/keyup', 0xffe3]]);
+  assert.deepEqual(state.held, []);
+  check('a pasted file goes to the remote clipboard, then Ctrl+V');
+
+  // Rotation: the remote screen takes the turned shape and input follows the turn.
+  const screen = await dp.locator('.remote-screen').boundingBox();
+  await clear(dp);
+  await dp.getByTestId('rotate-toggle').click();
+  await settle(dp);
+  await dp.waitForTimeout(900);
+  state = await snapshot(dp);
+  const viewport = inputCalls(state, 'setViewport').at(-1)?.args;
+  assert.deepEqual(viewport, [screen.height, screen.width], 'A turned view asks for a turned remote screen');
+  await clear(dp);
+  await dp.mouse.click(screen.x + screen.width - 3, screen.y + 3);
+  const turned = inputCalls(await snapshot(dp), 'button')[0].args;
+  assert.ok(turned[2] < 8 && turned[3] < 8, `The box's top-right corner is the remote top-left when turned: ${turned}`);
+  await dp.getByTestId('rotate-toggle').click();
+  await settle(dp);
+  check('rotated view: turned remote screen and input mapping');
   assert.deepEqual(desktop.errors, []);
   check('desktop click, hardware keyboard, and wheel remain usable');
   await desktop.context.close();

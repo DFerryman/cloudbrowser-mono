@@ -279,3 +279,92 @@ func (c *Chrome) InsertText(ctx context.Context, text string) error {
 	}
 	return errors.New("no page to type into")
 }
+
+// DropFiles drops files on the page under a point of the remote screen, as a file dragged in from
+// the desktop would be (CDP Input.dispatchDragEvent). The page is a visible tab whose viewport has
+// the point, the focused one first; false means there is none (the tab strip, the address bar).
+// The viewport is the bottom of the window (toolbars and info bars sit above it) at the page's
+// device pixel ratio, which includes its zoom.
+func (c *Chrome) DropFiles(ctx context.Context, x, y int, paths []string) (bool, error) {
+	var targets struct {
+		TargetInfos []struct {
+			TargetID string `json:"targetId"`
+			Type     string `json:"type"`
+		} `json:"targetInfos"`
+	}
+	if err := c.CDP.Call(ctx, "", "Target.getTargets", map[string]any{}, &targets); err != nil {
+		return false, err
+	}
+	type spot struct {
+		session string
+		x, y    float64
+	}
+	var found *spot
+	var sessions []string
+	defer func() {
+		for _, s := range sessions {
+			_ = c.CDP.Call(context.Background(), "", "Target.detachFromTarget", map[string]any{"sessionId": s}, nil)
+		}
+	}()
+	for _, t := range targets.TargetInfos {
+		if t.Type != "page" {
+			continue
+		}
+		var w struct {
+			Bounds struct {
+				Left, Top, Height float64
+				WindowState       string `json:"windowState"`
+			} `json:"bounds"`
+		}
+		if err := c.CDP.Call(ctx, "", "Browser.getWindowForTarget", map[string]any{"targetId": t.TargetID}, &w); err != nil || w.Bounds.WindowState == "minimized" {
+			continue
+		}
+		var s struct {
+			SessionID string `json:"sessionId"`
+		}
+		if err := c.CDP.Call(ctx, "", "Target.attachToTarget", map[string]any{"targetId": t.TargetID, "flatten": true}, &s); err != nil {
+			return false, err
+		}
+		sessions = append(sessions, s.SessionID)
+		var r struct {
+			Result struct {
+				Value []json.RawMessage `json:"value"`
+			} `json:"result"`
+		}
+		expr := `[document.visibilityState === "visible", document.hasFocus(), innerWidth, innerHeight, devicePixelRatio]`
+		if err := c.CDP.Call(ctx, s.SessionID, "Runtime.evaluate", map[string]any{"expression": expr, "returnByValue": true}, &r); err != nil || len(r.Result.Value) != 5 {
+			continue
+		}
+		var visible, focused bool
+		var width, height, ratio float64
+		for i, v := range []any{&visible, &focused, &width, &height, &ratio} {
+			_ = json.Unmarshal(r.Result.Value[i], v)
+		}
+		if !visible || width <= 0 || height <= 0 || ratio <= 0 {
+			continue
+		}
+		top := w.Bounds.Top + w.Bounds.Height - height*ratio
+		px, py := (float64(x)-w.Bounds.Left)/ratio, (float64(y)-top)/ratio
+		if px < 0 || py < 0 || px >= width || py >= height {
+			continue
+		}
+		if found == nil || focused {
+			found = &spot{s.SessionID, px, py}
+		}
+		if focused {
+			break
+		}
+	}
+	if found == nil {
+		return false, nil
+	}
+	// Copy, link and move: whichever the page asks for, as with a file manager's drag.
+	data := map[string]any{"items": []any{}, "files": paths, "dragOperationsMask": 1 | 2 | 16}
+	for _, kind := range []string{"dragEnter", "dragOver", "drop"} {
+		params := map[string]any{"type": kind, "x": found.x, "y": found.y, "data": data}
+		if err := c.CDP.Call(ctx, found.session, "Input.dispatchDragEvent", params, nil); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}

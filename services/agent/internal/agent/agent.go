@@ -27,8 +27,9 @@ import (
 // checks in a hidden page instead of a window that flashed onto the user's screen, and finishes
 // commands and delivers their replies across a gateway reconnect, and reports its final data-out
 // count in the shutdown reply. 0.2.3 waits for Chrome to take the hidden page instead of opening a
-// visible one when Chrome has no window yet (the check at every wake).
-const Version = "0.2.3"
+// visible one when Chrome has no window yet (the check at every wake). 0.3.0 receives files a viewer
+// pastes or drops (files.go).
+const Version = "0.3.0"
 
 // Browser is Chrome as the agent controls it through CDP.
 type Browser interface {
@@ -40,6 +41,9 @@ type Browser interface {
 	ObservedIPs(ctx context.Context, echoURLs []string) ([]string, error)
 	// InsertText types composed IME text into the focused element (CDP Input.insertText).
 	InsertText(ctx context.Context, text string) error
+	// DropFiles drops files (paths as Chrome sees them) on the page under a point of the remote
+	// screen; false means no page is there.
+	DropFiles(ctx context.Context, x, y int, paths []string) (bool, error)
 }
 
 // Neko opens a signaling relay to neko on the loopback interface for one viewer session.
@@ -73,11 +77,16 @@ type Config struct {
 	ProfileDir     string // /data/profile: Chrome's user data dir, archived at each sleep (page 4)
 	DataDir        string // /data: the data volume's mount point (disk usage, file system growth)
 	Host           Host   // optional: disk and network reports, file system growth
-	EchoURLs       []string
-	ExpectedIP     string // optional; reported with checks
-	Generation     int    // placement generation, from user data
-	Heartbeat      time.Duration
-	IPCheckEvery   time.Duration
+	// Files viewers paste or drop (files.go): written to UploadDir, which Chrome sees as
+	// UploadBrowserDir; both empty disables them. Clipboard is needed for pastes.
+	UploadDir        string
+	UploadBrowserDir string
+	Clipboard        Clipboard
+	EchoURLs         []string
+	ExpectedIP       string // optional; reported with checks
+	Generation       int    // placement generation, from user data
+	Heartbeat        time.Duration
+	IPCheckEvery     time.Duration
 }
 
 type Agent struct {
@@ -92,6 +101,9 @@ type Agent struct {
 	sessions    map[string]NekoSession
 	relayIDs    map[string]string
 	lastInputAt time.Time
+	transfers   map[string]*transfer
+	// clipboardQuietUntil: neko's clipboard reports are not relayed until then (files.go).
+	clipboardQuietUntil time.Time
 }
 
 func New(cfg Config, b Browser, n Neko, f Firewall, log *slog.Logger) *Agent {
@@ -101,7 +113,7 @@ func New(cfg Config, b Browser, n Neko, f Firewall, log *slog.Logger) *Agent {
 	if cfg.IPCheckEvery == 0 {
 		cfg.IPCheckEvery = 5 * time.Minute
 	}
-	return &Agent{cfg: cfg, browser: b, neko: n, firewall: f, log: log, sessions: map[string]NekoSession{}, relayIDs: map[string]string{}}
+	return &Agent{cfg: cfg, browser: b, neko: n, firewall: f, log: log, sessions: map[string]NekoSession{}, relayIDs: map[string]string{}, transfers: map[string]*transfer{}}
 }
 
 func (a *Agent) credentialPath() string { return filepath.Join(a.cfg.StateDir, "credential") }
@@ -125,6 +137,9 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.log.Warn("grow data file system", "err", err)
 		}
 		cancel()
+	}
+	if a.cfg.UploadDir != "" {
+		a.pruneUploads(0) // pages that could still read them did not survive the sleep
 	}
 	chromeMajor, err := a.browser.Start(ctx)
 	if err != nil {
@@ -464,6 +479,9 @@ func (a *Agent) openViewer(ctx context.Context, sessionID string, relayIDs ...st
 		relayID = relayIDs[0]
 	}
 	s, err := a.neko.Open(ctx, sessionID, func(msg json.RawMessage) {
+		if a.clipboardEchoed(msg) {
+			return
+		}
 		_ = a.write(ctx, protocol.ToViewer{T: "viewer", SessionID: sessionID, RelayID: relayID, Data: msg})
 	})
 	if err != nil {
@@ -512,6 +530,7 @@ func (a *Agent) closeViewer(sessionID string, relayIDs ...string) {
 	if s != nil {
 		s.Close()
 	}
+	a.endSessionTransfers(sessionID)
 }
 
 func (a *Agent) closeSessions() {
@@ -520,8 +539,9 @@ func (a *Agent) closeSessions() {
 	a.sessions = map[string]NekoSession{}
 	a.relayIDs = map[string]string{}
 	a.mu.Unlock()
-	for _, s := range all {
+	for id, s := range all {
 		s.Close()
+		a.endSessionTransfers(id)
 	}
 }
 
@@ -560,6 +580,12 @@ func (a *Agent) fromViewer(ctx context.Context, sessionID string, data json.RawM
 		if err := s.Send(f.Data); err != nil {
 			a.viewerError(ctx, sessionID, relayID, "input_failed")
 		}
+	case "file_begin", "file_chunk", "file_end", "file_cancel":
+		if s == nil {
+			a.viewerError(ctx, sessionID, relayID, "relay_unavailable")
+			return
+		}
+		a.fileFrame(ctx, sessionID, relayID, f)
 	}
 }
 

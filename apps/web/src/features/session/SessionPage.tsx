@@ -14,12 +14,13 @@ import {
   Moon,
   MoreHorizontal,
   RotateCw,
+  RotateCwSquare,
   Settings,
   Upload,
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import { COMBOS, qualityLevel, type ViewerState, type ViewerStats } from '@cloudbrowser/viewer';
+import { COMBOS, qualityLevel, type TransferUpdate, type ViewerState, type ViewerStats } from '@cloudbrowser/viewer';
 import { RemoteBrowserView, type RemoteBrowserHandle } from '@cloudbrowser/viewer/react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
@@ -61,6 +62,11 @@ type HeartbeatResult = { sleepAt: string | null; reason?: 'idle' | 'balance' | '
  * While browsers run on the fake executor the stream area shows a simulated Chrome; the real
  * viewer (packages/viewer, neko over the gateway) plugs into the same shell.
  */
+const ROTATED_KEY = 'cb.session.rotated';
+/** A transfer this large says it is under way; smaller ones finish before a toast could be read. */
+const LARGE_TRANSFER_BYTES = 2 * 1024 * 1024;
+const formatBytes = (n: number) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+
 export function SessionPage() {
   const { id = '' } = useParams();
   const { t, errorMessage } = useI18n();
@@ -86,6 +92,12 @@ export function SessionPage() {
   const [stats, setStats] = useState<ViewerStats | null>(null);
   const [streaming, setStreaming] = useState<VideoQuality | null>(null);
   const [muted, setMuted] = useState(true);
+  // Phones only: the view turned a quarter for a phone held sideways (a remembered preference).
+  const [touchDevice] = useState(() => typeof window !== 'undefined' && navigator.maxTouchPoints > 0 && window.matchMedia('(pointer: coarse)').matches);
+  const [rotated, setRotated] = useState(() => {
+    try { return touchDevice && localStorage.getItem(ROTATED_KEY) === '1'; } catch { return false; }
+  });
+  const uploadRef = useRef<HTMLInputElement>(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [inputInterrupted, setInputInterrupted] = useState(false);
   const [visibleHeight, setVisibleHeight] = useState<number | null>(null);
@@ -352,6 +364,20 @@ export function SessionPage() {
 
   const live = i?.status === 'running' && connect.data?.mode === 'webrtc' && viewer.state === 'live';
 
+  const toggleRotated = () => {
+    const next = !rotated;
+    setRotated(next);
+    try { localStorage.setItem(ROTATED_KEY, next ? '1' : '0'); } catch { /* Not remembered. */ }
+    viewerRef.current?.focus();
+  };
+
+  const onTransfer = (update: TransferUpdate) => {
+    if (update.state === 'uploading' && update.bytes >= LARGE_TRANSFER_BYTES) toast(t('session.fileSending', { size: formatBytes(update.bytes) }));
+    if (update.state !== 'error') return;
+    const key: MessageKey = { too_large: 'session.fileTooLarge', too_many: 'session.fileTooMany', not_on_page: 'session.fileNotOnPage', unsupported: 'session.fileUnsupported', timeout: 'session.fileUnsupported' }[update.reason ?? ''] as MessageKey | undefined ?? 'session.fileFailed';
+    toast(t(key), 'error');
+  };
+
   const disabledTool = (label: string, Icon: typeof Upload) => (
     <Button key={label} size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" disabled aria-label={label} title={`${label} · ${t('session.needsStream')}`}>
       <Icon />
@@ -387,6 +413,19 @@ export function SessionPage() {
               <span className="size-2 rounded-full bg-starting" aria-hidden /> {t('session.simulated')}
             </span>
           ) : null}
+          {touchDevice ? (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="text-zinc-300 hover:bg-zinc-800"
+              aria-label={t('session.rotate')}
+              title={t('session.rotate')}
+              aria-pressed={rotated}
+              onClick={toggleRotated}
+            >
+              <RotateCwSquare />
+            </Button>
+          ) : null}
           <Button
             size="icon"
             variant="ghost"
@@ -420,7 +459,34 @@ export function SessionPage() {
             ) : (
               disabledTool(t('session.clipboard'), ClipboardCopy)
             )}
-            {disabledTool(t('session.upload'), Upload)}
+            {live ? (
+              <>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="text-zinc-300 hover:bg-zinc-800"
+                  aria-label={t('session.uploadFiles')}
+                  title={t('session.uploadFiles')}
+                  onClick={() => uploadRef.current?.click()}
+                >
+                  <Upload />
+                </Button>
+                <input
+                  ref={uploadRef}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={(e) => {
+                    const files = [...(e.currentTarget.files ?? [])];
+                    e.currentTarget.value = '';
+                    viewerRef.current?.pasteFiles(files);
+                    viewerRef.current?.focus();
+                  }}
+                />
+              </>
+            ) : (
+              disabledTool(t('session.upload'), Upload)
+            )}
             {disabledTool(t('session.downloads'), Download)}
             {live ? (
               <Menu
@@ -497,6 +563,8 @@ export function SessionPage() {
             key={session.id}
             ref={viewerRef}
             onInputError={() => setInputInterrupted(true)}
+            onTransfer={onTransfer}
+            rotated={rotated}
             className="absolute inset-0 bg-frame"
             muted={muted}
             // Each viewer token works once, so every (re)connect asks the api for a fresh one.

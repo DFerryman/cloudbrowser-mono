@@ -6,6 +6,7 @@ import { KEYSYM, keyIdentity, keysymFor, keysymForName, matchingKeyIdentity, uni
 import { readStats, type ViewerStats } from './stats.js';
 import { ScrollAccumulator } from './scroll.js';
 import { InputQueue, type InputFailure } from './input-queue.js';
+import { FileTransfers, type TransferAction, type TransferFile, type TransferUpdate } from './file-transfer.js';
 
 export type ViewerState = 'connecting' | 'live' | 'reconnecting' | 'agent-offline' | 'taken-over' | 'closed';
 
@@ -25,6 +26,8 @@ export interface RemoteBrowserOptions {
   onCursor?: (css: string) => void;
   /** Text the remote Chrome put on its clipboard. */
   onClipboard?: (text: string) => void;
+  /** A pasted or dropped file transfer started, progressed or ended. */
+  onTransfer?: (update: TransferUpdate) => void;
   /** Delivery was interrupted; discard old input and require an explicit reconnect. */
   onInputError?: (reason: InputFailure) => void;
   /** Map Cmd → Ctrl and Option → Alt (macOS default, page 5). */
@@ -104,8 +107,19 @@ export class RemoteBrowser {
   /** neko's videos (system/init). Browsers on an image older than the quality ladder offer one. */
   private offeredVideos: string[] = [];
   private counters: { lost: number; received: number; freezes: number; frames: number; at: number } | null = null;
+  private readonly files: FileTransfers;
 
   constructor(private readonly opts: RemoteBrowserOptions) {
+    this.files = new FileTransfers({
+      // Files ride the viewer socket beside the input FIFO; the agent paces them with acknowledgements.
+      send: (frame) => {
+        if (!this.inputReady || this.stopped || !this.ws || this.ws.readyState !== 1) return false;
+        this.ws.send(JSON.stringify(frame));
+        return true;
+      },
+      onUpdate: (update) => this.opts.onTransfer?.(update),
+      onPasteReady: () => this.sendCombo(['Control', 'v']),
+    });
     this.video = opts.video ?? { quality: 'full', auto: true };
     this.inputQueue = new InputQueue({
       transport: () => this.ws,
@@ -372,6 +386,15 @@ export class RemoteBrowser {
     for (const code of buttons) this.sendInput({ event: EV.CONTROL_BUTTONDOWN, payload: { code } });
   }
 
+  /**
+   * Sends local files to the remote browser. paste: onto its clipboard, then Ctrl+V into the
+   * focused field; drop: onto the page at a point in remote screen pixels. Returns the transfer id,
+   * or null when it was refused (onTransfer says why).
+   */
+  sendFiles(action: TransferAction, files: TransferFile[], point?: { x: number; y: number }): string | null {
+    return this.files.start(action, files, point);
+  }
+
   /** Reports the usable viewport in CSS pixels; the remote screen follows, debounced. */
   setViewport(width: number, height: number) {
     this.pendingViewport = { width, height };
@@ -574,6 +597,9 @@ export class RemoteBrowser {
         return;
       case 'neko':
         void this.onNeko(frame.data as NekoMessage, ws).catch(() => this.reconnect(ws));
+        return;
+      case 'file':
+        this.files.handle(frame);
     }
   }
 
@@ -779,6 +805,9 @@ export class RemoteBrowser {
 
   private teardownPeer(preserveCandidates = false) {
     this.inputReady = false;
+    // Every path that loses the agent ends here (a new offer keeps it); the agent discards the
+    // part of a transfer it received.
+    if (!preserveCandidates) this.files.failAll();
     if (this.scrollTimer) clearTimeout(this.scrollTimer);
     this.scrollTimer = null;
     this.scrollAccumulator.reset();

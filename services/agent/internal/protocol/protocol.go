@@ -64,11 +64,37 @@ type IceServer struct {
 	Credential string   `json:"credential,omitempty"`
 }
 
-// ViewerFrame is what a viewer sent: a neko message or IME text.
+// ViewerFile reports a viewer's file transfer (packages/contracts AgentViewerFile).
+type ViewerFile struct {
+	T         string `json:"t"` // "viewer_file"
+	SessionID string `json:"sessionId"`
+	RelayID   string `json:"relayId,omitempty"`
+	ID        string `json:"id"`
+	Status    string `json:"status"` // progress | done | error
+	Received  int64  `json:"received,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// ViewerFrame is what a viewer sent: a neko message, IME text or part of a file transfer.
 type ViewerFrame struct {
-	T    string          `json:"t"` // neko | ime
+	T    string          `json:"t"` // neko | ime | file_begin | file_chunk | file_end | file_cancel
 	Data json.RawMessage `json:"data,omitempty"`
 	Text string          `json:"text,omitempty"`
+
+	// File transfers (file_*).
+	ID     string     `json:"id,omitempty"`
+	Action string     `json:"action,omitempty"` // paste | drop
+	X      *int       `json:"x,omitempty"`
+	Y      *int       `json:"y,omitempty"`
+	Files  []FileMeta `json:"files,omitempty"`
+	File   int        `json:"file,omitempty"`
+	Chunk  string     `json:"chunk,omitempty"` // base64
+}
+
+type FileMeta struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	Size int64  `json:"size"`
 }
 
 // Command kinds (packages/contracts AgentCommandKind).

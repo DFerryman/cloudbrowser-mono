@@ -74,6 +74,7 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
     case 'hello':
     case 'viewer':
     case 'viewer_error':
+    case 'viewer_file':
       return null; // handled by the gateway
     case 'turn_request':
       // neko's own TURN allocation, refreshed by the agent at each wake (page 5).

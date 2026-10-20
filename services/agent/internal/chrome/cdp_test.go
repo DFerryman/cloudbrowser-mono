@@ -7,8 +7,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,6 +59,7 @@ func TestChromeAgainstRealBrowser(t *testing.T) {
 	if err := c.InsertText(ctx, "你好"); err != nil {
 		t.Fatalf("insert text: %v", err)
 	}
+	testDropFiles(ctx, t, c)
 	if err := c.Close(ctx); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -66,6 +69,53 @@ func TestChromeAgainstRealBrowser(t *testing.T) {
 	case <-done:
 	case <-time.After(20 * time.Second):
 		t.Fatal("chrome did not exit after Browser.close")
+	}
+}
+
+// testDropFiles drops a file on a page that lists what it received in its title.
+func testDropFiles(ctx context.Context, t *testing.T, c *Chrome) {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "notes.md")
+	if err := os.WriteFile(file, []byte("# Notes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	page := `<body style="margin:0;height:100vh"><script>
+addEventListener("dragover", (e) => e.preventDefault());
+addEventListener("drop", async (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; document.title = f.name + ":" + (await f.text()) + ":" + e.clientX; });
+</script>`
+	var created struct {
+		TargetID string `json:"targetId"`
+	}
+	if err := c.CDP.Call(ctx, "", "Target.createTarget", map[string]any{"url": "data:text/html," + url.PathEscape(page)}, &created); err != nil {
+		t.Fatal(err)
+	}
+	var w struct {
+		Bounds struct{ Left, Top, Height float64 } `json:"bounds"`
+	}
+	if err := c.CDP.Call(ctx, "", "Browser.getWindowForTarget", map[string]any{"targetId": created.TargetID}, &w); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	// The bottom row of the window is the page's.
+	dropped, err := c.DropFiles(ctx, int(w.Bounds.Left)+40, int(w.Bounds.Top+w.Bounds.Height)-5, []string{file})
+	if err != nil || !dropped {
+		t.Fatalf("drop: %v %v", dropped, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var targets struct {
+			TargetInfos []struct{ TargetID, Title string } `json:"targetInfos"`
+		}
+		_ = c.CDP.Call(ctx, "", "Target.getTargets", map[string]any{}, &targets)
+		for _, info := range targets.TargetInfos {
+			if info.TargetID == created.TargetID && info.Title == "notes.md:# Notes:40" {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("page did not receive the file: %+v", targets.TargetInfos)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

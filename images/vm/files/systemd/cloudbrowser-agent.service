@@ -5,6 +5,8 @@ Wants=cloudbrowser-browser.service network-online.target
 After=cloudbrowser-browser.service network-online.target
 
 [Service]
+# Files viewers paste or drop go to the data volume, which the browser container mounts as /data;
+# pastes set the container's X clipboard with xclip (in the neko image), as neko does.
 EnvironmentFile=/etc/cloudbrowser/cloudbrowser.env
 ExecStart=/usr/local/bin/cloudbrowser-agent \
   --user-data /etc/cloudbrowser/agent.json \
@@ -15,7 +17,10 @@ ExecStart=/usr/local/bin/cloudbrowser-agent \
   --neko-url http://127.0.0.1:8080 \
   --neko-password-file /etc/cloudbrowser/neko-password \
   --browser-start "systemctl start cloudbrowser-browser" \
-  --browser-stop "systemctl stop cloudbrowser-browser"
+  --browser-stop "systemctl stop cloudbrowser-browser" \
+  --upload-dir /data/browser/uploads \
+  --upload-browser-dir /data/uploads \
+  --clipboard-exec "docker exec -i -u neko browser"
 Restart=always
 RestartSec=2
 # Under memory pressure the kernel ends a Chrome tab, never the agent that keeps the browser reachable.

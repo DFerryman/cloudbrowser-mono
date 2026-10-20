@@ -26,3 +26,19 @@ export function toRemotePoint(
     y: Math.min(((clientY - oy) / (vh * scale)) * height, height - 1),
   };
 }
+
+type Rect = { left: number; top: number; width: number; height: number };
+
+/**
+ * The view turned a quarter clockwise (a phone held sideways): the picture's frame as laid out
+ * before the turn, centered on the box, and a client point carried back into that frame.
+ */
+export function unrotate(clientX: number, clientY: number, box: Rect): { x: number; y: number; frame: Rect } {
+  const cx = box.left + box.width / 2;
+  const cy = box.top + box.height / 2;
+  return {
+    x: cx + (clientY - cy),
+    y: cy - (clientX - cx),
+    frame: { left: cx - box.height / 2, top: cy - box.width / 2, width: box.height, height: box.width },
+  };
+}

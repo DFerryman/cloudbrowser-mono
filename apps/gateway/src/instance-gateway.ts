@@ -358,6 +358,14 @@ export class InstanceGateway extends DurableObject<Env> {
       }
       return;
     }
+    if (frame.t === 'viewer_file') {
+      for (const v of this.ctx.getWebSockets(`session:${frame.sessionId}`)) {
+        const attachment = v.deserializeAttachment() as Attachment | null;
+        if (frame.relayId && (attachment?.role !== 'viewer' || attachment.relayId !== frame.relayId)) continue;
+        this.send(v, { t: 'file', id: frame.id, status: frame.status, received: frame.received, reason: frame.reason });
+      }
+      return;
+    }
     if (frame.t === 'hello') return;
     // Events, replies and TURN requests go to the api, which owns those records.
     const answer = await this.env.API.agentMessage(await this.instanceId(), att.generation, frame);

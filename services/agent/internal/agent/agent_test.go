@@ -23,6 +23,12 @@ type fakeBrowser struct {
 	ip       string
 	closed   int
 	inserted []string
+	drops    []drop
+}
+
+type drop struct {
+	x, y  int
+	paths []string
 }
 
 func (b *fakeBrowser) Start(context.Context) (int, error) { return 141, nil }
@@ -42,6 +48,13 @@ func (b *fakeBrowser) InsertText(_ context.Context, t string) error {
 	defer b.mu.Unlock()
 	b.inserted = append(b.inserted, t)
 	return nil
+}
+
+func (b *fakeBrowser) DropFiles(_ context.Context, x, y int, paths []string) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.drops = append(b.drops, drop{x, y, paths})
+	return true, nil
 }
 
 type fakeFirewall struct{ modes []string }

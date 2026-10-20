@@ -7,6 +7,8 @@ import { RemoteBrowser } from '../src/remote-browser';
 type RecordedCall = { method: string; actualMethod: string; args: unknown[]; phase: string | null };
 const calls: RecordedCall[] = [];
 const wire: { event: string; payload?: any }[] = [];
+// What an agent received of pasted or dropped files.
+const transfers: { action: string; x?: number; y?: number; names: string[]; text: string; done: boolean }[] = [];
 const held = new Set<number>();
 const remoteInput = document.createElement('textarea');
 const remoteScroll = document.createElement('div');
@@ -61,10 +63,31 @@ class FixtureSocket {
   push(frame: unknown) { this.onmessage?.({ data: JSON.stringify(frame) }); }
   send(raw: string) {
     const frame = JSON.parse(raw);
+    if (typeof frame.t === 'string' && frame.t.startsWith('file_')) return this.file(frame);
     if (frame.t !== 'neko') throw new Error('All input must use the ordered Neko transport');
     receiveInput(frame.data);
   }
   close() { this.readyState = 3; this.onclose?.(); }
+  // Acknowledges like agent 0.3.0: progress after each chunk, done after the end.
+  private received = new Map<string, number>();
+  file(frame: any) {
+    if (frame.t === 'file_begin') {
+      transfers.push({ action: frame.action, x: frame.x, y: frame.y, names: frame.files.map((f: any) => f.name), text: '', done: false });
+      this.received.set(frame.id, 0);
+    }
+    const transfer = transfers.at(-1)!;
+    if (frame.t === 'file_chunk') {
+      const bytes = Uint8Array.from(atob(frame.chunk), (c) => c.charCodeAt(0));
+      transfer.text += new TextDecoder().decode(bytes);
+      const received = this.received.get(frame.id)! + bytes.length;
+      this.received.set(frame.id, received);
+      queueMicrotask(() => this.push({ t: 'file', id: frame.id, status: 'progress', received }));
+    }
+    if (frame.t === 'file_end') {
+      transfer.done = true;
+      queueMicrotask(() => this.push({ t: 'file', id: frame.id, status: 'done' }));
+    }
+  }
 }
 class FixturePeer {
   connectionState = 'new';
@@ -132,10 +155,12 @@ RemoteBrowser.prototype.connect = async function () {
 function Fixture() {
   const ref = useRef<RemoteBrowserHandle>(null);
   const [keyboard, setKeyboard] = useState(false);
+  const [rotated, setRotated] = useState(false);
   return <>
     <header>
       <button data-testid="keyboard-toggle" onPointerDown={(e) => e.preventDefault()} onMouseDown={(e) => e.preventDefault()} onClick={() => ref.current?.toggleKeyboard()}>Keyboard</button>
       <output data-testid="keyboard-state">{String(keyboard)}</output>
+      <button data-testid="rotate-toggle" onClick={() => setRotated((r) => !r)}>Rotate</button>
     </header>
     <RemoteBrowserView
       ref={ref}
@@ -143,6 +168,7 @@ function Fixture() {
       style={{ position: 'absolute', top: 64, left: 0, right: 0, bottom: 0, background: '#222' }}
       getConnectInfo={async () => { throw new Error('The regression fixture must not request a real session'); }}
       onKeyboardChange={(open) => { record('keyboardChange', [open]); setKeyboard(open); }}
+      rotated={rotated}
     />
   </>;
 }
@@ -150,7 +176,19 @@ function Fixture() {
 createRoot(document.getElementById('root')!).render(<Fixture />);
 
 (window as any).touchHarness = {
-  clear() { calls.length = 0; wire.length = 0; focusChanges.length = 0; textareaFocusCalls = 0; phase = null; },
+  transfers: () => structuredClone(transfers),
+  dropFile(x: number, y: number, name: string, text: string) {
+    const box = document.querySelector('.remote-screen')!;
+    const data = new DataTransfer();
+    data.items.add(new File([text], name, { type: 'text/markdown' }));
+    for (const type of ['dragenter', 'dragover', 'drop']) box.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, dataTransfer: data }));
+  },
+  pasteFile(name: string, text: string, type: string) {
+    const data = new DataTransfer();
+    data.items.add(new File([text], name, { type }));
+    document.querySelector('textarea')!.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+  },
+  clear() { calls.length = 0; wire.length = 0; transfers.length = 0; focusChanges.length = 0; textareaFocusCalls = 0; phase = null; },
   resetRemote() { remoteScroll.scrollTo(0, 0); remoteInput.value = ''; selectedAll = false; },
   socketBuffer(bytes: number) { FixtureSocket.last.bufferedAmount = bytes; },
   nativeKey(type: string, key: string, code = '', modifiers = {}) {

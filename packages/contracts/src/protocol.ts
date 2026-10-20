@@ -62,7 +62,17 @@ export const AgentViewerError = z.object({
   reason: z.enum(['relay_unavailable', 'relay_failed', 'input_failed']),
 });
 
-export const AgentFrame = z.discriminatedUnion('t', [AgentHello, AgentEvent, AgentReply, AgentTurnRequest, AgentToViewer, AgentViewerError]);
+/** How a file transfer is going, for the viewer that sent it (agent 0.3.0). */
+export const AgentViewerFile = z.object({
+  t: z.literal('viewer_file'), sessionId: z.string(), relayId: z.string().optional(),
+  id: z.string().max(64),
+  /** progress: `received` bytes are on the VM; done: pasted (clipboard ready) or dropped. */
+  status: z.enum(['progress', 'done', 'error']),
+  received: z.number().int().nonnegative().optional(),
+  reason: z.string().max(64).optional(),
+});
+
+export const AgentFrame = z.discriminatedUnion('t', [AgentHello, AgentEvent, AgentReply, AgentTurnRequest, AgentToViewer, AgentViewerError, AgentViewerFile]);
 export type AgentFrame = z.infer<typeof AgentFrame>;
 
 // --- gateway -> agent -----------------------------------------------------------------------
@@ -79,11 +89,43 @@ export type GatewayToAgent =
 
 // --- viewer <-> gateway ---------------------------------------------------------------------
 
+/**
+ * Files a viewer pasted or dropped. They travel to the VM as ordered base64 chunks on the viewer
+ * socket, each file's bytes in order; the agent acknowledges what it wrote, and the viewer keeps
+ * only a few chunks unacknowledged so the gateway's input queue never fills.
+ */
+export const FILE_TRANSFER = {
+  maxFiles: 10,
+  maxBytes: 50 * 1024 * 1024,
+  chunkBytes: 96 * 1024,
+  /** Chunks sent ahead of the agent's acknowledgement. */
+  window: 3,
+} as const;
+const TransferId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+
 export const ViewerFrame = z.discriminatedUnion('t', [
   /** A neko v3 message, relayed as-is to neko through the agent. */
   z.object({ t: z.literal('neko'), data: z.unknown() }),
   /** Final IME / composed text, inserted by the agent with CDP Input.insertText (page 5). */
   z.object({ t: z.literal('ime'), text: z.string().max(10_000) }),
+  /**
+   * paste: put the files on the remote clipboard (one PNG as an image, otherwise as files) for a
+   * Ctrl+V the viewer sends after `done`. drop: drop them on the page at x/y (remote pixels).
+   */
+  z.object({
+    t: z.literal('file_begin'), id: TransferId, action: z.enum(['paste', 'drop']),
+    x: z.number().int().min(0).max(0xffff).optional(), y: z.number().int().min(0).max(0xffff).optional(),
+    files: z.array(z.object({
+      name: z.string().min(1).max(255), type: z.string().max(255),
+      size: z.number().int().nonnegative().max(FILE_TRANSFER.maxBytes),
+    })).min(1).max(FILE_TRANSFER.maxFiles),
+  }),
+  z.object({
+    t: z.literal('file_chunk'), id: TransferId, file: z.number().int().min(0).max(FILE_TRANSFER.maxFiles - 1),
+    chunk: z.string().max(Math.ceil(FILE_TRANSFER.chunkBytes / 3) * 4),
+  }),
+  z.object({ t: z.literal('file_end'), id: TransferId }),
+  z.object({ t: z.literal('file_cancel'), id: TransferId }),
 ]);
 export type ViewerFrame = z.infer<typeof ViewerFrame>;
 
@@ -94,7 +136,8 @@ export type GatewayToViewer =
   | { t: 'agent_online' }
   | { t: 'agent_offline' }
   /** Another tab or device opened this browser (one controller at a time). */
-  | { t: 'taken_over' };
+  | { t: 'taken_over' }
+  | { t: 'file'; id: string; status: 'progress' | 'done' | 'error'; received?: number; reason?: string };
 
 /** Claims of the single-use viewer token (Ed25519, 60 s, page 2). */
 export const ViewerTokenClaims = z.object({
