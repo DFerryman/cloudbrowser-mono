@@ -85,3 +85,24 @@ it('still raises a critical alert once when a live browser loses its data disk',
   const [finding] = await db.select().from(schema.driftFindings);
   expect(finding).toMatchObject({ kind: 'missing', resourceKind: 'volume', providerId: 'vol-test', instanceId: 'browser' });
 });
+
+it('skips a region whose provider read fails and still reconciles the others', async () => {
+  const db = createDb(createTestD1());
+  await db.update(schema.regions).set({ enabled: true }).where(eq(schema.regions.executor, 'fake'));
+  const store = new MemoryFakeStore();
+  const runtime = new FakeExecutor({ store, mode: 'runtime' });
+  await runtime.allocateIp(ctx('t1'), 'ap-northeast-1');
+  const executor = new FakeExecutor({ store, mode: 'readonly' });
+  const list = executor.listManaged.bind(executor);
+  vi.spyOn(executor, 'listManaged').mockImplementation(async (c, region) => {
+    if (region === 'us-west-2') throw new Error('DescribeVolumes: deadline passed');
+    return list(c, region);
+  });
+  const deps = { db, envName: 'test', now: () => new Date(), executor: () => executor };
+  const summary = await reconcileLedger(deps);
+  // The failed region is reported, nothing in it is judged missing, and the healthy one was checked.
+  expect(summary.failed).toEqual(['fake/us-west-2']);
+  expect(summary.orphans).toBe(1);
+  expect(summary.missing).toBe(0);
+});
+

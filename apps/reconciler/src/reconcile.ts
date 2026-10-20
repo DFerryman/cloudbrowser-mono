@@ -16,6 +16,34 @@ export interface ReconcilerDeps {
 /** Assumed active hours per running browser per day, for the month projection (page 12). */
 // The operator policy is read at run time (24 hours/day initially).
 
+/** Regions checked at once: enough to finish well inside the 5-minute cron, few enough to stay polite to AWS. */
+const REGION_CONCURRENCY = 6;
+
+/**
+ * Runs `check` for every region, a few at a time. A region whose provider calls fail (a timeout,
+ * a 5xx after retries) is logged and skipped: nothing in it is judged orphaned or missing from a
+ * partial read, and the other regions and the rest of the run go on. One slow region used to throw
+ * the whole run away. Returns the regions that failed.
+ */
+async function eachRegion<T extends { executor: string; providerRegion: string }>(targets: T[], check: (t: T) => Promise<void>): Promise<string[]> {
+  const failed: string[] = [];
+  let next = 0;
+  const worker = async () => {
+    while (next < targets.length) {
+      const t = targets[next++]!;
+      try {
+        await check(t);
+      } catch (e) {
+        failed.push(`${t.executor}/${t.providerRegion}`);
+        console.warn('reconcile region skipped', t.executor, t.providerRegion, (e as Error).message);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(REGION_CONCURRENCY, targets.length) }, worker));
+  return failed;
+}
+
+/** Each call gets its own deadline when it starts, so waiting for other regions never uses it up. */
 function ctx(deps: ReconcilerDeps, purpose: string): OpContext {
   return {
     operationId: `reconciler:${purpose}`,
@@ -84,13 +112,13 @@ async function freezeCreates(deps: ReconcilerDeps, reason: string) {
  */
 export async function reconcileLedger(deps: ReconcilerDeps) {
   const { db } = deps;
-  const summary = { adopted: 0, orphans: 0, missing: 0, frozen: false };
+  const summary: { adopted: number; orphans: number; missing: number; frozen: boolean; failed?: string[] } = { adopted: 0, orphans: 0, missing: 0, frozen: false };
   const targets = await db
     .selectDistinct({ executor: regions.executor, providerRegion: regions.providerRegion })
     .from(regions)
     .where(and(eq(regions.enabled, true),sql`NOT EXISTS (SELECT 1 FROM aws_provider_regions a WHERE a.region_id=${regions.id} AND a.status!='ready')`));
 
-  for (const t of targets) {
+  const failed = await eachRegion(targets, async (t) => {
     const executor = deps.executor(t.executor as ExecutorKind);
     const observed = (await executor.listManaged(ctx(deps, 'list'), t.providerRegion)).filter(
       // Root disks are accounted for by their VM ledger row. The complete inventory still
@@ -188,7 +216,8 @@ export async function reconcileLedger(deps: ReconcilerDeps) {
       await freezeCreates(deps, `${t.executor}/${t.providerRegion}: ${observed.length} managed resources, ledger has ${ledger.length}`);
       summary.frozen = true;
     }
-  }
+  });
+  if (failed.length) summary.failed = failed;
 
   // Too many creates in 10 minutes also trips the breaker.
   const [limit] = await db
@@ -217,7 +246,7 @@ export async function snapshotQuotasAndSpend(deps: ReconcilerDeps) {
   // The hourly VM price comes from the providers' price lists (refreshed by the engine), never a constant.
   let vmHourCents = 0;
   for (const s of (await priceSheets(db)).values()) vmHourCents = Math.max(vmHourCents, s.sheet.vmHour * 100);
-  for (const t of targets) {
+  const failed = await eachRegion(targets, async (t) => {
     const executor = deps.executor(t.executor as ExecutorKind);
     const qs = await executor.quotas(ctx(deps, 'quotas'), t.providerRegion);
     if (qs.length) {
@@ -225,7 +254,8 @@ export async function snapshotQuotasAndSpend(deps: ReconcilerDeps) {
         qs.map((q) => ({ executor: t.executor, region: t.providerRegion, metric: q.metric, limit: q.limit, used: q.used, takenAt: at })),
       );
     }
-  }
+  });
+  if (failed.length) console.warn('quota snapshot skipped regions', JSON.stringify(failed));
 
   const [{ cents } = { cents: 0 }] = await db
     .select({ cents: sql<number>`coalesce(sum(${resources.monthlyCostEstimate}), 0)` })

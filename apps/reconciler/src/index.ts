@@ -63,7 +63,12 @@ export default {
       try { await syncAwsProvider(env); }
       catch { console.error('AWS provider sync failed; details recorded in provider state'); }
     }
-    console.log('reconcile', JSON.stringify(await reconcileLedger(deps)));
-    if (new Date(controller.scheduledTime).getUTCMinutes() < 5) await snapshotQuotasAndSpend(deps);
+    // Each step is independent: a failure in one (logged) never skips the next.
+    try { console.log('reconcile', JSON.stringify(await reconcileLedger(deps))); }
+    catch (e) { console.error('reconcile failed', (e as Error).message); }
+    if (new Date(controller.scheduledTime).getUTCMinutes() < 5) {
+      try { await snapshotQuotasAndSpend(deps); }
+      catch (e) { console.error('quota and spend snapshot failed', (e as Error).message); }
+    }
   },
 } satisfies ExportedHandler<Env, {force:boolean}>;

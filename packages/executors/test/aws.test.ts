@@ -686,3 +686,23 @@ describe('stuck stops', () => {
     expect(ec2.calls.filter((c) => c.action === 'StopInstances').map((c) => c.params.Force)).toEqual(['true']);
   });
 });
+
+describe('transient AWS failures', () => {
+  it('retries a read that failed in transit (a Cloudflare 520 on the way to AWS) and never retries a write', async () => {
+    const { ex, ec2 } = setup();
+    await create(ex);
+    let failures = 1;
+    ec2.fail = (a) => (a === 'DescribeVolumes' && failures-- > 0 ? { code: 'HTTP520', status: 520 } : null);
+    const listed = ec2.calls.filter((c) => c.action === 'DescribeVolumes').length;
+    const observed = await ex.listManaged(ctx('list'), REGION);
+    expect(observed.filter((r) => r.kind === 'volume').length).toBeGreaterThan(0);
+    expect(ec2.calls.filter((c) => c.action === 'DescribeVolumes')).toHaveLength(listed + 2);
+
+    // A write that may have happened is never sent again here: the engine's journal looks it up first.
+    ec2.fail = (a) => (a === 'AllocateAddress' ? { code: 'InternalError', status: 500 } : null);
+    const before = ec2.calls.filter((c) => c.action === 'AllocateAddress').length;
+    await expect(ex.allocateIp(ctx('allocate_ip', 'op2:allocate_ip:1'), REGION)).rejects.toMatchObject({ errorClass: 'unknown_outcome' });
+    expect(ec2.calls.filter((c) => c.action === 'AllocateAddress')).toHaveLength(before + 1);
+  });
+});
+
