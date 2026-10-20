@@ -100,7 +100,8 @@ export function SessionPage() {
   const uploadRef = useRef<HTMLInputElement>(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [inputInterrupted, setInputInterrupted] = useState(false);
-  const [visibleHeight, setVisibleHeight] = useState<number | null>(null);
+  /** While the on-screen keyboard is up: the part of the page left visible above it. */
+  const [visibleArea, setVisibleArea] = useState<{ top: number; height: number } | null>(null);
   const openRequest = useRef<{ instanceId: string; promise: Promise<void> } | null>(null);
   const openIntent = useRef<{ instanceId: string; key: string } | null>(null);
   const openSequence = useRef(0);
@@ -224,19 +225,36 @@ export function SessionPage() {
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
 
+  // The page follows the visual viewport while the keyboard is up, so the remote screen moves up
+  // and shrinks into the space above it instead of being covered. The remote screen keeps its size
+  // (the viewer stops resizing it while typing), so the picture scales down proportionally.
   useEffect(() => {
     if (!keyboardOpen) {
-      setVisibleHeight(null);
+      setVisibleArea(null);
+      // iOS can leave the page panned after the keyboard closes.
+      if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
       return;
     }
     const viewport = window.visualViewport;
-    const resize = () => setVisibleHeight(viewport?.height ?? window.innerHeight);
-    resize();
-    viewport?.addEventListener('resize', resize);
-    window.addEventListener('resize', resize);
+    let frame = 0;
+    const update = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const height = Math.round(viewport?.height ?? window.innerHeight);
+        // iOS pans the layout viewport to keep the focused field in view; follow the pan.
+        const top = Math.max(0, Math.round(viewport?.offsetTop ?? 0));
+        setVisibleArea((prev) => (prev?.top === top && prev.height === height ? prev : { top, height }));
+      });
+    };
+    update();
+    viewport?.addEventListener('resize', update);
+    viewport?.addEventListener('scroll', update);
+    window.addEventListener('resize', update);
     return () => {
-      viewport?.removeEventListener('resize', resize);
-      window.removeEventListener('resize', resize);
+      cancelAnimationFrame(frame);
+      viewport?.removeEventListener('resize', update);
+      viewport?.removeEventListener('scroll', update);
+      window.removeEventListener('resize', update);
     };
   }, [keyboardOpen]);
 
@@ -385,7 +403,7 @@ export function SessionPage() {
   );
 
   return (
-    <div ref={frameRef} className="cb-dark fixed inset-0 flex h-dvh flex-col overflow-hidden overscroll-none bg-frame text-zinc-100" style={visibleHeight === null ? undefined : { height: visibleHeight }}>
+    <div ref={frameRef} className="cb-dark fixed inset-0 flex h-dvh flex-col overflow-hidden overscroll-none bg-frame text-zinc-100" style={visibleArea === null ? undefined : { top: visibleArea.top, bottom: 'auto', height: visibleArea.height }}>
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-zinc-800 px-2">
         <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.back')} onClick={() => navigate('/browsers')}>
           <ArrowLeft />

@@ -111,7 +111,8 @@ IME and clipboard events, with backpressure and visible failure instead of silen
 
 On touch screens, tap to click and swipe with one or two fingers to scroll. Use the toolbar's
 keyboard button to show or hide the software keyboard; touching the picture keeps that choice.
-Keyboard animations resize the local view without repeatedly changing the remote desktop.
+While the keyboard is up, the view moves above it and the picture shrinks proportionally to fit,
+so the page stays visible while typing; the remote desktop keeps its size.
 The standalone touch/input regression mounts the real viewer and interprets its Neko wire events, without
 sign-in or a running VM:
 
