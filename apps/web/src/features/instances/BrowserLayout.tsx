@@ -55,14 +55,14 @@ export function BrowserLayout() {
       <TrialNotice trial={i.trial} />
       <StopNotice instance={i} className="mb-4 max-w-3xl text-sm" />
       {i.status !== 'deleting' && i.status !== 'failed' ? <BalanceRequired instance={i} /> : null}
-      <nav className="mb-8 flex gap-6 overflow-x-auto border-b border-border" aria-label={i.name}>
+      <nav className="mb-8 flex gap-6 overflow-x-auto overflow-y-hidden border-b border-border" aria-label={i.name}>
         {tabs.map((tab) => (
           <NavLink
             key={tab.to}
             to={tab.to}
             className={({ isActive }) =>
               cn(
-                '-mb-px border-b-2 py-3 text-sm font-medium whitespace-nowrap transition-colors',
+                'border-b-2 py-3 text-sm font-medium whitespace-nowrap transition-colors',
                 isActive ? 'border-fg text-fg' : 'border-transparent text-muted hover:text-fg',
               )
             }
