@@ -123,6 +123,9 @@ describe('browsers', () => {
     for (const idleTimeoutS of [-1, 1, 60, 599, 3601]) {
       expect(await t.call('PATCH', path, { idleTimeoutS })).toMatchObject({ status: 400, body: { type: 'validation_failed' } });
     }
+    // An hour is allowed by default (migration 0024); a lower operator limit greys it out.
+    expect(await t.call('PATCH', path, { idleTimeoutS: 3600 })).toMatchObject({ status: 200, body: { idleTimeoutS: 3600 } });
+    t.d1.sqlite.exec(`UPDATE caps SET "limit" = 1800 WHERE scope = 'user:default' AND metric = 'idle_timeout_max_s'`);
     expect(await t.call('PATCH', path, { idleTimeoutS: 3600 })).toMatchObject({ status: 403, body: { type: 'plan_limit' } });
     expect(await t.call('PATCH', path, { idleTimeoutS: 600 })).toMatchObject({ status: 200, body: { idleTimeoutS: 600 } });
     const resumed = await heartbeat();
@@ -290,6 +293,7 @@ describe('browsers', () => {
     expect(inst.ipAddress).toBe(ip);
 
     expect((await t.call('PATCH', `/api/v1/instances/${id}`, { regionId: 'usw1' })).status).toBe(400);
+    t.d1.sqlite.exec(`UPDATE caps SET "limit" = 1800 WHERE scope = 'user:default' AND metric = 'idle_timeout_max_s'`);
     expect((await t.call('PATCH', `/api/v1/instances/${id}`, { idleTimeoutS: 3600 })).body.type).toBe('plan_limit');
     expect((await t.call('PATCH', `/api/v1/instances/${id}`, { name: 'Renamed', idleTimeoutS: 900 })).body.name).toBe('Renamed');
     // The browser language, picture setting and new-IP requests were removed: the fields are

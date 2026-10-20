@@ -211,6 +211,7 @@ export const zhCN: Messages = {
   'settings.autoSleep': '无操作后自动休眠',
   'settings.minutes': '{n} 分钟',
   'settings.neverSleep': '永不休眠',
+  'settings.autoSleepMax': '自动休眠最长可设置为 {n} 分钟。',
   'settings.autoSleepHint': '从最后一次使用浏览器开始计时；修改设置后从保存时开始重新计时。',
   'settings.neverSleepOn': '永不休眠：浏览器会一直运行并计费，直到你让它休眠或可用余额用完。停止后不会自动重新启动。',
   'settings.neverSleepTrial': '免费试用浏览器始终会自动休眠。充值转为付费浏览器后即可开启永不休眠。',

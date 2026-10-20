@@ -110,6 +110,7 @@ export class RemoteBrowser {
     this.inputQueue = new InputQueue({
       transport: () => this.ws,
       ready: () => this.inputReady && !this.stopped,
+      held: () => this.transportKeys.size > 0 || this.transportButtons.size > 0,
       failed: (reason) => {
         this.inputReady = false;
         this.stopped = true;

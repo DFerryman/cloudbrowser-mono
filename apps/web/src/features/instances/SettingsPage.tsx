@@ -42,7 +42,7 @@ export function SettingsPage() {
   const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString(locale) : '—');
   const save = (patch: Parameters<typeof update.mutate>[0]['patch']) =>
     update.mutate({ id: i.id, patch }, { onSuccess: () => toast(t('settings.saved')), onError: (e) => toast(errorMessage(e), 'error') });
-  const maxIdle = me.data?.entitlements.idleTimeoutMaxS ?? 1800;
+  const maxIdle = me.data?.entitlements.idleTimeoutMaxS ?? 3600;
   const [neverSleepOpen, setNeverSleepOpen] = useState(false);
   const neverSleep = i.idleTimeoutS === NEVER_SLEEP_TIMEOUT_S;
   // Offered by the operator and never to a free trial browser; the dialog checks credit and price.
@@ -120,6 +120,8 @@ export function SettingsPage() {
                 ))}
               </Select>
               <Hint className="mt-1.5">{neverSleep ? t('settings.neverSleepOn') : trial && neverSleepOffered ? t('settings.neverSleepTrial') : t('settings.autoSleepHint')}</Hint>
+              {/* Longer choices are greyed out by the operator's limit; say so rather than leave them unexplained. */}
+              {maxIdle < Math.max(...IDLE_TIMEOUT_OPTIONS_S) ? <Hint className="mt-1">{t('settings.autoSleepMax', { n: maxIdle / 60 })}</Hint> : null}
               <NeverSleepDialog instance={i} open={neverSleepOpen} onClose={() => setNeverSleepOpen(false)} />
             </div>
           </div>

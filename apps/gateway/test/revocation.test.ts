@@ -574,6 +574,31 @@ describe('gateway revocation', () => {
     expect((await open('agent')).response.status).toBe(403);
   });
 
+  it('rides out a single transient database error without closing a healthy connection', async () => {
+    const agent = await open('agent');
+    const viewer = await open('viewer');
+    expireAuthorizationLease();
+    const prepare = d1.prepare.bind(d1);
+    vi.spyOn(d1, 'prepare').mockImplementationOnce(() => { throw new Error('D1_ERROR: Network connection lost'); }).mockImplementation(prepare);
+    await frame(agent.socket, { t: 'viewer', sessionId: 'viewer1', data: { event: 'system/heartbeat' } });
+    expect(agent.socket.closed).toBeNull();
+    expect(viewer.socket.closed).toBeNull();
+    expect(viewer.socket.sent.at(-1)).toEqual({ t: 'neko', data: { event: 'system/heartbeat' } });
+  });
+
+  it('re-checks an idle viewer every ten seconds rather than every second', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
+    await open('agent');
+    const viewer = await open('viewer');
+    expect(viewer.response.status).toBe(101);
+    expect(await ctx.storage.get('alarm')).toBe(Date.now() + 10_000);
+    vi.setSystemTime(Date.now() + 10_000);
+    await gateway.alarm();
+    expect(viewer.socket.closed).toBeNull();
+    expect(await ctx.storage.get('alarm')).toBe(Date.now() + 10_000);
+  });
+
   it('does not accept an upgrade whose earlier database read completes after a revoke RPC', async () => {
     let entered!: () => void;
     let resume!: () => void;

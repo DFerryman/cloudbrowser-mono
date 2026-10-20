@@ -483,28 +483,24 @@ describe('first-boot script', () => {
 });
 
 describe('browser image policies', () => {
-  it('keeps unrelated upstream policies while allowing CDP and isolated IP checks', () => {
+  it('replaces neko\'s kiosk policies with a local-Chrome set that still allows CDP and isolated IP checks', () => {
     const dockerfile = readFileSync(new URL('../../../images/browser/Dockerfile', import.meta.url), 'utf8');
-    const cleanup = dockerfile.split('\n').find((line) => line.startsWith('RUN python3 -c ') && line.endsWith('/policies.json'))!;
-    expect(cleanup).toBeDefined();
-    expect(dockerfile.indexOf(cleanup)).toBeLessThan(dockerfile.indexOf('COPY policies.json'));
-    const retained = { SafeBrowsingEnabled: true, ExtensionSettings: { '*': { installation_mode: 'allowed' } } };
-    const dir = mkdtempSync(join(tmpdir(), 'cloudbrowser-policies-'));
-    const policyPath = join(dir, 'policies.json');
-    try {
-      writeFileSync(policyPath, JSON.stringify({ ...retained, DeveloperToolsAvailability: 2, IncognitoModeAvailability: 1 }));
-      execFileSync('bash', ['-c', cleanup.slice('RUN '.length).replace('/etc/opt/chrome/policies/managed/policies.json', '"$1"'), 'policy-test', policyPath]);
-      expect(JSON.parse(readFileSync(policyPath, 'utf8'))).toEqual(retained);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const removal = dockerfile.indexOf('RUN rm -f /etc/opt/chrome/policies/managed/policies.json');
+    expect(removal).toBeGreaterThan(0);
+    expect(removal).toBeLessThan(dockerfile.indexOf('COPY policies.json'));
     const managed = JSON.parse(readFileSync(new URL('../../../images/browser/policies.json', import.meta.url), 'utf8'));
     expect(managed).toMatchObject({
       DeveloperToolsAvailability: 1,
       IncognitoModeAvailability: 0,
       ProxySettings: { ProxyMode: 'direct' },
       WebRtcIPHandlingPolicy: 'default_public_interface_only',
+      DnsOverHttpsMode: 'off',
+      DefaultGeolocationSetting: 2,
     });
+    // What makes a browser feel unlike the user's own Chrome stays unset.
+    for (const key of ['DownloadRestrictions', 'AllowFileSelectionDialogs', 'PasswordManagerEnabled', 'EditBookmarksEnabled', 'BookmarkBarEnabled', 'ExtensionInstallBlocklist', 'ExtensionInstallForcelist', 'DefaultNotificationsSetting', 'DefaultPopupsSetting', 'BrowserSignin', 'SyncDisabled']) {
+      expect(managed).not.toHaveProperty(key);
+    }
   });
 });
 
@@ -672,5 +668,21 @@ describe('aws-ec2 storage growth', () => {
     ec2.modifications[0]!.state = 'unknown';
     await expect(ex.resizeVolume(ctx('resize'), REGION, vol.volumeId, 40)).rejects.toMatchObject({ errorClass: 'retryable' });
     expect(ec2.calls.filter((c) => c.action === 'ModifyVolume')).toHaveLength(1);
+  });
+});
+
+describe('stuck stops', () => {
+  const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString().replace('T', ' ').slice(0, 19);
+
+  it('forces a stop EC2 has left hanging for over ten minutes, and only then', async () => {
+    const { ex, ec2 } = setup();
+    const { vm, p } = await create(ex);
+    const inst = ec2.instances.get(vm.vmId)!;
+    Object.assign(inst, { state: 'stopping', stuck: true, reason: `User initiated (${minutesAgo(3)} GMT)` });
+    await expect(ex.ensureStopped({ ...ctx('stop'), deadline: Date.now() + 1000 }, p)).rejects.toMatchObject({ errorClass: 'retryable' });
+    expect(ec2.calls.filter((c) => c.action === 'StopInstances')).toHaveLength(0);
+    inst.reason = `User initiated (${minutesAgo(11)} GMT)`;
+    expect(await ex.ensureStopped(ctx('stop'), p)).toBe('stopped');
+    expect(ec2.calls.filter((c) => c.action === 'StopInstances').map((c) => c.params.Force)).toEqual(['true']);
   });
 });

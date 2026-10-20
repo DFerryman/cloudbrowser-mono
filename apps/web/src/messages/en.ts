@@ -209,6 +209,7 @@ export const en = {
   'settings.autoSleep': 'Auto-sleep after',
   'settings.minutes': '{n} min',
   'settings.neverSleep': 'Never sleep',
+  'settings.autoSleepMax': 'Auto-sleep can be set up to {n} minutes.',
   'settings.autoSleepHint': 'Counts from the last time you used the browser. A new setting counts from the moment you save it.',
   'settings.neverSleepOn': 'Never sleep: this browser runs, and is charged, until you put it to sleep or your available credit runs out. It does not restart by itself after a stop.',
   'settings.neverSleepTrial': 'Free trial browsers always auto-sleep. Add credit to convert this browser, then turn on Never sleep.',

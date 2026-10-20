@@ -13,7 +13,7 @@ export class FakeEc2 {
   addresses = new Map<string, Res & { publicIp: string; eni?: string; assoc?: string }>();
   enis = new Map<string, Res & { subnet: string; az: string; status: string; instance?: string }>();
   volumes = new Map<string, Res & { az: string; size: number; status: string; instance?: string; device?: string; snapshot?: string }>();
-  instances = new Map<string, Res & { state: string; az: string; type: string; eni: string; userData: string; protected: boolean; pendingDescribes: number; stateReason?: { code: string; message: string } }>();
+  instances = new Map<string, Res & { state: string; az: string; type: string; eni: string; userData: string; protected: boolean; pendingDescribes: number; stateReason?: { code: string; message: string }; reason?: string; stuck?: boolean }>();
   snapshots = new Map<string, Res & { volume: string; size: number; status: string; describes: number }>();
   tokens = new Map<string, string>();
   calls: { action: string; params: Record<string, string> }[] = [];
@@ -279,12 +279,12 @@ export class FakeEc2 {
         const rows = [...this.instances.values()].filter((i) => (ids.length ? ids.includes(i.id) : true) && this.match(i, f, { 'instance-state-name': (i) => (i as { state: string }).state }));
         if (ids.length && !rows.length) throw new Error('InvalidInstanceID.NotFound|400');
         for (const i of rows) {
-          if ((i.state === 'pending' || i.state === 'stopping') && i.pendingDescribes-- <= 0) i.state = i.state === 'pending' ? 'running' : 'stopped';
+          if ((i.state === 'pending' || (i.state === 'stopping' && !i.stuck)) && i.pendingDescribes-- <= 0) i.state = i.state === 'pending' ? 'running' : 'stopped';
         }
         return `<reservationSet>${rows
           .map(
             (i) =>
-              `<item><instancesSet><item><instanceId>${i.id}</instanceId><instanceType>${i.type}</instanceType><instanceState><name>${i.state}</name></instanceState>${i.stateReason ? `<stateReason><code>${esc(i.stateReason.code)}</code><message>${esc(i.stateReason.message)}</message></stateReason>` : ''}<placement><availabilityZone>${i.az}</availabilityZone></placement><cpuOptions><coreCount>1</coreCount><threadsPerCore>2</threadsPerCore></cpuOptions>${tagXml(i.tags)}</item></instancesSet></item>`,
+              `<item><instancesSet><item><instanceId>${i.id}</instanceId><instanceType>${i.type}</instanceType><instanceState><name>${i.state}</name></instanceState>${i.reason ? `<reason>${esc(i.reason)}</reason>` : ''}${i.stateReason ? `<stateReason><code>${esc(i.stateReason.code)}</code><message>${esc(i.stateReason.message)}</message></stateReason>` : ''}<placement><availabilityZone>${i.az}</availabilityZone></placement><cpuOptions><coreCount>1</coreCount><threadsPerCore>2</threadsPerCore></cpuOptions>${tagXml(i.tags)}</item></instancesSet></item>`,
           )
           .join('')}</reservationSet>`;
       }
@@ -294,6 +294,8 @@ export class FakeEc2 {
         if (i.state === 'terminated') throw new Error('IncorrectInstanceState|400');
         i.state = action === 'StartInstances' ? 'pending' : 'stopping';
         i.pendingDescribes = 1;
+        // A forced stop ends a stop that hardware trouble left hanging.
+        if (action === 'StopInstances' && p.Force === 'true') i.stuck = false;
         const failure = action === 'StartInstances' ? this.startFailure(i.id) : null;
         if (failure) Object.assign(i, { state: 'stopping', stateReason: failure });
         return `<instancesSet><item><instanceId>${i.id}</instanceId><currentState><name>${i.state}</name></currentState></item></instancesSet>`;

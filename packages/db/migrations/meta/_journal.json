@@ -169,6 +169,13 @@
       "when": 1792520014000,
       "tag": "0023_never_sleep_policy",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1792520015000,
+      "tag": "0024_idle_timeout_hour",
+      "breakpoints": true
     }
   ]
 }

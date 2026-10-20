@@ -58,4 +58,25 @@ describe('one ordered input transport', () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(failed).toHaveBeenLastCalledWith('transport');
   });
+
+  it('reconnects silently after a quiet spell, but reports a drop right after input or with a key held', () => {
+    vi.useFakeTimers();
+    const failed = vi.fn();
+    let held = false;
+    const queue = new InputQueue({ transport: () => ({ readyState: 1, send: vi.fn() }), ready: () => true, failed, held: () => held });
+    queue.enqueue({ event: 'buttonup' });
+    vi.advanceTimersByTime(60_000);
+    queue.interrupt('disconnected');
+    expect(failed).not.toHaveBeenCalled();
+    queue.resume();
+    queue.enqueue({ event: 'keydown' });
+    queue.interrupt('disconnected');
+    expect(failed).toHaveBeenCalledExactlyOnceWith('disconnected');
+    queue.resume();
+    queue.enqueue({ event: 'keydown' });
+    held = true;
+    vi.advanceTimersByTime(60_000);
+    queue.interrupt('disconnected');
+    expect(failed).toHaveBeenCalledTimes(2);
+  });
 });

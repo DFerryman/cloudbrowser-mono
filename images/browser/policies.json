@@ -6,12 +6,18 @@
   "RestoreOnStartup": 1,
   "DeveloperToolsAvailability": 1,
   "IncognitoModeAvailability": 0,
-  "BrowserSignin": 0,
   "MetricsReportingEnabled": false,
   "PromotionalTabsEnabled": false,
   "DefaultBrowserSettingEnabled": false,
   "BackgroundModeEnabled": false,
   "HardwareAccelerationModeEnabled": false,
+  "BrowserGuestModeEnabled": false,
+  "BrowserAddPersonEnabled": false,
+  "CommandLineFlagSecurityWarningsEnabled": false,
+  "FullscreenAllowed": true,
+  "AutoplayAllowed": true,
   "DownloadDirectory": "/data/downloads",
-  "PromptForDownloadLocation": false
+  "PromptForDownloadLocation": false,
+  "URLBlocklist": ["file://*"],
+  "URLAllowlist": ["file:///data/downloads"]
 }

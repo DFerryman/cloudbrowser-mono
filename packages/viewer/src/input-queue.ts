@@ -6,6 +6,13 @@ export interface InputTransport {
 
 export type InputFailure = 'overflow' | 'transport' | 'disconnected' | 'relay';
 
+/**
+ * Input handed to the socket this long before it closed has reached the gateway and been relayed
+ * (or refused, which the gateway reports with `input_error`). A connection that drops after a
+ * quiet spell lost nothing, so it reconnects without asking the user.
+ */
+const SETTLED_MS = 10_000;
+
 /** One FIFO for every input kind. WebSocket.send order is preserved across backpressure pauses. */
 export class InputQueue {
   private readonly pending: { data: string; bytes: number }[] = [];
@@ -13,12 +20,16 @@ export class InputQueue {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private blocked = false;
   private used = false;
+  private lastInputAt = -Infinity;
 
   constructor(private readonly options: {
     transport: () => InputTransport | null;
     ready: () => boolean;
     failed: (reason: InputFailure) => void;
     sent?: (data: string) => void;
+    /** A key or button is down on the remote: a lost release would leave it stuck. */
+    held?: () => boolean;
+    settledMs?: number;
     maxEvents?: number;
     maxBytes?: number;
     highWaterBytes?: number;
@@ -33,6 +44,7 @@ export class InputQueue {
       return false;
     }
     this.used = true;
+    this.lastInputAt = Date.now();
     this.pending.push({ data, bytes });
     this.bytes += bytes;
     this.flush();
@@ -65,10 +77,14 @@ export class InputQueue {
     }
   }
 
-  /** Interrupted input is never replayed into a replacement connection. */
+  /**
+   * Interrupted input is never replayed into a replacement connection. The user is told only when
+   * input may have been lost: something was still queued, sent moments ago, or held down.
+   */
   interrupt(reason: InputFailure, force = false): void {
     if (this.blocked) return;
-    const notify = this.used || force;
+    const atRisk = this.pending.length > 0 || Date.now() - this.lastInputAt < (this.options.settledMs ?? SETTLED_MS) || (this.options.held?.() ?? false);
+    const notify = force || (this.used && atRisk);
     this.clear();
     this.blocked = true;
     if (notify) this.options.failed(reason);
@@ -79,6 +95,7 @@ export class InputQueue {
     this.pending.length = 0;
     this.bytes = 0;
     this.used = false;
+    this.lastInputAt = -Infinity;
   }
 
   resume(): void {

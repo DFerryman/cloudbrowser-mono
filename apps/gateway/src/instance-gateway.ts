@@ -19,7 +19,29 @@ const INPUT_AUTH_LEASE_MS = 1000;
  * lease length are unchanged; a frame that finds an expired lease still waits for a fresh check.
  */
 const RENEW_BEFORE_MS = 500;
-type InputGrant = { instanceId: string; row: LiveInstance; until: number };
+/**
+ * With no frames to re-check, the alarm re-checks open viewers this often (or at an earlier
+ * trial or credit deadline). Frames still use the one-second lease; stop and delete RPCs still
+ * revoke at once. Re-reading D1 every second for an idle viewer only multiplied the chance that a
+ * transient read error closed a healthy connection.
+ */
+const IDLE_RECHECK_MS = 10_000;
+/** A failed D1 read is retried after these pauses before authorization fails closed. */
+const READ_RETRY_MS = [100, 400];
+
+async function withRetry<T>(read: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await read();
+    } catch (error) {
+      const wait = READ_RETRY_MS[attempt];
+      if (wait === undefined) throw error;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
+}
+/** `until` ends the lease for frames; `recheckAt` is when the alarm re-checks it without one. */
+type InputGrant = { instanceId: string; row: LiveInstance; until: number; recheckAt: number };
 
 // Operation commands use <operation id>:<step>. Legacy commands without a prefix and
 // independent periodic IP checks remain compatible, but canceled work cannot be delivered.
@@ -87,9 +109,9 @@ export class InstanceGateway extends DurableObject<Env> {
   /** D1 is authoritative; upgrades and expired authorization leases read current state. */
   private async liveInstance(instanceId: string): Promise<LiveInstance | null> {
     try {
-      const row = await this.env.DB.prepare(`SELECT b.user_id, b.status, b.desired_state, a.generation
+      const row = await withRetry(() => this.env.DB.prepare(`SELECT b.user_id, b.status, b.desired_state, a.generation
         FROM browser_instances b LEFT JOIN agent_credentials a ON a.instance_id = b.id WHERE b.id = ?`)
-        .bind(instanceId).first<LiveInstance>();
+        .bind(instanceId).first<LiveInstance>());
       if (!row || row.desired_state === 'deleted' || ['deleting', 'purged', 'failed'].includes(row.status)) {
         this.closeAll('browser unavailable');
         return null;
@@ -136,20 +158,21 @@ export class InstanceGateway extends DurableObject<Env> {
     const epoch = this.revocationEpoch;
     try {
       // Both reads are independent; one round trip instead of two on the connect path.
-      const [session, access] = await Promise.all([
+      const [session, access] = await withRetry(() => Promise.all([
         this.env.DB.prepare(`SELECT id FROM viewer_sessions
           WHERE id = ? AND instance_id = ? AND user_id = ? AND ended_at IS NULL`)
           .bind(sessionId, instanceId, row.user_id).first(),
         prepaidAccess(createDb(this.env.DB), row.user_id, instanceId),
-      ]);
+      ]));
       if (!session) return false;
       if (!access.allowed || epoch !== this.revocationEpoch) return false;
       const until = Math.min(Date.now() + INPUT_AUTH_LEASE_MS, access.deadlineAt?.getTime() ?? Infinity);
       if (until <= Date.now()) return false;
-      const grant = { instanceId, row, until };
+      const recheckAt = Math.min(Date.now() + IDLE_RECHECK_MS, access.deadlineAt?.getTime() ?? Infinity);
+      const grant = { instanceId, row, until, recheckAt };
       this.inputGrants.set(sessionId, grant);
       // A trial or depleted balance is revoked even if the viewer sends no more input frames.
-      await this.ctx.storage.setAlarm(until);
+      await this.ctx.storage.setAlarm(recheckAt);
       if (epoch !== this.revocationEpoch || until <= Date.now()) {
         if (this.inputGrants.get(sessionId) === grant) this.inputGrants.delete(sessionId);
         return false;
@@ -308,7 +331,7 @@ export class InstanceGateway extends DurableObject<Env> {
       return att?.role === 'viewer' ? this.inputGrants.get(att.sessionId) : null;
     });
     if (grants.every(grant => grant && grant.instanceId === instanceId && grant.until > Date.now())) {
-      await this.ctx.storage.setAlarm(Math.min(...grants.map(grant => grant!.until)));
+      await this.ctx.storage.setAlarm(Math.min(...grants.map(grant => grant!.recheckAt)));
       return;
     }
     const row = await this.liveInstance(instanceId);

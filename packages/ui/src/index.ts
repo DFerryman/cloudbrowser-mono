@@ -9,3 +9,4 @@ export { StatusBadge, type StatusTone } from './status-badge.js';
 export { ToastProvider, useToast } from './toast.js';
 export { Hint } from './hint.js';
 export { Pagination, usePaged, type PaginationLabels } from './pagination.js';
+export { useFullscreenElement } from './fullscreen.js';

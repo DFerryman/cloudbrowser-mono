@@ -169,6 +169,24 @@ func (c *Chrome) Close(ctx context.Context) error {
 	return err
 }
 
+// createHiddenPage opens about:blank in the browser context without showing it. A page in a new
+// browser context otherwise gets a window of its own, which flashed onto the user's screen at
+// every IP check. Hidden targets are never shown; a Chrome that refuses one gets the old,
+// visible page rather than no check.
+func (c *Chrome) createHiddenPage(ctx context.Context, browserContextID string) (string, error) {
+	var t struct {
+		TargetID string `json:"targetId"`
+	}
+	params := map[string]any{"url": "about:blank", "browserContextId": browserContextID, "background": true, "focus": false, "hidden": true}
+	err := c.CDP.Call(ctx, "", "Target.createTarget", params, &t)
+	if err != nil && ctx.Err() == nil {
+		delete(params, "hidden")
+		delete(params, "focus")
+		err = c.CDP.Call(ctx, "", "Target.createTarget", params, &t)
+	}
+	return t.TargetID, err
+}
+
 // ObservedIPs loads each echo URL in a throwaway browser context, so the request takes Chrome's
 // normal network path without touching the user's tabs or cookies (page 3, "Verification").
 func (c *Chrome) ObservedIPs(ctx context.Context, echoURLs []string) ([]string, error) {
@@ -182,16 +200,14 @@ func (c *Chrome) ObservedIPs(ctx context.Context, echoURLs []string) ([]string, 
 
 	var out []string
 	for _, u := range echoURLs {
-		var t struct {
-			TargetID string `json:"targetId"`
-		}
-		if err := c.CDP.Call(ctx, "", "Target.createTarget", map[string]any{"url": "about:blank", "browserContextId": bc.BrowserContextID, "background": true}, &t); err != nil {
+		targetID, err := c.createHiddenPage(ctx, bc.BrowserContextID)
+		if err != nil {
 			return out, err
 		}
 		var s struct {
 			SessionID string `json:"sessionId"`
 		}
-		if err := c.CDP.Call(ctx, "", "Target.attachToTarget", map[string]any{"targetId": t.TargetID, "flatten": true}, &s); err != nil {
+		if err := c.CDP.Call(ctx, "", "Target.attachToTarget", map[string]any{"targetId": targetID, "flatten": true}, &s); err != nil {
 			return out, err
 		}
 		// fetch() from the page uses the same network stack, proxy policy and DNS as browsing.
@@ -202,8 +218,8 @@ func (c *Chrome) ObservedIPs(ctx context.Context, echoURLs []string) ([]string, 
 			ExceptionDetails any `json:"exceptionDetails"`
 		}
 		expr := fmt.Sprintf(`fetch(%q, {cache: "no-store"}).then(r => r.text())`, u)
-		err := c.CDP.Call(ctx, s.SessionID, "Runtime.evaluate", map[string]any{"expression": expr, "awaitPromise": true, "returnByValue": true}, &r)
-		_ = c.CDP.Call(context.Background(), "", "Target.closeTarget", map[string]any{"targetId": t.TargetID}, nil)
+		err = c.CDP.Call(ctx, s.SessionID, "Runtime.evaluate", map[string]any{"expression": expr, "awaitPromise": true, "returnByValue": true}, &r)
+		_ = c.CDP.Call(context.Background(), "", "Target.closeTarget", map[string]any{"targetId": targetID}, nil)
 		if err != nil {
 			return out, err
 		}

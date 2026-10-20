@@ -7,6 +7,10 @@ name: Images
 
 on:
   workflow_dispatch:
+  # Weekly, so the browser image picks up each Chrome stable release (about every four weeks,
+  # with security updates in between) without waiting for a code change.
+  schedule:
+    - cron: '17 3 * * 1'
   push:
     branches: [main]
     paths: ['images/**', 'services/agent/**', '.github/workflows/images.yml']
@@ -36,6 +40,12 @@ jobs:
       - name: Image name
         id: img
         run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.name }}" >> "$GITHUB_OUTPUT"
+      - name: Current Chrome stable
+        id: chrome
+        # A new release changes the build argument, so the cached Chrome layer is rebuilt.
+        run: |
+          version=$(curl -fsS 'https://versionhistory.googleapis.com/v1/chrome/platforms/linux/channels/stable/versions?pageSize=1' | jq -r '.versions[0].version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -47,6 +57,7 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           platforms: linux/amd64
+          build-args: CHROME_VERSION=${{ steps.chrome.outputs.version }}
           push: true
           tags: |
             ${{ steps.img.outputs.ref }}:main

@@ -160,6 +160,15 @@ const RUN_STATES: Record<string, RunState> = {
   terminated: 'terminated',
 };
 
+/** A stop still pending after this long is forced (EC2: "Troubleshoot an instance stuck in stopping"). */
+const FORCE_STOP_AFTER_MS = 10 * 60_000;
+
+/** When the current stop was requested, from EC2's `reason`: "User initiated (2026-10-20 03:00:00 GMT)". */
+function stopRequestedAt(inst: XmlNode | null): number | null {
+  const at = /\((\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) GMT\)/.exec(text(inst ?? undefined, 'reason') ?? '');
+  return at ? Date.parse(`${at[1]}T${at[2]}Z`) : null;
+}
+
 export class AwsExecutor implements Executor {
   readonly kind = 'aws-ec2' as const;
   readonly capabilities: Capabilities = {
@@ -586,6 +595,13 @@ export class AwsExecutor implements Executor {
     if (state === 'missing' || state === 'terminated') return 'missing';
     if (state === 'stopped') return 'stopped';
     if (state === 'running' || state === 'pending') await this.call(ctx, region, 'StopInstances', { 'InstanceId.1': p.vmId });
+    // EC2 can leave a VM on failing hardware in `stopping` indefinitely, and the browser showed
+    // "Going to sleep" until someone forced it from the console. Chrome was closed (or given its
+    // time) before this step, so a stop that has not finished in time is forced.
+    const since = stopRequestedAt(inst);
+    if (state === 'stopping' && since !== null && Date.now() - since > FORCE_STOP_AFTER_MS) {
+      await this.call(ctx, region, 'StopInstances', { 'InstanceId.1': p.vmId, Force: 'true' });
+    }
     return this.waitFor(ctx, `VM ${p.vmId} to stop`, async () => {
       const s = this.stateOf(await this.instance(ctx, region, p.vmId));
       return s === 'stopped' ? ('stopped' as const) : s === 'missing' || s === 'terminated' ? ('missing' as const) : null;

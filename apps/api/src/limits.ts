@@ -30,7 +30,7 @@ export async function entitlementsFor(db: Db, userId: string): Promise<Entitleme
     maxBrowsers: c.get('instances') ?? 0,
     // Every browser a user owns may run at once; there is no separate running limit.
     maxRunning: c.get('instances') ?? 0,
-    idleTimeoutMaxS: c.get('idle_timeout_max_s') ?? 1800,
+    idleTimeoutMaxS: c.get('idle_timeout_max_s') ?? 3600,
     // A separate switch, not an idle timeout: 1 offers Never sleep (still subject to credit), 0 does not.
     neverSleep: (c.get('never_sleep') ?? 0) === 1,
     maxStorageGb: (await storageLimits(db, userId)).maxGb,

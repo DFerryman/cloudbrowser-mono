@@ -2,6 +2,7 @@ import * as D from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { cn } from './cn.js';
+import { useFullscreenElement } from './fullscreen.js';
 
 /**
  * A modal dialog. On phones it is a sheet along the bottom edge; from `sm` up it is centered.
@@ -28,9 +29,10 @@ export function Dialog({
   /** `lg` for wide content (e.g. a form with a summary next to it). */
   size?: 'md' | 'lg';
 }) {
+  const container = useFullscreenElement();
   return (
     <D.Root open={open} onOpenChange={onOpenChange}>
-      <D.Portal>
+      <D.Portal container={container}>
         <D.Overlay className="fixed inset-0 z-40 bg-black/40 [animation:cb-fade_150ms_var(--ease-out)]" />
         <D.Content
           className={cn(

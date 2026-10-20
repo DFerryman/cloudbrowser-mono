@@ -1,4 +1,5 @@
-import { Button, Input, Label, useToast } from '@cloudbrowser/ui';
+import { IDLE_TIMEOUT_OPTIONS_S, NEVER_SLEEP_TIMEOUT_S } from '@cloudbrowser/contracts';
+import { Button, Input, Label, Select, useToast } from '@cloudbrowser/ui';
 import { Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { del, put, useAdmin, useAdminAction } from './data.js';
@@ -19,6 +20,8 @@ export function LimitsPage() {
   const perUser = caps.data?.find((c) => c.scope === 'user:default' && c.metric === 'instances')?.limit;
   const [perUserDraft, setPerUserDraft] = useState<string | null>(null);
   const neverSleep = caps.data?.find((c) => c.scope === 'user:default' && c.metric === 'never_sleep')?.limit === 1;
+  // Without a row the api allows up to an hour.
+  const idleMax = caps.data?.find((c) => c.scope === 'user:default' && c.metric === 'idle_timeout_max_s')?.limit ?? 3600;
 
   return (
     <div className="space-y-4">
@@ -42,6 +45,25 @@ export function LimitsPage() {
           </Button>
         </form>
         <p className="mt-2 text-xs text-muted">{t('limits.perUserHelp')}</p>
+      </section>
+      <section className="max-w-3xl rounded-[var(--radius-control)] border border-border p-4" data-testid="idle-max-setting">
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <Label htmlFor="idle-max">{t('limits.idleMax')}</Label>
+            <Select
+              id="idle-max"
+              value={idleMax}
+              disabled={!caps.data || save.isPending}
+              onChange={(e) => save.mutate({ scope: 'user:default', metric: 'idle_timeout_max_s', limit: Number(e.target.value) }, { onSuccess: () => toast(t('common.saved')), onError: (err) => toast(errorText(err), 'error') })}
+              className="w-40"
+            >
+              {IDLE_TIMEOUT_OPTIONS_S.filter((s) => s !== NEVER_SLEEP_TIMEOUT_S).map((s) => (
+                <option key={s} value={s}>{t('limits.minutes', { n: s / 60 })}</option>
+              ))}
+            </Select>
+          </div>
+        </div>
+        <p className="mt-2 text-xs text-muted">{t('limits.idleMaxHelp')}</p>
       </section>
       <section className="max-w-3xl rounded-[var(--radius-control)] border border-border p-4" data-testid="never-sleep-setting">
         <div className="flex flex-wrap items-center justify-between gap-3">

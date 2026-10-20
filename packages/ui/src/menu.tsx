@@ -1,12 +1,14 @@
 import * as M from '@radix-ui/react-dropdown-menu';
 import type { ReactNode } from 'react';
 import { cn } from './cn.js';
+import { useFullscreenElement } from './fullscreen.js';
 
 export function Menu({ trigger, children, align = 'end' }: { trigger: ReactNode; children: ReactNode; align?: 'start' | 'end' }) {
+  const container = useFullscreenElement();
   return (
     <M.Root>
       <M.Trigger asChild>{trigger}</M.Trigger>
-      <M.Portal>
+      <M.Portal container={container}>
         <M.Content
           align={align}
           sideOffset={4}

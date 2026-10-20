@@ -23,8 +23,9 @@ import (
 	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/protocol"
 )
 
-// Version is reported in `ready`. 0.2.1 also reports failed viewer input relays.
-const Version = "0.2.1"
+// Version is reported in `ready`. 0.2.1 also reports failed viewer input relays; 0.2.2 runs IP
+// checks in a hidden page instead of a window that flashed onto the user's screen.
+const Version = "0.2.2"
 
 // Browser is Chrome as the agent controls it through CDP.
 type Browser interface {
