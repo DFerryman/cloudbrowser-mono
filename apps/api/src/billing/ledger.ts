@@ -11,7 +11,7 @@ import type { Creem } from './creem.js';
 
 const { balanceTransactions, billingAccounts, events, topupPacks, auditLog, browserInstances, browserReservations } = schema;
 
-export type BalanceKind = 'topup' | 'refund' | 'dispute' | 'adjustment';
+export type BalanceKind = 'topup' | 'refund' | 'dispute' | 'adjustment' | 'promotion';
 
 interface BalanceChange {
   userId: string;

@@ -102,7 +102,7 @@ export type BillingState = z.infer<typeof BillingState>;
 
 export const BalanceTransaction = z.object({
   id: z.string(),
-  kind: z.enum(['topup', 'refund', 'dispute', 'adjustment']),
+  kind: z.enum(['topup', 'refund', 'dispute', 'adjustment', 'promotion']),
   amountMicros: z.number().int(),
   description: z.string().nullable(),
   createdAt: z.string(),

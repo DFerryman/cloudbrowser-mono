@@ -7,6 +7,7 @@ import { BrowserDetailPage, BrowsersPage } from './Browsers.js';
 import { LimitsPage } from './Limits.js';
 import { OverviewPage } from './Overview.js';
 import { PricingPage } from './Pricing.js';
+import { PromotionsPage } from './Promotions.js';
 import { AwsProviderPage } from './AwsProvider.js';
 import { useAdmin, type AdminSession } from './data.js';
 import { AdminI18nProvider, useT, type AdminKey } from './i18n.js';
@@ -71,6 +72,7 @@ const NAV: [string, AdminKey][] = [
   ['users', 'nav.users'],
   ['aws-provider', 'nav.aws'],
   ['pricing', 'nav.pricing'],
+  ['promotions', 'nav.promotions'],
   ['findings', 'nav.findings'],
   ['limits', 'nav.limits'],
   ['audit', 'nav.audit'],
@@ -121,6 +123,7 @@ function Console({ session }: { session: AdminSession }) {
           <Route path="users" element={<UsersPage />} />
           <Route path="aws-provider" element={<AwsProviderPage />} />
           <Route path="pricing" element={<PricingPage />} />
+          <Route path="promotions" element={<PromotionsPage />} />
           <Route path="findings" element={<FindingsPage />} />
           <Route path="limits" element={<LimitsPage />} />
           <Route path="audit" element={<AuditPage />} />

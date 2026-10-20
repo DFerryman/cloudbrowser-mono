@@ -16,6 +16,7 @@ import { createAuth } from './auth.js';
 import type { AppEnv, Env } from './env.js';
 import { internalApi } from './internal.js';
 import { problem, ProblemError } from './problem.js';
+import { promotionSweep } from './promotions.js';
 import { adminRoute } from './routes/admin.js';
 import { publicRoute } from './routes/public.js';
 import { v1 } from './routes/v1.js';
@@ -154,13 +155,14 @@ export default {
     }
   },
 
-  /** Every 5 minutes: billing sweep (the 03:00–03:04 UTC run also reconciles with Creem) and alert delivery. */
+  /** Every 5 minutes: billing sweep (the 03:00–03:04 UTC run also reconciles with Creem), alert delivery and promotion rewards. */
   async scheduled(controller: ScheduledController, env: Env) {
     const at = new Date(controller.scheduledTime);
     const nightly = at.getUTCHours() === 3 && at.getUTCMinutes() < 5;
     const db = createDb(env.DB);
     console.log('billing sweep', JSON.stringify(await billingSweep(env, db, creemFrom(env), new Date(), { nightly })));
     console.log('alerts delivered', await deliverAlerts(env, db));
+    console.log('promotions', JSON.stringify(await promotionSweep(env, db, new Date()).catch((e) => ({ error: String(e) }))));
   },
 } satisfies ExportedHandler<Env, { eventId: string }>;
 

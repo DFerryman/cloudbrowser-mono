@@ -1,5 +1,5 @@
 import { cn, Eyebrow, Menu, MenuItem, MenuSeparator, PageHeader as Header, ResizeHandle, Skeleton, useResizableWidth } from '@cloudbrowser/ui';
-import { BookOpen, Globe, LayoutGrid, LogOut, PanelLeftClose, PanelLeftOpen, Plus, UserRound, Wallet } from 'lucide-react';
+import { BookOpen, Gift, Globe, LayoutGrid, LogOut, PanelLeftClose, PanelLeftOpen, Plus, UserRound, Wallet } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react-router';
 import { fundedHours, isLowBalance, runwayLabel } from '../features/billing/access.js';
@@ -7,6 +7,7 @@ import { BillingBanner } from '../features/billing/BillingBanner.js';
 import { useBilling } from '../features/billing/hooks.js';
 import { money } from '../lib/money.js';
 import { useMe } from '../features/instances/hooks.js';
+import { usePromotions } from '../features/promotions/hooks.js';
 import { api, isUnauthenticated } from '../lib/api.js';
 import { useLiveEvents } from '../lib/events.js';
 import { useI18n } from '../lib/i18n.js';
@@ -71,6 +72,7 @@ export function AppShell() {
   const { t, locale, setLocale } = useI18n();
   const me = useMe();
   const billing = useBilling();
+  const promotions = usePromotions();
   const location = useLocation();
   const navigate = useNavigate();
   const wide = useWide();
@@ -109,6 +111,8 @@ export function AppShell() {
     { to: '/billing', label: t('nav.billing'), icon: Wallet },
     { to: '/account', label: t('nav.account'), icon: UserRound },
   ];
+  const promotionsNav = { to: '/promotions', label: t('nav.promotions'), icon: Gift };
+  const pendingTasks = promotions.data?.filter((p) => p.status === 'pending').length ?? 0;
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     cn(
       'group relative flex h-9 items-center gap-3 px-2.5 text-sm font-medium transition-colors',
@@ -201,6 +205,24 @@ export function AppShell() {
         </nav>
 
         <div className="mt-auto flex flex-col gap-2">
+          {/* Promotions sit apart from the main sections, just above the balance. */}
+          <NavLink to={promotionsNav.to} className={linkClass} title={pendingTasks ? `${promotionsNav.label} · ${t('nav.promotionsPending', { n: pendingTasks })}` : promotionsNav.label} data-testid="nav-promotions">
+            {({ isActive }) => (
+              <>
+                {isActive ? <span className="absolute inset-y-2 left-0 w-0.5 bg-fg" aria-hidden /> : null}
+                <span className="relative">
+                  <Gift className={cn('size-4 shrink-0 transition-colors', isActive ? 'text-fg' : 'text-subtle group-hover:text-fg')} />
+                  {collapsed && pendingTasks ? <span className="absolute -top-1 -right-1 size-2 rounded-full bg-running" aria-hidden /> : null}
+                </span>
+                {!collapsed ? <span className="flex-1 truncate">{promotionsNav.label}</span> : null}
+                {!collapsed && pendingTasks ? (
+                  <span className="min-w-5 bg-running/15 px-1.5 text-center text-[11px] font-semibold text-running tabular-nums" aria-label={t('nav.promotionsPending', { n: pendingTasks })}>
+                    {pendingTasks}
+                  </span>
+                ) : null}
+              </>
+            )}
+          </NavLink>
           {me.data && b && !collapsed ? (
             <div className="border border-border bg-bg p-4">
               <Link to="/billing" className="group block">
@@ -268,13 +290,14 @@ export function AppShell() {
         </div>
       </main>
 
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-border bg-bg/90 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl md:hidden" aria-label={t('nav.menu')}>
+      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-border bg-bg/90 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl md:hidden" aria-label={t('nav.menu')}>
         {nav.slice(0, 1).map((n) => <TabLink key={n.to} {...n} />)}
         <button type="button" onClick={() => navigate('/browsers/new')} className="flex flex-col items-center justify-center gap-0.5 py-2 text-[11px] font-medium text-fg">
           <span className="grid size-7 place-items-center bg-fg text-bg"><Plus className="size-4" /></span>
           {t('nav.new')}
         </button>
         {nav.slice(1).map((n) => <TabLink key={n.to} {...n} />)}
+        <TabLink {...promotionsNav} />
       </nav>
     </div>
   );

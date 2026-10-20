@@ -820,6 +820,57 @@ export const webhookEvents = sqliteTable('webhook_events', {
 });
 
 // ---------------------------------------------------------------------------------------------
+// Promotions: tasks that reward users with credit. Owner: api (operators edit tasks in the console;
+// the api decides completion and credits the reward).
+// ---------------------------------------------------------------------------------------------
+
+export type LocalizedText = { en: string; 'zh-CN': string };
+
+export const promotionTasks = sqliteTable('promotion_tasks', {
+  id: text('id').primaryKey(),
+  title: json<LocalizedText>('title').notNull(),
+  description: json<LocalizedText>('description').notNull(),
+  /** Where the task's button takes the user in the app, e.g. /browsers/new; null for no button. */
+  actionUrl: text('action_url'),
+  /** How completion is decided (contracts PromotionCriterion), measured against `target`. */
+  criterion: text('criterion').notNull(),
+  target: integer('target').notNull(),
+  rewardMicros: integer('reward_micros').notNull(),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+  /** Only accounts with at least one paid top-up can earn it (limits throwaway accounts). */
+  requiresTopup: integer('requires_topup', { mode: 'boolean' }).notNull().default(false),
+  sortOrder: integer('sort_order').notNull().default(0),
+  /** Shown and counted from this time (activity before it does not count); null = always. */
+  startsAt: ts('starts_at'),
+  /** No new completions after this time; null = no end. */
+  endsAt: ts('ends_at'),
+  /** At most this many accounts earn the reward; null = no limit. */
+  maxCompletions: integer('max_completions'),
+  createdAt: ts('created_at').notNull(),
+  updatedAt: ts('updated_at').notNull(),
+  updatedBy: text('updated_by'),
+});
+
+export const promotionCompletions = sqliteTable(
+  'promotion_completions',
+  {
+    taskId: text('task_id').notNull().references(() => promotionTasks.id),
+    userId: text('user_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+    /** The measured progress when it was completed. */
+    progress: integer('progress').notNull(),
+    rewardMicros: integer('reward_micros').notNull(),
+    completedAt: ts('completed_at').notNull(),
+    /** Set once the reward is on the balance (reference `promotion:<task>:<user>`). */
+    creditedAt: ts('credited_at'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.taskId, t.userId] }),
+    index('promotion_completions_user_idx').on(t.userId),
+    index('promotion_completions_pending_idx').on(t.creditedAt),
+  ],
+);
+
+// ---------------------------------------------------------------------------------------------
 // Operator console (page 10). Owner: api (admin endpoints); alerts are raised by every Worker.
 // ---------------------------------------------------------------------------------------------
 

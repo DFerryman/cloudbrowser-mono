@@ -27,6 +27,7 @@ export function useLiveEvents(enabled: boolean) {
     es.addEventListener('entitlements.updated', () => {
       void queryClient.invalidateQueries({ queryKey: keys.me });
       void queryClient.invalidateQueries({ queryKey: keys.billing });
+      void queryClient.invalidateQueries({ queryKey: keys.promotions });
     });
     return () => es.close();
   }, [enabled]);

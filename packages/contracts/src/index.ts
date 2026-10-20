@@ -13,3 +13,4 @@ export * from './backups.js';
 export * from './billing.js';
 export * from './pricing.js';
 export * from './public.js';
+export * from './promotions.js';

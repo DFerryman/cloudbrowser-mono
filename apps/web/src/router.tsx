@@ -72,6 +72,7 @@ export const router = createBrowserRouter(isAdminHost() ? [
       { path: '/settings', element: <Navigate to="/account" replace /> },
       { path: '/billing', element: <BillingPage /> },
       { path: '/billing/success', element: <BillingSuccessPage /> },
+      { path: '/promotions', lazy: async () => ({ Component: (await import('./features/promotions/PromotionsPage.js')).PromotionsPage }) },
     ],
   },
 ]);

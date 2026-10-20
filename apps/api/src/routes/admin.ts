@@ -4,7 +4,7 @@
  * written to `audit_log` with the admin's stable Access subject and email. Internal:
  * not part of the public OpenAPI document.
  */
-import { OPERATION_STEPS, PricingSettings, TRIAL, UsageItem, costRates, customerRates, minimumMarkupPercent, type OperationKind } from '@cloudbrowser/contracts';
+import { OPERATION_STEPS, PROMOTION_ID, PricingSettings, PromotionTaskInput, TRIAL, UsageItem, costRates, customerRates, minimumMarkupPercent, type OperationKind } from '@cloudbrowser/contracts';
 import { awsInventory, blocksRegion, launchHealthByRegion, launchHealthFor, launchVerifiedAt, newId, openProviderIssue, priceSheets, pricingSettings, reopenRegion, schema, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, isNotNull, isNull, like, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
@@ -42,6 +42,8 @@ const {
   providerPrices,
   regions,
   pricingSettings: pricingSettingsTable,
+  promotionTasks,
+  promotionCompletions,
 } = schema;
 
 export const adminRoute = new Hono<AppEnv>();
@@ -623,7 +625,7 @@ adminRoute.get('/pricing', async (c) => {
       topupGrossMicros: grossCents * 10_000,
       topups: Number(topups?.n ?? 0),
       refundMicros: -Number(tx.find((t) => t.kind === 'refund')?.amount ?? 0) - Number(tx.find((t) => t.kind === 'dispute')?.amount ?? 0),
-      creditMicros: Number(tx.find((t) => t.kind === 'adjustment')?.amount ?? 0),
+      creditMicros: Number(tx.find((t) => t.kind === 'adjustment')?.amount ?? 0) + Number(tx.find((t) => t.kind === 'promotion')?.amount ?? 0),
       estimatedFeesMicros: feesMicros,
       // AWS's own view of the month (ledger + running VMs, by the reconciler): includes what is not
       // billed to anyone (creating, deleted and failed browsers, old IPs, recover snapshots).
@@ -656,6 +658,67 @@ adminRoute.post('/pricing/refresh', async (c) => {
   const out = await res.json();
   await audit(c.get('db'), c, 'pricing.refresh', 'global', { result: out as Record<string, unknown> });
   return c.json(out);
+});
+
+// --- promotions --------------------------------------------------------------------------------
+
+/** Every task with how many accounts finished it and what it has paid out. */
+adminRoute.get('/promotions', async (c) => {
+  const db = c.get('db');
+  const tasks = await db.select().from(promotionTasks).orderBy(promotionTasks.sortOrder, promotionTasks.createdAt);
+  const stats = new Map((await db.all<{ task_id: string; n: number; credited: number; micros: number }>(sql`SELECT task_id, count(*) AS n,
+    sum(credited_at IS NOT NULL) AS credited, sum(CASE WHEN credited_at IS NOT NULL THEN reward_micros ELSE 0 END) AS micros
+    FROM promotion_completions GROUP BY task_id`)).map((r) => [r.task_id, r]));
+  return c.json(tasks.map((t) => {
+    const s = stats.get(t.id);
+    return { ...t, completions: Number(s?.n ?? 0), credited: Number(s?.credited ?? 0), paidMicros: Number(s?.micros ?? 0) };
+  }));
+});
+
+/** Creates or replaces a task. Changing the reward or target affects completions from now on only. */
+adminRoute.put('/promotions/:id', async (c) => {
+  const db = c.get('db');
+  const id = c.req.param('id');
+  if (!PROMOTION_ID.test(id)) throw problem(400, 'validation_failed', 'id: use 2–63 lowercase letters, digits and dashes.');
+  const { reason, ...next } = await body(c, PromotionTaskInput.extend({ reason: z.string().trim().min(3).max(500) }));
+  const startsAt = next.startsAt ? new Date(next.startsAt) : null;
+  const endsAt = next.endsAt ? new Date(next.endsAt) : null;
+  if (startsAt && endsAt && endsAt <= startsAt) throw problem(400, 'validation_failed', 'endsAt: must be after startsAt.');
+  if (next.criterion === 'two_factor_enabled' && next.target !== 1) throw problem(400, 'validation_failed', 'target: two_factor_enabled is done or not, so its target is 1.');
+  const [before] = await db.select().from(promotionTasks).where(eq(promotionTasks.id, id));
+  const now = new Date();
+  const values = { ...next, startsAt, endsAt, updatedAt: now, updatedBy: c.get('user').email };
+  await db.insert(promotionTasks).values({ id, ...values, createdAt: now }).onConflictDoUpdate({ target: promotionTasks.id, set: values });
+  await audit(db, c, before ? 'promotion.update' : 'promotion.create', `promotion:${id}`, { before: before ?? null, after: next, reason });
+  return c.json({ ok: true });
+});
+
+/** Only a task nobody has completed can be deleted; otherwise turn it off (its history stays). */
+adminRoute.delete('/promotions/:id', async (c) => {
+  const db = c.get('db');
+  const id = c.req.param('id');
+  const { reason } = await body(c, z.object({ reason: z.string().trim().min(3).max(500) }));
+  const [before] = await db.select().from(promotionTasks).where(eq(promotionTasks.id, id));
+  if (!before) throw problem(404, 'not_found');
+  const [done] = await db.select({ id: promotionCompletions.userId }).from(promotionCompletions).where(eq(promotionCompletions.taskId, id)).limit(1);
+  if (done) throw problem(409, 'invalid_state', 'Accounts have completed this task. Turn it off instead, so its rewards stay on record.');
+  await db.batch([db.delete(promotionTasks).where(eq(promotionTasks.id, id)), audit(db, c, 'promotion.delete', `promotion:${id}`, { before, reason })]);
+  return c.json({ ok: true });
+});
+
+/** Who completed a task, newest first (paged). */
+adminRoute.get('/promotions/:id/completions', async (c) => {
+  const page = pageQuery(c, 100);
+  const rows = await c.get('db')
+    .select({ userId: promotionCompletions.userId, email: user.email, progress: promotionCompletions.progress, rewardMicros: promotionCompletions.rewardMicros,
+      completedAt: promotionCompletions.completedAt, creditedAt: promotionCompletions.creditedAt })
+    .from(promotionCompletions)
+    .leftJoin(user, eq(user.id, promotionCompletions.userId))
+    .where(eq(promotionCompletions.taskId, c.req.param('id')))
+    .orderBy(desc(promotionCompletions.completedAt))
+    .limit(page.limit)
+    .offset(page.offset);
+  return c.json(rows);
 });
 
 // --- audit -------------------------------------------------------------------------------------

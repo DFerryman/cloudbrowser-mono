@@ -16,6 +16,7 @@ export const keys = {
   me: ['me'] as const,
   billing: ['billing'] as const,
   pricing: ['pricing'] as const,
+  promotions: ['promotions'] as const,
   transactions: ['billing', 'transactions'] as const,
   usage: (month: string) => ['billing', 'usage', month] as const,
   regions: ['regions'] as const,

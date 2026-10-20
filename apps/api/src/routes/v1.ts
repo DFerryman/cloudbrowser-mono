@@ -38,6 +38,7 @@ import { problem, ProblemError } from '../problem.js';
 import { toInstances, toOperation } from '../views.js';
 import { neverSleepQuote, neverSleepRefused } from '../never-sleep.js';
 import { eventsRoute } from './events.js';
+import { promotionsRoute } from './promotions.js';
 import { resizeQuota } from '../storage.js';
 
 const { browserInstances, regions, operations, viewerSessions, instanceHealth, placements, events, auditLog, agentCredentials, archiveKeys, agentCommands } = schema;
@@ -909,3 +910,4 @@ v1.openapi(
 
 v1.route('/', eventsRoute);
 v1.route('/', billingRoute);
+v1.route('/', promotionsRoute);

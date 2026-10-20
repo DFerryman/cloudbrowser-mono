@@ -44,6 +44,12 @@ const instances = [
   { ...base, id: 'b4', name: 'Trial browser', regionId: 'syd1', status: 'running', ipAddress: '192.0.2.10', lastActiveAt: ago(1), storageGb: 2, trial: { state: 'active', secondsLeft: 1320, reclaimAt: null } },
   { ...base, id: 'b5', name: 'Social SG', regionId: 'ap-southeast-1', status: 'starting', ipAddress: '203.0.113.90', lastActiveAt: ago(30), currentOperation: { id: 'o', kind: 'start', status: 'running' } },
 ];
+const promotions = [
+  { id: 'first-browser-20-minutes', title: { en: 'Run your first browser for 20 minutes', 'zh-CN': '让你的第一个浏览器运行 20 分钟' }, description: { en: 'Create a browser and use it for a total of 20 minutes, in one go or over several sessions. $5 of credit is added to your balance as soon as you finish.', 'zh-CN': '创建一个浏览器，累计使用满 20 分钟（可一次用完，也可分多次）。完成后，$5 额度会立即加入你的余额。' },
+    actionUrl: '/browsers/new', criterion: 'browser_running_minutes', target: 20, progress: 12, rewardMicros: 5_000_000, status: 'pending', needsTopup: false, completedAt: null, endsAt: null },
+  { id: 'two-factor', title: { en: 'Turn on two-step verification', 'zh-CN': '开启两步验证' }, description: { en: 'Protect your account with an authenticator app.', 'zh-CN': '用验证器应用保护你的账户。' },
+    actionUrl: '/account', criterion: 'two_factor_enabled', target: 1, progress: 1, rewardMicros: 1_000_000, status: 'completed', needsTopup: false, completedAt: ago(2000), endsAt: null },
+];
 const publicPricing = {
   regions: REGIONS.map(([id, city, country, area, availability], n) => ({ ...pricing[n], name: `AWS ${city}`, city, country, area, availability, acceptingNew: availability !== 'unavailable', available: availability !== 'unavailable', cost: rates(40_000) })),
   model: { computeMarkupPercent: 220, fixedMarkupPercent: 150, transferMarkupPercent: 150, relayGbMicros: 50_000, billTransitions: true },
@@ -75,6 +81,7 @@ async function shoot({ path, name, width, height = 900, signedIn = true, locale 
       else if (p.startsWith('/api/v1/instances/') && p.split('/').length === 5) body = instances.find((i) => i.id === p.split('/')[4]);
       else if (p === '/api/v1/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
       else if (p === '/api/v1/usage') body = { totalMicros: 0, byItem: {}, month, byBrowser: [], byDay: [] };
+      else if (p === '/api/v1/promotions') body = empty ? [] : promotions;
       else body = [];
       return route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
     }
@@ -118,6 +125,10 @@ const jobs = [
   { name: 'billing-desktop', path: '/billing', width: 1440 },
   { name: 'billing-phone', path: '/billing', width: 390, height: 844 },
   { name: 'account-desktop', path: '/account', width: 1440 },
+  { name: 'promotions-desktop', path: '/promotions', width: 1440 },
+  { name: 'promotions-desktop-dark', path: '/promotions', width: 1440, theme: 'dark', locale: 'zh-CN' },
+  { name: 'promotions-phone', path: '/promotions', width: 390, height: 844 },
+  { name: 'promotions-empty', path: '/promotions', width: 1440, empty: true },
   { name: 'settings-desktop', path: '/browsers/b1/settings', width: 1440 },
   { name: 'settings-phone', path: '/browsers/b1/settings', width: 390, height: 844 },
   { name: 'sidebar-collapsed', path: '/browsers', width: 1440, action: (p) => p.getByRole('button', { name: 'Collapse sidebar' }).click() },
