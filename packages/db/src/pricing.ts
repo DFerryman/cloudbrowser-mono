@@ -11,6 +11,10 @@ export async function pricingSettings(db: Db): Promise<PricingSettings> {
   if (!row) return DEFAULT_PRICING_SETTINGS;
   return {
     markupPercent: row.markupPercent,
+    fixedMarkupPercent: row.fixedMarkupPercent,
+    transferMarkupPercent: row.transferMarkupPercent,
+    relayGbMicros: row.relayGbMicros,
+    billTransitions: row.billTransitions,
     minBalanceMicros: row.minBalanceMicros,
     lowBalanceMicros: row.lowBalanceMicros,
     paymentFeeBps: row.paymentFeeBps,

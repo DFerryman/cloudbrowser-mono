@@ -1,4 +1,4 @@
-import { browserEstimate, customerRates, retentionReserve, TRIAL, BYTES_PER_GB, DEFAULT_PRICING_SETTINGS, DEFAULT_IDLE_TIMEOUT_S, NEVER_SLEEP_TIMEOUT_S, ProviderPriceSheet, type Rates } from '@cloudbrowser/contracts';
+import { browserEstimate, customerRates, retentionReserve, TRIAL, BYTES_PER_GB, DEFAULT_PRICING_SETTINGS, DEFAULT_IDLE_TIMEOUT_S, NEVER_SLEEP_TIMEOUT_S, ProviderPriceSheet, type PriceFactors, type Rates } from '@cloudbrowser/contracts';
 import { and, eq, notInArray, sql, type SQL } from 'drizzle-orm';
 import type { Db } from './index.js';
 import { priceSheets, pricingSettings } from './pricing.js';
@@ -29,7 +29,7 @@ export async function reservationQuote(db: Db, regionId: string, spec: { storage
   if (!priced) return null;
   const [placement] = spec.instanceId ? await db.select({ rootVolumeGb: placements.rootVolumeGb }).from(placements)
     .where(and(eq(placements.instanceId, spec.instanceId), eq(placements.status, 'current'))) : [];
-  const rates = { ...customerRates(priced.sheet, (await pricingSettings(db)).markupPercent), snapshot: 0 };
+  const rates = { ...customerRates(priced.sheet, await pricingSettings(db)), snapshot: 0 };
   const machine = { storageGb: spec.storageGb, rootVolumeGb: placement?.rootVolumeGb ?? priced.sheet.rootVolumeGb, backups: spec.backupsEnabled };
   return { rates, requiredMicros: retentionReserve(rates, machine, now), fixedHourMicros: browserEstimate(rates, machine).alwaysOnHour };
 }
@@ -104,7 +104,7 @@ interface SpendInputs {
   all: { inst: typeof browserInstances.$inferSelect; health: typeof instanceHealth.$inferSelect | null }[];
   holds: Map<string, typeof browserReservations.$inferSelect>;
   prices: { price: typeof providerPrices.$inferSelect }[];
-  settings: { markupPercent: number };
+  settings: PriceFactors;
   placementRows: { machine: typeof placements.$inferSelect }[];
 }
 
@@ -130,14 +130,14 @@ function spendProjection({ all, holds, prices, settings, placementRows }: SpendI
     const vmPrice = machine?.instanceType ? sheet.instanceTypes[machine.instanceType] : sheet.vmHour;
     if (vmPrice === undefined) return null;
     // The same rounding as metering: the cost to a micro-dollar first, then the markup.
-    const rates = customerRates({ ...sheet, vmHour: vmPrice }, settings.markupPercent);
+    const rates = customerRates({ ...sheet, vmHour: vmPrice }, settings);
     const fixed = holds.get(inst.id)?.fixedHourMicros ?? 0;
     const running = inst.status === 'running';
     hour += fixed + (running ? rates.compute : 0);
     const base = health?.baseMeteredAt?.getTime() ?? now.getTime();
     const compute = health?.meteredAt?.getTime() ?? inst.lastActiveAt?.getTime() ?? now.getTime();
     pending += fixed * Math.max(0, now.getTime() - base) / 3_600_000;
-    pending += (health?.pendingComputeMs ?? 0) / 3_600_000 * rates.compute;
+    pending += ((health?.pendingComputeMs ?? 0) + (health?.transitionMs ?? 0)) / 3_600_000 * rates.compute;
     if (running) pending += rates.compute * Math.max(0, now.getTime() - compute) / 3_600_000;
     const tx = health?.netTxBytes ?? 0;
     const billed = health?.netTxBilledBytes ?? tx;

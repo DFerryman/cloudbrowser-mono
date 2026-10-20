@@ -1,6 +1,6 @@
 import { Button, Input, Label, useToast } from '@cloudbrowser/ui';
 import { RefreshCw } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { post, put, usd, useAdmin, useAdminAction, when, type PricingOverview } from './data.js';
 import { useT, type AdminKey } from './i18n.js';
 import { Mono, PageTitle, Pill, ReasonDialog, Table, Tile } from './ui.js';
@@ -13,6 +13,37 @@ const ITEMS: [keyof NonNullable<PricingOverview['regions'][number]['cost']>, Adm
 ];
 /** Usage rows: every item, so they add up to the totals. Snapshots are internal recovery costs, never charged. */
 const USAGE_ROWS: [string, AdminKey][] = [...ITEMS, ['snapshot', 'item.snapshot']];
+type Settings = PricingOverview['settings'];
+type NumericSetting = { [K in keyof Settings]: Settings[K] extends number ? K : never }[keyof Settings];
+/** The settings in the order the form shows them; each has its own explanation. */
+const FIELDS: { key: NumericSetting; label: AdminKey; help: AdminKey; scale?: number; step?: string }[] = [
+  { key: 'markupPercent', label: 'pricing.markup', help: 'pricing.markupHelp' },
+  { key: 'fixedMarkupPercent', label: 'pricing.fixedMarkup', help: 'pricing.fixedMarkupHelp' },
+  { key: 'transferMarkupPercent', label: 'pricing.transferMarkup', help: 'pricing.transferMarkupHelp' },
+  { key: 'relayGbMicros', label: 'pricing.relay', help: 'pricing.relayHelp', scale: 1_000_000, step: '0.001' },
+  { key: 'paymentFeeBps', label: 'pricing.feePct', help: 'pricing.feePctHelp', scale: 100, step: '0.01' },
+  { key: 'paymentFeeFixedCents', label: 'pricing.feeFixed', help: 'pricing.feeFixedHelp', scale: 100, step: '0.01' },
+  { key: 'minBalanceMicros', label: 'pricing.minBalance', help: 'pricing.minBalanceHelp', scale: 1_000_000, step: '0.01' },
+  { key: 'lowBalanceMicros', label: 'pricing.lowBalance', help: 'pricing.lowBalanceHelp', scale: 1_000_000, step: '0.01' },
+];
+/** neko's full-quality stream is about 2 Mbit/s, constant while a viewer is open. */
+const DEFAULT_VIDEO_GB_HOUR = 0.9;
+const HOURS_PER_MONTH = 730;
+const minimumMarkup = (feeBps: number) => 100 + Math.ceil(feeBps / 100);
+
+/**
+ * One hour with the live view open, for a browser with the default 10 GB disk: AWS and relay cost,
+ * the customer price, and what is left after the payment provider's percentage fee.
+ */
+function liveHour(r: PricingOverview['regions'][number], videoGb: number, s: Settings) {
+  if (!r.cost || !r.price || !r.sheet) return null;
+  const gbMonths = (10 + r.sheet.rootVolumeGb) / HOURS_PER_MONTH;
+  const sum = (x: NonNullable<typeof r.cost>) => x.compute + x.ip + x.storage * gbMonths + x.transfer * videoGb;
+  const cost = sum(r.cost);
+  const price = sum(r.price);
+  const net = price * (1 - s.paymentFeeBps / 10_000) - cost;
+  return { cost, price, net, pct: price > 0 ? Math.round((net / price) * 100) : 0 };
+}
 
 /**
  * Prices and margin: AWS cost per region from the AWS Price List API, the customer price
@@ -26,6 +57,7 @@ export function PricingPage() {
   const refresh = useAdminAction(() => post('/pricing/refresh'));
   const [draft, setDraft] = useState<PricingOverview['settings'] | null>(null);
   const [confirm, setConfirm] = useState(false);
+  const [videoGb, setVideoGb] = useState(DEFAULT_VIDEO_GB_HOUR);
   useEffect(() => {
     if (data.data && !draft) setDraft(data.data.settings);
   }, [data.data, draft]);
@@ -33,10 +65,15 @@ export function PricingPage() {
   const d = data.data;
   const mo = d.month;
   const marginPct = mo.revenueMicros > 0 ? Math.round((mo.grossMarginMicros / mo.revenueMicros) * 100) : null;
-  const field = (key: keyof PricingOverview['settings'], label: AdminKey, scale = 1, step = '1') => (
-    <div>
-      <Label htmlFor={key}>{t(label)}</Label>
-      <Input id={key} type="number" step={step} value={draft[key] / scale} onChange={(e) => setDraft({ ...draft, [key]: Math.round(Number(e.target.value) * scale) })} className="w-36" />
+  const floor = minimumMarkup(draft.paymentFeeBps);
+  const row = (id: string, label: ReactNode, input: ReactNode, help: AdminKey, warn?: string | null) => (
+    <div key={id} className="grid gap-1 border-b border-border py-3 last:border-0 sm:grid-cols-[220px_160px_1fr] sm:items-start sm:gap-4">
+      <div className="pt-2"><Label htmlFor={id}>{label}</Label></div>
+      {input}
+      <div className="text-xs text-muted">
+        <p>{t(help)}</p>
+        {warn ? <p className="mt-1 text-error">{warn}</p> : null}
+      </div>
     </div>
   );
 
@@ -77,22 +114,60 @@ export function PricingPage() {
       <section>
         <h2 className="mb-2 text-sm font-medium">{t('pricing.settings')}</h2>
         <form
-          className="flex flex-wrap items-end gap-3"
+          className="max-w-5xl rounded-[var(--radius-card)] border border-border px-4"
+          data-testid="pricing-settings"
           onSubmit={(e) => {
             e.preventDefault();
             setConfirm(true);
           }}
         >
-          {field('markupPercent', 'pricing.markup')}
-          {field('minBalanceMicros', 'pricing.minBalance', 1_000_000, '0.01')}
-          {field('lowBalanceMicros', 'pricing.lowBalance', 1_000_000, '0.01')}
-          {field('paymentFeeBps', 'pricing.feePct', 100, '0.01')}
-          {field('paymentFeeFixedCents', 'pricing.feeFixed', 100, '0.01')}
-          <Button type="submit" variant="primary" disabled={save.isPending || JSON.stringify(draft) === JSON.stringify(d.settings)}>
-            {t('common.save')}
-          </Button>
+          {FIELDS.map(({ key, label, help, scale = 1, step = '1' }) => row(
+            key,
+            t(label),
+            <Input id={key} type="number" step={step} value={draft[key] / scale} onChange={(e) => setDraft({ ...draft, [key]: Math.round(Number(e.target.value) * scale) })} className="w-36" />,
+            help,
+            key.endsWith('arkupPercent') && draft[key] < floor ? t('pricing.belowFloor', { floor }) : null,
+          ))}
+          {row(
+            'billTransitions',
+            t('pricing.transitions'),
+            <label className="flex items-center gap-2 pt-2 text-sm">
+              <input id="billTransitions" type="checkbox" checked={draft.billTransitions} onChange={(e) => setDraft({ ...draft, billTransitions: e.target.checked })} />
+              {draft.billTransitions ? t('pricing.on') : t('pricing.off')}
+            </label>,
+            'pricing.transitionsHelp',
+          )}
+          <div className="flex justify-end py-3">
+            <Button type="submit" variant="primary" disabled={save.isPending || JSON.stringify(draft) === JSON.stringify(d.settings)}>
+              {t('common.save')}
+            </Button>
+          </div>
         </form>
         <p className="mt-2 text-xs text-muted">{t('pricing.settingsNote')}</p>
+      </section>
+
+      <section data-testid="pricing-breakeven">
+        <h2 className="mb-1 text-sm font-medium">{t('pricing.breakeven')}</h2>
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-muted">
+          <label htmlFor="video-gb">{t('pricing.videoGb')}</label>
+          <Input id="video-gb" type="number" step="0.1" min={0} value={videoGb} onChange={(e) => setVideoGb(Math.max(0, Number(e.target.value)))} className="w-24" />
+          <span>{t('pricing.breakevenHelp')}</span>
+        </div>
+        <Table
+          rows={d.regions.filter((r) => r.cost && r.price)}
+          rowKey={(r) => r.regionId}
+          columns={[t('col.region'), t('pricing.hourCost'), t('pricing.hourPrice'), t('pricing.hourNet')]}
+          cells={(r) => {
+            // Saved prices, so this shows what users are charged now (the draft applies on save).
+            const h = liveHour(r, videoGb, d.settings)!;
+            return [
+              <span>{r.name} <Mono>{r.providerRegion}</Mono></span>,
+              <span className="tabular-nums">{usd(Math.round(h.cost))}</span>,
+              <span className="tabular-nums">{usd(Math.round(h.price))}</span>,
+              <span className={h.net < 0 ? 'tabular-nums font-medium text-error' : 'tabular-nums'}>{usd(Math.round(h.net))} ({h.pct}%)</span>,
+            ];
+          }}
+        />
       </section>
 
       <section>
@@ -133,7 +208,11 @@ export function PricingPage() {
       <ReasonDialog
         open={confirm}
         title={t('pricing.confirmTitle')}
-        description={t('pricing.confirmHelp', { from: d.settings.markupPercent, to: draft.markupPercent })}
+        description={t('pricing.confirmHelp', {
+          changes: [...FIELDS.map(({ key, label, scale = 1 }) => [t(label), d.settings[key] / scale, draft[key] / scale] as const),
+            [t('pricing.transitions'), d.settings.billTransitions ? t('pricing.on') : t('pricing.off'), draft.billTransitions ? t('pricing.on') : t('pricing.off')] as const]
+            .filter(([, from, to]) => from !== to).map(([label, from, to]) => `${label}: ${from} → ${to}`).join('; '),
+        })}
         confirm={t('common.save')}
         busy={save.isPending}
         onClose={() => setConfirm(false)}

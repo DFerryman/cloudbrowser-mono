@@ -190,7 +190,17 @@ export type UserRow = {
 type RatesRow = { compute: number; ip: number; storage: number; snapshot: number; transfer: number };
 
 export type PricingOverview = {
-  settings: { markupPercent: number; minBalanceMicros: number; lowBalanceMicros: number; paymentFeeBps: number; paymentFeeFixedCents: number };
+  settings: {
+    markupPercent: number;
+    fixedMarkupPercent: number;
+    transferMarkupPercent: number;
+    relayGbMicros: number;
+    billTransitions: boolean;
+    minBalanceMicros: number;
+    lowBalanceMicros: number;
+    paymentFeeBps: number;
+    paymentFeeFixedCents: number;
+  };
   regions: {
     regionId: string;
     name: string;

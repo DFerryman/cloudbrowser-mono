@@ -2,8 +2,8 @@
  * Signed-out data for the public site (`/api/public/*`): the price list and the service status.
  * GET only, no session, the same answer for every visitor, cacheable for a minute. Nothing about a single user or browser is exposed.
  */
-import { DATA_KEPT_DAYS, TRIAL, type ComponentStatus, type PublicPricing, type PublicStatus } from '@cloudbrowser/contracts';
-import { pricingSettings, schema } from '@cloudbrowser/db';
+import { DATA_KEPT_DAYS, TRIAL, costRates, type ComponentStatus, type PublicPricing, type PublicStatus } from '@cloudbrowser/contracts';
+import { priceSheets, pricingSettings, schema } from '@cloudbrowser/db';
 import { desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { regionViews } from '../availability.js';
@@ -28,14 +28,24 @@ publicRoute.get('/pricing', async (c) => {
   // The same answer for everyone (it is cached): no latency estimate from the caller's location.
   const listed = (await regionViews(db, null)).filter((r) => r.enabled);
   const prices = new Map((await allRegionPricing(db, null)).map((p) => [p.regionId, p]));
+  const [sheets, settings] = await Promise.all([priceSheets(db), pricingSettings(db)]);
   const out: PublicPricing = {
     regions: listed.flatMap((r) => {
       const p = prices.get(r.id);
       if (!p) return [];
       const { version: _version, ...rest } = p;
-      return [{ ...rest, name: r.name, city: r.city, country: r.country, area: r.area, availability: r.availability, acceptingNew: r.acceptingNew }];
+      const sheet = sheets.get(r.id)?.sheet;
+      return [{ ...rest, name: r.name, city: r.city, country: r.country, area: r.area, availability: r.availability, acceptingNew: r.acceptingNew,
+        cost: sheet ? costRates(sheet, settings.relayGbMicros) : null }];
     }),
-    minBalanceMicros: (await pricingSettings(db)).minBalanceMicros,
+    model: {
+      computeMarkupPercent: settings.markupPercent,
+      fixedMarkupPercent: settings.fixedMarkupPercent,
+      transferMarkupPercent: settings.transferMarkupPercent,
+      relayGbMicros: settings.relayGbMicros,
+      billTransitions: settings.billTransitions,
+    },
+    minBalanceMicros: settings.minBalanceMicros,
     retentionDays: DATA_KEPT_DAYS,
     trial: { regionId: TRIAL.regionId, minutes: TRIAL.runningSeconds / 60, storageGb: TRIAL.storageGb, keptDays: TRIAL.keptDays },
   };

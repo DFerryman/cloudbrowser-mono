@@ -428,6 +428,8 @@ export const instanceHealth = sqliteTable('instance_health', {
   /** Last time the engine billed what the browser holds while it exists (IP, storage, snapshots). */
   baseMeteredAt: ts('base_metered_at'),
   pendingComputeMs: integer('pending_compute_ms').notNull().default(0),
+  /** Boot and shutdown time (VM up, browser not yet or no longer running) not yet billed. */
+  transitionMs: integer('transition_ms').notNull().default(0),
   /** Data volume usage reported by the agent's heartbeat. */
   diskUsedBytes: integer('disk_used_bytes'),
   diskTotalBytes: integer('disk_total_bytes'),
@@ -650,7 +652,12 @@ export const launchHealth = sqliteTable('launch_health', {
 /** One row (id 1): markup and balance thresholds, edited in the operator console. Owner: api (admin). */
 export const pricingSettings = sqliteTable('pricing_settings', {
   id: integer('id').primaryKey(),
+  /** The compute markup. */
   markupPercent: integer('markup_percent').notNull(),
+  fixedMarkupPercent: integer('fixed_markup_percent').notNull().default(120),
+  transferMarkupPercent: integer('transfer_markup_percent').notNull().default(120),
+  relayGbMicros: integer('relay_gb_micros').notNull().default(50_000),
+  billTransitions: integer('bill_transitions', { mode: 'boolean' }).notNull().default(true),
   minBalanceMicros: integer('min_balance_micros').notNull(),
   lowBalanceMicros: integer('low_balance_micros').notNull(),
   paymentFeeBps: integer('payment_fee_bps').notNull().default(0),

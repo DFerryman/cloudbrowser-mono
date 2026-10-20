@@ -4,8 +4,10 @@ import { RegionId } from './regions.js';
 /**
  * Prices (page 6). What the provider charges us comes from its price list for the browser's own
  * region (AWS Price List API, refreshed by the engine at least twice a day); nothing here is a
- * price. Customers pay that cost times an operator-set markup (`markupPercent`, e.g. 120 → cost ×
- * 1.2), metered per minute and taken from a prepaid balance.
+ * price. Data sent to the viewer also crosses Cloudflare's TURN relay, which bills per GB it
+ * delivers: that is added to the AWS transfer cost (`relayGbMicros`). Customers pay each cost
+ * times its operator-set markup (compute, fixed resources, transfer; e.g. 130 → cost × 1.3),
+ * metered per minute and taken from a prepaid balance.
  *
  * Money is held in micro-dollars (USD × 1,000,000) so per-minute charges add up exactly.
  */
@@ -67,23 +69,35 @@ export const Rates = z.object({
 });
 export type Rates = z.infer<typeof Rates>;
 
-/** The cost of each unit to us, in micro-dollars. Pure. */
-export function costRates(sheet: ProviderPriceSheet): Rates {
+/** What turns provider costs into customer prices: the markups and the relay's cost. */
+export type PriceFactors = Pick<PricingSettings, 'markupPercent' | 'fixedMarkupPercent' | 'transferMarkupPercent' | 'relayGbMicros'>;
+
+/**
+ * The cost of each unit to us, in micro-dollars. Transfer is AWS's data-out price plus the TURN
+ * relay's per-GB price: the live view's video, nearly all of a browser's traffic, is billed by both. Pure.
+ */
+export function costRates(sheet: ProviderPriceSheet, relayGbMicros = 0): Rates {
   const m = (usd: number) => Math.round(usd * MICROS_PER_USD);
   return {
     compute: m(sheet.vmHour),
     ip: m(sheet.ipHour),
     storage: m(sheet.volumeGbMonth),
     snapshot: m(sheet.snapshotGbMonth),
-    transfer: m(sheet.transferOutGb),
+    transfer: m(sheet.transferOutGb) + relayGbMicros,
   };
 }
 
-/** Customer prices: our cost times the markup, rounded to a micro-dollar. Pure. */
-export function customerRates(sheet: ProviderPriceSheet, markupPercent: number): Rates {
-  const cost = costRates(sheet);
-  const up = (micros: number) => Math.round((micros * markupPercent) / 100);
-  return { compute: up(cost.compute), ip: up(cost.ip), storage: up(cost.storage), snapshot: up(cost.snapshot), transfer: up(cost.transfer) };
+/** Customer prices: each cost times its markup, rounded to a micro-dollar. Pure. */
+export function customerRates(sheet: ProviderPriceSheet, factors: PriceFactors): Rates {
+  const cost = costRates(sheet, factors.relayGbMicros);
+  const up = (micros: number, percent: number) => Math.round((micros * percent) / 100);
+  return {
+    compute: up(cost.compute, factors.markupPercent),
+    ip: up(cost.ip, factors.fixedMarkupPercent),
+    storage: up(cost.storage, factors.fixedMarkupPercent),
+    snapshot: up(cost.snapshot, factors.fixedMarkupPercent),
+    transfer: up(cost.transfer, factors.transferMarkupPercent),
+  };
 }
 
 /**
@@ -189,10 +203,25 @@ export const RegionPricing = z.object({
 });
 export type RegionPricing = z.infer<typeof RegionPricing>;
 
-/** Operator settings for customer prices and the prepaid balance (admin console). */
+/**
+ * Operator settings for customer prices and the prepaid balance (admin console). Every markup is
+ * at least 100 (never below cost); the console also refuses one that the payment provider's
+ * percentage fee would push below cost.
+ */
 export const PricingSettings = z.object({
-  /** Customer price = provider cost × markupPercent / 100. At least 100 (never below cost). */
+  /** Compute (the VM, per running hour): price = AWS on-demand price × markupPercent / 100. */
   markupPercent: z.number().int().min(100).max(1000),
+  /** Dedicated IP, data volume and system disk, charged awake or asleep: AWS price × this / 100. */
+  fixedMarkupPercent: z.number().int().min(100).max(1000),
+  /** Data sent to the internet (mostly the live view): (AWS data-out + relay) × this / 100. */
+  transferMarkupPercent: z.number().int().min(100).max(1000),
+  /** Cloudflare TURN relay price per GB it delivers to the viewer, in micro-dollars ($0.05 = 50000). */
+  relayGbMicros: z.number().int().min(0).max(1_000_000),
+  /**
+   * Bill the minutes AWS charges while a browser boots (wake, first start) and shuts down (Chrome
+   * closing, the profile archive upload, the OS halting) as running time. Off: those minutes are ours.
+   */
+  billTransitions: z.boolean(),
   /** A browser can only be created or woken with at least this balance. */
   minBalanceMicros: z.number().int().min(0),
   /** Below this balance the app warns the user and emails once. */
@@ -205,8 +234,15 @@ export type PricingSettings = z.infer<typeof PricingSettings>;
 
 export const DEFAULT_PRICING_SETTINGS: PricingSettings = {
   markupPercent: 120,
+  fixedMarkupPercent: 120,
+  transferMarkupPercent: 120,
+  relayGbMicros: 50_000,
+  billTransitions: true,
   minBalanceMicros: 1 * MICROS_PER_USD,
   lowBalanceMicros: 2 * MICROS_PER_USD,
-  paymentFeeBps: 0,
-  paymentFeeFixedCents: 0,
+  paymentFeeBps: 390,
+  paymentFeeFixedCents: 40,
 };
+
+/** The smallest markup the payment provider's percentage fee leaves at or above cost. Pure. */
+export const minimumMarkupPercent = (paymentFeeBps: number) => 100 + Math.ceil(paymentFeeBps / 100);

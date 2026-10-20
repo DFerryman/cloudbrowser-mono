@@ -1,4 +1,4 @@
-import { browserEstimate, customerRates, priceVersion, ProviderPriceSheet, splitUsagePeriod } from '@cloudbrowser/contracts';
+import { browserEstimate, costRates, customerRates, minimumMarkupPercent, priceVersion, ProviderPriceSheet, splitUsagePeriod } from '@cloudbrowser/contracts';
 import { meterUsage } from '@cloudbrowser/engine';
 import { createDb, prepaidBalance, reservationQuote } from '@cloudbrowser/db';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -115,14 +115,23 @@ afterEach(() => vi.unstubAllGlobals());
 describe('prices', () => {
   const sheet = ProviderPriceSheet.parse(SIMULATED_SHEET);
 
+  const markup = (percent: number, relayGbMicros = 0) => ({ markupPercent: percent, fixedMarkupPercent: percent, transferMarkupPercent: percent, relayGbMicros });
+
   it('are the provider cost times the markup, per unit, in micro-dollars', () => {
-    expect(customerRates(sheet, 100)).toEqual({ compute: 100_000, ip: 5_000, storage: 80_000, snapshot: 50_000, transfer: 90_000 });
-    expect(customerRates(sheet, 120)).toEqual({ compute: 120_000, ip: 6_000, storage: 96_000, snapshot: 60_000, transfer: 108_000 });
-    expect(priceVersion(customerRates(sheet, 120), 16)).not.toBe(priceVersion(customerRates(sheet, 125), 16));
+    expect(customerRates(sheet, markup(100))).toEqual({ compute: 100_000, ip: 5_000, storage: 80_000, snapshot: 50_000, transfer: 90_000 });
+    expect(customerRates(sheet, markup(120))).toEqual({ compute: 120_000, ip: 6_000, storage: 96_000, snapshot: 60_000, transfer: 108_000 });
+    expect(priceVersion(customerRates(sheet, markup(120)), 16)).not.toBe(priceVersion(customerRates(sheet, markup(125)), 16));
+  });
+
+  it('mark each kind of cost up separately and add the relay to data transfer', () => {
+    const factors = { markupPercent: 130, fixedMarkupPercent: 110, transferMarkupPercent: 150, relayGbMicros: 50_000 };
+    expect(costRates(sheet, 50_000)).toMatchObject({ compute: 100_000, transfer: 140_000 });
+    expect(customerRates(sheet, factors)).toEqual({ compute: 130_000, ip: 5_500, storage: 88_000, snapshot: 55_000, transfer: 210_000 });
+    expect(minimumMarkupPercent(390)).toBe(104);
   });
 
   it('estimate what a browser costs running, and per month while it is kept', () => {
-    const e = browserEstimate(customerRates(sheet, 120), { storageGb: 10, rootVolumeGb: 16, backups: true });
+    const e = browserEstimate(customerRates(sheet, markup(120)), { storageGb: 10, rootVolumeGb: 16, backups: true });
     expect(e).toMatchObject({ runningHour: 120_000, ipMonth: 4_380_000, storageMonth: 2_496_000, snapshotMonth: 600_000, alwaysOnMonth: 7_476_000 });
   });
 
@@ -405,7 +414,9 @@ describe('free trial', () => {
     await meterUsage(engineAt(start));
     await meterUsage(engineAt(start + 5 * 60_000));
     const compute = t.d1.sqlite.prepare(`SELECT amount_micros AS a FROM usage_records WHERE instance_id = ? AND item = 'compute' AND amount_micros > 0`).get(id) as { a: number };
-    expect(compute.a).toBe(10_000); // 5 minutes at $0.12/h
+    // 5 minutes at $0.12/h, plus the second or so the wake spent booting (billed as running time).
+    expect(compute.a).toBeGreaterThanOrEqual(10_000);
+    expect(compute.a).toBeLessThan(10_100);
     expect((await t.call('GET', '/api/v1/billing')).body.balanceMicros).toBeLessThan(10_000_000);
   });
 });

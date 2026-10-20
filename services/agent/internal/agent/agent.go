@@ -25,7 +25,8 @@ import (
 
 // Version is reported in `ready`. 0.2.1 also reports failed viewer input relays; 0.2.2 runs IP
 // checks in a hidden page instead of a window that flashed onto the user's screen, and finishes
-// commands and delivers their replies across a gateway reconnect.
+// commands and delivers their replies across a gateway reconnect, and reports its final data-out
+// count in the shutdown reply.
 const Version = "0.2.2"
 
 // Browser is Chrome as the agent controls it through CDP.
@@ -316,6 +317,13 @@ func (a *Agent) command(ctx context.Context, in protocol.Incoming) {
 			break
 		}
 		reply.Result = a.archiveProfile(ctx, in.Payload)
+		// The archive upload is the last traffic before the VM halts and its counter resets: report
+		// the final count here, since the next heartbeat may never come (data out, page 6).
+		if a.cfg.Host != nil {
+			if tx, err := a.cfg.Host.NetTxBytes(); err == nil {
+				reply.Result["netTxBytes"] = tx
+			}
+		}
 	case protocol.CmdRestoreArchive:
 		if err := a.restoreProfile(ctx, in.Payload); err != nil {
 			reply.OK, reply.Error = false, err.Error()

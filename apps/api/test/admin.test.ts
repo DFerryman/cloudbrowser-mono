@@ -303,10 +303,14 @@ describe('admin console', () => {
     expect(tyo.price).toMatchObject({ compute: 120_000, ip: 6_000 });
 
     expect((await callAdmin('PUT', '/api/v1/admin/pricing/settings', { ...pricing.settings, markupPercent: 90, reason: 'below cost' }, IP)).status).toBe(400);
-    await callAdmin('PUT', '/api/v1/admin/pricing/settings', { ...pricing.settings, markupPercent: 135, reason: 'margin review' }, IP);
+    // Creem keeps 3.9% of each top-up: 103% would sell below cost after the fee.
+    expect(pricing.settings).toMatchObject({ paymentFeeBps: 390, relayGbMicros: 50_000, billTransitions: true });
+    expect((await callAdmin('PUT', '/api/v1/admin/pricing/settings', { ...pricing.settings, transferMarkupPercent: 103, reason: 'below cost after fees' }, IP)).status).toBe(400);
+    await callAdmin('PUT', '/api/v1/admin/pricing/settings', { ...pricing.settings, markupPercent: 135, fixedMarkupPercent: 150, transferMarkupPercent: 110, reason: 'margin review' }, IP);
     await signIn(t, 'user@example.com');
     const prices = (await t.call('GET', '/api/v1/pricing')).body;
-    expect(prices.find((r: { regionId: string }) => r.regionId === 'tyo1').rates).toMatchObject({ compute: 135_000, ip: 6_750 });
+    // Each kind of cost has its own markup; transfer is AWS data out ($0.09) plus the relay ($0.05).
+    expect(prices.find((r: { regionId: string }) => r.regionId === 'tyo1').rates).toMatchObject({ compute: 135_000, ip: 7_500, storage: 120_000, transfer: 154_000 });
 
     await callAdmin('POST', `/api/v1/admin/users/${owner}/credit`, { amountMicros: 5_000_000, reason: 'pilot credit' }, IP);
     expect((await t.call('GET', '/api/v1/billing')).body.balanceMicros).toBe(5_000_000);

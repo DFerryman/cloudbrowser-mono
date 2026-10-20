@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RegionPricing } from './pricing.js';
+import { RegionPricing, Rates } from './pricing.js';
 import { Region, RegionId } from './regions.js';
 
 /**
@@ -12,8 +12,20 @@ export const PublicPricing = z.object({
       name: z.string(),
       /** False when the region takes no new browsers right now (existing ones keep working). */
       acceptingNew: z.boolean(),
+      /** What each unit costs us there (AWS list price; transfer includes the relay), before markups. */
+      cost: Rates.nullable(),
     }).merge(Region.pick({ city: true, country: true, area: true, availability: true })),
   ),
+  /** The pricing model, published: price = cost × the markup for that kind of cost ÷ 100. */
+  model: z.object({
+    computeMarkupPercent: z.number().int(),
+    fixedMarkupPercent: z.number().int(),
+    transferMarkupPercent: z.number().int(),
+    /** The TURN relay's price per GB, included in each region's transfer cost. */
+    relayGbMicros: z.number().int(),
+    /** Boot and shutdown minutes are charged as running time. */
+    billTransitions: z.boolean(),
+  }),
   /** The least available credit needed to create or wake a paid browser. */
   minBalanceMicros: z.number().int(),
   /** Days a browser and its data are kept after available credit runs out. */

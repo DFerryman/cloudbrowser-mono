@@ -32,8 +32,7 @@ export interface RegionPrice {
 export async function regionPrice(db: Db, regionId: string): Promise<RegionPrice | null> {
   const stored = (await priceSheets(db)).get(regionId);
   if (!stored) return null;
-  const { markupPercent } = await pricingSettings(db);
-  const rates = customerRates(stored.sheet, markupPercent);
+  const rates = customerRates(stored.sheet, await pricingSettings(db));
   return { sheet: stored.sheet, rates, version: priceVersion(rates, stored.sheet.rootVolumeGb), fetchedAt: stored.fetchedAt };
 }
 
@@ -45,7 +44,7 @@ export async function instancePrice(db: Db, instanceId: string, regionId: string
   const actual = placement?.instanceType ? p.sheet.instanceTypes[placement.instanceType] : p.sheet.vmHour;
   if (actual === undefined) return null;
   const sheet = { ...p.sheet, vmHour: actual, rootVolumeGb: placement?.rootVolumeGb ?? p.sheet.rootVolumeGb };
-  return { ...p, sheet, rates: { ...customerRates(sheet, (await pricingSettings(db)).markupPercent), snapshot: 0 } };
+  return { ...p, sheet, rates: { ...customerRates(sheet, await pricingSettings(db)), snapshot: 0 } };
 }
 
 /** Like regionPrice, but refuses the action when there is no price or the user saw an older one. */
@@ -70,11 +69,11 @@ export async function storageLimits(db: Db, userId: string | null) {
 export async function allRegionPricing(db: Db, userId: string | null): Promise<RegionPricing[]> {
   const regions = (await db.select().from(schema.regions).orderBy(asc(schema.regions.id))).filter((r) => r.enabled || r.executor !== 'fake');
   const sheets = await priceSheets(db);
-  const { markupPercent } = await pricingSettings(db);
+  const settings = await pricingSettings(db);
   const storage = await storageLimits(db, userId);
   return regions.map((r) => {
     const stored = sheets.get(r.id);
-    const rates = stored ? customerRates(stored.sheet, markupPercent) : null;
+    const rates = stored ? customerRates(stored.sheet, settings) : null;
     return {
       regionId: r.id as RegionId,
       available: !!stored && (stored.sheet.source!=='aws-price-list' || Date.now()-stored.fetchedAt.getTime()<=AWS_PRICE_MAX_AGE_MS),

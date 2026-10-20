@@ -58,7 +58,7 @@ async function fixture(mode = 'allowed') {
         body = status === 200 ? { email: 'operator@example.test' } : { type: status === 401 ? 'unauthenticated' : 'forbidden', status };
       } else if (url.pathname === '/api/v1/admin/overview') body = overview;
       else if (url.pathname === '/api/v1/admin/pricing') body = {
-        settings: { markupPercent: 120, minBalanceMicros: 1_000_000, lowBalanceMicros: 2_000_000, paymentFeeBps: 0, paymentFeeFixedCents: 0 },
+        settings: { markupPercent: 120, fixedMarkupPercent: 120, transferMarkupPercent: 120, relayGbMicros: 50_000, billTransitions: true, minBalanceMicros: 1_000_000, lowBalanceMicros: 2_000_000, paymentFeeBps: 390, paymentFeeFixedCents: 40 },
         regions: [], month: { month: '2026-10', revenueMicros: 0, costMicros: 0, grossMarginMicros: 0, byItem: {}, topupMicros: 0, topups: 0,
           refundMicros: 0, creditMicros: 0, estimatedFeesMicros: 0, projectedAwsCents: null }, balances: { totalMicros: 0, negativeMicros: 0 },
       };
@@ -128,7 +128,10 @@ try {
   const pricing = await fixture();
   await pricing.page.goto(`${admin.origin}/pricing`);
   await pricing.page.getByRole('heading', { name: '定价与毛利', exact: true }).waitFor();
-  await pricing.page.getByLabel('加价（AWS 成本的 %）', { exact: true }).waitFor();
+  await pricing.page.getByLabel('计算加价（%）', { exact: true }).waitFor();
+  for (const label of ['IP 与存储加价（%）', '流量加价（%）', 'TURN 中继成本（$/GB）']) await pricing.page.getByLabel(label, { exact: true }).waitFor();
+  assert.match(await pricing.page.getByTestId('pricing-settings').innerText(), /Cloudflare Realtime TURN/);
+  await pricing.page.getByTestId('pricing-breakeven').waitFor();
   noOrdinaryLogin(pricing);
   await finish(pricing, 'pricing deep link stays inside the Access-protected console');
 

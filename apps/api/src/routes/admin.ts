@@ -4,7 +4,7 @@
  * written to `audit_log` with the admin's stable Access subject and email. Internal:
  * not part of the public OpenAPI document.
  */
-import { OPERATION_STEPS, PricingSettings, UsageItem, costRates, customerRates, type OperationKind } from '@cloudbrowser/contracts';
+import { OPERATION_STEPS, PricingSettings, UsageItem, costRates, customerRates, minimumMarkupPercent, type OperationKind } from '@cloudbrowser/contracts';
 import { awsInventory, blocksRegion, launchHealthByRegion, launchHealthFor, launchVerifiedAt, newId, openProviderIssue, priceSheets, pricingSettings, reopenRegion, schema, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, isNotNull, isNull, like, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
@@ -608,8 +608,8 @@ adminRoute.get('/pricing', async (c) => {
         fetchedAt: row?.fetchedAt ?? null,
         lastError: row?.lastError ?? null,
         lastErrorAt: row?.lastErrorAt ?? null,
-        cost: s ? costRates(s.sheet) : null,
-        price: s ? customerRates(s.sheet, settings.markupPercent) : null,
+        cost: s ? costRates(s.sheet, settings.relayGbMicros) : null,
+        price: s ? customerRates(s.sheet, settings) : null,
       };
     }),
     month: {
@@ -635,6 +635,11 @@ adminRoute.get('/pricing', async (c) => {
 adminRoute.put('/pricing/settings', async (c) => {
   const db = c.get('db');
   const { reason, ...next } = await body(c, PricingSettings.extend({ reason: z.string().trim().min(3).max(500) }));
+  // The payment provider keeps its percentage of every top-up: a markup below this sells below cost.
+  const floor = minimumMarkupPercent(next.paymentFeeBps);
+  for (const [field, value] of [['markupPercent', next.markupPercent], ['fixedMarkupPercent', next.fixedMarkupPercent], ['transferMarkupPercent', next.transferMarkupPercent]] as const) {
+    if (value < floor) throw problem(400, 'validation_failed', `${field} must be at least ${floor}: below that, the ${next.paymentFeeBps / 100}% payment fee makes it cost more than it earns.`);
+  }
   const before = await pricingSettings(db);
   const now = new Date();
   const values = { ...next, updatedAt: now, updatedBy: c.get('user').email };

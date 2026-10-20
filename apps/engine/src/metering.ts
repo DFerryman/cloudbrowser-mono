@@ -1,8 +1,10 @@
 /**
  * Usage metering and balance enforcement (page 6), every minute from the engine's cron:
  *  - charges each browser for what it used since the last run, at its region's provider price times
- *    the markup: compute while running; the dedicated IP, storage (data volume and system disk) and
- *    snapshots for as long as it exists; data sent to the internet as reported by its agent;
+ *    the markups: compute while running, plus the boot and shutdown time the engine measured (AWS
+ *    bills those minutes too) unless the operator turned that off; the dedicated IP, storage (data
+ *    volume and system disk) and snapshots for as long as it exists; data sent to the internet as
+ *    reported by its agent, at AWS's data-out price plus the TURN relay's;
  *  - records the usage per browser, item and day in `usage_records` and takes it from the owner's
  *    prepaid balance (pilot: recorded at the real prices, nothing taken);
  *  - when a balance reaches zero, records it (the session view warns) and puts the user's running
@@ -33,6 +35,8 @@ const { browserInstances, instanceHealth, operations, events, usageRecords, bill
 
 /** A missed cron run is not billed beyond this. */
 const MAX_METER_STEP_MS = 5 * 60_000;
+/** One boot or shutdown is never billed beyond its operation's deadline. */
+const MAX_TRANSITION_MS = 20 * 60_000;
 /** States in which a browser holds its IP and volume and is charged for them. */
 const NOT_BILLED = ['creating', 'failed', 'purged'];
 
@@ -42,7 +46,7 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
   const summary = { metered: 0, chargedMicros: 0, stopped: 0 };
   const prepaid = await billingRequired(db);
   if (prepaid) await reconcileReservations(deps);
-  const { markupPercent } = await pricingSettings(db);
+  const settings = await pricingSettings(db);
   const sheets = await priceSheets(db);
   const rows = await db.select({ inst: browserInstances, health: instanceHealth }).from(browserInstances)
     .leftJoin(instanceHealth, eq(instanceHealth.instanceId, browserInstances.id))
@@ -54,7 +58,7 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
   const snapshots = ids.length ? await db.select().from(backups).where(and(inArray(backups.instanceId, ids), eq(backups.kind, 'snapshot'), eq(backups.status, 'complete'))) : [];
   for (const { inst, health } of rows) {
     // Cron enforcement still runs each minute; settlement can skip unchanged short windows.
-    if (health?.baseMeteredAt && !health.pendingComputeMs && options.minIntervalMs
+    if (health?.baseMeteredAt && !health.pendingComputeMs && !health.transitionMs && options.minIntervalMs
       && now.getTime() - health.baseMeteredAt.getTime() < options.minIntervalMs) {
       // Settle immediately at depletion/expiry so the atomic stop guard sees the actual debit.
       if (inst.status !== 'running' || (await prepaidAccess(db, inst.userId, inst.id, now)).allowed) continue;
@@ -66,6 +70,7 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
     const origin = health?.meteredAt?.getTime() ?? inst.lastActiveAt?.getTime() ?? now.getTime();
     const computeFrom = new Date(Math.max(origin, now.getTime() - MAX_METER_STEP_MS));
     const pendingMs = health?.pendingComputeMs ?? 0;
+    const transitionMs = health?.transitionMs ?? 0;
     const trialMillis = running && inst.trialState === 'active' ? Math.min(TRIAL.runningSeconds * 1000 - Math.max(inst.trialUsedMs, inst.trialUsedS * 1000), Math.max(0, now.getTime() - origin)) : 0;
     const tx = health?.netTxBytes ?? null;
     const billedTx = health?.netTxBilledBytes ?? null;
@@ -75,6 +80,7 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
       AND ${instanceHealth.baseMeteredAt} IS ${health?.baseMeteredAt?.getTime() ?? null}
       AND ${instanceHealth.meteredAt} IS ${health?.meteredAt?.getTime() ?? null}
       AND ${instanceHealth.pendingComputeMs} = ${pendingMs}
+      AND ${instanceHealth.transitionMs} = ${transitionMs}
       AND (${instanceHealth.baseMeteredAt} IS NULL OR ${instanceHealth.baseMeteredAt} < ${now.getTime()}))
       AND EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${inst.id}
         AND ${browserInstances.status} = ${inst.status} AND ${browserInstances.desiredState} = ${inst.desiredState})`;
@@ -93,14 +99,14 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
       ]);
       continue;
     }
-    const cost = costRates(priced.sheet);
+    const cost = costRates(priced.sheet, settings.relayGbMicros);
     if (placement?.instanceType) cost.compute = Math.round(priced.sheet.instanceTypes[placement.instanceType]! * 1_000_000);
     const removed = inst.status === 'deleting';
     const hold = holds.get(inst.id);
     const retaining = !!hold?.retentionStartedAt;
     const free: Rates = { compute: 0, ip: 0, storage: 0, snapshot: 0, transfer: 0 };
-    const quoted = trial || removed ? free : retaining ? { ...hold.rates, compute: 0, transfer: 0, snapshot: 0 } : { ...customerRates(priced.sheet, markupPercent), snapshot: 0 };
-    if (!trial && !removed && !retaining) quoted.compute = Math.round(cost.compute * markupPercent / 100);
+    const quoted = trial || removed ? free : retaining ? { ...hold.rates, compute: 0, transfer: 0, snapshot: 0 } : { ...customerRates(priced.sheet, settings), snapshot: 0 };
+    if (!trial && !removed && !retaining) quoted.compute = Math.round(cost.compute * settings.markupPercent / 100);
     const rootGb = placement?.rootVolumeGb ?? priced.sheet.rootVolumeGb;
     const ledger = retained.filter((r) => r.instanceId === inst.id);
     const live = ledger.filter((r) => r.state !== 'deleted' && r.providerId !== null);
@@ -112,11 +118,11 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
     const hasSnapshot = removed ? live.some((r) => r.kind === 'snapshot') : snapshots.some((s) => s.instanceId === inst.id);
     type Entry = { day: string; item: UsageItem; quantity: number; price: number; cost: number };
     const entries: Entry[] = [];
-    const add = (day: string, item: UsageItem, quantity: number) => {
+    const add = (day: string, item: UsageItem, quantity: number, price = quoted[item]) => {
       if (quantity <= 0) return;
-      const previous = entries.find((e) => e.day === day && e.item === item);
+      const previous = entries.find((e) => e.day === day && e.item === item && e.price === price);
       if (previous) previous.quantity += quantity;
-      else entries.push({ day, item, quantity, price: quoted[item], cost: cost[item] });
+      else entries.push({ day, item, quantity, price, cost: cost[item] });
     };
     for (const part of splitUsagePeriod(baseFrom, now)) {
       add(part.day, 'ip', part.hours * ipCount);
@@ -126,6 +132,8 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
     if (running) for (const part of splitUsagePeriod(computeFrom, now)) add(part.day, 'compute', part.hours);
     // Running time settled by a stop follows the same missed-run cap as running time metered here.
     if (pendingMs > 0) add(usageDay(now), 'compute', Math.min(pendingMs, MAX_METER_STEP_MS) / 3_600_000);
+    // Boot and shutdown, measured by the operations; recorded at cost even when not charged.
+    if (transitionMs > 0) add(usageDay(now), 'compute', Math.min(transitionMs, MAX_TRANSITION_MS) / 3_600_000, settings.billTransitions ? quoted.compute : 0);
     add(usageDay(now), 'transfer', txBytes / BYTES_PER_GB);
     const stmts: BatchItem<'sqlite'>[] = [];
     const reference = `usage:${inst.id}:${from}:${now.getTime()}`;
@@ -172,7 +180,7 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
       trialUsedS: sql`cast(min(${TRIAL.runningSeconds * 1000},max(${browserInstances.trialUsedMs},${browserInstances.trialUsedS}*1000)+${trialMillis})/1000 AS integer)`,
       trialState: sql`CASE WHEN max(${browserInstances.trialUsedMs},${browserInstances.trialUsedS}*1000)+${trialMillis}>=${TRIAL.runningSeconds * 1000} THEN 'ended' ELSE 'active' END`, updatedAt: now,
     }).where(and(eq(browserInstances.id,inst.id),eq(browserInstances.trialState,'active'),claim)));
-    stmts.push(db.update(instanceHealth).set({ baseMeteredAt: now, meteredAt: running ? now : null, pendingComputeMs: 0, ...(tx !== null ? { netTxBilledBytes: tx } : {}) })
+    stmts.push(db.update(instanceHealth).set({ baseMeteredAt: now, meteredAt: running ? now : null, pendingComputeMs: 0, transitionMs: 0, ...(tx !== null ? { netTxBilledBytes: tx } : {}) })
       .where(and(eq(instanceHealth.instanceId, inst.id), claim)).returning({ id: instanceHealth.instanceId }));
     const result = await db.batch(stmts as [BatchItem<'sqlite'>,...BatchItem<'sqlite'>[]]);
     if ((result.at(-1) as {id:string}[]).length) {

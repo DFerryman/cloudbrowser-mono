@@ -66,9 +66,9 @@ export function PricingPage() {
         )}
       </section>
 
-      {region?.rates ? (
+      {region?.rates && pricing.data ? (
         <section className={`${container} grid gap-4 pb-16 lg:grid-cols-2`}>
-          <UnitRates region={region} />
+          <UnitRates region={region} model={pricing.data.model} />
           <Estimator region={region} />
         </section>
       ) : null}
@@ -150,31 +150,54 @@ function RegionCard({ region }: { region: RegionPrice }) {
   );
 }
 
-function UnitRates({ region }: { region: RegionPrice }) {
+/**
+ * The published pricing model for the selected region: each unit's AWS list price (data sent
+ * includes the TURN relay), the markup for that kind of cost, and the resulting price.
+ */
+function UnitRates({ region, model }: { region: RegionPrice; model: PublicPricing['model'] }) {
   const { t, locale } = useI18n();
   const r = region.rates!;
+  const c = region.cost;
   const m = (v: number) => money(v, locale);
-  const rows = [
-    [t('pricing.rate.compute'), m(r.compute), t('pricing.unit.hour')],
-    [t('pricing.rate.ip'), m(r.ip), t('pricing.unit.hour')],
-    [t('pricing.rate.storage'), m(r.storage), t('pricing.unit.gbMonth')],
-    [t('pricing.rate.transfer'), m(r.transfer), t('pricing.unit.gb')],
+  const rows: [string, number | undefined, number, number, string][] = [
+    [t('pricing.rate.compute'), c?.compute, model.computeMarkupPercent, r.compute, t('pricing.unit.hour')],
+    [t('pricing.rate.ip'), c?.ip, model.fixedMarkupPercent, r.ip, t('pricing.unit.hour')],
+    [t('pricing.rate.storage'), c?.storage, model.fixedMarkupPercent, r.storage, t('pricing.unit.gbMonth')],
+    [t('pricing.rate.transfer'), c?.transfer, model.transferMarkupPercent, r.transfer, t('pricing.unit.gb')],
   ];
   return (
-    <Card className="p-6">
-      <h2 className="text-base font-semibold">{t('pricing.rates')}</h2>
-      <table className="mt-3 w-full text-sm">
-        <tbody className="divide-y divide-border">
-          {rows.map(([label, value, unit]) => (
-            <tr key={label}>
-              <td className="py-2.5 pr-3 text-muted">{label}</td>
-              <td className="py-2.5 text-right font-medium tabular-nums">
-                {value} <span className="text-xs font-normal text-subtle">{unit}</span>
-              </td>
+    <Card className="p-6" data-testid="pricing-model">
+      <h2 className="text-base font-semibold">{t('pricing.model')}</h2>
+      <p className="mt-1 text-sm text-muted">{t('pricing.modelIntro')}</p>
+      <div className="mt-3 overflow-x-auto">
+        <table className="w-full min-w-[420px] text-sm">
+          <thead>
+            <tr className="text-left text-xs text-subtle">
+              <th className="py-2 pr-3 font-medium">{t('pricing.model.item')}</th>
+              <th className="py-2 pr-3 text-right font-medium">{t('pricing.model.cost')}</th>
+              <th className="py-2 pr-3 text-right font-medium">{t('pricing.model.markup')}</th>
+              <th className="py-2 text-right font-medium">{t('pricing.model.price')}</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {rows.map(([label, cost, markup, price, unit]) => (
+              <tr key={label}>
+                <td className="py-2.5 pr-3 text-muted">{label}</td>
+                <td className="py-2.5 pr-3 text-right tabular-nums">{cost === undefined ? '—' : m(cost)}</td>
+                <td className="py-2.5 pr-3 text-right tabular-nums">× {(markup / 100).toFixed(2)}</td>
+                <td className="py-2.5 text-right font-medium tabular-nums">
+                  {m(price)} <span className="text-xs font-normal text-subtle">{unit}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <ul className="mt-4 list-disc space-y-1.5 pl-5 text-xs leading-relaxed text-muted">
+        <li>{t('pricing.model.relay', { relay: m(model.relayGbMicros) })}</li>
+        <li>{model.billTransitions ? t('pricing.model.transitionsOn') : t('pricing.model.transitionsOff')}</li>
+        <li>{t('pricing.model.fees')}</li>
+      </ul>
     </Card>
   );
 }

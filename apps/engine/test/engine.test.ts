@@ -842,7 +842,47 @@ describe('metering and the prepaid balance', () => {
     w.advance(60_000);
     await meter();
     expect((await usage('transfer'))?.quantity).toBe(2.5);
-    expect((await usage('transfer'))?.amountMicros).toBe(Math.round(2.5 * 108_000)); // $0.09/GB × 120%
+    expect((await usage('transfer'))?.amountMicros).toBe(Math.round(2.5 * 168_000)); // ($0.09/GB AWS + $0.05/GB relay) × 120%
+  });
+
+  it('bills the minutes a VM spends shutting down as running time, and records them at cost when turned off', async () => {
+    await meter();
+    const sleep = async () => {
+      w.agentMode = 'gateway'; // a real agent that does not answer
+      const stop = await w.enqueue('inst1', 'stop');
+      expect((await runOperation(w.deps(), stop)).state).toBe('deferred');
+      w.advance(61_000); // the agent never acknowledges: the VM is stopped after 60 s, still billed by AWS
+      expect(await w.settle(stop)).toEqual({ state: 'succeeded' });
+      const [h] = await w.db.select().from(instanceHealth).where(eq(instanceHealth.instanceId, 'inst1'));
+      expect(h!.transitionMs).toBeGreaterThanOrEqual(61_000);
+      await meter();
+      w.agentMode = 'fake';
+    };
+    await sleep();
+    const billed = (await w.db.select().from(usageRecords).where(eq(usageRecords.item, 'compute')))[0]!;
+    expect(billed).toMatchObject({ unitPriceMicros: 120_000, unitCostMicros: 100_000 });
+    expect(billed.quantity * 3_600_000).toBeGreaterThanOrEqual(61_000);
+
+    await w.db.update(settings).set({ billTransitions: false }).where(eq(settings.id, 1));
+    await w.settle(await w.enqueue('inst1', 'start'));
+    await sleep();
+    const unbilled = (await w.db.select().from(usageRecords).where(and(eq(usageRecords.item, 'compute'), eq(usageRecords.unitPriceMicros, 0))))[0]!;
+    expect(unbilled.amountMicros).toBe(0);
+    expect(unbilled.costMicros).toBeGreaterThan(0); // still our cost, and in the margin report
+  });
+
+  it('bills the archive upload from the final data-out count in the shutdown reply', async () => {
+    await w.db.update(instanceHealth).set({ netTxBytes: 1024 ** 3 }).where(eq(instanceHealth.instanceId, 'inst1'));
+    await meter(); // the baseline
+    w.agentMode = 'gateway';
+    const stop = await w.enqueue('inst1', 'stop');
+    expect((await runOperation(w.deps(), stop)).state).toBe('deferred');
+    const [cmd] = await w.db.select().from(schema.agentCommands).where(eq(schema.agentCommands.kind, 'prepare_shutdown'));
+    await w.db.update(schema.agentCommands).set({ status: 'succeeded', reply: { archived: false, netTxBytes: 3 * 1024 ** 3 } }).where(eq(schema.agentCommands.id, cmd!.id));
+    w.advance(3_000);
+    expect(await w.settle(stop)).toEqual({ state: 'succeeded' });
+    await meter();
+    expect((await usage('transfer'))?.quantity).toBe(2);
   });
 
   it('follows the markup set by the operator', async () => {

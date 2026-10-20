@@ -16,7 +16,7 @@ import { bootstrapToken, type CommandReply } from './agent.js';
 import { archiveObjectKey } from './archives.js';
 import { fencedInsert, operationFence } from './fencing.js';
 
-const { browserInstances, instanceHealth, ipAddresses, placements, resources, auditLog, events, agentCredentials, agentCommands, viewerSessions, backups, archiveKeys, providerPrices, regions, operations } = schema;
+const { browserInstances, instanceHealth, ipAddresses, placements, resources, auditLog, events, agentCredentials, agentCommands, viewerSessions, backups, archiveKeys, providerPrices, regions, operations, operationSteps } = schema;
 
 /**
  * A new browser's data volume. The profile without caches is typically well under 2 GB, Chrome's
@@ -399,6 +399,12 @@ async function prepareShutdown(env: StepEnv): Promise<StepOutcome> {
   );
   if (reply.status === 'pending' && !timedOut) return { wait: COMMAND_POLL_MS, reason: 'waiting for Chrome to close' };
   if (archive) await settleArchive(env, archive.backupId, reply);
+  // The agent's final data-out count, after the archive upload: heartbeats are stored at most once
+  // a minute and the counter resets when the VM halts, so this traffic was otherwise never billed.
+  const tx = reply.result?.netTxBytes;
+  if (typeof tx === 'number' && Number.isSafeInteger(tx) && tx >= 0) {
+    await env.deps.db.update(instanceHealth).set({ netTxBytes: tx }).where(and(eq(instanceHealth.instanceId, env.instance.id), operationFence(env)));
+  }
   return { result: { acked: reply.status === 'succeeded' } };
 }
 
@@ -448,10 +454,30 @@ async function currentPlacement(env: StepEnv): Promise<PlacementRow | null> {
 
 // --- finish ------------------------------------------------------------------------------------
 
+/** When this operation's step finished, or null if it did not. */
+async function stepDoneAt(env: StepEnv, step: string): Promise<number | null> {
+  const [row] = await env.deps.db.select({ at: operationSteps.updatedAt }).from(operationSteps)
+    .where(and(eq(operationSteps.operationId, env.op.id), eq(operationSteps.step, step), eq(operationSteps.status, 'succeeded')));
+  return row?.at.getTime() ?? null;
+}
+
+/**
+ * AWS bills a VM from boot to halt, but only "running" was metered: the minutes spent booting
+ * (until Chrome is ready) and shutting down (closing Chrome, uploading the archive, halting) are
+ * added here and billed as running time by the meter (page 6).
+ */
+function transitionStatement(env: StepEnv, fromMs: number | null) {
+  const ms = fromMs === null ? 0 : Math.max(0, Math.round(env.deps.now().getTime() - fromMs));
+  return env.deps.db.insert(instanceHealth).values({ instanceId: env.instance.id, transitionMs: ms })
+    .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { transitionMs: sql`${instanceHealth.transitionMs} + ${ms}` }, setWhere: operationFence(env) });
+}
+
 async function finishWithStatus(
   env: StepEnv,
   status: string,
   extra: Partial<typeof browserInstances.$inferInsert> = {},
+  /** When the VM began running before the browser did (boot), or kept running after it (shutdown). */
+  vmUpSince: number | null = null,
 ): Promise<StepOutcome> {
   const { db, now } = env.deps;
   const at = now();
@@ -461,6 +487,7 @@ async function finishWithStatus(
       .set({ status, statusReason: null, updatedAt: at, ...extra })
       .where(and(eq(browserInstances.id, env.instance.id), operationFence(env))),
     db.insert(events).values(eventRow(env.instance.userId, 'instance.updated', { instanceId: env.instance.id }, at)),
+    ...(vmUpSince !== null ? [transitionStatement(env, vmUpSince)] : []),
   ] as const;
   if (status === 'running') {
     const startsRunning = sql`exists(select 1 from browser_instances where id = ${env.instance.id} and status <> 'running')`;
@@ -481,7 +508,7 @@ async function finishCreate(env: StepEnv): Promise<StepOutcome> {
     .update(ipAddresses)
     .set({ assignedAt: env.deps.now() })
     .where(eq(ipAddresses.address, address));
-  return finishWithStatus(env, 'running', { lastActiveAt: env.deps.now() });
+  return finishWithStatus(env, 'running', { lastActiveAt: env.deps.now() }, await stepDoneAt(env, 'create_vm'));
 }
 
 // --- create ------------------------------------------------------------------------------------
@@ -1051,8 +1078,11 @@ async function finishStop(env: StepEnv): Promise<StepOutcome> {
         .where(and(eq(resources.id, r.id), operationFence(env)));
     }
   }
+  // The VM ran from this stop's start (running time was settled then) until ensure_stopped; a
+  // stop that found no VM to shut down (skipped) adds nothing.
+  const shutDown = env.results.prepare_shutdown && 'acked' in env.results.prepare_shutdown ? env.op.createdAt.getTime() : null;
   return finishWithStatus(env, 'sleeping', env.instance.trialState === 'active' || env.instance.trialState === 'ended'
-    ? { trialReclaimAt: env.instance.trialReclaimAt ?? new Date(env.op.createdAt.getTime() + TRIAL.keptDays * 86_400_000) } : {});
+    ? { trialReclaimAt: env.instance.trialReclaimAt ?? new Date(env.op.createdAt.getTime() + TRIAL.keptDays * 86_400_000) } : {}, shutDown);
 }
 
 // --- resize_volume (page 4: more storage) --------------------------------------------------------
@@ -1139,7 +1169,7 @@ export const HANDLERS: Record<string, Record<string, Handler>> = {
     await_agent: awaitAgent,
     verify_binding: verifyBinding,
     verify_ip_in_chrome: verifyIpInChrome,
-    finish: (env) => finishWithStatus(env, 'running', { lastActiveAt: env.deps.now() }),
+    finish: async (env) => finishWithStatus(env, 'running', { lastActiveAt: env.deps.now() }, await stepDoneAt(env, 'ensure_running')),
   },
   stop: {
     prepare_shutdown: prepareShutdown,
