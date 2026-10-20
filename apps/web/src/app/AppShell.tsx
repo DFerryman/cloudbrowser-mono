@@ -16,10 +16,14 @@ export function Logo({ compact }: { compact?: boolean }) {
   const { t } = useI18n();
   return (
     <span className="flex items-center gap-2.5 text-[15px] font-semibold tracking-tight">
-      {/* A square in a square: a browser window, drawn in ink. */}
-      <span className="grid size-6 place-items-center bg-fg" aria-hidden>
-        <span className="size-2.5 border-2 border-bg" />
-      </span>
+      <img
+        src="/nevazu-logo.png"
+        alt=""
+        aria-hidden="true"
+        width={32}
+        height={16}
+        className={cn('h-auto w-8 shrink-0 object-contain', compact && 'w-6 lg:w-8')}
+      />
       <span className={cn(compact && 'hidden lg:inline')}>{t('app.name')}</span>
     </span>
   );
