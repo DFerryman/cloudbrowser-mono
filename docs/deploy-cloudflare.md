@@ -12,6 +12,27 @@ Everything in the control plane runs on Cloudflare. Five Workers share one D1 da
 
 ## Prerequisites
 
+For an API/frontend-only release, use a clean checkout of the latest `main`:
+
+```bash
+git checkout main
+git pull --ff-only origin main
+pnpm install --frozen-lockfile
+pnpm --filter @cloudbrowser/api run deploy
+```
+
+The API deploy command rejects other branches, uncommitted changes, or a HEAD different from
+`origin/main`. It rebuilds the frontend and verifies its source commit before calling Wrangler.
+The deployed `/build-info.json` reports the commit and branch with `Cache-Control: no-store`;
+the same commit is recorded in the Cloudflare version message. Do not deploy an old `dist/`
+directory or bypass this command with a direct `wrangler deploy`.
+
+The API's Custom Domains (`nevazu.com`, `www.nevazu.com`, and `admin.console.nevazu.com`) are
+declared in `apps/api/wrangler.jsonc`, including managed DNS and HTTPS certificates. The zone's
+`http_request_dynamic_redirect` rule is recorded in `deploy/cloudflare-www-redirect.json` and
+must be enabled for `www` to redirect to `https://nevazu.com`, retaining the path and query.
+Read the existing zone ruleset before applying that rule and preserve unrelated rules.
+
 - **Workers Paid plan.** Email Service can only send to arbitrary recipients on Workers Paid
   (3,000 emails/month included). Queues, Durable Objects, D1 and Rate Limiting also work on Free,
   but SSE streams and a 1-minute cron fit Paid better.

@@ -1,6 +1,13 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "cloudbrowser",
+  // Keep every public hostname in source control; www is canonicalized by the
+  // zone redirect recorded in deploy/cloudflare-www-redirect.json.
+  "routes": [
+    { "pattern": "nevazu.com", "custom_domain": true },
+    { "pattern": "www.nevazu.com", "custom_domain": true },
+    { "pattern": "admin.console.nevazu.com", "custom_domain": true }
+  ],
   "main": "src/index.ts",
   "minify": true,
   "compatibility_date": "2026-10-01",

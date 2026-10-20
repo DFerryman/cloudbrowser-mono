@@ -7,7 +7,7 @@
     "dev": "wrangler dev --port 8787 --persist-to ../../.wrangler/state",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "deploy": "wrangler deploy"
+    "deploy": "node ../../scripts/deploy-api-main.mjs"
   },
   "dependencies": {
     "@better-auth/passkey": "1.7.10",

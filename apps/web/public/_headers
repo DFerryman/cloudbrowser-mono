@@ -9,3 +9,6 @@
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
+
+/build-info.json
+  Cache-Control: no-store
