@@ -194,9 +194,10 @@ Cloudflare deployment.
   networks paused by the IP check, are queued in `user_notices` by the engine and emailed by the
   sweep; none of them is ever undone automatically.
 - **Picture resolution and adaptive quality**: the old screen-size setting was stored but never
-  applied. neko now streams a ladder of the same desktop (`full`, `high` 87.5%, `medium` 75% at
-  20 fps, `low` 75% at 15 fps, VP8 at 2.0/1.5/1.0/0.65 Mbit/s caps; every level keeps page text
-  readable — an earlier ladder went down to half size, which blurred text; before, `codec: h264` without pipelines
+  applied. neko now streams a ladder of the same desktop, every level at full resolution
+  (`full` 25 fps, `high` 20 fps, `medium` 15 fps, `low` 10 fps; VP8 at 2.0/1.6/1.2/0.9 Mbit/s with
+  max quantizers 20/24/28/32): lower levels give up frame rate and a little fine detail, never
+  resolution — earlier ladders downscaled to 75% and then 50%, which blurred text; before, `codec: h264` without pipelines
   silently fell back to neko's single default VP8 stream). There is no picture setting: the
   per-browser resolution and *Adjust to my connection* options were removed (their D1 columns stay
   unused so an older API can be rolled back to); every live view starts at `full` and adapts. The
@@ -206,8 +207,8 @@ Cloudflare deployment.
   hysteresis before a cap lifts); `low` at 15 fps is reached only when frames, loss, freezes or a
   rise in delay show the connection struggling for three readings (about 6 s). The viewer also
   measures the decoded picture against the desktop and never adapts below a level whose picture
-  is under 70% of the desktop's width (`MIN_LEGIBLE_SCALE`), so browsers still on the older
-  half-size ladder stop at `high`.
+  is under 90% of the desktop's width (`MIN_LEGIBLE_SCALE`), so browsers still on an older,
+  downscaling ladder stay at `full`.
   The viewer requests the level with `signal/video`
   and adapts it from its own receive statistics (dropped frames, loss, freezes, growing RTT),
   because neko 3.0.8's estimator compares bits with bytes. The page layout follows the viewer's

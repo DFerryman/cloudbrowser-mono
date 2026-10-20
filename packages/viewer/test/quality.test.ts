@@ -50,9 +50,6 @@ describe('picture quality controller', () => {
     const delayed = new QualityController('full', 0);
     expect(run(delayed, 0, 20, rtt(400))).toEqual([[4, 'medium']]);
     expect(run(delayed, 20_000, 8, rtt(800))).toEqual([[24, 'low']]);
-    // The low level runs at 15 fps on purpose.
-    const low = new QualityController('low', 0);
-    expect(run(low, 10_000, 20, (at) => good(at, 15))).toEqual([]);
   });
 
   it('treats a missing frame rate as unknown, but no packets at all as trouble', () => {
@@ -92,20 +89,22 @@ describe('picture quality controller', () => {
     expect(run(spike, 0, 60, (at) => rtt(at === 20_000 ? 340 : 60)(at))).toEqual([]);
   });
 
-  it('never adapts below the lowest level whose picture keeps text readable', () => {
-    // An older image whose lower levels are half-size pictures of the desktop.
+  it('never adapts to a downscaled picture that would blur text', () => {
+    // An older image whose lower levels are 75% and 50% pictures of the desktop.
     const scales: Record<string, number> = { full: 1, high: 0.75, medium: 0.5, low: 0.5 };
     const c = new QualityController('full', 0);
     const sample = (at: number): QualitySample => ({ ...bad(at), scale: scales[c.quality]! });
-    const switches = run(c, 10_000, 60, sample).map(([, q]) => q);
-    // Down to medium, found unreadable, back to high, and held there however bad it gets.
-    expect(switches).toEqual(['high', 'medium', 'high']);
-    expect(c.quality).toBe('high');
-    // A steady connection still returns to full.
-    expect(run(c, 70_000, 60, (at) => ({ ...good(at), scale: scales[c.quality]! })).map(([, q]) => q)).toEqual(['full']);
-    // The current ladder stays readable at every level.
+    // Down to high, found too soft, back to full, and held there however bad it gets.
+    expect(run(c, 10_000, 60, sample).map(([, q]) => q)).toEqual(['high', 'full']);
+    expect(c.quality).toBe('full');
+    // The current ladder is full size at every level, so it adapts all the way down.
     const current = new QualityController('full', 0);
-    expect(run(current, 10_000, 40, (at) => ({ ...bad(at), scale: 0.75 })).map(([, q]) => q)).toEqual(['high', 'medium', 'low']);
+    expect(run(current, 10_000, 40, (at) => ({ ...bad(at), scale: 1 })).map(([, q]) => q)).toEqual(['high', 'medium', 'low']);
+  });
+
+  it('runs low at 10 fps on purpose', () => {
+    const low = new QualityController('low', 0);
+    expect(run(low, 10_000, 30, (at) => good(at, 10))).toEqual([]);
   });
 
   it('returns one level at a time after a quiet period, never above the preferred level', () => {
