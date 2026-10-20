@@ -6,7 +6,6 @@ import { OpenAPIHono } from '@hono/zod-openapi';
 import type { ViewerTokenClaims } from '@cloudbrowser/contracts';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { createDb } from '@cloudbrowser/db';
-import { deliverAlerts } from './admin/alerts.js';
 import { adminOrigin, isAdminOrigin, isAdminPath, requireAdmin } from './admin/access.js';
 import { creemFrom } from './billing/creem.js';
 import { billingSweep } from './billing/sweep.js';
@@ -15,6 +14,8 @@ import type { MiddlewareHandler } from 'hono';
 import { createAuth } from './auth.js';
 import type { AppEnv, Env } from './env.js';
 import { internalApi } from './internal.js';
+import { adminSweep, deliverAlerts } from './notifications/admin.js';
+import { rewardNotices } from './notifications/user.js';
 import { problem, ProblemError } from './problem.js';
 import { promotionSweep } from './promotions.js';
 import { adminRoute } from './routes/admin.js';
@@ -161,8 +162,11 @@ export default {
     const nightly = at.getUTCHours() === 3 && at.getUTCMinutes() < 5;
     const db = createDb(env.DB);
     console.log('billing sweep', JSON.stringify(await billingSweep(env, db, creemFrom(env), new Date(), { nightly })));
-    console.log('alerts delivered', await deliverAlerts(env, db));
     console.log('promotions', JSON.stringify(await promotionSweep(env, db, new Date()).catch((e) => ({ error: String(e) }))));
+    console.log('reward emails', await rewardNotices(env, db, new Date()).catch((e) => String(e)));
+    // Admin watchers raise alerts; deliver afterwards so they go out in the same run.
+    console.log('admin notifications', JSON.stringify(await adminSweep(db, new Date())));
+    console.log('alerts delivered', await deliverAlerts(env, db));
   },
 } satisfies ExportedHandler<Env, { eventId: string }>;
 

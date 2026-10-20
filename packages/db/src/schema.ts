@@ -862,6 +862,8 @@ export const promotionCompletions = sqliteTable(
     completedAt: ts('completed_at').notNull(),
     /** Set once the reward is on the balance (reference `promotion:<task>:<user>`). */
     creditedAt: ts('credited_at'),
+    /** Set once the reward-credited email went out (several rewards share one email). */
+    notifiedAt: ts('notified_at'),
   },
   (t) => [
     primaryKey({ columns: [t.taskId, t.userId] }),
@@ -893,6 +895,17 @@ export const adminStepUps = sqliteTable('admin_step_ups', {
   challenge: text('challenge'),
   challengeExpiresAt: ts('challenge_expires_at'),
   verifiedAt: ts('verified_at'),
+});
+
+/**
+ * What the notification sweeps last told someone, so each message goes out once per occurrence
+ * (e.g. `user:<id>:low_balance` = time of the last email, `admin:users_milestone` = 50,
+ * `admin:inventory_empty:<region>` while that region has none). Owner: api.
+ */
+export const notificationState = sqliteTable('notification_state', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  updatedAt: ts('updated_at').notNull(),
 });
 
 /**

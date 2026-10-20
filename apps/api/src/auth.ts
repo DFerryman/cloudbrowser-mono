@@ -4,7 +4,7 @@ import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { passkey } from '@better-auth/passkey';
 import { emailOTP } from 'better-auth/plugins';
 import { eq } from 'drizzle-orm';
-import { sendSignInCode } from './email.js';
+import { sendSignInCode } from './notifications/user.js';
 import type { Env } from './env.js';
 import { twoFactorGuard, twoFactorPlugin } from './two-factor.js';
 

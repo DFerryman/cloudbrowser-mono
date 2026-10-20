@@ -10,7 +10,7 @@ import { and, desc, eq, gte, inArray, isNotNull, isNull, like, or, sql } from 'd
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import { isAdminEmail } from '../admin/access.js';
-import { acknowledgeAlert } from '../admin/alerts.js';
+import { acknowledgeAlert } from '../notifications/admin.js';
 import { applyBalance, notifyHub } from '../billing/ledger.js';
 import type { AppEnv } from '../env.js';
 import { systemOperation } from '../ops.js';

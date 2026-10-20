@@ -12,7 +12,7 @@ export interface Env {
   OPERATIONS: Queue<OperationMessage>;
   /** Per-user SSE fan-out: the EventHub Durable Object hosted by the engine Worker. */
   EVENT_HUB: DurableObjectNamespace;
-  /** Cloudflare Email Service binding for sign-in codes. */
+  /** Cloudflare Email Service binding: sign-in codes, user notifications and operator alerts (src/notifications). */
   EMAIL?: SendEmail;
   /** Workers Rate Limiting bindings: sign-in attempts per IP/email, and API writes per user. */
   AUTH_LIMITER?: RateLimit;
@@ -50,7 +50,7 @@ export interface Env {
   ACCESS_AUD?: string;
   /** Authorized operator emails; defaults to the deployment owner's address. */
   ADMIN_EMAIL_ALLOWLIST?: string;
-  /** Where operator alerts go: comma-separated emails (Email Service) and a Slack-compatible webhook URL. */
+  /** Where operator alerts go: comma-separated emails (default: ADMIN_EMAIL_ALLOWLIST) and a Slack-compatible webhook URL. */
   ALERT_EMAILS?: string;
   ALERT_WEBHOOK_URL?: string;
   /** Wraps per-browser archive keys (base64, 32 bytes); same value as the engine's. Secret. */

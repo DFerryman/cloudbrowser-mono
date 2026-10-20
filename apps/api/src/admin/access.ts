@@ -4,7 +4,7 @@ import type { MiddlewareHandler } from 'hono';
 import type { AppEnv, Env } from '../env.js';
 import { problem } from '../problem.js';
 
-const DEFAULT_ADMIN_EMAIL = 'sanchai20@163.com';
+export const DEFAULT_ADMIN_EMAIL = 'sanchai20@163.com';
 const MAX_ASSERTION_BYTES = 16 * 1024;
 // Shared public-key caches contain no identity or request state. jose handles signing-key rotation.
 const publicKeys = new Map<string, ReturnType<typeof createRemoteJWKSet>>();

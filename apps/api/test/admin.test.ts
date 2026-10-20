@@ -2,7 +2,7 @@ import { createDb, raiseAlert, recordLaunch } from '@cloudbrowser/db';
 import { meterUsage } from '@cloudbrowser/engine';
 import { SignJWT } from 'jose';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { deliverAlerts } from '../src/admin/alerts.js';
+import { deliverAlerts } from '../src/notifications/admin.js';
 import {
   ACCESS_AUD,
   ACCESS_ISSUER,

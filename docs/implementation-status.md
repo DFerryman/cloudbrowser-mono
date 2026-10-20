@@ -100,6 +100,11 @@ Cloudflare deployment.
 - **Alerts**: a shared `raiseAlert` (deduplicated while open) used by the reconciler (circuit
   breaker, findings, spend 80%/100%), the engine (failed IP checks, quota/forbidden/invalid errors)
   and billing (drift, disputes); delivered to email and a Slack-compatible webhook by the api cron.
+- **Notifications** (`apps/api/src/notifications`, guide: `docs/notifications.md`): split into
+  user-facing emails (`user.ts`: sign-in codes, credit warnings, deletion notices, browser notices,
+  reward confirmations, each with a repeat rule and the advisory ones with a cooldown) and
+  administrator alerts (`admin.ts`: delivery, region out of inventory, user milestones, promotion
+  budgets). Alert emails default to the admin allowlist when `ALERT_EMAILS` is empty.
 - **AWS executor** (`packages/executors/src/aws`, guide: `docs/aws.md`): Elastic IP on its own
   network interface, encrypted gp3 data volume, VM from stock Ubuntu 24.04 with IMDSv2 and
   termination protection; ClientToken plus `cb:token` tag lookup for every create; instance-type
