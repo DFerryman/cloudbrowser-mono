@@ -1,7 +1,7 @@
 /** Live AWS catalog, quota and organization billing synchronization. No infrastructure mutations. */
-import { AWS_REGION_FACTS } from '@cloudbrowser/contracts';
+import { AWS_REGION_FACTS, TIERS } from '@cloudbrowser/contracts';
 import { createDb, schema, type Db } from '@cloudbrowser/db';
-import { AwsApi, AwsExecutor, DEFAULT_INSTANCE_TYPES, Ec2Client, assumeRoleCredentials, xmlItems, xmlText, type AwsCredentials, type AwsRegionConfig, type XmlNode } from '@cloudbrowser/executors';
+import { AwsApi, AwsExecutor, DEFAULT_TIER_INSTANCE_TYPES, Ec2Client, assumeRoleCredentials, xmlItems, xmlText, type AwsCredentials, type AwsRegionConfig, type XmlNode } from '@cloudbrowser/executors';
 import { and, eq, sql } from 'drizzle-orm';
 import type { Env } from './index.js';
 
@@ -129,21 +129,25 @@ async function syncRegion(db: Db, env: Env, ec2: Ec2Client, credentials: () => P
     if (groups[0] && subnets.length) config={subnets:Object.fromEntries(subnets.filter((s)=>xmlText(s,'state')==='available' && Number(xmlText(s,'availableIpAddressCount'))>0).map((s)=>[xmlText(s,'availabilityZone')!,xmlText(s,'subnetId')!])),securityGroupId:xmlText(groups[0],'groupId')!};
   }
   if (!config || !Object.keys(config.subnets).length) throw new Error('Regional browser network is not provisioned');
+  const tiers=DEFAULT_TIER_INSTANCE_TYPES;
   const offerings=await all('DescribeInstanceTypeOfferings','instanceTypeOfferingSet',{
-    LocationType:'availability-zone','Filter.1.Name':'instance-type',...Object.fromEntries(DEFAULT_INSTANCE_TYPES.map((t,i)=>[`Filter.1.Value.${i+1}`,t])),
+    LocationType:'availability-zone','Filter.1.Name':'instance-type',...Object.fromEntries([...tiers.basic,...tiers.premium].map((t,i)=>[`Filter.1.Value.${i+1}`,t])),
   });
-  const offered=DEFAULT_INSTANCE_TYPES.filter((type)=>offerings.some((o)=>xmlText(o,'instanceType')===type && xmlText(o,'location')! in config!.subnets));
+  const offeredIn=(types:string[])=>types.filter((type)=>offerings.some((o)=>xmlText(o,'instanceType')===type && xmlText(o,'location')! in config!.subnets));
+  const offered=offeredIn(tiers.basic);
   if (!offered.length) throw new Error('No supported browser machine is offered in the configured availability zones');
+  // Premium is optional: a region without its machines keeps taking Basic browsers.
+  const premiumOffered=offeredIn(tiers.premium);
   // Per zone, so a launch never asks a zone for a type it does not offer (EC2: Unsupported).
-  const zoneInstanceTypes=Object.fromEntries(Object.keys(config.subnets).map((zone)=>[zone,offered.filter((type)=>offerings.some((o)=>xmlText(o,'instanceType')===type && xmlText(o,'location')===zone))]));
-  config={...config,instanceTypes:offered,zoneInstanceTypes};
+  const byZone=(types:string[])=>Object.fromEntries(Object.keys(config!.subnets).map((zone)=>[zone,types.filter((type)=>offerings.some((o)=>xmlText(o,'instanceType')===type && xmlText(o,'location')===zone))]));
+  config={...config,instanceTypes:offered,zoneInstanceTypes:byZone(offered),premium:{instanceTypes:premiumOffered,zoneInstanceTypes:byZone(premiumOffered)}};
   const executor=new AwsExecutor({accessKeyId:env.AWS_ACCESS_KEY_ID!,secretAccessKey:env.AWS_SECRET_ACCESS_KEY!,credentials,mode:'readonly',regions:{[code]:config},appUrl:'',agentImage:'',browserImage:''});
   const ctx={operationId:'aws-provider-sync',step:'provider-sync',token:'provider-sync',tags:{'cb:managed':'true' as const,'cb:env':env.ENV_NAME ?? 'prod','cb:instance':'provider-sync','cb:op':'provider-sync','cb:gen':'0'},deadline};
   const quotas:{metric:string;limit:number;used:number}[]=await executor.quotas(ctx,code);
   const [volumes,enis,subnets,machines,addresses,reservations]=await Promise.all([
     all('DescribeVolumes','volumeSet'), all('DescribeNetworkInterfaces','networkInterfaceSet'),
     all('DescribeSubnets','subnetSet',{'Filter.1.Name':'subnet-id',...Object.fromEntries(Object.values(config.subnets).map((v,i)=>[`Filter.1.Value.${i+1}`,v]))}),
-    all('DescribeInstanceTypes','instanceTypeSet',Object.fromEntries(offered.map((v,i)=>[`InstanceType.${i+1}`,v]))),
+    all('DescribeInstanceTypes','instanceTypeSet',Object.fromEntries([...offered,...premiumOffered].map((v,i)=>[`InstanceType.${i+1}`,v]))),
     all('DescribeAddresses','addressesSet'),all('DescribeInstances','reservationSet',{'Filter.1.Name':'instance-state-name','Filter.1.Value.1':'pending','Filter.1.Value.2':'running'}),
   ]);
   const [storageLimit,eniLimit]=await Promise.all([ec2.serviceQuota(code,'ebs','L-7A658B76',deadline),ec2.serviceQuota(code,'vpc','L-DF5E4CA3',deadline)]);
@@ -160,17 +164,25 @@ async function syncRegion(db: Db, env: Env, ec2: Ec2Client, credentials: () => P
     await db.insert(providerPrices).values({regionId,...values}).onConflictDoUpdate({target:providerPrices.regionId,set:values});
   }
   if (!sheet) throw new Error('AWS prices are unavailable');
-  const vcpu=Math.max(...machines.map((m)=>Number(xmlText(m,'vCpuInfo','defaultVCpus'))));
+  // What one browser of each tier needs: the most any of its launch candidates has.
+  const vcpusOf=(types:string[])=>Math.max(...machines.filter((m)=>types.includes(xmlText(m,'instanceType')!)).map((m)=>Number(xmlText(m,'vCpuInfo','defaultVCpus'))));
+  const vcpu=vcpusOf(offered);
   if (!Number.isFinite(vcpu) || vcpu<=0) throw new Error('AWS machine CPU requirements are unavailable');
+  const premiumVcpu=premiumOffered.length ? vcpusOf(premiumOffered) : TIERS.premium.vcpu;
+  if (!Number.isFinite(premiumVcpu) || premiumVcpu<=0) throw new Error('AWS machine CPU requirements are unavailable');
   const remaining=(metric:string)=>{const q=quotas.find((q)=>q.metric===metric)!;return Math.max(0,q.limit-q.used);};
   const [storage]=await db.all<{gb:number}>(sql`SELECT COALESCE(MAX("limit"),10) gb FROM caps WHERE metric='storage_gb'`);
   const subnetFree=subnets.reduce((n,s)=>n+Number(xmlText(s,'availableIpAddressCount')),0);
   const usedCpu=(i:XmlNode)=>Number(xmlText(i,'cpuOptions','coreCount'))*Number(xmlText(i,'cpuOptions','threadsPerCore'));
   const managedCpu=reservations.flatMap((r)=>xmlItems(r,'instancesSet')).filter(heldResource).reduce((n,i)=>n+usedCpu(i),0);
   const managedStorage=volumes.filter((v)=>heldResource(v) && xmlText(v,'volumeType')==='gp3').reduce((n,v)=>n+Number(xmlText(v,'size')),0);
-  const capacity=Math.floor(Math.min(remaining('static_ips')+addresses.filter(heldResource).length,(remaining('vcpus')+managedCpu)/vcpu,(remaining('gp3_gib')+managedStorage)/((storage?.gb ?? 10)+sheet.rootVolumeGb),remaining('network_interfaces')+enis.filter(heldResource).length,subnetFree+enis.filter((e)=>heldResource(e) && Object.values(config!.subnets).includes(xmlText(e,'subnetId')!)).length));
-  if (!Number.isFinite(capacity)) throw new Error('AWS returned an incomplete quota usage observation');
-  await db.update(catalog).set({config:config as unknown as Record<string,unknown>,quotas,capacity:Math.max(0,capacity),checkedAt:now,status:'ready',lastError:null}).where(eq(catalog.regionId,regionId));
+  // Browsers every dimension but vCPUs allows (one of each per browser, whatever its tier), and the
+  // vCPUs the account can give its browsers: aws_region_inventory divides those by each tier's need.
+  const capacity=Math.floor(Math.min(remaining('static_ips')+addresses.filter(heldResource).length,(remaining('gp3_gib')+managedStorage)/((storage?.gb ?? 10)+sheet.rootVolumeGb),remaining('network_interfaces')+enis.filter(heldResource).length,subnetFree+enis.filter((e)=>heldResource(e) && Object.values(config!.subnets).includes(xmlText(e,'subnetId')!)).length));
+  const vcpuCapacity=Math.floor(remaining('vcpus')+managedCpu);
+  if (!Number.isFinite(capacity) || !Number.isFinite(vcpuCapacity)) throw new Error('AWS returned an incomplete quota usage observation');
+  await db.update(catalog).set({config:config as unknown as Record<string,unknown>,quotas,capacity:Math.max(0,capacity),vcpuCapacity:Math.max(0,vcpuCapacity),
+    basicVcpus:vcpu,premiumVcpus:premiumVcpu,premiumOffered:premiumOffered.length>0 && !!sheet.premium,checkedAt:now,status:'ready',lastError:null}).where(eq(catalog.regionId,regionId));
 }
 
 async function syncBilling(db: Db, api: AwsApi, accountId: string, now: Date) {

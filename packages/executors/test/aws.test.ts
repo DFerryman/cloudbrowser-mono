@@ -706,3 +706,67 @@ describe('transient AWS failures', () => {
   });
 });
 
+
+describe('aws-ec2 tiers', () => {
+  const premiumPrices = (ec2: FakeEc2, types = ['c7i.xlarge', 'c6i.xlarge', 'c5.xlarge']) => {
+    tokyoPriceList(ec2);
+    const usd: Record<string, string> = { 'c7i.xlarge': '0.2244000000', 'c6i.xlarge': '0.2140000000', 'c5.xlarge': '0.2140000000' };
+    for (const type of types) {
+      ec2.priceList.AmazonEC2!.push(priceItem('AmazonEC2', { ...linux, instanceType: type, vcpu: '4', memory: '8 GiB', usagetype: `APN1-BoxUsage:${type}` }, [{ usd: usd[type]!, unit: 'Hrs' }]));
+    }
+  };
+
+  it('launches a Premium browser on the Premium machines, falling back within them, and tells the VM its tier', async () => {
+    const { ex, ec2 } = setup();
+    ec2.fail = (a, p) => (a === 'RunInstances' && p.InstanceType === 'c7i.xlarge' ? { code: 'InsufficientInstanceCapacity', status: 500 } : null);
+    const ip = await ex.allocateIp(ctx('allocate_ip'), REGION);
+    const nic = await ex.ensureNetworkInterface(ctx('create_nic'), REGION, ip);
+    const vol = await ex.ensureVolume(ctx('create_volume'), REGION, nic.zone, 20);
+    const vm = await ex.ensureVm(ctx('create_vm'), REGION, {
+      instanceId: 'inst1', zone: nic.zone, nicId: nic.nicId, volumeId: vol.volumeId, bootstrapToken: 't', gatewayUrl: 'wss://g',
+      tier: 'premium', maxVmHour: 0.2244, instanceTypePrices: { 'c7i.xlarge': 0.2244, 'c6i.xlarge': 0.214, 'c5.xlarge': 0.214 },
+    });
+    expect(ec2.calls.filter((c) => c.action === 'RunInstances').map((c) => c.params.InstanceType)).toEqual(['c7i.xlarge', 'c6i.xlarge']);
+    expect(vm.instanceType).toBe('c6i.xlarge');
+    expect(ec2.instances.get(vm.vmId)!.userData).toContain('\nBROWSER_TIER=premium\n');
+  });
+
+  it('keeps Basic browsers on the Basic machines and tells their VM so', async () => {
+    const { ex, ec2 } = setup();
+    const { vm } = await create(ex);
+    expect(vm.instanceType).toBe('c7i-flex.large');
+    expect(ec2.instances.get(vm.vmId)!.userData).toContain('\nBROWSER_TIER=basic\n');
+  });
+
+  it('prices Premium beside Basic, and leaves only Premium out when one of its machines has no price', async () => {
+    const { ex, ec2 } = setup('readonly');
+    premiumPrices(ec2);
+    const sheet = await ex.prices(ctx('prices'), REGION);
+    expect(sheet).toMatchObject({
+      instanceType: 'c7i-flex.large', vmHour: 0.1065, machine: { vcpu: 2, memoryGb: 4 },
+      premium: { instanceType: 'c7i.xlarge', vmHour: 0.2244, machine: { vcpu: 4, memoryGb: 8 } },
+      instanceTypes: { 'c7i-flex.large': 0.1065, 'c6i.large': 0.107, 'c5.large': 0.107, 'c7i.xlarge': 0.2244, 'c6i.xlarge': 0.214, 'c5.xlarge': 0.214 },
+    });
+    premiumPrices(ec2, ['c7i.xlarge', 'c6i.xlarge']);
+    const partial = await ex.prices(ctx('prices'), REGION);
+    expect(partial.premium).toBeUndefined();
+    expect(partial.instanceTypes).toEqual({ 'c7i-flex.large': 0.1065, 'c6i.large': 0.107, 'c5.large': 0.107 });
+  });
+
+  it('offers Premium only in zones with a Premium machine, and nowhere when the region has none', async () => {
+    const subnets = { 'ap-northeast-1a': 'subnet-a', 'ap-northeast-1c': 'subnet-c' };
+    const ec2 = new FakeEc2();
+    premiumPrices(ec2);
+    const make = (premium: { instanceTypes: string[]; zoneInstanceTypes: Record<string, string[]> }) => new AwsExecutor({
+      mode: 'readonly', accessKeyId: 'AKIDTEST', secretAccessKey: 'secret', appUrl: '', agentImage: '', browserImage: '', endpoint: () => 'https://ec2.test/', fetch: ec2.fetch,
+      regions: { [REGION]: { subnets, securityGroupId: 'sg-1', instanceTypes: ['c7i-flex.large'], zoneInstanceTypes: { 'ap-northeast-1a': ['c7i-flex.large'], 'ap-northeast-1c': ['c7i-flex.large'] }, premium } },
+    });
+    const some = make({ instanceTypes: ['c7i.xlarge'], zoneInstanceTypes: { 'ap-northeast-1a': [], 'ap-northeast-1c': ['c7i.xlarge'] } });
+    expect(some.zones(REGION)).toEqual(['ap-northeast-1a', 'ap-northeast-1c']);
+    expect(some.zones(REGION, 'premium')).toEqual(['ap-northeast-1c']);
+    const none = make({ instanceTypes: [], zoneInstanceTypes: { 'ap-northeast-1a': [], 'ap-northeast-1c': [] } });
+    expect(JSON.parse(none.pricingConfigKey(REGION)).premiumInstanceTypes).toEqual([]);
+    expect((await none.prices(ctx('prices'), REGION)).premium).toBeUndefined();
+    expect((await some.prices(ctx('prices'), REGION)).premium).toMatchObject({ instanceType: 'c7i.xlarge' });
+  });
+});

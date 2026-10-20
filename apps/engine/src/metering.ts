@@ -17,7 +17,9 @@
  */
 import {
   BYTES_PER_GB,
+  BrowserTier,
   splitUsagePeriod,
+  tierSheet,
   costRates,
   customerRates,
   type Rates,
@@ -98,7 +100,8 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
       ]);
       continue;
     }
-    const cost = costRates(priced.sheet, settings.relayGbMicros);
+    // The machine's own price; a placement that has not recorded its type yet uses its tier's.
+    const cost = costRates(tierSheet(priced.sheet, BrowserTier.catch('basic').parse(inst.tier)) ?? priced.sheet, settings.relayGbMicros);
     if (placement?.instanceType) cost.compute = Math.round(priced.sheet.instanceTypes[placement.instanceType]! * 1_000_000);
     const removed = inst.status === 'deleting';
     const hold = holds.get(inst.id);

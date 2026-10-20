@@ -1,4 +1,4 @@
-import { VIDEO_QUALITIES, type VideoQuality } from '@cloudbrowser/contracts';
+import { TIERS, VIDEO_QUALITIES, type TierSpec, type VideoQuality } from '@cloudbrowser/contracts';
 
 /** The sharpest level to use, and whether to adapt below it (the web app uses the default: full, adapting). */
 export interface VideoPreference {
@@ -26,8 +26,11 @@ export interface QualitySample {
   scale?: number | null;
 }
 
-/** neko encodes at a constant rate whatever is on screen (images/browser/neko.yaml). */
-const EXPECTED_FPS: Record<VideoQuality, number> = { full: 25, high: 20, medium: 15, low: 10 };
+/**
+ * neko encodes at a constant rate whatever is on screen; each tier's browser image has its own
+ * rate per level (TIERS[tier].fps: neko.yaml for Basic, neko-premium.yaml for Premium).
+ */
+export type LevelFps = TierSpec['fps'];
 /** A switch restarts the stream at a keyframe; readings right after it say little. */
 const SETTLE_MS = 4_000;
 /** Consecutive bad readings (about 6 s) before stepping down: brief hiccups keep the picture. */
@@ -49,8 +52,8 @@ const RTT_WINDOW = 30;
  * A long round trip caps the picture even while nothing is lost: smaller frames reach the
  * screen sooner, and fewer packets go missing that would take a whole round trip to resend.
  * Every level is full size (images/browser/neko.yaml), so a cap costs frame rate, not sharpness.
- * The bands are wide so that ordinary paths keep 25 fps. The cap stops at medium; only a
- * struggling connection gets low.
+ * The bands are wide so that ordinary paths keep the full frame rate. The cap stops at medium;
+ * only a struggling connection gets low.
  */
 const LATENCY_CAPS: readonly { aboveMs: number; quality: VideoQuality }[] = [
   { aboveMs: 180, quality: 'high' },
@@ -96,7 +99,7 @@ export class QualityController {
   private floor = VIDEO_QUALITIES.length - 1;
   private illegible = 0;
 
-  constructor(maxQuality: VideoQuality, now: number, current: VideoQuality = maxQuality) {
+  constructor(maxQuality: VideoQuality, now: number, current: VideoQuality = maxQuality, private readonly fps: LevelFps = TIERS.basic.fps) {
     this.max = VIDEO_QUALITIES.indexOf(maxQuality);
     this.level = Math.max(this.max, VIDEO_QUALITIES.indexOf(current));
     this.settleUntil = now + SETTLE_MS;
@@ -135,7 +138,7 @@ export class QualityController {
       this.rtts = [];
       return this.move(ceiling, s.at);
     }
-    const expected = EXPECTED_FPS[this.quality];
+    const expected = this.fps[this.quality];
     const struggling = s.stalled || s.lossRate > LOSS_LIMIT || s.freezes > 0 || (s.fps !== null && s.fps < expected * FPS_SHARE)
       || (s.rttMs !== null && bestRtt !== null && s.rttMs > bestRtt + RTT_RISE_MS);
     if (struggling) {

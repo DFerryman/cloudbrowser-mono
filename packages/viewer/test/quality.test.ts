@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { TIERS } from '@cloudbrowser/contracts';
 import { QualityController, type QualitySample } from '../src/quality.js';
 
 const good = (at: number, fps: number | null = 25): QualitySample => ({ at, stalled: false, fps, lossRate: 0, freezes: 0, rttMs: 40 });
@@ -16,6 +17,16 @@ function run(c: QualityController, from: number, seconds: number, sample: (at: n
 }
 
 describe('picture quality controller', () => {
+  it('judges a Premium stream against its own frame rates', () => {
+    // 25 fps is a healthy Basic stream but less than half of Premium's 60.
+    const premium = new QualityController('full', 0, 'full', TIERS.premium.fps);
+    expect(run(premium, 10_000, 6, (at) => good(at, 25))).toEqual([[14, 'high']]);
+    // At high (30 fps) the same 25 fps is healthy, and 58 fps at full is too.
+    expect(run(premium, 16_000, 10, (at) => good(at, 25))).toEqual([]);
+    const healthy = new QualityController('full', 0, 'full', TIERS.premium.fps);
+    expect(run(healthy, 0, 120, (at) => good(at, 58))).toEqual([]);
+  });
+
   it('stays at the sharpest level on a healthy connection', () => {
     const c = new QualityController('full', 0);
     expect(run(c, 0, 120, good)).toEqual([]);

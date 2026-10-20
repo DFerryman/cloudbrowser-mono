@@ -144,7 +144,6 @@ export interface ScreenConfiguration {
   rate: number;
 }
 
-/** The largest supported size that fits the viewport, so pixels map 1:1. */
 /** A screen mode as neko reports it, or null for anything malformed. */
 export function screenOf(value: unknown): ScreenConfiguration | null {
   if (value === null || typeof value !== 'object') return null;
@@ -158,9 +157,14 @@ export function screenOf(value: unknown): ScreenConfiguration | null {
 export const sameScreen = (a: ScreenConfiguration, b: ScreenConfiguration) =>
   a.height === b.height && a.rate === b.rate && a.width - (a.width % 8) === b.width - (b.width % 8);
 
+/**
+ * The largest supported size that fits the viewport, at the highest refresh rate up to `maxRate`
+ * that neko offers for it: Chrome draws no faster than the desktop, so the rate caps the frame
+ * rate (TIERS[tier].maxRefreshRate: 30 for Basic, 60 for Premium).
+ */
 export function fitScreen(width: number, height: number): { width: number; height: number };
-export function fitScreen(width: number, height: number, configurations: readonly ScreenConfiguration[]): ScreenConfiguration | null;
-export function fitScreen(width: number, height: number, configurations?: readonly ScreenConfiguration[]) {
+export function fitScreen(width: number, height: number, configurations: readonly ScreenConfiguration[], maxRate?: number): ScreenConfiguration | null;
+export function fitScreen(width: number, height: number, configurations?: readonly ScreenConfiguration[], maxRate = 30) {
   if (configurations) {
     if (configurations.length === 0) return null;
     // Keep the existing 720p–1440p policy when the server supports it. For smaller viewports,
@@ -174,7 +178,7 @@ export function fitScreen(width: number, height: number, configurations?: readon
       return (fits.length > 0 ? difference > 0 : difference < 0) ? b : a;
     });
     const rates = sizes.filter((s) => s.width === best.width && s.height === best.height).map((s) => s.rate);
-    const bounded = rates.filter((rate) => rate <= 30);
+    const bounded = rates.filter((rate) => rate <= maxRate);
     return { width: best.width, height: best.height, rate: bounded.length > 0 ? Math.max(...bounded) : Math.min(...rates) };
   }
   let best: readonly [number, number] = SCREEN_SIZES[0];

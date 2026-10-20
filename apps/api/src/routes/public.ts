@@ -2,8 +2,8 @@
  * Signed-out data for the public site (`/api/public/*`): the price list and the service status.
  * GET only, no session, the same answer for every visitor, cacheable for a minute. Nothing about a single user or browser is exposed.
  */
-import { DATA_KEPT_DAYS, TRIAL, costRates, type ComponentStatus, type PublicPricing, type PublicStatus } from '@cloudbrowser/contracts';
-import { priceSheets, pricingSettings, schema, trialMinutes } from '@cloudbrowser/db';
+import { DATA_KEPT_DAYS, TRIAL, costRates, tierSheet, type ComponentStatus, type PublicPricing, type PublicStatus } from '@cloudbrowser/contracts';
+import { priceSheets, pricingSettings, schema, trialMinutes, userCaps } from '@cloudbrowser/db';
 import { desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { regionViews } from '../availability.js';
@@ -35,8 +35,11 @@ publicRoute.get('/pricing', async (c) => {
       if (!p) return [];
       const { version: _version, ...rest } = p;
       const sheet = sheets.get(r.id)?.sheet;
+      const premium = sheet ? tierSheet(sheet, 'premium') : null;
       return [{ ...rest, name: r.name, city: r.city, country: r.country, area: r.area, availability: r.availability, acceptingNew: r.acceptingNew,
-        cost: sheet ? costRates(sheet, settings.relayGbMicros) : null }];
+        cost: sheet ? costRates(sheet, settings.relayGbMicros) : null,
+        premiumCost: premium ? costRates(premium, settings.relayGbMicros) : null,
+        premiumAvailability: r.premium?.availability ?? null }];
     }),
     model: {
       computeMarkupPercent: settings.markupPercent,
@@ -45,6 +48,7 @@ publicRoute.get('/pricing', async (c) => {
       relayGbMicros: settings.relayGbMicros,
       billTransitions: settings.billTransitions,
     },
+    premiumOffered: (await userCaps(db, 'default')).get('premium') === 1,
     minBalanceMicros: settings.minBalanceMicros,
     retentionDays: DATA_KEPT_DAYS,
     trial: { regionId: TRIAL.regionId, minutes: await trialMinutes(db), storageGb: TRIAL.storageGb, keptDays: TRIAL.keptDays },

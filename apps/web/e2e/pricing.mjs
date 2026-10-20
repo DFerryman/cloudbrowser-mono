@@ -30,7 +30,7 @@ const instance = {
 const results = [];
 
 async function fixture({ trial = false, failed = false, noPrice = false, width = 1365, height = 1024, sizeGb = 10, totalBytes, status = 'sleeping', purgeAfter = null,
-  balanceMicros = trial ? 0 : 10_000_000, reservedMicros = 0, availableMicros = Math.max(0, balanceMicros - reservedMicros), mode = 'prepaid', trialEligible = false, trialSeconds = 600, busy = false, legacySnapshots = false, rootVolumeGb = 16, locale = 'en-US', maxBrowsers = 10, idleTimeoutMaxS = 3600, neverSleep = true, neverSleepReason = null } = {}) {
+  balanceMicros = trial ? 0 : 10_000_000, reservedMicros = 0, availableMicros = Math.max(0, balanceMicros - reservedMicros), mode = 'prepaid', trialEligible = false, trialSeconds = 600, busy = false, legacySnapshots = false, rootVolumeGb = 16, locale = 'en-US', maxBrowsers = 10, idleTimeoutMaxS = 3600, neverSleep = true, neverSleepReason = null, premium = false } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, locale, hasTouch: width === 820 });
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
@@ -67,18 +67,20 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
         } else body = { instanceId: 'new-browser', operationId: 'fixture-operation' };
       } else if (url.pathname === '/api/v1/me') body = {
         user: { id: 'fixture-user', name: 'Test user', email: 'fixture@example.test' },
-        entitlements: { billing: 'prepaid', maxBrowsers, maxRunning: 10, idleTimeoutMaxS, maxStorageGb: 100, neverSleep },
+        entitlements: { billing: 'prepaid', maxBrowsers, maxRunning: 10, idleTimeoutMaxS, maxStorageGb: 100, neverSleep, premium },
         usage: { browsers: failed ? 0 : 1, running: 0 },
       };
       else if (url.pathname === '/api/v1/regions') body = [{ id: 'syd1', name: 'Sydney', country: 'AU', city: 'Sydney', timezone: 'Australia/Sydney', enabled: true, acceptingNew: state.stockAvailable, probeUrl: null,
         area: 'asia_pacific', availability: state.stockAvailable ? 'available' : 'unavailable', availabilityReason: state.stockAvailable ? null : 'no_stock', estimatedRttMs: null,
+        premium: premium ? { availability: 'available', availabilityReason: null } : null,
         ...(!state.stockAvailable ? { inventory: { available: 0, checkedAt: new Date().toISOString(), status: 'ready', constraint: 'quota_and_budget' } } : {}) }];
       else if (url.pathname === '/api/v1/pricing') {
         state.priceReads++;
         const newer = state.version === 'quote-2';
         body = [{ regionId: 'syd1', available: !noPrice, source: 'aws-price-list', updatedAt: new Date().toISOString(),
           rates: noPrice ? null : { compute: newer ? 200_000 : 100_000, ip: newer ? 12_000 : 6_000, storage: newer ? 200_000 : 100_000, snapshot: newer ? 100_000 : 50_000, transfer: 100_000 },
-          rootVolumeGb: 16, machine: { vcpu: 2, memoryGb: 4 }, defaultStorageGb: state.storageGb, maxStorageGb: 100, version: noPrice ? null : state.version }];
+          rootVolumeGb: 16, machine: { vcpu: 2, memoryGb: 4 }, defaultStorageGb: state.storageGb, maxStorageGb: 100, version: noPrice ? null : state.version,
+          premium: premium && !noPrice ? { rates: { compute: 210_000, ip: 6_000, storage: 100_000, snapshot: 50_000, transfer: 100_000 }, machine: { vcpu: 4, memoryGb: 8 }, version: 'premium-1' } : null }];
       } else if (url.pathname === '/api/v1/billing') body = {
         mode, enabled: false, balanceMicros, reservedMicros, availableMicros, retentionDays: 7, exhaustedAt: null, dataKeptUntil: null, frozen: false,
         minBalanceMicros: 1_000_000, lowBalanceMicros: 2_000_000, burnHourMicros: 10_000, topUps: [], month: { ...zero, month },
@@ -99,7 +101,7 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
       }
       else if (url.pathname === '/api/v1/usage') body = { ...zero, month, byBrowser: [], byDay: [] };
       else if (url.pathname === '/api/v1/events') return route.fulfill({ contentType: 'text/event-stream', body: ': local fixture\n\n' });
-      else if (url.pathname.endsWith('/sessions') || url.pathname.endsWith('/transactions')) body = [];
+      else if (url.pathname.endsWith('/sessions') || url.pathname.endsWith('/transactions') || url.pathname === '/api/v1/promotions') body = [];
       else throw new Error(`Unhandled fixture route: ${request.method()} ${url.pathname}`);
       if (request.method() === 'GET' && state.extraRegion && url.pathname === '/api/v1/regions') body.push({ id: 'eu-central-1', name: 'Europe (Frankfurt)', country: 'DE', city: 'Frankfurt', timezone: 'Europe/Berlin', enabled: true, acceptingNew: true, probeUrl: null,
         area: 'europe', availability: 'available', availabilityReason: null, estimatedRttMs: null, inventory: { available: 4, checkedAt: new Date().toISOString(), status: 'ready', constraint: 'quota_and_budget' } });
@@ -257,6 +259,32 @@ try {
   await dynamic.page.waitForURL('**/browsers');
   assert.equal(dynamic.state.requests[0].body.regionId, 'eu-central-1');
   await finish(dynamic, 'an API-discovered region outside the legacy list shows live stock and can be selected for creation');
+
+  {
+    // Without the operator's switch there is no machine choice, and creates are Basic.
+    const basic = await fixture();
+    await basic.page.goto(`${origin}/browsers/new`);
+    await basic.page.getByText('2 h/day, about $12.98/month', { exact: true }).waitFor();
+    assert.equal(await basic.page.getByText('Machine', { exact: true }).count(), 0);
+    await basic.page.getByRole('button', { name: 'Create browser', exact: true }).click();
+    await basic.page.waitForURL('**/browsers');
+    assert.equal(basic.state.requests[0].body.tier, undefined);
+    await finish(basic, 'without Premium on offer the dialog has no machine choice and creates Basic');
+
+    const premium = await fixture({ premium: true });
+    premium.state.extraRegion = true;
+    await premium.page.goto(`${origin}/browsers/new`);
+    await premium.page.getByText('2 vCPU · 4 GB memory · up to 25 fps.', { exact: true }).waitFor();
+    await premium.page.getByText('Premium', { exact: true }).click();
+    // Premium's running price, and a region without Premium cannot be chosen.
+    await premium.page.getByText('$0.2196/h', { exact: true }).first().waitFor();
+    await premium.page.getByText('Premium not offered here', { exact: true }).waitFor();
+    if (process.env.SHOT_DIR) await premium.page.screenshot({ path: `${process.env.SHOT_DIR}/create-premium.png`, fullPage: true });
+    await premium.page.getByRole('button', { name: 'Create browser', exact: true }).click();
+    await premium.page.waitForURL('**/browsers');
+    assert.deepEqual([premium.state.requests[0].body.tier, premium.state.requests[0].body.priceVersion, premium.state.requests[0].body.regionId], ['premium', 'premium-1', 'syd1']);
+    await finish(premium, 'Premium shows its own price and regions, and confirms with its own price version');
+  }
 
   for (const width of [1920, 390]) {
     const longList = await fixture({ width, height: 900 });

@@ -5,6 +5,10 @@
 set -euo pipefail
 token=$(curl -fsS -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
 ip=$(curl -fsS -m 5 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/public-ipv4 || true)
+# Premium browsers stream the 60 fps live view (BROWSER_TIER from the first boot's cloudbrowser.env).
+# A browser image older than that file keeps neko's default configuration.
+config=
+if [ "${BROWSER_TIER:-basic}" = premium ]; then config=/etc/neko/neko-premium.yaml; fi
 install -d -m 0700 /run/cloudbrowser
 umask 077
 cat >/run/cloudbrowser/neko.env <<ENV
@@ -18,3 +22,8 @@ NEKO_SESSION_IMPLICIT_HOSTING=true
 NEKO_SESSION_MERCIFUL_RECONNECT=true
 TZ=${BROWSER_TZ:-UTC}
 ENV
+if [ -n "$config" ]; then
+  # neko 3 reads NEKO_CONFIG; a missing file would leave neko without its configuration.
+  if docker run --rm --entrypoint test "$BROWSER_IMAGE" -f "$config"; then echo "NEKO_CONFIG=$config" >>/run/cloudbrowser/neko.env
+  else echo "cloudbrowser: $BROWSER_IMAGE has no $config; streaming the Basic configuration" >&2; fi
+fi

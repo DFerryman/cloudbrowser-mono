@@ -2,6 +2,8 @@
 
 Nevazu ([nevazu.com](https://nevazu.com)) — persistent cloud browsers: each browser is a real Chrome in its own cloud VM with a **dedicated,
 stable IP** in Tokyo or US West, **persistent encrypted data**, and a **low-latency live view**.
+Browsers come in two machine tiers: **Basic** (2 vCPU / 4 GB, up to 25 fps) and **Premium**
+(4 vCPU / 8 GB, up to 60 fps in H.264), see [docs/aws.md](docs/aws.md#premium-4-vcpu--8-gb-60-fps).
 The design lives in the Notion plan *Persistent Cloud Browser — Implementation Plan*.
 
 This repository holds **Phase 0 (Foundations)** of that plan, with the control plane on

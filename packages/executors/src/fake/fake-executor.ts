@@ -47,9 +47,15 @@ export interface FakeExecutorOptions {
   priceSheet?: Partial<FakePriceSheet>;
 }
 
-type FakePriceSheet = Pick<ProviderPriceSheet, 'vmHour' | 'volumeGbMonth' | 'snapshotGbMonth' | 'ipHour' | 'transferOutGb' | 'rootVolumeGb'>;
+type FakePriceSheet = Pick<ProviderPriceSheet, 'vmHour' | 'volumeGbMonth' | 'snapshotGbMonth' | 'ipHour' | 'transferOutGb' | 'rootVolumeGb'> & {
+  /** Premium's machine per hour; null leaves Premium out, as in a region that does not offer it. */
+  premiumVmHour: number | null;
+};
 
-const SIMULATED_PRICES: FakePriceSheet = { vmHour: 0.1, volumeGbMonth: 0.08, snapshotGbMonth: 0.05, ipHour: 0.005, transferOutGb: 0.09, rootVolumeGb: 16 };
+/** Premium costs about twice Basic, like c7i.xlarge next to c7i-flex.large. */
+const SIMULATED_PRICES: FakePriceSheet = { vmHour: 0.1, premiumVmHour: 0.21, volumeGbMonth: 0.08, snapshotGbMonth: 0.05, ipHour: 0.005, transferOutGb: 0.09, rootVolumeGb: 16 };
+/** The simulator's machine type for each tier. */
+const FAKE_TYPES = { basic: 'fake.large', premium: 'fake.xlarge' } as const;
 
 /** Documentation address ranges, keyed by provider region. */
 const DEFAULT_IP_PREFIX: Record<string, string> = {
@@ -307,8 +313,9 @@ export class FakeExecutor implements Executor {
     return this.call('ensureVm', ctx, async () => {
       this.requireOwner(ctx, await this.mustGet(spec.nicId, 'network_interface'));
       this.requireOwner(ctx, await this.mustGet(spec.volumeId, 'volume'));
+      const type = FAKE_TYPES[spec.tier ?? 'basic'];
       if (!(await this.store.findByToken('vm', ctx.token)) && (spec.maxVmHour !== undefined || spec.instanceTypePrices !== undefined)) {
-        const price = spec.instanceTypePrices?.['fake.large'];
+        const price = spec.instanceTypePrices?.[type];
         if (typeof spec.maxVmHour !== 'number' || !Number.isFinite(spec.maxVmHour) || spec.maxVmHour < 0 ||
             typeof price !== 'number' || !Number.isFinite(price) || price < 0) {
           throw new ExecutorError('invalid', 'A valid confirmed VM hourly price and current provider price are required.');
@@ -325,6 +332,7 @@ export class FakeExecutor implements Executor {
           nicId: spec.nicId,
           volumeId: spec.volumeId,
           rootVolumeGb: this.priceSheet.rootVolumeGb,
+          instanceType: type,
           terminationProtection: true,
           // What a real VM receives as user data; `scripts/dev-agent.sh` reads it to start a local agent.
           userData: { instanceId: spec.instanceId, gatewayUrl: spec.gatewayUrl, bootstrapToken: spec.bootstrapToken },
@@ -333,7 +341,7 @@ export class FakeExecutor implements Executor {
       );
       await this.update(ctx, spec.volumeId, { state: 'in-use' });
       await this.update(ctx, spec.nicId, { state: 'in-use' });
-      return { vmId: rec.id, zone: rec.zone!, instanceType: 'fake.large', rootVolumeGb: Number(rec.attrs.rootVolumeGb ?? 16) };
+      return { vmId: rec.id, zone: rec.zone!, instanceType: String(rec.attrs.instanceType ?? FAKE_TYPES.basic), rootVolumeGb: Number(rec.attrs.rootVolumeGb ?? 16) };
     });
   }
 
@@ -375,7 +383,7 @@ export class FakeExecutor implements Executor {
       const vol = await this.store.get(p.volumeId);
       return {
         vm: !vm || vm.state === 'deleted' ? 'missing' : (vm.state as RunState),
-        ...(!vm || vm.state === 'deleted' ? {} : { instanceType: 'fake.large' }),
+        ...(!vm || vm.state === 'deleted' ? {} : { instanceType: String(vm.attrs.instanceType ?? FAKE_TYPES.basic) }),
         ...(!vm || vm.state === 'deleted' ? {} : { rootVolumeGb: Number(vm.attrs.rootVolumeGb ?? 16) }),
         publicAddresses: await this.publicAddressesOf(p.nicId),
         volumeAttached: !!vol && vol.state === 'in-use',
@@ -426,7 +434,7 @@ export class FakeExecutor implements Executor {
       const count = (k: ResourceKind) => live.filter((r) => r.kind === k).length;
       return [
         { metric: 'static_ips', limit: this.quotaLimits.static_ips, used: count('ip') },
-        { metric: 'vcpus', limit: this.quotaLimits.vcpus, used: 2 * live.filter((r) => r.kind === 'vm' && r.state === 'running').length },
+        { metric: 'vcpus', limit: this.quotaLimits.vcpus, used: live.filter((r) => r.kind === 'vm' && r.state === 'running').reduce((n, r) => n + (r.attrs.instanceType === FAKE_TYPES.premium ? 4 : 2), 0) },
         { metric: 'volumes', limit: this.quotaLimits.volumes, used: count('volume') },
       ];
     });
@@ -437,16 +445,21 @@ export class FakeExecutor implements Executor {
    * pricing, metering and billing paths run end to end in local development and tests.
    */
   pricingConfigKey(_region: string): string {
-    return JSON.stringify({ instanceTypes: ['fake.large'], rootVolumeGb: this.priceSheet.rootVolumeGb });
+    return JSON.stringify({ instanceTypes: [FAKE_TYPES.basic], premiumInstanceTypes: this.priceSheet.premiumVmHour === null ? [] : [FAKE_TYPES.premium], rootVolumeGb: this.priceSheet.rootVolumeGb });
   }
 
   prices(ctx: OpContext, _region: string, additionalInstanceTypes: string[] = []): Promise<ProviderPriceSheet> {
+    const premium = this.priceSheet.premiumVmHour;
     return this.call('prices', ctx, async () => ({
       source: 'simulated' as const,
-      instanceType: 'fake.large',
+      instanceType: FAKE_TYPES.basic,
       vmHour: this.priceSheet.vmHour,
-      instanceTypes: Object.fromEntries(['fake.large', ...additionalInstanceTypes].map((type) => [type, this.priceSheet.vmHour])),
+      instanceTypes: {
+        ...Object.fromEntries([FAKE_TYPES.basic, ...additionalInstanceTypes].map((type) => [type, type === FAKE_TYPES.premium && premium !== null ? premium : this.priceSheet.vmHour])),
+        ...(premium === null ? {} : { [FAKE_TYPES.premium]: premium }),
+      },
       machine: { vcpu: 2, memoryGb: 4 },
+      ...(premium === null ? {} : { premium: { instanceType: FAKE_TYPES.premium, vmHour: premium, machine: { vcpu: 4, memoryGb: 8 } } }),
       volumeGbMonth: this.priceSheet.volumeGbMonth,
       snapshotGbMonth: this.priceSheet.snapshotGbMonth,
       ipHour: this.priceSheet.ipHour,

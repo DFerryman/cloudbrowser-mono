@@ -5,7 +5,7 @@
  * (a capacity shortage, or a provider failure such as an encryption key the account may not use).
  */
 import { AWS_REGION_FACTS, awsLatencyProbeUrl, estimateRttMs, type Region } from '@cloudbrowser/contracts';
-import { awsInventory, blocksRegion, launchHealthByRegion, launchVerifiedAt, openProviderIssue, recentCapacityAt, schema, type Db, type LaunchHealthRow } from '@cloudbrowser/db';
+import { awsInventory, blocksRegion, launchHealthByRegion, launchVerifiedAt, openProviderIssue, priceSheets, recentCapacityAt, schema, type Db, type LaunchHealthRow } from '@cloudbrowser/db';
 import { asc } from 'drizzle-orm';
 import { regionAcceptingNew } from './limits.js';
 
@@ -48,13 +48,23 @@ export function callerLocation(req: Request): { lat: number; lon: number } | nul
 
 /** Every listed region as the API shows it, with availability and a latency estimate. */
 export async function regionViews(db: Db, from: { lat: number; lon: number } | null, now = new Date()): Promise<Region[]> {
-  const [listed, health] = await Promise.all([listedRegions(db), launchHealthByRegion(db)]);
+  const [listed, health, sheets] = await Promise.all([listedRegions(db), launchHealthByRegion(db), priceSheets(db)]);
   return Promise.all(listed.map(async ({ row: r, inventory }) => {
     const stock = inventory ? inventory.available : null;
     const acceptingNewBase = r.enabled && (stock !== null ? stock > 0 : await regionAcceptingNew(db, r.id));
     const facts = r.executor === 'aws-ec2' ? AWS_REGION_FACTS[r.providerRegion] : undefined;
     const rows = health.get(r.id) ?? [];
     const { availability, availabilityReason } = availabilityOf({ enabled: r.enabled, acceptingNew: acceptingNewBase, stock, health: rows, now });
+    // Premium where the region prices a Premium machine and, under AWS inventory, offers one.
+    const premiumOffered = !!sheets.get(r.id)?.sheet.premium && (!inventory || !!inventory.premium_offered);
+    const premiumStock = inventory ? inventory.availableByTier.premium : null;
+    const premium = premiumOffered ? availabilityOf({
+      enabled: r.enabled,
+      acceptingNew: r.enabled && (premiumStock !== null ? premiumStock > 0 : await regionAcceptingNew(db, r.id, 'premium')),
+      stock: premiumStock,
+      health: rows,
+      now,
+    }) : null;
     return {
       id: r.id,
       name: r.name,
@@ -75,6 +85,7 @@ export async function regionViews(db: Db, from: { lat: number; lon: number } | n
       availabilityReason,
       launchVerifiedAt: launchVerifiedAt(rows)?.toISOString() ?? null,
       estimatedRttMs: facts && from ? estimateRttMs(from, facts) : null,
+      premium,
     };
   }));
 }

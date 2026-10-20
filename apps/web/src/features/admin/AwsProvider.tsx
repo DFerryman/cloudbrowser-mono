@@ -7,7 +7,7 @@ import { Mono, PageTitle, Pill, ReasonDialog, StatusPill, Table, Tile } from './
 type Connection = { runtimeAuthorization?: string; sessionExpiresAt?: string | null; managementAuthorization?: string; managementSessionExpiresAt?: string | null };
 type Provider = {
   state: { accountId:string|null;managementAccountId:string|null;connection:Connection|null;billing:{spendMicros:number;organizationSpendMicros?:number;byRegion?:Record<string,number>;estimated:boolean;credits:Record<string,unknown>[]|null}|null;billingAt:string|null;catalogAt:string|null;lastError:string|null;lastErrorAt:string|null };
-  regions:{regionId:string;providerRegion:string;name:string;optInStatus:string;status:string;quotas:{metric:string;used:number;limit:number}[]|null;checkedAt:string|null;lastError:string|null;price:{fetchedAt:string|null;lastError:string|null};inventory?:{available:number};held:number;launch?:Launch}[];
+  regions:{regionId:string;providerRegion:string;name:string;optInStatus:string;status:string;quotas:{metric:string;used:number;limit:number}[]|null;checkedAt:string|null;lastError:string|null;price:{fetchedAt:string|null;lastError:string|null};inventory?:{available:number;availableByTier?:{basic:number;premium:number};premium_offered?:number};held:number;launch?:Launch}[];
 };
 /** How launches went: tested by a real VM, or a provider failure that stops new browsers. */
 type Launch={verifiedAt:string|null;issue:{at:string;class:string|null;message:string|null;zone:string|null;blocking:boolean}|null};
@@ -57,7 +57,7 @@ export function AwsProviderPage() {
         <span>{r.name}<br/><Mono>{r.providerRegion}</Mono></span>,
         <span><StatusPill value={r.status} tone={r.status==='ready'?'ok':'warn'}/><br/><span className="text-xs text-muted"><StatusPill value={r.optInStatus} tone="muted"/></span></span>,
         <LaunchCell launch={r.launch} onReopen={()=>setReopening(r.regionId)} />,
-        <span className="font-semibold tabular-nums">{r.inventory?.available ?? 0}</span>,
+        <span className="tabular-nums"><span className="font-semibold">{r.inventory?.available ?? 0}</span>{r.inventory?.availableByTier ? <span className="block text-xs text-muted">{r.inventory.premium_offered ? t('aws.premiumStock',{count:r.inventory.availableByTier.premium}) : t('aws.premiumNotOffered')}</span> : null}</span>,
         <span className="tabular-nums">{r.held}</span>,
         <span className="text-xs">{r.quotas?.map((q)=><span key={q.metric} className="block">{q.metric}: {q.used} / {q.limit}</span>) ?? t('aws.unavailable')}</span>,
         billing?.byRegion ? usd(billing.byRegion[r.providerRegion] ?? 0):'—',

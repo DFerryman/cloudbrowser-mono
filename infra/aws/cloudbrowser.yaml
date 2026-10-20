@@ -17,8 +17,8 @@ Parameters:
     Description: Regions the IAM users may act in.
   AllowedInstanceTypes:
     Type: CommaDelimitedList
-    Default: c7i-flex.large,c6i.large,c5.large
-    Description: Instance types the runtime user may launch (the executor tries them in order). 2 vCPU / 4 GB each.
+    Default: c7i-flex.large,c6i.large,c5.large,c7i.xlarge,c6i.xlarge,c5.xlarge
+    Description: Instance types the runtime user may launch (the executor tries each tier's in order). Basic 2 vCPU / 4 GB, Premium 4 vCPU / 8 GB.
   BudgetEmail:
     Type: String
     Default: ''

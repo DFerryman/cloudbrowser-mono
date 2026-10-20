@@ -1,8 +1,8 @@
-import { CreateInstanceBody, DEFAULT_REGION, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
+import { CreateInstanceBody, DEFAULT_REGION, TIERS, browserEstimate, retentionReserve, type BrowserTier, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
 import { Button, cn, Hint, Input, Label, SidePanel } from '@cloudbrowser/ui';
 import { DocsLink } from '../../app/DocsLink.js';
-import { AlertCircle, ChevronDown, ChevronRight, Gift, Wallet } from 'lucide-react';
-import { useEffect, useId, useState, type FormEvent, type ReactNode } from 'react';
+import { AlertCircle, ChevronDown, ChevronRight, Gauge, Gift, Monitor, Wallet } from 'lucide-react';
+import { useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
@@ -13,6 +13,7 @@ import { canSpend, minimumSpendBalance } from '../billing/access.js';
 import { useCreateInstance, useInstances, useMe, useRegions } from './hooks.js';
 import { RegionPicker } from './RegionPicker.js';
 import { regionPlace } from './region-names.js';
+import { pricingForTier, regionForTier } from './tiers.js';
 
 
 type Plan = 'trial' | 'paid';
@@ -21,6 +22,8 @@ type Plan = 'trial' | 'paid';
  * Creating a browser (page 1): what it is called, where it lives (permanently) and what it costs,
  * read top to bottom. The price the user saw is sent back with the request, so it cannot change
  * unseen. When the free trial is on offer it is a plan of its own, next to paying as you go.
+ * Where the operator offers Premium, the machine is chosen first: regions and prices then show
+ * that tier's availability and cost.
  */
 export function CreateDialog({ open, initialInstance, onClose, onCreated }: { open: boolean; initialInstance?: Instance; onClose: () => void; onCreated: (instanceId: string) => void }) {
   const { t, locale, errorMessage } = useI18n();
@@ -35,6 +38,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
   const [name, setName] = useState('');
   const [regionId, setRegionId] = useState<Region['id']>(DEFAULT_REGION);
   const [plan, setPlan] = useState<Plan>('paid');
+  const [tier, setTier] = useState<BrowserTier>('basic');
   const [error, setError] = useState<string | null>(null);
   // The cost stays folded away so the panel reads cleanly; one click shows the whole estimate.
   const [costOpen, setCostOpen] = useState(false);
@@ -44,6 +48,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
       setCostOpen(false);
       setName(initialInstance?.name ?? `Browser ${(instances.data?.length ?? 0) + 1}`);
       if (initialInstance) setRegionId(initialInstance.regionId);
+      setTier(initialInstance?.tier ?? 'basic');
       setError(null);
     }
   }, [open, initialInstance?.id]);
@@ -53,8 +58,13 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
   // The one free trial (page 6): offered once, in its own region, while that region takes new browsers.
   const trialOffer = !!b?.trial.eligible && !!regions.data?.find((r) => r.id === b.trial.regionId)?.acceptingNew;
   const trial = trialOffer && plan === 'trial';
+  // The free trial is a Basic browser; Premium is offered where the operator turned it on.
+  const premiumOffer = !!me.data?.entitlements.premium && !trial;
+  const machine: BrowserTier = premiumOffer ? tier : 'basic';
+  const tierRegions = useMemo(() => regions.data?.map((r) => regionForTier(r, machine)), [regions.data, machine]);
+  const tierPricing = useMemo(() => pricing.data?.map((p) => pricingForTier(p, machine)), [pricing.data, machine]);
   const storageFor = (p: RegionPricing) => (trial && b ? b.trial.storageGb : p.defaultStorageGb);
-  const price = pricing.data?.find((p) => p.regionId === regionId);
+  const price = tierPricing?.find((p) => p.regionId === regionId);
   const reserve = price?.rates ? retentionReserve(price.rates, { storageGb: price.defaultStorageGb, rootVolumeGb: price.rootVolumeGb, backups: false }) : 0;
   const balanceTooLow = !!b && !canSpend(b, reserve);
   const needsCredit = balanceTooLow && !trial;
@@ -66,18 +76,18 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
   useEffect(() => {
     if (trial && b) setRegionId(b.trial.regionId);
   }, [trial, b]);
-  // Never preselect a region that cannot take new browsers.
+  // Never preselect a region that cannot take new browsers (of the chosen machine).
   useEffect(() => {
-    const list = regions.data;
+    const list = tierRegions;
     if (list && !list.find((r) => r.id === regionId)?.acceptingNew) {
       const first = list.find((r) => r.acceptingNew);
       if (first) setRegionId(first.id);
     }
-  }, [regions.data, regionId]);
+  }, [tierRegions, regionId]);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    const parsed = CreateInstanceBody.safeParse({ name, regionId, priceVersion: price?.version ?? undefined, storageGb: trial ? b!.trial.storageGb : price?.defaultStorageGb, ...(trial ? { trial: true } : {}) });
+    const parsed = CreateInstanceBody.safeParse({ name, regionId, priceVersion: price?.version ?? undefined, storageGb: trial ? b!.trial.storageGb : price?.defaultStorageGb, ...(trial ? { trial: true } : {}), ...(machine === 'premium' ? { tier: machine } : {}) });
     if (!parsed.success) {
       setError(t('error.validation_failed'));
       return;
@@ -91,12 +101,13 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
     }
   };
 
-  const regionAvailable = regions.data?.find((r) => r.id === regionId)?.acceptingNew === true;
+  const regionAvailable = tierRegions?.find((r) => r.id === regionId)?.acceptingNew === true;
   const blocked = create.isPending || pricing.isFetching || pricing.isError || regions.isError || !regionAvailable || !b || b.frozen || atLimit || needsCredit || !price?.available || !price.version;
   const notice = error
     ?? (atLimit && me.data ? t('create.atLimit', { max: me.data.entitlements.maxBrowsers }) : null)
     ?? (b?.frozen ? t('billing.frozen') : null)
-    ?? (regions.isError ? t('create.regionsFailed') : regions.data && !regionAvailable ? t(regions.data.some((r) => r.acceptingNew) ? 'create.regionUnavailable' : 'create.noInventory') : null);
+    ?? (regions.isError ? t('create.regionsFailed') : tierRegions && !regionAvailable
+      ? t(tierRegions.some((r) => r.acceptingNew) ? 'create.regionUnavailable' : machine === 'premium' ? 'create.premiumNowhere' : 'create.noInventory') : null);
 
   return (
     <SidePanel
@@ -155,18 +166,34 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
           <Input id="name" value={name} maxLength={64} required onChange={(e) => setName(e.target.value)} />
         </div>
 
+        {premiumOffer ? (
+          <fieldset>
+            <legend className="mb-2 text-sm font-medium">{t('create.machine')}</legend>
+            <div className="grid gap-2 sm:grid-cols-2" role="radiogroup">
+              <Choice name="machine" checked={machine === 'basic'} onChange={() => setTier('basic')} icon={<Monitor className="size-4" />}
+                title={t('tier.basic')}
+                hint={t('create.machine.hint', { vcpu: TIERS.basic.vcpu, memory: TIERS.basic.memoryGb, fps: TIERS.basic.fps.full })} />
+              <Choice name="machine" checked={machine === 'premium'} onChange={() => setTier('premium')} icon={<Gauge className="size-4" />}
+                title={t('tier.premium')}
+                hint={`${t('create.machine.hint', { vcpu: TIERS.premium.vcpu, memory: TIERS.premium.memoryGb, fps: TIERS.premium.fps.full })} ${t('create.machine.premiumHint')}`} />
+            </div>
+            {machine === 'premium' ? <Hint className="mt-2">{t('create.machine.premiumNote')} <DocsLink to="browsers#premium" /></Hint> : null}
+          </fieldset>
+        ) : null}
+
         <fieldset>
           <legend className="mb-2 text-sm font-medium">{t('create.region')}</legend>
           <RegionPicker
             open={open}
-            regions={regions.data}
+            regions={tierRegions}
             loading={regions.isPending}
-            pricing={pricing.data}
+            pricing={tierPricing}
             value={regionId}
             onChange={setRegionId}
             trialRegionId={trial && b ? b.trial.regionId : null}
             storageFor={storageFor}
             priceLabel={trial ? t('trial.free') : undefined}
+            reasonFor={machine === 'premium' ? (r) => (r.premium ? null : t('create.region.noPremium')) : undefined}
           />
         </fieldset>
 

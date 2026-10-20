@@ -1,3 +1,4 @@
+import { BROWSER_TIERS, BrowserTier, tierSheet } from '@cloudbrowser/contracts';
 import { newId, priceSheets, raiseAlert, schema, type Db } from '@cloudbrowser/db';
 import type { Executor, ExecutorKind, OpContext } from '@cloudbrowser/executors';
 import { and, eq, gte, inArray, ne, sql } from 'drizzle-orm';
@@ -243,9 +244,13 @@ export async function snapshotQuotasAndSpend(deps: ReconcilerDeps) {
     .selectDistinct({ executor: regions.executor, providerRegion: regions.providerRegion })
     .from(regions)
     .where(and(eq(regions.enabled, true),sql`NOT EXISTS (SELECT 1 FROM aws_provider_regions a WHERE a.region_id=${regions.id} AND a.status!='ready')`));
-  // The hourly VM price comes from the providers' price lists (refreshed by the engine), never a constant.
-  let vmHourCents = 0;
-  for (const s of (await priceSheets(db)).values()) vmHourCents = Math.max(vmHourCents, s.sheet.vmHour * 100);
+  // The hourly VM price comes from the providers' price lists (refreshed by the engine), never a
+  // constant: the dearest region's, for each tier.
+  const vmHourCents: Record<BrowserTier, number> = { basic: 0, premium: 0 };
+  for (const s of (await priceSheets(db)).values()) {
+    for (const tier of BROWSER_TIERS) vmHourCents[tier] = Math.max(vmHourCents[tier], (tierSheet(s.sheet, tier)?.vmHour ?? 0) * 100);
+  }
+  vmHourCents.premium ||= vmHourCents.basic;
   const failed = await eachRegion(targets, async (t) => {
     const executor = deps.executor(t.executor as ExecutorKind);
     const qs = await executor.quotas(ctx(deps, 'quotas'), t.providerRegion);
@@ -261,12 +266,13 @@ export async function snapshotQuotasAndSpend(deps: ReconcilerDeps) {
     .select({ cents: sql<number>`coalesce(sum(${resources.monthlyCostEstimate}), 0)` })
     .from(resources)
     .where(inArray(resources.state, ['active', 'superseded', 'pending']));
-  const [{ running } = { running: 0 }] = await db
-    .select({ running: sql<number>`count(*)` })
+  const running = await db
+    .select({ tier: browserInstances.tier, n: sql<number>`count(*)` })
     .from(browserInstances)
-    .where(inArray(browserInstances.status, ['running', 'starting', 'creating']));
+    .where(inArray(browserInstances.status, ['running', 'starting', 'creating']))
+    .groupBy(browserInstances.tier);
   const daysInMonth = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 0)).getUTCDate();
-  const runningHoursCents = Math.round(running * 24 * daysInMonth * vmHourCents);
+  const runningHoursCents = Math.round(running.reduce((sum, r) => sum + Number(r.n) * 24 * daysInMonth * vmHourCents[BrowserTier.catch('basic').parse(r.tier)], 0));
   const month = at.toISOString().slice(0, 7);
   const projectedCents = Number(cents) + runningHoursCents;
   await db.insert(spendSnapshots).values({ month, activeMonthlyCents: Number(cents), runningHoursCents, projectedCents, takenAt: at });

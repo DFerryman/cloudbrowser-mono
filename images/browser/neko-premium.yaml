@@ -1,0 +1,82 @@
+# Premium tier (4 vCPU / 8 GB VM): the same desktop at 60 frames per second, in H.264. The VM
+# selects this file with NEKO_CONFIG (images/vm/files/bin/cloudbrowser-browser-env); Basic
+# browsers keep neko.yaml. Ladder ids match neko.yaml (VideoQuality in the contracts), so the
+# viewer adapts the same way; each level's frame rate is TIERS.premium.fps in the contracts.
+#
+# Why H.264 here and not Basic's VP8: libvpx's realtime VP8 could not encode 1080p60 on four
+# vCPUs (about 30 fps with every core busy, measured with Chrome scrolling a page), while x264
+# held 60 fps with about 2.3 vCPUs busy in all, Chrome included, under continuous scrolling and
+# under 1080p60 video playback. Every browser the viewer supports decodes H.264 in WebRTC.
+#
+# Constant quality with a bitrate cap (pass=qual): a frame costs what changed in it, up to the
+# cap. A plain bitrate target spent about 2.9 Mbit/s on a page that did not move (its keyframes
+# came out nearly lossless); quality 23 under the cap measured 0.6 Mbit/s on a still page and
+# 1.9 Mbit/s while scrolling, with text as sharp as the screen. Basic's VP8 sends about 2 Mbit/s
+# either way.
+#
+# The desktop runs at 60 Hz (Basic's at 30 Hz caps Chrome at 30 fps), and every level's frame
+# rate divides 60 evenly, so motion stays even at every level.
+desktop:
+  screen: "1920x1080@60"
+capture:
+  video:
+    codec: h264
+    ids: [full, high, medium, low]
+    pipelines:
+      full:
+        fps: 60
+        # Constrained baseline: what neko's H.264 SDP offers (profile-level-id 42e01f).
+        gst_prefix: "! video/x-raw,format=I420"
+        gst_encoder: x264enc
+        gst_params: &h264
+          pass: qual                 # constant quality (CRF) at `quantizer` ...
+          quantizer: "23"
+          bitrate: "4500"            # ... never above this many kbit/s (1080p60 video measured 4.5)
+          vbv-buf-capacity: "600"    # ms: short bursts, so a scene change does not queue up the link
+          # A keyframe every 2 s. neko sends one at once to a new viewer and on every level
+          # change, and lost packets are resent, so this only bounds recovery from what resends miss.
+          key-int-max: "120"
+          threads: "4"
+          byte-stream: "true"
+          tune: zerolatency          # no lookahead or B-frames: each frame leaves as it is encoded
+          speed-preset: superfast
+        gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
+      high:
+        fps: 30
+        gst_prefix: "! video/x-raw,format=I420"
+        gst_encoder: x264enc
+        gst_params:
+          <<: *h264
+          bitrate: "2500"
+          key-int-max: "60"
+        gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
+      medium:
+        fps: 20
+        gst_prefix: "! video/x-raw,format=I420"
+        gst_encoder: x264enc
+        gst_params:
+          <<: *h264
+          bitrate: "1600"
+          key-int-max: "40"
+        gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
+      low:
+        fps: 10
+        gst_prefix: "! video/x-raw,format=I420"
+        gst_encoder: x264enc
+        gst_params:
+          <<: *h264
+          bitrate: "900"
+          key-int-max: "20"
+        gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
+server:
+  bind: "127.0.0.1:8080"   # reached only by the agent on the same VM
+webrtc:
+  icelite: false           # full ICE: the viewer relays through TURN; neko advertises the static IP (NEKO_WEBRTC_NAT1TO1)
+  estimator:
+    # neko compares its estimate in bits with the stream rate in bytes; the viewer adapts instead.
+    enabled: false
+member:
+  provider: multiuser      # the agent signs in as admin with the VM's password; viewers never see it
+session:
+  implicit_hosting: true
+  merciful_reconnect: true

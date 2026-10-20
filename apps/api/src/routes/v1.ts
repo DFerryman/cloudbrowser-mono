@@ -179,10 +179,11 @@ v1.openapi(
     const now = new Date();
     // The free trial (page 6): only where usage is paid, only in its region, once per user.
     const trial = body.trial === true && (await entitlementsFor(db, user.id)).billing === 'prepaid';
+    const tier = body.tier ?? 'basic';
     if (trial && body.regionId !== TRIAL.regionId) throw problem(400, 'validation_failed', `The free trial runs in ${REGION_INFO[TRIAL.regionId]?.city ?? TRIAL.regionId} only.`);
-    await admitCreate(db, user.id, body.regionId, now, { trial });
-    // The user must have been shown this region's current prices (create dialog).
-    const confirmedPrice = await requirePrice(db, body.regionId, body.priceVersion);
+    await admitCreate(db, user.id, body.regionId, now, { trial, tier });
+    // The user must have been shown this region's current prices for the tier (create dialog).
+    const confirmedPrice = await requirePrice(db, body.regionId, body.priceVersion, tier);
     const storageGb = trial ? TRIAL.storageGb : (await storageLimits(db, user.id)).defaultGb;
     if (body.storageGb !== storageGb) throw problem(409, 'price_changed', 'The storage included with a new browser changed. Review the new price and try again.');
     if (trial && !(await claimTrial(db, user.id, now))) throw problem(409, 'invalid_state', 'You have already used your free trial.');
@@ -206,6 +207,7 @@ v1.openapi(
               userId: user.id,
               name: body.name,
               regionId: body.regionId,
+              tier,
               status: 'creating',
               desiredState: 'running',
               storageGb,
@@ -224,7 +226,7 @@ v1.openapi(
               actor: `user:${user.id}`,
               action: 'instance.create',
               target: `instance:${instanceId}`,
-              detail: { regionId: body.regionId, priceVersion: body.priceVersion ?? null, trial },
+              detail: { regionId: body.regionId, tier, priceVersion: body.priceVersion ?? null, trial },
               createdAt: now,
             }),
           ],
@@ -592,7 +594,7 @@ v1.openapi(
   async (c) => {
     const db = c.get('db');
     const row = await ownedInstance(c, c.req.valid('param').id);
-    const now = currentBurn(await instancePrice(db, row.id, row.regionId), row);
+    const now = currentBurn(await instancePrice(db, row), row);
     return c.json(await instanceUsage(db, row.id, monthOf(c.req.valid('query').month), now), 200);
   },
 );

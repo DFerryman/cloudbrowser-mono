@@ -26,7 +26,60 @@ Sydney price sheet. The fallbacks `c6i.large` and `c5.large` are also 2 vCPU / 4
 unit prices are queried separately (customers pay the region's price for the first type).
 Burstable `t3` types are not used:
 when their CPU credits run out they either throttle the video or bill surplus credits that the
-price list does not show.
+price list does not show. Graviton is not an option: Google Chrome for Linux is x86-64 only.
+
+## Premium: 4 vCPU / 8 GB, 60 fps
+
+Basic is capped at 25 fps by two things: its neko pipeline encodes 25 fps, and its desktop runs
+at 30 Hz, which Chrome follows (it draws no more frames than the display shows). Premium browsers
+run a 60 Hz desktop and the 60 fps pipeline in `images/browser/neko-premium.yaml` on
+**`c7i.xlarge`** (4 vCPU, 8 GiB, Sapphire Rapids, full-performance), falling back to
+`c6i.xlarge` and `c5.xlarge` (the same shape, at or below its price). Sydney list prices in
+October 2026 were about $0.23 an hour for `c7i.xlarge` against $0.11 for Basic's `c7i-flex.large`;
+customers see the region's own price list times the compute markup, as for Basic. A browser's
+tier is chosen when it is created and never changes.
+
+**Why these numbers.** Measured with the pinned neko image and Chrome 155 on a 4 vCPU Cascade Lake
+host at 2.8 GHz (slower per core than `c7i`), with Chrome scrolling a dense page every frame:
+
+| Live view | Encoded | VM busy |
+|---|---|---|
+| Basic: VP8, 25 fps, 30 Hz desktop | 24 fps | 1.7 vCPU (85% of a 2 vCPU VM) |
+| VP8 at 60 fps, every speed setting tried | 17–32 fps | all 4 vCPUs |
+| H.264 (x264 superfast) at 60 fps | 59.5 fps | 2.2 vCPU |
+| H.264 at 60 fps with a 1080p60 video playing in Chrome | 59.6 fps | 2.3 vCPU |
+| H.264 at 60 fps limited to 2 CPUs | 59.4 fps | 2.0 (no headroom left) |
+
+VP8 cannot encode 1080p60 in real time on four vCPUs, so Premium streams H.264 (every browser the
+viewer supports decodes it in WebRTC; Firefox through its OpenH264 plugin). Four vCPUs leave about
+40% headroom for heavier pages; two would have none. Premium encodes at constant quality with a
+4.5 Mbit/s cap, so it sends only what changes: about 0.6 Mbit/s on a still page and 1.7–1.9
+Mbit/s while scrolling, less than Basic's constant 2 Mbit/s. Pages are still drawn on the CPU,
+so WebGL-heavy sites and 3D games remain slower than on a local computer; a GPU tier (`g4dn`,
+`g6`) would need NVIDIA drivers, an NVENC pipeline and a G-instance vCPU quota (zero by default).
+
+**Turning Premium on in an existing deployment.** Premium is off (`premium` cap 0) until all of
+this is done, so nothing below affects Basic browsers:
+
+1. Let the runtime identity launch the Premium types. CloudFormation stacks: re-run the
+   `aws cloudformation deploy` command of step 3 with
+   `AllowedInstanceTypes=c7i-flex.large,c6i.large,c5.large,c7i.xlarge,c6i.xlarge,c5.xlarge` (the
+   new default). AWS Provider deployments: add the three types wherever the
+   `nevazu-provider-runtime` role's policy (or an SCP) lists instance types.
+2. Publish the browser and agent images built from this commit (GitHub Actions → Images): the
+   browser image carries `neko-premium.yaml` and the 60 Hz modes, the agent image the VM script
+   that selects it. A VM takes images at first boot, so this reaches new browsers only.
+3. Apply migration `0029_browser_tiers` and deploy every Worker (`pnpm db:migrate:remote`,
+   `pnpm deploy`). Within five minutes the reconciler lists which zones offer the Premium types
+   and the engine prices them; the console's *Pricing & margin* page shows each region's Premium
+   machine and price, and *AWS* shows Premium stock.
+4. Create a Premium browser for yourself first: `INSERT INTO caps (scope, metric, "limit") VALUES
+   ('user:<your user id>', 'premium', 1)` (or console → Limits with that scope). Check the toolbar
+   shows about 60 fps and the codec `H264`.
+5. Console → Limits → **Offer Premium** (`user:default` / `premium` = 1).
+
+Each Premium browser holds 4 of the region's Standard On-Demand vCPUs (Basic holds 2), so ask for
+a larger vCPU quota (step 2) before offering it widely.
 
 **Switching an existing deployment to 4 GB VMs.** Re-run the deploy command above with the new
 `AllowedInstanceTypes`, set `instanceTypes` in `AWS_REGIONS` as above (or remove it), and redeploy
@@ -351,6 +404,8 @@ alerts.
 | *Failed* within a minute of create, alert `forbidden` with "ended during launch: … Client.InvalidKMSKey.InvalidState …" or "EBS could not create volume …"; the region shows *Blocked* | /admin → Alerts (the message carries EC2's state reason); /admin → AWS Provider → Launches; `launch_health` in D1 | The account may not use the region's EBS encryption key. EC2 reports a KMS call denied by IAM, an organization SCP or the key policy as "the KMS key is in an incorrect state", so it looks like a disabled key. Check any organization SCP regional restriction first: it must allow the KMS calls EC2 makes on the role's behalf there (`kms:CreateGrant`, `kms:Decrypt`, `kms:GenerateDataKeyWithoutPlaintext`, `kms:ReEncryptFrom`, `kms:ReEncryptTo`, `kms:DescribeKey`); see `infra/aws/organization-scp/`. Then the key's state and key policy. New browsers there are refused, without probes, until the operator reopens the region (/admin → AWS Provider → Reopen, or `DELETE FROM launch_health WHERE region_id = '…'`) or a launch there succeeds |
 | *Waiting for capacity* | /admin → Operations | No capacity for any of the three instance types in any zone of the region. A new browser first moves to the region's other zones (the reaper releases the empty disk and interface it leaves), then keeps retrying; a waking browser moves to another zone after 30 minutes. A VM that EC2 ends during launch is relaunched with a new token, never retried as the same dead VM |
 | Alert `quota` | Service Quotas | vCPU or Elastic IP limit (step 2) |
+| Premium create *Failed* with `UnauthorizedOperation`; Basic still works | engine logs; the runtime policy | The runtime identity may not launch `c7i.xlarge`/`c6i.xlarge`/`c5.xlarge` yet (Premium step 1). Such a refusal does not block the region for Basic |
+| Premium browser runs at about 25 fps | VM system log (`cloudbrowser:` lines); toolbar codec | The browser image predates `neko-premium.yaml` (the VM falls back to the Basic stream and logs it), or `BROWSER_IMAGE`/`AGENT_IMAGE` pin an older build |
 | Running, but the live view stays black | browser devtools console; api config | TURN key missing on the api; gateway domain or viewer keys wrong |
 | Chrome fills only part of the desktop, with black space on the right | Browser supervisor configuration and `openbox` process | Preserve the upstream Openbox program when replacing the Chrome configuration; `--start-maximized` needs a window manager |
 | *Needs attention*: "Network paused while we check your dedicated IP" | /admin → the browser → Last IP check | Chrome saw a different IP than the Elastic IP; it stays blocked until checked |

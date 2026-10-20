@@ -1,4 +1,4 @@
-import { browserEstimate, customerRates, retentionReserve, TRIAL, BYTES_PER_GB, DEFAULT_PRICING_SETTINGS, DEFAULT_IDLE_TIMEOUT_S, NEVER_SLEEP_TIMEOUT_S, ProviderPriceSheet, type PriceFactors, type Rates } from '@cloudbrowser/contracts';
+import { browserEstimate, BrowserTier, customerRates, retentionReserve, tierSheet, TRIAL, BYTES_PER_GB, DEFAULT_PRICING_SETTINGS, DEFAULT_IDLE_TIMEOUT_S, NEVER_SLEEP_TIMEOUT_S, ProviderPriceSheet, type PriceFactors, type Rates } from '@cloudbrowser/contracts';
 import { and, eq, notInArray, sql, type SQL } from 'drizzle-orm';
 import type { Db } from './index.js';
 import { priceSheets, pricingSettings } from './pricing.js';
@@ -127,7 +127,8 @@ function spendProjection({ all, holds, prices, settings, placementRows }: SpendI
     const sheet = sheets.get(inst.regionId);
     if (!sheet) return null;
     const machine = machines.get(inst.id);
-    const vmPrice = machine?.instanceType ? sheet.instanceTypes[machine.instanceType] : sheet.vmHour;
+    // The machine's own price; before its VM exists, its tier's.
+    const vmPrice = machine?.instanceType ? sheet.instanceTypes[machine.instanceType] : tierSheet(sheet, BrowserTier.catch('basic').parse(inst.tier))?.vmHour;
     if (vmPrice === undefined) return null;
     // The same rounding as metering: the cost to a micro-dollar first, then the markup.
     const rates = customerRates({ ...sheet, vmHour: vmPrice }, settings);

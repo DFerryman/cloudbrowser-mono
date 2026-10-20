@@ -8,7 +8,7 @@
  * create step journal calls one by one (allocate IP, network interface, volume, VM), so each step
  * has its own idempotency token and lookup.
  */
-import type { ProviderPriceSheet } from '@cloudbrowser/contracts';
+import type { BrowserTier, ProviderPriceSheet } from '@cloudbrowser/contracts';
 
 export type { ProviderPriceSheet };
 
@@ -143,6 +143,8 @@ export interface VmSpec {
   gatewayUrl: string;
   /** IANA timezone of the region; the browser's clock uses it. */
   timezone?: string;
+  /** Machine tier: which launch candidates to try and which live view the VM streams. Basic when absent. */
+  tier?: BrowserTier;
   /** Maximum VM price in USD/hour confirmed for this operation; applies only to a new launch. */
   maxVmHour?: number;
   /** Current provider prices for all configured launch candidates, never an estimated fallback. */
@@ -220,8 +222,11 @@ export interface Executor {
 
   // Every method converges to the requested state and is safe to call again with the same token.
   allocateIp(ctx: OpContext, region: string): Promise<IpAllocation>;
-  /** Availability zones a placement may use in a region (recover moves to another one). */
-  zones(region: string): string[];
+  /**
+   * Availability zones a placement of this tier (default Basic) may use in a region: those that
+   * offer one of its machines (recover moves to another one).
+   */
+  zones(region: string, tier?: BrowserTier): string[];
   /** Load dynamically discovered network and machine configuration before planning/pricing. */
   prepareRegion?(region: string): Promise<void>;
   /**
@@ -260,8 +265,8 @@ export interface Executor {
   /** Stable identity for settings that affect the default machine and its provider price sheet. */
   pricingConfigKey(region: string): string;
   /**
-   * What this region costs, from the provider's price list (never a built-in number). Additional
-   * types price existing VMs; they do not become launch candidates.
+   * What this region costs, from the provider's price list (never a built-in number), for every
+   * tier offered there. Additional types price existing VMs; they do not become launch candidates.
    */
   prices(ctx: OpContext, region: string, additionalInstanceTypes?: string[]): Promise<ProviderPriceSheet>;
 }

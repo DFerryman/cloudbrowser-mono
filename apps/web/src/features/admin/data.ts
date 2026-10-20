@@ -151,6 +151,8 @@ export type InstanceRow = {
   name: string;
   status: string;
   regionId: string;
+  /** basic | premium; absent from an api older than tiers. */
+  tier?: string;
   userEmail: string | null;
   userId: string;
   suspendedAt: string | null;
@@ -161,7 +163,7 @@ export type InstanceRow = {
 export type Row = Record<string, unknown>;
 
 export type InstanceDetail = {
-  instance: Row & { id: string; name: string; status: string; regionId: string; suspendedAt: string | null; suspendedReason: string | null; statusReason: string | null };
+  instance: Row & { id: string; name: string; status: string; regionId: string; tier?: string; suspendedAt: string | null; suspendedReason: string | null; statusReason: string | null };
   owner: { id: string; email: string } | null;
   health: Row | null;
   placements: Row[];
@@ -213,6 +215,8 @@ export type PricingOverview = {
     lastErrorAt: string | null;
     cost: RatesRow | null;
     price: RatesRow | null;
+    /** Premium's machine and its compute per hour (cost and price); null where Premium is not offered. */
+    premium?: { instanceType: string; vmHour: number; machine: { vcpu: number; memoryGb: number } | null; cost: number; price: number } | null;
   }[];
   month: {
     month: string;

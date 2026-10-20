@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { RegionId } from './regions.js';
+import type { BrowserTier } from './tiers.js';
 
 /**
  * Prices (page 6). What the provider charges us comes from its price list for the browser's own
@@ -27,6 +28,16 @@ export const ProviderPriceSheet = z.object({
   instanceTypes: z.record(z.string(), z.number().nonnegative()),
   /** What the first type gives a browser, from the price list. Missing from sheets stored before it. */
   machine: z.object({ vcpu: z.number().positive(), memoryGb: z.number().positive() }).nullish(),
+  /**
+   * Premium's first launch candidate, its price and machine; its fallbacks are priced in
+   * `instanceTypes`. Absent where Premium is not offered or one of its types has no price.
+   * The fields above describe Basic.
+   */
+  premium: z.object({
+    instanceType: z.string(),
+    vmHour: z.number().nonnegative(),
+    machine: z.object({ vcpu: z.number().positive(), memoryGb: z.number().positive() }).nullable(),
+  }).nullish(),
   /** gp3 per GB-month (data volume and system disk). */
   volumeGbMonth: z.number().nonnegative(),
   /** EBS snapshot storage per GB-month. */
@@ -41,6 +52,16 @@ export const ProviderPriceSheet = z.object({
   effectiveDate: z.string().nullable(),
 });
 export type ProviderPriceSheet = z.infer<typeof ProviderPriceSheet>;
+
+/**
+ * The sheet as a browser of this tier sees it: its machine and hourly price in place of Basic's,
+ * so every pricing function applies unchanged. Null where the tier is not offered. Pure.
+ */
+export function tierSheet(sheet: ProviderPriceSheet, tier: BrowserTier): ProviderPriceSheet | null {
+  if (tier === 'basic') return sheet;
+  const t = sheet.premium;
+  return t ? { ...sheet, instanceType: t.instanceType, vmHour: t.vmHour, machine: t.machine } : null;
+}
 
 /** Billable usage of a browser. Each has its own unit and per-unit price. */
 export const UsageItem = z.enum(['compute', 'ip', 'storage', 'snapshot', 'transfer']);
@@ -200,6 +221,16 @@ export const RegionPricing = z.object({
   defaultStorageGb: z.number().int(),
   maxStorageGb: z.number().int(),
   version: z.string().nullable(),
+  /**
+   * Premium here: its rates (compute differs; the fixed resources are the same as Basic's),
+   * machine and price version. Null where Premium is not offered or not priced. `rates`,
+   * `machine` and `version` above are Basic's.
+   */
+  premium: z.object({
+    rates: Rates,
+    machine: z.object({ vcpu: z.number(), memoryGb: z.number() }).nullable(),
+    version: z.string(),
+  }).nullable().optional(),
 });
 export type RegionPricing = z.infer<typeof RegionPricing>;
 

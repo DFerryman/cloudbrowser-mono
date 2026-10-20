@@ -1,4 +1,4 @@
-import { MICROS_PER_USD, TRIAL, type Entitlements } from '@cloudbrowser/contracts';
+import { MICROS_PER_USD, TRIAL, type BrowserTier, type Entitlements } from '@cloudbrowser/contracts';
 import { awsInventory, billingRequired, blocksRegion, convertTrialStatements, launchHealthFor, openProviderIssue, prepaidBalance, reservationQuote, reservationWrite, pricingSettings, schema, userCaps as sharedUserCaps, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 import { storageLimits } from './pricing.js';
@@ -33,6 +33,8 @@ export async function entitlementsFor(db: Db, userId: string): Promise<Entitleme
     idleTimeoutMaxS: c.get('idle_timeout_max_s') ?? 3600,
     // A separate switch, not an idle timeout: 1 offers Never sleep (still subject to credit), 0 does not.
     neverSleep: (c.get('never_sleep') ?? 0) === 1,
+    // Also a switch: 1 offers Premium browsers to this account, 0 (the default) does not.
+    premium: (c.get('premium') ?? 0) === 1,
     maxStorageGb: (await storageLimits(db, userId)).maxGb,
   };
 }
@@ -120,17 +122,17 @@ export async function usage(db: Db, userId: string) {
   };
 }
 
-/** Whether a region has room for a new browser: region cap and provider quota headroom. */
-export async function regionAcceptingNew(db: Db, regionId: string): Promise<boolean> {
+/** Whether a region has room for a new browser of this tier: region cap and provider quota headroom. */
+export async function regionAcceptingNew(db: Db, regionId: string, tier: BrowserTier = 'basic'): Promise<boolean> {
   try {
-    await checkRegionRoom(db, regionId);
+    await checkRegionRoom(db, regionId, tier);
     return true;
   } catch {
     return false;
   }
 }
 
-async function checkRegionRoom(db: Db, regionId: string) {
+async function checkRegionRoom(db: Db, regionId: string, tier: BrowserTier = 'basic') {
   const [region] = await db.select().from(regions).where(eq(regions.id, regionId));
   if (!region?.enabled) throw problem(409, 'region_unavailable', 'This region is not available.');
   // The provider itself failed a VM or disk here: another browser would fail the same way. An
@@ -144,7 +146,11 @@ async function checkRegionRoom(db: Db, regionId: string) {
   }
   const inventory = (await awsInventory(db)).get(regionId);
   if (inventory) {
-    if (inventory.available < 1) throw problem(409, 'region_unavailable', 'AWS has no room for another browser in this region right now. Choose another region.', { limit: 'no_stock' });
+    if (inventory.availableByTier[tier] < 1) {
+      throw problem(409, 'region_unavailable', tier === 'premium'
+        ? 'AWS has no room for another Premium browser in this region right now. Choose Basic or another region.'
+        : 'AWS has no room for another browser in this region right now. Choose another region.', { limit: 'no_stock' });
+    }
     return;
   }
   const regionCaps = await capsFor(db, [`region:${regionId}`]);
@@ -169,8 +175,11 @@ async function checkRegionRoom(db: Db, regionId: string) {
  * Bounded before created (page 10, rule 5): plan, region and global caps, provider quota headroom,
  * and the circuit breaker are all checked before a create is admitted. Spend never limits it.
  */
-export async function admitCreate(db: Db, userId: string, regionId: string, now: Date, opts: { trial?: boolean } = {}) {
+export async function admitCreate(db: Db, userId: string, regionId: string, now: Date, opts: { trial?: boolean; tier?: BrowserTier } = {}) {
   await requireUnfrozen(db, userId);
+  const tier = opts.tier ?? 'basic';
+  // The free trial is a Basic browser; Premium is offered where the operator turned it on.
+  if (tier === 'premium' && opts.trial) throw problem(400, 'validation_failed', 'The free trial runs on a Basic browser.');
   const [freeze] = await db.select().from(controlFlags).where(eq(controlFlags.key, 'creation_freeze'));
   if (freeze?.value === 'true') throw problem(503, 'creation_frozen', 'New browsers are temporarily unavailable.');
 
@@ -178,6 +187,7 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
   const providerManaged = (await awsInventory(db)).has(regionId);
 
   const c = await userCaps(db, userId);
+  if (tier === 'premium' && (c.get('premium') ?? 0) !== 1) throw problem(403, 'plan_limit', 'Premium browsers are not available to your account yet.', { limit: 'premium' });
   const u = await usage(db, userId);
   if (u.browsers >= (c.get('instances') ?? 0)) {
     throw problem(403, 'plan_limit', `Your account allows ${c.get('instances') ?? 0} browsers.`, { limit: 'instances' });
@@ -188,7 +198,7 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
     if (!quote) throw problem(503, 'price_unavailable', 'Prices for this region are unavailable.');
     await admitSpend(db, userId, 'create a browser', quote.requiredMicros);
   }
-  await checkRegionRoom(db, regionId);
+  await checkRegionRoom(db, regionId, tier);
   const total = await count(db, HOLDS_SLOT);
   if (!providerManaged && total >= (global.get('instances') ?? Infinity)) throw problem(503, 'region_unavailable');
   const [recent] = await db

@@ -7,6 +7,7 @@
  * repeated call (or a call whose response was lost) finds the resource by lookup instead of
  * creating a second one. AllocateAddress and CreateSnapshot have no ClientToken: lookup only.
  */
+import type { BrowserTier } from '@cloudbrowser/contracts';
 import {
   ExecutorError,
   LaunchFailed,
@@ -37,18 +38,24 @@ import { Ec2Client, Ec2Error, isNotFound, type ClientOptions, type Params, type 
 import { bootstrapScript } from './user-data.js';
 import { items, tags as tagsOf, text, type XmlNode } from './xml.js';
 
-/** Network created by infra/aws/cloudbrowser.yaml, per provider region (Worker var AWS_REGIONS). */
-export interface AwsRegionConfig {
-  /** Availability zone → outbound-only subnet. The first zone is the default for new browsers. */
-  subnets: Record<string, string>;
-  securityGroupId: string;
-  /** Tried in order on a capacity error. 2 vCPU / 4 GB by default (see DEFAULT_INSTANCE_TYPES). */
+/** One tier's machines in a region. */
+export interface AwsTierMachines {
+  /** Tried in order on a capacity error (see DEFAULT_TIER_INSTANCE_TYPES). */
   instanceTypes?: string[];
   /**
    * Which of `instanceTypes` each zone offers (DescribeInstanceTypeOfferings). Without it every
    * zone is assumed to offer every type.
    */
   zoneInstanceTypes?: Record<string, string[]>;
+}
+
+/** Network created by infra/aws/cloudbrowser.yaml, per provider region (Worker var AWS_REGIONS). */
+export interface AwsRegionConfig extends AwsTierMachines {
+  /** Availability zone → outbound-only subnet. The first zone is the default for new browsers. */
+  subnets: Record<string, string>;
+  securityGroupId: string;
+  /** `instanceTypes` and `zoneInstanceTypes` above are Basic's; Premium's are here. Absent: its defaults in every zone. */
+  premium?: AwsTierMachines;
   /** Pin an AMI; by default the latest Canonical Ubuntu 24.04 LTS (amd64) image. */
   ami?: string;
 }
@@ -68,14 +75,41 @@ export interface AwsExecutorOptions extends ClientOptions {
 }
 
 /**
- * One small VM per browser: 2 vCPU / 4 GB is what Chrome plus neko's H.264 encoding at 1080p30
- * need to stay smooth (about 2.5 GB in use with a handful of tabs; the encoder takes most of a
- * vCPU while the screen moves). `c7i-flex` has the same CPU as the `m7i-flex` the first real
- * browsers ran on, with half the memory. The fallbacks are 2 vCPU / 4 GB at the same price. No
- * burstable `t3`: once its CPU credits run out it either throttles the video or bills surplus
- * credits that the price list does not show.
+ * One VM per browser, and every launch candidate of a tier has the same vCPUs and memory
+ * (contracts TIERS). No burstable `t3`: once its CPU credits run out it either throttles the
+ * video or bills surplus credits that the price list does not show. Chrome for Linux is x86-64
+ * only, so no Graviton.
+ *
+ * Basic, 2 vCPU / 4 GB: Chrome plus neko's VP8 encoding at 1080p25 (about 2.5 GB in use with a
+ * handful of tabs; while the screen moves the encoder takes most of a vCPU and the VM is about
+ * 85% busy). `c7i-flex` has the same CPU as the `m7i-flex` the first real browsers ran on, with
+ * half the memory; the fallbacks are 2 vCPU / 4 GB at the same price.
+ *
+ * Premium, 4 vCPU / 8 GB: Chrome drawing 60 fps on a 60 Hz desktop plus x264 at 1080p60 kept
+ * about 2.3 vCPUs busy under continuous scrolling or 1080p60 video, leaving room for heavier
+ * pages; on 2 vCPUs the same stream had no headroom left. Full-performance `c7i` rather than
+ * `c7i-flex`, whose 40% baseline is not sized for a stream that is busy the whole session;
+ * `c6i` and `c5` are the same shape at or below its price.
  */
-export const DEFAULT_INSTANCE_TYPES = ['c7i-flex.large', 'c6i.large', 'c5.large'];
+export const DEFAULT_TIER_INSTANCE_TYPES: Record<BrowserTier, string[]> = {
+  basic: ['c7i-flex.large', 'c6i.large', 'c5.large'],
+  premium: ['c7i.xlarge', 'c6i.xlarge', 'c5.xlarge'],
+};
+export const DEFAULT_INSTANCE_TYPES = DEFAULT_TIER_INSTANCE_TYPES.basic;
+
+/**
+ * A tier's launch candidates and zone offerings in a region. Basic without a list, or a config
+ * without `premium` (a hand-written AWS_REGIONS entry), gets the defaults. The reconciler lists
+ * the Premium machines the region's zones offer: an empty list means Premium is not offered.
+ */
+export function tierMachines(cfg: AwsRegionConfig, tier: BrowserTier = 'basic'): { instanceTypes: string[]; zoneInstanceTypes?: Record<string, string[]> } {
+  const machines = tier === 'basic' ? cfg : cfg.premium;
+  const listed = tier === 'basic' ? !!machines?.instanceTypes?.length : !!machines?.instanceTypes;
+  return {
+    instanceTypes: listed ? machines!.instanceTypes! : DEFAULT_TIER_INSTANCE_TYPES[tier],
+    ...(machines?.zoneInstanceTypes ? { zoneInstanceTypes: machines.zoneInstanceTypes } : {}),
+  };
+}
 /** Ubuntu, Docker and the browser image take about 8 GB; the rest leaves room for an image update. */
 export const DEFAULT_ROOT_VOLUME_GB = 16;
 const DATA_DEVICE = '/dev/sdf';
@@ -362,17 +396,18 @@ export class AwsExecutor implements Executor {
   pricingConfigKey(region: string): string {
     const cfg = this.region(region);
     return JSON.stringify({
-      instanceTypes: cfg.instanceTypes?.length ? cfg.instanceTypes : DEFAULT_INSTANCE_TYPES,
+      instanceTypes: tierMachines(cfg).instanceTypes,
+      premiumInstanceTypes: premiumOffered(cfg) ? tierMachines(cfg, 'premium').instanceTypes : [],
       rootVolumeGb: this.opts.rootVolumeGb ?? DEFAULT_ROOT_VOLUME_GB,
     });
   }
 
-  /** Zones that offer at least one launch candidate, in configuration order. */
-  zones(region: string): string[] {
+  /** Zones that offer at least one launch candidate of the tier, in configuration order. */
+  zones(region: string, tier: BrowserTier = 'basic'): string[] {
     const cfg = this.region(region);
     const all = Object.keys(cfg.subnets);
-    const types = cfg.instanceTypes?.length ? cfg.instanceTypes : DEFAULT_INSTANCE_TYPES;
-    const offered = cfg.zoneInstanceTypes ? all.filter((z) => cfg.zoneInstanceTypes![z]?.some((t) => types.includes(t))) : all;
+    const { instanceTypes: types, zoneInstanceTypes } = tierMachines(cfg, tier);
+    const offered = zoneInstanceTypes ? all.filter((z) => zoneInstanceTypes[z]?.some((t) => types.includes(t))) : all;
     return offered.length ? offered : all;
   }
 
@@ -467,7 +502,10 @@ export class AwsExecutor implements Executor {
     let vmId = text(items(inst ?? undefined, 'instancesSet')[0], 'instanceId');
     let launchedAt: number | null = null;
     if (!vmId) {
-      const configuredTypes = cfg.instanceTypes?.length ? cfg.instanceTypes : DEFAULT_INSTANCE_TYPES;
+      const tier = spec.tier ?? 'basic';
+      const machines = tierMachines(cfg, tier);
+      const configuredTypes = machines.instanceTypes;
+      if (!configuredTypes.length) throw new ExecutorError('invalid', `No ${tier} machine is offered in ${region}.`);
       let types = configuredTypes.map((type, index) => ({ type, index }));
       // Older callers may omit a quote. Production creation supplies both fields; a partial or
       // malformed quote never permits launch, and an existing VM is resolved before this gate.
@@ -486,7 +524,7 @@ export class AwsExecutor implements Executor {
         if (!types.length) throw new NoLaunchCandidate('price', 'No launch candidate fits the confirmed VM hourly price.');
       }
       // A type this zone does not offer fails with Unsupported; skip it instead of asking.
-      const zoneTypes = cfg.zoneInstanceTypes?.[spec.zone];
+      const zoneTypes = machines.zoneInstanceTypes?.[spec.zone];
       if (zoneTypes) {
         types = types.filter(({ type }) => zoneTypes.includes(type));
         if (!types.length) throw new NoLaunchCandidate('zone', `No allowed machine type is offered in ${spec.zone}.`);
@@ -499,6 +537,7 @@ export class AwsExecutor implements Executor {
         appUrl: this.opts.appUrl,
         agentImage: this.opts.agentImage,
         browserImage: this.opts.browserImage,
+        tier,
         ...(spec.timezone ? { timezone: spec.timezone } : {}),
       });
       for (const [attempt, { type, index }] of types.entries()) {
@@ -887,11 +926,14 @@ export class AwsExecutor implements Executor {
    * This region's prices from the AWS Price List API: on-demand Linux for every allowed instance
    * type, gp3 storage, EBS snapshots, an in-use public IPv4 address and data transfer out to the
    * internet (first paid tier). Throws if any of them is missing, so a partial sheet is never stored.
+   * Premium is priced when the region offers it; a Premium type without a price leaves Premium
+   * out of the sheet rather than making Basic unavailable.
    */
   async prices(ctx: OpContext, region: string, additionalInstanceTypes: string[] = []): Promise<ProviderPriceSheet> {
     this.authorize('prices');
     const cfg = this.region(region);
-    const configuredTypes = cfg.instanceTypes?.length ? cfg.instanceTypes : DEFAULT_INSTANCE_TYPES;
+    const configuredTypes = tierMachines(cfg).instanceTypes;
+    const premiumTypes = premiumOffered(cfg) ? tierMachines(cfg, 'premium').instanceTypes : [];
     const types = [...new Set([...configuredTypes, ...additionalInstanceTypes])];
     const dates: string[] = [];
     const price = (what: string, products: PriceListProduct[], match: (a: Record<string, string>) => boolean, unit: string): number => {
@@ -919,6 +961,23 @@ export class AwsExecutor implements Executor {
       instanceTypes[type] = price(`${type} instance`, products, ends(`BoxUsage:${type}`), 'Hrs');
       if (i === 0) machine = machineOf(products.find((p) => ends(`BoxUsage:${type}`)(p.attributes))?.attributes);
     }
+    let premium: ProviderPriceSheet['premium'] = null;
+    try {
+      for (const [i, type] of premiumTypes.entries()) {
+        const products = await this.ec2.products(
+          'AmazonEC2',
+          { regionCode: region, instanceType: type, operatingSystem: 'Linux', tenancy: 'Shared', preInstalledSw: 'NA', capacitystatus: 'Used', licenseModel: 'No License required', operation: 'RunInstances' },
+          ctx.deadline,
+        );
+        instanceTypes[type] = price(`${type} instance`, products, ends(`BoxUsage:${type}`), 'Hrs');
+        if (i === 0) premium = { instanceType: type, vmHour: instanceTypes[type]!, machine: machineOf(products.find((p) => ends(`BoxUsage:${type}`)(p.attributes))?.attributes) ?? null };
+      }
+    } catch (e) {
+      if (!(e instanceof ExecutorError && e.errorClass === 'invalid')) throw e;
+      // Its fallbacks may also launch, so every one of them needs a price.
+      for (const type of premiumTypes) if (!configuredTypes.includes(type) && !additionalInstanceTypes.includes(type)) delete instanceTypes[type];
+      premium = null;
+    }
     const storage = await this.ec2.products('AmazonEC2', { regionCode: region, productFamily: 'Storage', volumeApiName: 'gp3' }, ctx.deadline);
     const snapshots = await this.ec2.products('AmazonEC2', { regionCode: region, productFamily: 'Storage Snapshot', storageMedia: 'Amazon S3', locationType: 'AWS Region' }, ctx.deadline);
     const ips = await this.ec2.products('AmazonVPC', { regionCode: region, group: 'VPCPublicIPv4Address' }, ctx.deadline);
@@ -930,6 +989,7 @@ export class AwsExecutor implements Executor {
       vmHour: instanceTypes[instanceType]!,
       instanceTypes,
       machine,
+      ...(premium ? { premium } : {}),
       volumeGbMonth: price('gp3 storage', storage, ends('EBS:VolumeUsage.gp3'), 'GB-Mo'),
       snapshotGbMonth: price('EBS snapshot', snapshots, ends('EBS:SnapshotUsage'), 'GB-Mo'),
       ipHour: price('public IPv4', ips, ends('PublicIPv4:InUseAddress'), 'Hrs'),
@@ -941,6 +1001,11 @@ export class AwsExecutor implements Executor {
 }
 
 export { Ec2Error };
+
+/** Whether the region's configuration offers Premium (see tierMachines). */
+function premiumOffered(cfg: AwsRegionConfig): boolean {
+  return tierMachines(cfg, 'premium').instanceTypes.length > 0;
+}
 
 /** "2" and "4 GiB" from the price list's attributes. */
 function machineOf(a: Record<string, string> | undefined): ProviderPriceSheet['machine'] {

@@ -4,7 +4,7 @@
  * written to `audit_log` with the admin's stable Access subject and email. Internal:
  * not part of the public OpenAPI document.
  */
-import { OPERATION_STEPS, PROMOTION_ID, PricingSettings, PromotionTaskInput, TRIAL, UsageItem, costRates, customerRates, minimumMarkupPercent, type OperationKind } from '@cloudbrowser/contracts';
+import { OPERATION_STEPS, PROMOTION_ID, PricingSettings, PromotionTaskInput, TRIAL, UsageItem, costRates, customerRates, minimumMarkupPercent, tierSheet, type OperationKind } from '@cloudbrowser/contracts';
 import { awsInventory, blocksRegion, launchHealthByRegion, launchHealthFor, launchVerifiedAt, newId, openProviderIssue, priceSheets, pricingSettings, reopenRegion, schema, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, isNotNull, isNull, like, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
@@ -219,6 +219,7 @@ adminRoute.get('/instances', async (c) => {
       name: browserInstances.name,
       status: browserInstances.status,
       regionId: browserInstances.regionId,
+      tier: browserInstances.tier,
       userEmail: user.email,
       userId: browserInstances.userId,
       suspendedAt: browserInstances.suspendedAt,
@@ -404,6 +405,7 @@ adminRoute.put('/caps', async (c) => {
   if (limit === undefined) throw problem(400, 'validation_failed', 'limit is required');
   if (metric === 'running' && scope.startsWith('user:')) throw problem(400, 'validation_failed', 'Users have one limit: instances. Every browser they own may run at once.');
   if (metric === 'never_sleep' && (!scope.startsWith('user:') || limit > 1)) throw problem(400, 'validation_failed', 'never_sleep is a switch for user:default or user:<id>: 1 offers Never sleep, 0 does not.');
+  if (metric === 'premium' && (!scope.startsWith('user:') || limit > 1)) throw problem(400, 'validation_failed', 'premium is a switch for user:default or user:<id>: 1 offers Premium browsers, 0 does not.');
   if (metric === 'trial_minutes' && (scope !== 'user:default' || limit < 1 || limit > TRIAL.maxMinutes)) throw problem(400, 'validation_failed', `trial_minutes is set for user:default only, from 1 to ${TRIAL.maxMinutes} minutes.`);
   const [before] = await db.select().from(caps).where(and(eq(caps.scope, scope), eq(caps.metric, metric)));
   await db.insert(caps).values({ scope, metric, limit }).onConflictDoUpdate({ target: [caps.scope, caps.metric], set: { limit } });
@@ -613,6 +615,12 @@ adminRoute.get('/pricing', async (c) => {
         lastErrorAt: row?.lastErrorAt ?? null,
         cost: s ? costRates(s.sheet, settings.relayGbMicros) : null,
         price: s ? customerRates(s.sheet, settings) : null,
+        // Premium's compute (its fixed resources cost what Basic's do); null where not offered.
+        premium: s?.sheet.premium ? {
+          ...s.sheet.premium,
+          cost: costRates(tierSheet(s.sheet, 'premium')!, settings.relayGbMicros).compute,
+          price: customerRates(tierSheet(s.sheet, 'premium')!, settings).compute,
+        } : null,
       };
     }),
     month: {

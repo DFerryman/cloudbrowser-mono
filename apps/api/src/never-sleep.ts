@@ -18,7 +18,7 @@ const usd = (micros: number) => `$${(micros / MICROS_PER_USD).toFixed(2)}`;
 export async function neverSleepQuote(db: Db, userId: string, inst: InstanceRow, now = new Date()): Promise<NeverSleepQuote> {
   const [entitlements, price, paid, runway] = await Promise.all([
     entitlementsFor(db, userId),
-    instancePrice(db, inst.id, inst.regionId),
+    instancePrice(db, inst),
     billingRequired(db),
     accountRunway(db, userId, now),
   ]);

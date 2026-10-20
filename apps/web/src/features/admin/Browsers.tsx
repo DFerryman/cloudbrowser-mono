@@ -42,7 +42,9 @@ export function BrowsersPage() {
           <span>
             <StatusPill value={r.status} /> {r.suspendedAt ? <Pill tone="bad">{t('browsers.suspended')}</Pill> : null}
           </span>,
-          r.regionId,
+          <span>
+            {r.regionId} {r.tier === 'premium' ? <Pill>{t('tier.premium')}</Pill> : null}
+          </span>,
           r.ipAddress ? <Mono>{r.ipAddress}</Mono> : '—',
           r.userEmail ?? '—',
           when(r.updatedAt),
@@ -119,6 +121,11 @@ export function BrowserDetailPage() {
           ) : (
             '—'
           )}
+        </dd>
+        <dt className="text-muted">{t('browsers.tier')}</dt>
+        <dd>
+          {t(i.tier === 'premium' ? 'tier.premiumFull' : 'tier.basicFull')}
+          {current?.instanceType ? <span className="text-muted"> · <Mono>{String(current.instanceType)}</Mono></span> : null}
         </dd>
         <dt className="text-muted">{t('browsers.where')}</dt>
         <dd>{t('browsers.whereValue', { region: i.regionId, ip: String(current?.ipAddress ?? '—'), zone: String(current?.zone ?? '—'), gen: String(current?.generation ?? '—') })}</dd>

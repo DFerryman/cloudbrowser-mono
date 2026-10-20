@@ -14,6 +14,10 @@ export const PublicPricing = z.object({
       acceptingNew: z.boolean(),
       /** What each unit costs us there (AWS list price; transfer includes the relay), before markups. */
       cost: Rates.nullable(),
+      /** The same for a Premium browser (only compute differs); null where Premium is not offered. */
+      premiumCost: Rates.nullable().optional(),
+      /** Whether new Premium browsers can be created there; null where Premium is not offered. */
+      premiumAvailability: z.enum(['available', 'limited', 'unavailable']).nullable().optional(),
     }).merge(Region.pick({ city: true, country: true, area: true, availability: true })),
   ),
   /** The pricing model, published: price = cost × the markup for that kind of cost ÷ 100. */
@@ -26,6 +30,8 @@ export const PublicPricing = z.object({
     /** Boot and shutdown minutes are charged as running time. */
     billTransitions: z.boolean(),
   }),
+  /** Whether new accounts may create Premium browsers (the operator's `premium` switch for user:default). */
+  premiumOffered: z.boolean().optional(),
   /** The least available credit needed to create or wake a paid browser. */
   minBalanceMicros: z.number().int(),
   /** Days a browser and its data are kept after available credit runs out. */

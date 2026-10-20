@@ -52,6 +52,27 @@ describe('neko data channel encoding', () => {
   it('uses the supported rate when a screen has no mode at or below 30 Hz', () => {
     expect(fitScreen(1600, 1000, [{ width: 1440, height: 900, rate: 60 }])).toEqual({ width: 1440, height: 900, rate: 60 });
   });
+
+  it('gives Premium the 60 Hz desktop where neko has one, and the same size as Basic', () => {
+    const configurations = [
+      { width: 1368, height: 768, rate: 60 },
+      { width: 1368, height: 768, rate: 30 },
+      { width: 1600, height: 900, rate: 60 },
+      { width: 1600, height: 900, rate: 25 },
+      { width: 1920, height: 1080, rate: 60 },
+      { width: 1920, height: 1080, rate: 30 },
+      { width: 2560, height: 1440, rate: 30 },
+      { width: 2560, height: 1440, rate: 25 },
+    ];
+    expect(fitScreen(2000, 1200, configurations, 60)).toEqual({ width: 1920, height: 1080, rate: 60 });
+    expect(fitScreen(1700, 1000, configurations, 60)).toEqual({ width: 1600, height: 900, rate: 60 });
+    expect(fitScreen(1440, 860, configurations, 60)).toEqual({ width: 1368, height: 768, rate: 60 });
+    // Basic keeps its 30 Hz cap on the same image.
+    expect(fitScreen(2000, 1200, configurations)).toEqual({ width: 1920, height: 1080, rate: 30 });
+    expect(fitScreen(1700, 1000, configurations)).toEqual({ width: 1600, height: 900, rate: 25 });
+    // A size without a 60 Hz mode stays at its best rate.
+    expect(fitScreen(4000, 2500, configurations, 60)).toEqual({ width: 2560, height: 1440, rate: 30 });
+  });
 });
 
 describe('keyboard mapping', () => {

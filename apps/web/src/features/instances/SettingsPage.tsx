@@ -1,5 +1,5 @@
 import { useRegionInfo } from './hooks.js';
-import { IDLE_TIMEOUT_OPTIONS_S, NEVER_SLEEP_TIMEOUT_S } from '@cloudbrowser/contracts';
+import { IDLE_TIMEOUT_OPTIONS_S, NEVER_SLEEP_TIMEOUT_S, TIERS } from '@cloudbrowser/contracts';
 import { Button, cn, Hint, Input, Label, Pagination, Section, Select, useToast } from '@cloudbrowser/ui';
 import { ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
@@ -49,6 +49,7 @@ export function SettingsPage() {
   const neverSleepOffered = (me.data?.entitlements.neverSleep ?? false) || neverSleep;
   const trial = i.trial !== null && i.trial.state !== 'converted';
   const check = i.lastIpCheck;
+  const tier = i.tier ?? 'basic';
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -56,6 +57,10 @@ export function SettingsPage() {
         <dl>
           <Row label={t('settings.region')}>
             {region.name} <span className="text-muted">· {t('settings.regionPermanent')}</span>
+          </Row>
+          <Row label={t('settings.machine')}>
+            {t(`tier.${tier}`)}{' '}
+            <span className="text-muted">· {t('create.machine.hint', { vcpu: TIERS[tier].vcpu, memory: TIERS[tier].memoryGb, fps: TIERS[tier].fps.full })}</span>
           </Row>
           <Row label={t('settings.ip')}>
             <span className="font-mono">{i.ipAddress ?? t('browsers.reservingIp')}</span>

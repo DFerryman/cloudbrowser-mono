@@ -1,4 +1,4 @@
-import { StopReason, type Instance, type Operation } from '@cloudbrowser/contracts';
+import { BrowserTier, StopReason, type Instance, type Operation } from '@cloudbrowser/contracts';
 import { schema, type Db } from '@cloudbrowser/db';
 import { and, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 
@@ -61,6 +61,7 @@ export async function toInstances(db: Db, rows: InstanceRow[]): Promise<Instance
       id: r.id,
       name: r.name,
       regionId: r.regionId as Instance['regionId'],
+      tier: BrowserTier.catch('basic').parse(r.tier),
       status: r.status as Instance['status'],
       statusReason: r.statusReason,
       desiredState: r.desiredState as Instance['desiredState'],

@@ -32,6 +32,17 @@ COPY policies.json /etc/opt/chrome/policies/managed/cloudbrowser.json
 # DevTools on the loopback interface for the agent only.
 COPY google-chrome.conf /etc/neko/supervisord/google-chrome.conf
 COPY neko.yaml /etc/neko/neko.yaml
+# Premium browsers stream at 60 fps (the VM sets NEKO_CONFIG to this file; Basic keeps neko.yaml).
+COPY neko-premium.yaml /etc/neko/neko-premium.yaml
+# Chrome draws no faster than the desktop's refresh rate, and the viewer picks a desktop size that
+# fits the window. neko's X server has 60 Hz modes for 1920x1080, 1280x720 and the VESA sizes;
+# add common laptop sizes so Premium keeps 60 fps there too (GTF timings, like neko's own lines).
+# Basic is unaffected: these sizes already have 30 or 25 Hz modes, and its viewer stays at or below 30.
+RUN sed -i \
+      -e '/Modeline "1920x1080_60.00"/a\  Modeline "1600x900_60.00" 119.00 1600 1696 1864 2128 900 901 904 932 -HSync +Vsync\n  Modeline "1368x768_60.00" 85.86 1368 1440 1584 1800 768 769 772 795 -HSync +Vsync' \
+      -e 's/Modes "1920x1080_60.00"/Modes "1920x1080_60.00" "1600x900_60.00" "1368x768_60.00"/' \
+      /etc/neko/xorg.conf \
+ && test "$(grep -c '1600x900_60.00\|1368x768_60.00' /etc/neko/xorg.conf)" = 3
 
 # Supervisor needs root to manage its pid/socket and drop privileges for its programs.
 # neko and Chrome run as the unprivileged `neko` user in their supervisor configurations.

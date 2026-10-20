@@ -1,4 +1,4 @@
-import { ProviderPriceSheet, TRIAL, resourceMonthlyCostCents } from '@cloudbrowser/contracts';
+import { BrowserTier, ProviderPriceSheet, TRIAL, resourceMonthlyCostCents, tierSheet } from '@cloudbrowser/contracts';
 import { blocksRegion, eventRow, launchHealthFor, newArchiveKey, newId, openProviderIssue, raiseAlert, recentCapacityAt, recordLaunch, schema, settleRunningStatements, sha256Hex, userCaps, type Db } from '@cloudbrowser/db';
 import { ExecutorError, isRegionDenial, LaunchFailed, NoLaunchCandidate, ProviderFailed, type ExecutorKind, type ResourceKind, type VmRef } from '@cloudbrowser/executors';
 import { and, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
@@ -45,17 +45,33 @@ async function estimateCents(env: Pick<StepEnv, 'deps' | 'executor'>, providerRe
   const sheet = await sheetFor(env.deps.db, env.executor.kind, providerRegion);
   return sheet ? resourceMonthlyCostCents(sheet, kind, sizeGb) : 0;
 }
-/** A capacity fallback can only select a machine at or below the public price confirmed. */
+/** The browser's machine tier (a row from before tiers is Basic). */
+const tierOf = (env: Pick<StepEnv, 'instance'>): BrowserTier => BrowserTier.catch('basic').parse(env.instance.tier);
+
+/**
+ * The tier's launch candidates and price cap: a capacity fallback can only select a machine at
+ * or below the public price confirmed.
+ */
 async function vmPricing(env: StepEnv, providerRegion: string) {
-  const sheet = await sheetFor(env.deps.db, env.executor.kind, providerRegion);
-  if (!sheet) {
-    if (env.executor.kind === 'fake') return {}; // Local simulator fixtures do not need live AWS prices.
+  const tier = tierOf(env);
+  const regionSheet = await sheetFor(env.deps.db, env.executor.kind, providerRegion);
+  if (!regionSheet) {
+    if (env.executor.kind === 'fake') return { tier }; // Local simulator fixtures do not need live AWS prices.
     throw new StepFailed('Machine prices are unavailable. No new VM was launched.');
   }
+  const sheet = tierSheet(regionSheet, tier);
+  if (!sheet) throw new StepFailed('Premium machines are not offered in this region right now. No new VM was launched.');
   const quoted = env.op.params?.maxVmHour;
   const maxVmHour = typeof quoted === 'number' && Number.isFinite(quoted) && quoted >= 0 ? Math.min(quoted, sheet.vmHour) : sheet.vmHour;
-  return { maxVmHour, instanceTypePrices: sheet.instanceTypes ?? { [sheet.instanceType]: sheet.vmHour } };
+  return { tier, maxVmHour, instanceTypePrices: sheet.instanceTypes ?? { [sheet.instanceType]: sheet.vmHour } };
 }
+
+/**
+ * Whether a failed launch says something about the region for every tier. An IAM or SCP policy
+ * may allow Basic's machine types but not Premium's (the stack's AllowedInstanceTypes): such a
+ * refusal must not close the region to Basic. The operation still fails and alerts.
+ */
+const regionWide = (env: StepEnv, e: unknown) => !(tierOf(env) === 'premium' && isRegionDenial(e));
 
 const MAX_IP_ROUNDS = 3;
 
@@ -187,7 +203,7 @@ const ZONE_RETRY_MS = 5 * 60_000;
  */
 async function moveCreateToAnotherZone(env: StepEnv, zone: string) {
   const { db, now } = env.deps;
-  const zones = env.executor.zones(env.region.providerRegion);
+  const zones = env.executor.zones(env.region.providerRegion, tierOf(env));
   let tried = [...new Set([...strings(env.op.params?.avoidZones), zone])];
   if (!zones.some((z) => !tried.includes(z))) {
     // Every zone was short. Start over in one whose shortage has had time to clear, never
@@ -519,7 +535,7 @@ async function createNic(env: StepEnv): Promise<StepOutcome> {
   await ledgerPending(env, 'network_interface', ctx.token, 1, null);
   // The interface fixes the zone of the disk and VM. A retried step finds its interface by token.
   const avoid = strings(env.op.params?.avoidZones);
-  const zones = env.executor.zones(env.region.providerRegion);
+  const zones = env.executor.zones(env.region.providerRegion, tierOf(env));
   const [zone] = await zonesByHealth(env, zones.some((z) => !avoid.includes(z)) ? zones.filter((z) => !avoid.includes(z)) : zones);
   const nic = await env.executor.ensureNetworkInterface(ctx, env.region.providerRegion, ip, zone).catch(async (e: unknown) => {
     if (isRegionDenial(e)) await learnFromLaunch(env, e, zone ?? '', ctx.token);
@@ -609,7 +625,7 @@ async function createVm(env: StepEnv): Promise<StepOutcome> {
       timezone: env.region.timezone,
     });
   } catch (e) {
-    await learnFromLaunch(env, e, zone, ctx.token);
+    if (regionWide(env, e)) await learnFromLaunch(env, e, zone, ctx.token);
     if (zoneMayHelp(e)) await moveCreateToAnotherZone(env, zone);
     throw e;
   }
@@ -953,7 +969,7 @@ async function recoverSnapshot(env: StepEnv): Promise<StepOutcome> {
   const p = await loadPlacement(env);
   await env.executor.ensureStopped(env.ctx('snapshot_volume', 'stop'), placementRef(p)).catch((e) => { if (e instanceof OperationSuperseded) throw e; });
   const snap = await snapshotVolume(env, p, 'recover', env.ctx('snapshot_volume').token);
-  const zones = env.executor.zones(p.providerRegion);
+  const zones = env.executor.zones(p.providerRegion, tierOf(env));
   const [target = p.zone ?? zones[0]!] = await zonesByHealth(env, zones.filter((z) => z !== p.zone));
   return { result: { snapshotId: snap.snapshotId, sizeGb: snap.sizeGb, zone: target, generation: p.generation + 1 } };
 }
@@ -1012,7 +1028,7 @@ async function recoverVm(env: StepEnv): Promise<StepOutcome> {
       timezone: env.region.timezone,
     });
   } catch (e) {
-    await learnFromLaunch(env, e, plan.zone, ctx.token);
+    if (regionWide(env, e)) await learnFromLaunch(env, e, plan.zone, ctx.token);
     throw e;
   }
   await recordLaunch(env.deps.db, env.region.id, vm.zone, { kind: 'success' }, env.deps.now());

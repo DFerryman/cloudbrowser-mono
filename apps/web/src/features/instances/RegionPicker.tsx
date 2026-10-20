@@ -97,7 +97,7 @@ const latencyTone = (ms: number) => (ms <= 80 ? 'bg-running' : ms <= 160 ? 'bg-s
  * (measured, or estimated until measured), whether it can take a browser now and what an hour
  * costs. The nearest regions come first; the nearest available one is marked.
  */
-export function RegionPicker({ open, regions, loading, pricing, value, onChange, trialRegionId, storageFor, priceLabel }: {
+export function RegionPicker({ open, regions, loading, pricing, value, onChange, trialRegionId, storageFor, priceLabel, reasonFor }: {
   open: boolean;
   regions: Region[] | undefined;
   loading: boolean;
@@ -108,6 +108,8 @@ export function RegionPicker({ open, regions, loading, pricing, value, onChange,
   trialRegionId: string | null;
   storageFor: (p: RegionPricing) => number;
   priceLabel?: string;
+  /** Why a region cannot be chosen, in place of its own availability (e.g. Premium is not offered there). */
+  reasonFor?: (r: Region) => string | null;
 }) {
   const { t, locale } = useI18n();
   const measured = useMeasuredLatency(regions, open);
@@ -154,9 +156,9 @@ export function RegionPicker({ open, regions, loading, pricing, value, onChange,
           const p = pricing?.find((x) => x.regionId === r.id);
           const hourly = p?.rates ? browserEstimate(p.rates, { storageGb: storageFor(p), rootVolumeGb: p.rootVolumeGb, backups: false }).runningTotalHour : null;
           const disabled = !selectable(r);
-          const status = trialRegionId && r.id !== trialRegionId && r.acceptingNew
+          const status = reasonFor?.(r) ?? (trialRegionId && r.id !== trialRegionId && r.acceptingNew
             ? t('create.region.notInTrial')
-            : r.availabilityReason ? t(`create.region.reason.${r.availabilityReason}` as MessageKey) : r.inventory ? t('create.region.stock', { count: r.inventory.available }) : null;
+            : r.availabilityReason ? t(`create.region.reason.${r.availabilityReason}` as MessageKey) : r.inventory ? t('create.region.stock', { count: r.inventory.available }) : null);
           const reason = [status, untested(r) ? t('create.region.untested') : null].filter(Boolean).join(' · ') || null;
           return (
             <RegionRow

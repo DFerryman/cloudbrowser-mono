@@ -5,9 +5,11 @@
  */
 import {
   browserEstimate,
+  BrowserTier,
   customerRates,
   AWS_PRICE_MAX_AGE_MS,
   priceVersion,
+  tierSheet,
   type ProviderPriceSheet,
   type Rates,
   type RegionId,
@@ -28,29 +30,41 @@ export interface RegionPrice {
   fetchedAt: Date;
 }
 
-/** The customer price of one region now, or null before its prices were read from the provider. */
-export async function regionPrice(db: Db, regionId: string): Promise<RegionPrice | null> {
+/**
+ * The customer price of a new browser of this tier in one region now, or null before the
+ * region's prices were read from the provider or where the tier is not offered.
+ */
+export async function regionPrice(db: Db, regionId: string, tier: BrowserTier = 'basic'): Promise<RegionPrice | null> {
   const stored = (await priceSheets(db)).get(regionId);
-  if (!stored) return null;
-  const rates = customerRates(stored.sheet, await pricingSettings(db));
-  return { sheet: stored.sheet, rates, version: priceVersion(rates, stored.sheet.rootVolumeGb), fetchedAt: stored.fetchedAt };
+  const sheet = stored ? tierSheet(stored.sheet, tier) : null;
+  if (!stored || !sheet) return null;
+  const rates = customerRates(sheet, await pricingSettings(db));
+  return { sheet, rates, version: priceVersion(rates, sheet.rootVolumeGb), fetchedAt: stored.fetchedAt };
 }
 
 /** Existing browsers show their observed machine and root disk, not the new-browser default. */
-export async function instancePrice(db: Db, instanceId: string, regionId: string): Promise<RegionPrice | null> {
-  const p = await regionPrice(db, regionId);
+export async function instancePrice(db: Db, inst: { id: string; regionId: string; tier: string }): Promise<RegionPrice | null> {
+  const tier = BrowserTier.catch('basic').parse(inst.tier);
+  // A browser keeps its machine even where its tier is no longer offered to new browsers.
+  const tierPrice = await regionPrice(db, inst.regionId, tier);
+  const p = tierPrice ?? (await regionPrice(db, inst.regionId));
   if (!p) return null;
-  const [placement] = await db.select().from(schema.placements).where(and(eq(schema.placements.instanceId, instanceId), eq(schema.placements.status, 'current')));
-  const actual = placement?.instanceType ? p.sheet.instanceTypes[placement.instanceType] : p.sheet.vmHour;
+  const [placement] = await db.select().from(schema.placements).where(and(eq(schema.placements.instanceId, inst.id), eq(schema.placements.status, 'current')));
+  const actual = placement?.instanceType ? p.sheet.instanceTypes[placement.instanceType] : tierPrice?.sheet.vmHour;
   if (actual === undefined) return null;
   const sheet = { ...p.sheet, vmHour: actual, rootVolumeGb: placement?.rootVolumeGb ?? p.sheet.rootVolumeGb };
   return { ...p, sheet, rates: { ...customerRates(sheet, await pricingSettings(db)), snapshot: 0 } };
 }
 
-/** Like regionPrice, but refuses the action when there is no price or the user saw an older one. */
-export async function requirePrice(db: Db, regionId: string, shownVersion: string | undefined): Promise<RegionPrice> {
+/**
+ * Like regionPrice, but refuses the action when there is no price or the user saw an older one.
+ * Actions on an existing browser (more storage) confirm the region's Basic version: its fixed
+ * resources cost the same in every tier.
+ */
+export async function requirePrice(db: Db, regionId: string, shownVersion: string | undefined, tier: BrowserTier = 'basic'): Promise<RegionPrice> {
   if (shownVersion === undefined) throw problem(400, 'validation_failed', 'Review the current prices before confirming this action.');
-  const p = await regionPrice(db, regionId);
+  const p = await regionPrice(db, regionId, tier);
+  if (!p && tier === 'premium' && (await regionPrice(db, regionId))) throw problem(409, 'region_unavailable', 'Premium browsers are not offered in this region. Choose Basic or another region.');
   if (!p) throw problem(503, 'price_unavailable', 'Prices for this region are being updated. Try again in a few minutes.');
   if (p.sheet.source==='aws-price-list' && Date.now()-p.fetchedAt.getTime()>AWS_PRICE_MAX_AGE_MS) throw problem(503,'price_unavailable','The AWS price feed is out of date. New purchases are paused until it refreshes.');
   if (shownVersion !== p.version) {
@@ -74,6 +88,8 @@ export async function allRegionPricing(db: Db, userId: string | null): Promise<R
   return regions.map((r) => {
     const stored = sheets.get(r.id);
     const rates = stored ? customerRates(stored.sheet, settings) : null;
+    const premium = stored ? tierSheet(stored.sheet, 'premium') : null;
+    const premiumRates = premium ? customerRates(premium, settings) : null;
     return {
       regionId: r.id as RegionId,
       available: !!stored && (stored.sheet.source!=='aws-price-list' || Date.now()-stored.fetchedAt.getTime()<=AWS_PRICE_MAX_AGE_MS),
@@ -85,6 +101,7 @@ export async function allRegionPricing(db: Db, userId: string | null): Promise<R
       defaultStorageGb: storage.defaultGb,
       maxStorageGb: storage.maxGb,
       version: stored && rates ? priceVersion(rates, stored.sheet.rootVolumeGb) : null,
+      premium: premium && premiumRates ? { rates: premiumRates, machine: premium.machine ?? null, version: priceVersion(premiumRates, premium.rootVolumeGb) } : null,
     };
   });
 }

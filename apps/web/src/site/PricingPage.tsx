@@ -1,4 +1,4 @@
-import { REGION_AREAS, browserEstimate, type PublicPricing, type RegionId } from '@cloudbrowser/contracts';
+import { REGION_AREAS, TIERS, browserEstimate, type BrowserTier, type PublicPricing, type RegionId } from '@cloudbrowser/contracts';
 import { Button, Card, cn, CountryTag, Eyebrow, Hint, Menu, MenuItem, MenuLabel, Skeleton } from '@cloudbrowser/ui';
 import { ArrowRight, Check, ChevronDown, ChevronsUpDown, Gift, MapPin, Minus, Plus } from 'lucide-react';
 import { useEffect, useId, useState, type ReactNode } from 'react';
@@ -16,6 +16,14 @@ const GB_PER_HOUR = 1;
 /** A region a visitor can price and a user can create in: open, taking new browsers, priced. */
 const supported = (r: RegionPrice) => r.available && r.acceptingNew && !!r.rates;
 
+/** A region's prices for a browser of this tier: Premium's rates and machine, where it is offered. */
+function forTier(r: RegionPrice, tier: BrowserTier): RegionPrice {
+  if (tier === 'basic') return r;
+  return r.premium
+    ? { ...r, rates: r.premium.rates, machine: r.premium.machine, cost: r.premiumCost ?? r.cost, acceptingNew: (r.premiumAvailability ?? 'unavailable') !== 'unavailable' }
+    : { ...r, rates: null, machine: null, cost: null, acceptingNew: false };
+}
+
 /**
  * Prepaid pricing for visitors: what a browser costs running and asleep in each region, the unit
  * rates behind it, an estimate for a month, and how charges and the held amount work.
@@ -25,7 +33,11 @@ export function PricingPage() {
   const navigate = useNavigate();
   const signedIn = useSignedIn();
   const pricing = usePublicPricing();
-  const regions = pricing.data?.regions ?? [];
+  // Premium is shown where the operator offers it to new accounts and some region prices it.
+  const premiumShown = !!pricing.data?.premiumOffered && !!pricing.data.regions.some((r) => r.premium);
+  const [tierChoice, setTier] = useState<BrowserTier>('basic');
+  const tier: BrowserTier = premiumShown ? tierChoice : 'basic';
+  const regions = (pricing.data?.regions ?? []).map((r) => forTier(r, tier));
   const [regionId, setRegionId] = useState<RegionId | null>(null);
   useEffect(() => {
     if (!regionId && regions.length) setRegionId((regions.find(supported) ?? regions[0]!).regionId);
@@ -48,10 +60,13 @@ export function PricingPage() {
         ) : (
           <>
             <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
-              <RegionMenu groups={groups} value={region} onChange={setRegionId} />
+              <div className="flex flex-wrap items-end gap-3">
+                <RegionMenu groups={groups} value={region} onChange={setRegionId} />
+                {premiumShown ? <TierSwitch value={tier} onChange={setTier} /> : null}
+              </div>
               <p className="text-xs text-subtle">{t('pricing.regionHint')}</p>
             </div>
-            {region ? <RegionCard region={region} /> : null}
+            {region ? <RegionCard region={region} tier={tier} /> : null}
           </>
         )}
       </section>
@@ -109,10 +124,31 @@ export function PricingPage() {
   );
 }
 
-function RegionCard({ region }: { region: RegionPrice }) {
+/** Basic or Premium: the machine the prices below are for. */
+function TierSwitch({ value, onChange }: { value: BrowserTier; onChange: (tier: BrowserTier) => void }) {
+  const { t } = useI18n();
+  return (
+    <div className="inline-flex border border-border" role="radiogroup" aria-label={t('create.machine')}>
+      {(['basic', 'premium'] as const).map((tier) => (
+        <button
+          key={tier}
+          type="button"
+          role="radio"
+          aria-checked={value === tier}
+          className={cn('h-10 px-4 text-sm font-medium transition-colors', value === tier ? 'bg-fg text-bg' : 'text-muted hover:text-fg')}
+          onClick={() => onChange(tier)}
+        >
+          {t(`tier.${tier}`)} <span className={cn('font-normal', value === tier ? 'text-bg/70' : 'text-subtle')}>· {t('pricing.fps', { fps: TIERS[tier].fps.full })}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function RegionCard({ region, tier }: { region: RegionPrice; tier: BrowserTier }) {
   const { t, locale } = useI18n();
   const m = (v: number) => money(v, locale);
-  if (!region.rates) return <Card className="p-6 text-sm text-muted">{t('pricing.unavailable')}</Card>;
+  if (!region.rates) return <Card className="p-6 text-sm text-muted">{t(tier === 'premium' ? 'pricing.noPremium' : 'pricing.unavailable')}</Card>;
   const e = browserEstimate(region.rates, { storageGb: region.defaultStorageGb, rootVolumeGb: region.rootVolumeGb, backups: false });
   const cells = [
     { label: t('pricing.running'), hint: t('pricing.runningHint'), value: m(e.runningTotalHour), unit: t('pricing.unit.hour'), strong: true },
@@ -133,7 +169,7 @@ function RegionCard({ region }: { region: RegionPrice }) {
         ))}
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-surface px-6 py-3 font-mono text-xs text-muted md:px-8">
-        <span>{region.machine ? t('pricing.machine', { vcpu: region.machine.vcpu, memory: region.machine.memoryGb, gb: region.defaultStorageGb + region.rootVolumeGb }) : null}</span>
+        <span>{region.machine ? `${t('pricing.machine', { vcpu: region.machine.vcpu, memory: region.machine.memoryGb, gb: region.defaultStorageGb + region.rootVolumeGb })} · ${t('pricing.fps', { fps: TIERS[tier].fps.full })}` : null}</span>
         {!region.acceptingNew ? <span className="font-medium text-starting">{t('pricing.notAccepting')}</span> : null}
       </div>
     </Card>

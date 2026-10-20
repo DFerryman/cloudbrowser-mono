@@ -35,12 +35,14 @@ const minimumMarkup = (feeBps: number) => 100 + Math.ceil(feeBps / 100);
  * One hour with the live view open, for a browser with the default 10 GB disk: AWS and relay cost,
  * the customer price, and what is left after the payment provider's percentage fee.
  */
-function liveHour(r: PricingOverview['regions'][number], videoGb: number, s: Settings) {
-  if (!r.cost || !r.price || !r.sheet) return null;
+function liveHour(r: PricingOverview['regions'][number], videoGb: number, s: Settings, tier: 'basic' | 'premium' = 'basic') {
+  if (!r.cost || !r.price || !r.sheet || (tier === 'premium' && !r.premium)) return null;
   const gbMonths = (10 + r.sheet.rootVolumeGb) / HOURS_PER_MONTH;
-  const sum = (x: NonNullable<typeof r.cost>) => x.compute + x.ip + x.storage * gbMonths + x.transfer * videoGb;
-  const cost = sum(r.cost);
-  const price = sum(r.price);
+  // Premium differs only in compute: the same IP, storage and transfer rates.
+  const sum = (x: NonNullable<typeof r.cost>, premiumCompute: number | undefined) =>
+    (tier === 'premium' ? premiumCompute ?? 0 : x.compute) + x.ip + x.storage * gbMonths + x.transfer * videoGb;
+  const cost = sum(r.cost, r.premium?.cost);
+  const price = sum(r.price, r.premium?.price);
   const net = price * (1 - s.paymentFeeBps / 10_000) - cost;
   return { cost, price, net, pct: price > 0 ? Math.round((net / price) * 100) : 0 };
 }
@@ -154,14 +156,14 @@ export function PricingPage() {
           <span>{t('pricing.breakevenHelp')}</span>
         </div>
         <Table
-          rows={d.regions.filter((r) => r.cost && r.price)}
-          rowKey={(r) => r.regionId}
+          rows={d.regions.filter((r) => r.cost && r.price).flatMap((r) => [{ ...r, tier: 'basic' as const }, ...(r.premium ? [{ ...r, tier: 'premium' as const }] : [])])}
+          rowKey={(r) => `${r.regionId}:${r.tier}`}
           columns={[t('col.region'), t('pricing.hourCost'), t('pricing.hourPrice'), t('pricing.hourNet')]}
           cells={(r) => {
             // Saved prices, so this shows what users are charged now (the draft applies on save).
-            const h = liveHour(r, videoGb, d.settings)!;
+            const h = liveHour(r, videoGb, d.settings, r.tier)!;
             return [
-              <span>{r.name} <Mono>{r.providerRegion}</Mono></span>,
+              <span>{r.name} <Mono>{r.providerRegion}</Mono> {r.tier === 'premium' ? <Pill>{t('tier.premium')}</Pill> : null}</span>,
               <span className="tabular-nums">{usd(Math.round(h.cost))}</span>,
               <span className="tabular-nums">{usd(Math.round(h.price))}</span>,
               <span className={h.net < 0 ? 'tabular-nums font-medium text-error' : 'tabular-nums'}>{usd(Math.round(h.net))} ({h.pct}%)</span>,
@@ -184,6 +186,12 @@ export function PricingPage() {
                 {r.providerRegion}
                 {r.sheet ? ` · ${r.sheet.instanceType}` : ''}
               </Mono>
+              {r.premium ? (
+                <span className="block text-xs text-muted">
+                  {t('tier.premium')}: <Mono>{r.premium.instanceType}</Mono>{' '}
+                  <span className="tabular-nums whitespace-nowrap">{usd(r.premium.cost)} → <span className="font-medium">{usd(r.premium.price)}</span>{t('pricing.perHour')}</span>
+                </span>
+              ) : null}
             </span>,
             ...ITEMS.map(([key]) =>
               r.cost && r.price ? (

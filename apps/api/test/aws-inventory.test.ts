@@ -10,7 +10,7 @@ function setup() {
     UPDATE caps SET "limit"=100 WHERE scope='user:default' AND metric='instances';
     INSERT INTO aws_provider_regions (region_id,provider_region,opt_in_status,status,capacity,checked_at) SELECT id,provider_region,'opted-in','ready',1,${now} FROM regions;
     INSERT INTO provider_prices (region_id,executor,provider_region,sheet,fetched_at) SELECT id,executor,provider_region,'{"vmHour":0.1,"ipHour":0.005,"volumeGbMonth":0.08,"rootVolumeGb":16}',${now} FROM regions;`);
-  const add=(id:string,region='syd1',storage=10)=>d1.sqlite.prepare("INSERT INTO browser_instances (id,user_id,name,region_id,status,desired_state,storage_gb,idle_timeout_s,locale,screen,fingerprint,created_at,updated_at) VALUES (?,?,?,?,'creating','running',?,1800,'en-US','auto','{}',?,?)").run(id,'u',id,region,storage,now,now);
+  const add=(id:string,region='syd1',storage=10,tier='basic')=>d1.sqlite.prepare("INSERT INTO browser_instances (id,user_id,name,region_id,tier,status,desired_state,storage_gb,idle_timeout_s,locale,screen,fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,'creating','running',?,1800,'en-US','auto','{}',?,?)").run(id,'u',id,region,tier,storage,now,now);
   return {d1,db,add,now};
 }
 
@@ -28,6 +28,42 @@ it('counts only what AWS can allocate: regions do not share a limit, and money d
   add('a');add('b','syd1',100);add('c');
   expect((await awsInventory(db)).get('syd1')!.available).toBe(0);
   expect(()=>add('d')).toThrow('aws_inventory_unavailable');
+});
+
+it('shares the vCPU room between tiers: a Premium browser holds twice what a Basic one does',async()=>{
+  const {d1,db,add}=setup();
+  // Other dimensions allow 10 browsers; 8 vCPUs fit four Basic (2 each) or two Premium (4 each).
+  d1.sqlite.exec("UPDATE aws_provider_regions SET capacity=10,vcpu_capacity=8,basic_vcpus=2,premium_vcpus=4,premium_offered=1 WHERE region_id='syd1'");
+  expect((await awsInventory(db)).get('syd1')!.availableByTier).toEqual({basic:4,premium:2});
+  add('p1','syd1',10,'premium');
+  expect((await awsInventory(db)).get('syd1')!.availableByTier).toEqual({basic:2,premium:1});
+  add('b1');
+  expect((await awsInventory(db)).get('syd1')!.availableByTier).toEqual({basic:1,premium:0});
+  expect(()=>add('p2','syd1',10,'premium')).toThrow('aws_inventory_unavailable');
+  add('b2');
+  expect(()=>add('b3')).toThrow('aws_inventory_unavailable');
+  // A sleeping Premium browser keeps its vCPUs so it can wake.
+  d1.sqlite.exec("UPDATE browser_instances SET status='sleeping' WHERE id='p1'");
+  expect((await awsInventory(db)).get('syd1')!.availableByTier).toEqual({basic:0,premium:0});
+});
+
+it('offers no Premium stock until the reconciler reports Premium machines and vCPU room',async()=>{
+  const {d1,db,add}=setup();
+  d1.sqlite.exec("UPDATE aws_provider_regions SET capacity=3 WHERE region_id='syd1'");
+  // An older reconciler's capacity already counts Basic vCPUs; Premium waits for the new one.
+  expect((await awsInventory(db)).get('syd1')!.availableByTier).toEqual({basic:3,premium:0});
+  expect(()=>add('p','syd1',10,'premium')).toThrow('aws_inventory_unavailable');
+  d1.sqlite.exec("UPDATE aws_provider_regions SET vcpu_capacity=16 WHERE region_id='syd1'");
+  expect((await awsInventory(db)).get('syd1')!.availableByTier).toEqual({basic:3,premium:0});
+  d1.sqlite.exec("UPDATE aws_provider_regions SET premium_offered=1 WHERE region_id='syd1'");
+  expect((await awsInventory(db)).get('syd1')!.availableByTier).toEqual({basic:3,premium:3});
+  add('p','syd1',10,'premium');
+  expect((await awsInventory(db)).get('syd1')!.availableByTier).toEqual({basic:2,premium:2});
+});
+
+it('never changes a browser\'s tier',()=>{
+  const {d1,add}=setup();add('one');
+  expect(()=>d1.sqlite.exec("UPDATE browser_instances SET tier='premium' WHERE id='one'")).toThrow('tier is immutable');
 });
 
 it('withdraws stale quotas and prices instead of treating missing data as free capacity',async()=>{
@@ -84,6 +120,6 @@ it('gives the last slot to exactly one of two people creating at the same moment
 it('ends with a clean schema: the view has only the current columns and users have no running cap',()=>{
   const {d1}=setup();
   const columns=(d1.sqlite.prepare('PRAGMA table_info(aws_region_inventory)').all() as {name:string}[]).map((c)=>c.name);
-  expect(columns).toEqual(['region_id','checked_at','status','quota_available','availability']);
+  expect(columns).toEqual(['region_id','checked_at','status','availability','premium_offered','quota_available','premium_available']);
   expect(d1.sqlite.prepare("SELECT COUNT(*) n FROM caps WHERE metric='running' AND scope LIKE 'user:%'").get()).toEqual({n:0});
 });

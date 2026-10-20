@@ -42,5 +42,13 @@ export const Region = z.object({
   launchVerifiedAt: z.string().nullable(),
   /** Round trip estimated from the caller's approximate location, before the client measures it. */
   estimatedRttMs: z.number().int().nonnegative().nullable(),
+  /**
+   * Whether a new Premium browser can be created here, as `availability` says for Basic. Null
+   * where Premium is not offered at all (no Premium machine or price in the region).
+   */
+  premium: z.object({
+    availability: z.enum(['available', 'limited', 'unavailable']),
+    availabilityReason: z.enum(['low_stock', 'capacity', 'provider_issue', 'blocked', 'no_stock', 'closed']).nullable(),
+  }).nullable().optional(),
 });
 export type Region = z.infer<typeof Region>;

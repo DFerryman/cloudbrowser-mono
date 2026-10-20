@@ -1,5 +1,5 @@
 import { useRegionInfo } from '../instances/hooks.js';
-import type { ConnectInfo, Instance, VideoQuality, ViewerSession } from '@cloudbrowser/contracts';
+import { TIERS, type ConnectInfo, type Instance, type VideoQuality, type ViewerSession } from '@cloudbrowser/contracts';
 import { Button, cn, Menu, MenuItem, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -31,6 +31,16 @@ import { keys, queryClient } from '../../lib/query.js';
 import { CreateProgress } from '../instances/CreateProgress.js';
 import { useInstance, useLifecycle, useVerifyIp } from '../instances/hooks.js';
 import { shownStatus, STATUS_TONE, statusKey } from '../instances/status.js';
+
+/** Whether this web browser decodes H.264 over WebRTC, which Premium's live view needs. Unknown counts as yes. */
+const decodesH264 = (() => {
+  try {
+    const codecs = globalThis.RTCRtpReceiver?.getCapabilities?.('video')?.codecs;
+    return !codecs || codecs.some((c) => c.mimeType.toLowerCase() === 'video/h264');
+  } catch {
+    return true;
+  }
+})();
 
 const HEARTBEAT_MS = 15_000;
 const IDLE_WARNING_MS = 60_000;
@@ -282,6 +292,8 @@ export function SessionPage() {
   };
 
   const i = instance.data;
+  // Premium streams H.264 (images/browser/neko-premium.yaml); without a decoder the picture stays black.
+  const h264Missing = i?.tier === 'premium' && !decodesH264;
   const region = useRegionInfo(i?.regionId ?? '');
   const regionName = region.name;
   const idleLeft = sleepAt ? sleepAt - now : Infinity;
@@ -298,6 +310,8 @@ export function SessionPage() {
     }}>{t('overlay.retryNow')}</Button>} />;
   } else if (openError || connectionError) {
     overlay = <Overlay message={connectionErrorMessage(openError ?? connectionError)} action={<Button onClick={() => void open()}>{t('common.retry')}</Button>} />;
+  } else if (h264Missing && i?.status === 'running') {
+    overlay = <Overlay message={t('session.h264Unsupported')} action={<Button onClick={() => navigate('/browsers')}>{t('session.back')}</Button>} />;
   } else if (i) {
     switch (shownStatus(i)) {
       case 'creating':
@@ -425,7 +439,7 @@ export function SessionPage() {
           {i && i.status !== 'running' ? (
             <StatusBadge className="mr-2 hidden text-zinc-300 md:inline-flex" tone={STATUS_TONE[shownStatus(i)]} label={t(statusKey(shownStatus(i)))} />
           ) : connect.data?.mode === 'webrtc' && stats ? (
-            <ConnectionIndicator stats={stats} picture={streaming ? t(`session.picture.${streaming}` as MessageKey) : null} />
+            <ConnectionIndicator stats={stats} picture={streaming ? t(`session.picture.${streaming}` as MessageKey, { fps: TIERS[i?.tier ?? 'basic'].fps[streaming] }) : null} />
           ) : connect.data?.mode === 'simulated' ? (
             <span className="mr-2 hidden items-center gap-1.5 text-xs text-zinc-400 md:inline-flex" title={t('session.simulatedHint')}>
               <span className="size-2 rounded-full bg-starting" aria-hidden /> {t('session.simulated')}
@@ -576,10 +590,11 @@ export function SessionPage() {
         onWheel={() => (hadInput.current = true)}
       >
         {i?.status === 'running' && connect.data?.mode === 'simulated' ? <SimulatedChrome instance={i} regionName={regionName} /> : null}
-        {i?.status === 'running' && connect.data?.mode === 'webrtc' && session && !takenOver ? (
+        {i?.status === 'running' && connect.data?.mode === 'webrtc' && session && !takenOver && !h264Missing ? (
           <RemoteBrowserView
             key={session.id}
             ref={viewerRef}
+            tier={i.tier}
             onInputError={() => setInputInterrupted(true)}
             onTransfer={onTransfer}
             rotated={rotated}

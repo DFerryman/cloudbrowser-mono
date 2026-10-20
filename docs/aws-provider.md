@@ -12,7 +12,7 @@ and errors. Changes to inventory policy require a reason and are audited.
 | Region list / opt-in state | EC2 DescribeRegions, all regions | Every 5 minutes |
 | Display name / country | SSM public global infrastructure parameters | First discovery, daily, or manual refresh |
 | Browser networks | EC2 DescribeVpcs/Subnets/SecurityGroups | Every 5 minutes |
-| Machines and AZ availability | DescribeInstanceTypeOfferings / DescribeInstanceTypes (stored per zone, so a launch never asks a zone for a type it does not offer) | Every 5 minutes |
+| Machines and AZ availability | DescribeInstanceTypeOfferings / DescribeInstanceTypes for each tier's types (stored per zone and tier, so a launch never asks a zone for a type it does not offer; a region without a Premium type keeps taking Basic browsers) | Every 5 minutes |
 | Account quotas | Service Quotas GetServiceQuota | Every 5 minutes |
 | Consumed IPs, CPU, storage, interfaces | Paginated EC2 describe APIs, including non-project resources | Every 5 minutes |
 | Unit prices | AWS Price List GetProducts, including historical machine types | Every 12 hours or manual refresh |
@@ -33,7 +33,13 @@ Legacy simulator regions and immutable existing browser placements are not rewri
 
 Inventory is how many more browsers AWS can allocate to this account in a region: the smallest
 room under Elastic IPs, Standard On-Demand vCPUs, gp3 GiB, regional ENIs and subnet addresses,
-divided by what one browser needs, minus the browsers that hold a slot. It is not limited by any
+divided by what one browser needs, minus the browsers that hold a slot. It is counted per tier
+(migration 0029): every browser needs one IP, interface, subnet address and its disks, while the
+vCPUs are one pool both tiers draw from, 2 per Basic browser and 4 per Premium browser (the
+`basic_vcpus` / `premium_vcpus` the reconciler reads from DescribeInstanceTypes). The reconciler
+stores the other dimensions' room in `capacity` and the vCPU room in `vcpu_capacity`;
+`aws_region_inventory` gives `quota_available` (Basic) and `premium_available`. A region whose
+zones offer no Premium type, or whose prices have no Premium machine, has no Premium stock. It is not limited by any
 budget or by spend (migration 0018 removed the budget policy). Existing project browsers hold
 their slot even while asleep, so they can always wake; foreign and orphan AWS resources consume
 quota. Local pending creates are counted before AWS reports them. AWS physical capacity is only
@@ -82,6 +88,11 @@ AWS publishes no live on-demand capacity, so the region list combines what is kn
 - **Location**: city, country and timezone come from `AWS_REGION_FACTS`, not SSM (SSM has no city or
   timezone and reports Hong Kong as CN). The browser's timezone follows the region (`TZ` in the
   browser container).
+
+The runtime role must allow both tiers' instance types where its policy lists them (Basic
+`c7i-flex.large`, `c6i.large`, `c5.large`; Premium `c7i.xlarge`, `c6i.xlarge`, `c5.xlarge`). A
+Premium launch that IAM or an SCP refuses fails that browser with an alert but does not mark the
+region *Blocked*, so Basic browsers keep being created there.
 
 ## Credentials
 

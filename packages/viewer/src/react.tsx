@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type CSSProperties } from 'react';
 import { isMac } from './keyboard.js';
 import { toRemotePoint, unrotate } from './mapping.js';
-import type { VideoQuality } from '@cloudbrowser/contracts';
+import type { BrowserTier, VideoQuality } from '@cloudbrowser/contracts';
 import type { VideoPreference } from './quality.js';
 import { RemoteBrowser, type ConnectInfo, type ViewerState } from './remote-browser.js';
 import type { ViewerStats } from './stats.js';
@@ -60,6 +60,8 @@ export interface RemoteBrowserViewProps {
   video?: VideoPreference;
   /** The level being streamed now. */
   onVideo?: (quality: VideoQuality) => void;
+  /** The browser's machine tier: its frame rate and desktop refresh rate (read when the view mounts). */
+  tier?: BrowserTier;
   muted?: boolean;
   className?: string;
   style?: CSSProperties;
@@ -70,7 +72,7 @@ export interface RemoteBrowserViewProps {
  * textarea that owns the keyboard (so IME composition works), and the remote cursor drawn locally.
  */
 export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserViewProps>(function RemoteBrowserView(
-  { getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError, onTransfer, rotated = false, video, onVideo, muted = true, className, style },
+  { getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError, onTransfer, rotated = false, video, onVideo, tier, muted = true, className, style },
   ref,
 ) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -89,6 +91,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   const callbacks = useRef({ getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer });
   callbacks.current = { getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer };
   const initialVideo = useRef(video);
+  const initialTier = useRef(tier);
 
   const updateKeyboard = (open: boolean) => {
     if (keyboardRequested.current === open) return;
@@ -132,6 +135,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       },
       macToPc: isMac(),
       ...(initialVideo.current ? { video: initialVideo.current } : {}),
+      ...(initialTier.current ? { tier: initialTier.current } : {}),
       onVideo: (q) => callbacks.current.onVideo?.(q),
       onTransfer: (update) => callbacks.current.onTransfer?.(update),
     });

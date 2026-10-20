@@ -187,6 +187,7 @@ function UsedLine({ instance: i }: { instance: Instance }) {
   const recoverable = deleted && i.purgeAfter !== null && Date.parse(i.purgeAfter) > Date.now();
   return (
     <>
+      {i.tier === 'premium' ? <span className="font-medium text-fg">{t('tier.premium')} · </span> : null}
       {recoverable && i.purgeAfter
         ? t('browsers.recoverableUntil', { date: new Date(i.purgeAfter).toLocaleDateString(locale) })
         : deleted

@@ -24,6 +24,7 @@ export function LimitsPage() {
   const [trialDraft, setTrialDraft] = useState<string | null>(null);
   const trialValid = trialDraft !== null && Number.isInteger(Number(trialDraft)) && Number(trialDraft) >= 1 && Number(trialDraft) <= TRIAL.maxMinutes;
   const neverSleep = caps.data?.find((c) => c.scope === 'user:default' && c.metric === 'never_sleep')?.limit === 1;
+  const premium = caps.data?.find((c) => c.scope === 'user:default' && c.metric === 'premium')?.limit === 1;
   // Without a row the api allows up to an hour.
   const idleMax = caps.data?.find((c) => c.scope === 'user:default' && c.metric === 'idle_timeout_max_s')?.limit ?? 3600;
 
@@ -110,6 +111,22 @@ export function LimitsPage() {
           </Button>
         </div>
         <p className="mt-2 text-xs text-muted">{t('limits.neverSleepHelp')}</p>
+      </section>
+      <section className="max-w-3xl rounded-[var(--radius-control)] border border-border p-4" data-testid="premium-setting">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium">{t('limits.premium')}</p>
+            <p className="text-xs text-muted">{premium ? t('limits.premiumOn') : t('limits.premiumOff')}</p>
+          </div>
+          <Button
+            variant={premium ? 'secondary' : 'primary'}
+            disabled={!caps.data || save.isPending}
+            onClick={() => save.mutate({ scope: 'user:default', metric: 'premium', limit: premium ? 0 : 1 }, { onSuccess: () => toast(t('common.saved')), onError: (err) => toast(errorText(err), 'error') })}
+          >
+            {premium ? t('limits.premiumDisable') : t('limits.premiumEnable')}
+          </Button>
+        </div>
+        <p className="mt-2 text-xs text-muted">{t('limits.premiumHelp')}</p>
       </section>
       <p className="text-xs text-muted">{t('limits.note')}</p>
       <form

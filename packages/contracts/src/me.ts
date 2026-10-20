@@ -9,6 +9,8 @@ export const Entitlements = z.object({
   idleTimeoutMaxS: z.number().int(),
   /** Whether the operator offers Never sleep to this account (`never_sleep` cap). */
   neverSleep: z.boolean(),
+  /** Whether the operator offers Premium browsers to this account (`premium` cap). */
+  premium: z.boolean(),
   /** The most a browser's storage can grow to, in GB. */
   maxStorageGb: z.number().int(),
 });

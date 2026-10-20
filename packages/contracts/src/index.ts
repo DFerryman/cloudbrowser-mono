@@ -2,6 +2,7 @@ export * from './regions.js';
 export * from './aws-regions.js';
 export * from './aws-provider.js';
 export * from './operations.js';
+export * from './tiers.js';
 export * from './instances.js';
 export * from './errors.js';
 export * from './me.js';

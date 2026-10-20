@@ -18,6 +18,8 @@ export interface BootstrapInput {
   browserImage: string;
   /** IANA timezone for the browser (e.g. Asia/Tokyo); UTC when absent or malformed. */
   timezone?: string;
+  /** Machine tier: `premium` streams the 60 fps live view (images/browser/neko-premium.yaml). */
+  tier?: 'basic' | 'premium';
 }
 
 const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -41,11 +43,12 @@ AGENT_IMAGE=${input.agentImage}
 BROWSER_IMAGE=${input.browserImage}
 ECHO_URL=${echo}
 BROWSER_TZ=${timezone}
+BROWSER_TIER=${input.tier === 'premium' ? 'premium' : 'basic'}
 ENV
 umask 022
 
-# The VM has 4 GB, enough for the browser; a small swap file absorbs the odd spike so the kernel
-# does not have to kill Chrome. Swappiness 10: only used under memory pressure.
+# The VM has 4 GB (Basic) or 8 GB (Premium), enough for the browser; a small swap file absorbs
+# the odd spike so the kernel does not have to kill Chrome. Swappiness 10: only used under memory pressure.
 if [ ! -f /swapfile ]; then fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && echo '/swapfile none swap sw 0 0' >>/etc/fstab; fi
 swapon /swapfile 2>/dev/null || true
 echo 'vm.swappiness=10' >/etc/sysctl.d/90-cloudbrowser.conf && sysctl -q -p /etc/sysctl.d/90-cloudbrowser.conf

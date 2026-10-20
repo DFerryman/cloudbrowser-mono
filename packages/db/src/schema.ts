@@ -206,6 +206,8 @@ export const browserInstances = sqliteTable(
     trialUsedMs: integer('trial_used_ms').notNull().default(0),
     /** An unconverted trial browser is deleted and purged at this time (7 days after it last slept). */
     trialReclaimAt: ts('trial_reclaim_at'),
+    /** Machine tier (contracts TIERS): basic | premium. Set at creation, never changes (trigger). */
+    tier: text('tier').notNull().default('basic'),
   },
   (t) => [index('instances_user_idx').on(t.userId), index('instances_status_idx').on(t.status)],
 );
@@ -634,6 +636,10 @@ export const awsProviderRegions = sqliteTable('aws_provider_regions', {
   optInStatus: text('opt_in_status').notNull(), status: text('status').notNull(),
   config: json<Record<string, unknown>>('config'), quotas: json<{ metric: string; limit: number; used: number }[]>('quotas'),
   capacity: integer('capacity').notNull(), checkedAt: ts('checked_at'), lastError: text('last_error'),
+  /** vCPUs the account can give its browsers; `capacity` then counts every other dimension. */
+  vcpuCapacity: integer('vcpu_capacity'),
+  basicVcpus: integer('basic_vcpus').notNull().default(2), premiumVcpus: integer('premium_vcpus').notNull().default(4),
+  premiumOffered: integer('premium_offered', { mode: 'boolean' }).notNull().default(false),
 });
 
 /**

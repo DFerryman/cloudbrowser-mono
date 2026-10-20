@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { RegionId } from './regions.js';
 import { OperationSummary } from './operations.js';
 import { TrialState } from './billing.js';
+import { BrowserTier } from './tiers.js';
 
 /**
  * Engine-owned lifecycle status (page 2, "Instance lifecycle").
@@ -45,10 +46,10 @@ export const SCREEN_SIZES = [
 export const ScreenSize = z.enum(SCREEN_SIZES);
 
 /**
- * Picture levels of the live view, sharpest first (neko video ids, images/browser/neko.yaml).
- * Every level shows the same desktop at the same size in the viewer; a lower level is a
- * downscaled picture: softer, with less data per hour. The viewer picks the level from the
- * connection; there is no per-browser setting.
+ * Picture levels of the live view, sharpest first (neko video ids, images/browser/neko.yaml and
+ * neko-premium.yaml). Every level shows the same desktop at the same size in the viewer; a lower
+ * level gives up frame rate first (TIERS[tier].fps) and a little fine detail second. The viewer
+ * picks the level from the connection; there is no per-browser setting.
  */
 export const VIDEO_QUALITIES = ['full', 'high', 'medium', 'low'] as const;
 export const VideoQuality = z.enum(VIDEO_QUALITIES);
@@ -73,6 +74,8 @@ export const Instance = z.object({
   id: z.string(),
   name: z.string(),
   regionId: RegionId,
+  /** Machine tier, fixed at creation (TIERS). */
+  tier: BrowserTier,
   status: InstanceStatus,
   /** Short reason for failed / needs_attention / provider_issue states. */
   statusReason: z.string().nullable(),
@@ -152,7 +155,10 @@ export const PriceVersion = z.string().min(1).max(200);
 export const CreateInstanceBody = z.object({
   name: InstanceName,
   regionId: RegionId,
+  /** Basic unless given. Premium needs the operator's `premium` switch and is never a free trial. */
+  tier: BrowserTier.optional(),
   screen: ScreenSize.optional(),
+  /** The version of the chosen tier's prices (RegionPricing, or its `premium`). */
   priceVersion: PriceVersion,
   /** Data volume size shown in the quote; must still match the default size when confirmed. */
   storageGb: z.number().int().min(1).max(16_384),
