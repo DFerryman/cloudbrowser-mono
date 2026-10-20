@@ -18,9 +18,9 @@ export function StatusBadge({ tone, label, icon, className, pill }: { tone: Stat
   const t = TONES[tone];
   const Icon = icon ?? t.icon;
   return (
-    <span className={cn('inline-flex items-center gap-1.5 text-sm font-medium', pill && cn('h-6 px-2 text-xs font-medium', t.pill), className)}>
-      <Icon className={cn(pill ? 'size-3.5' : 'size-4', !pill && t.color, t.spin && 'animate-spin')} aria-hidden />
-      <span>{label}</span>
+    <span title={label} className={cn('inline-flex min-w-0 max-w-full items-center gap-1.5 text-sm font-medium', pill && cn('h-6 px-2 text-xs font-medium', t.pill), className)}>
+      <Icon className={cn('shrink-0', pill ? 'size-3.5' : 'size-4', !pill && t.color, t.spin && 'animate-spin')} aria-hidden />
+      <span className="min-w-0 truncate">{label}</span>
     </span>
   );
 }
