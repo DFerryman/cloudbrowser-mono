@@ -44,6 +44,7 @@ export function OverviewPage() {
 const SWITCHES: { key: string; label: AdminKey; help: AdminKey }[] = [
   { key: 'creation_freeze', label: 'switches.freeze', help: 'switches.freezeHelp' },
   { key: 'billing_required', label: 'switches.billing', help: 'switches.billingHelp' },
+  { key: 'invite_only', label: 'switches.inviteOnly', help: 'switches.inviteOnlyHelp' },
 ];
 
 function Switches({ flags }: { flags: Overview['flags'] }) {

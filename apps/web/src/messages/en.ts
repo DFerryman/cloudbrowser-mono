@@ -6,11 +6,11 @@ export const en = {
   'nav.language': 'Language',
 
   'auth.title': 'Sign in to Nevazu',
-  'auth.subtitle': 'We will email you a 6-digit code. Nevazu is invite-only during the pilot.',
+  'auth.subtitle': 'We will email you a 6-digit code. New here? The same code creates your account.',
   'auth.email': 'Email',
   'auth.sendCode': 'Send code',
   'auth.code': 'Code',
-  'auth.codeSent': 'If {email} is invited, a code is on its way. It expires in 5 minutes.',
+  'auth.codeSent': 'A code is on its way to {email}. It expires in 5 minutes.',
   'auth.signIn': 'Sign in',
   'auth.useOtherEmail': 'Use a different email',
   'auth.invalidCode': 'That code is not valid or has expired.',
@@ -606,7 +606,7 @@ export const en = {
   'pricing.how.4.title': 'If credit runs out',
   'pricing.how.4.body': 'Browsers stop at once and are kept {days} days, then deleted unless you add credit.',
   'pricing.trial.title': 'Try it free',
-  'pricing.trial.body': 'Every invited account can run one browser for {minutes} minutes in {region}, with no credit needed.',
+  'pricing.trial.body': 'Every new account can run one browser for {minutes} minutes in {region}, with no credit needed.',
   'pricing.minBalance': 'Creating or waking a paid browser needs at least {amount} of available credit.',
   'pricing.source': 'Rates follow public AWS list prices for each region times a service multiplier, and are shown in USD. Taxes may be added at checkout.',
   'pricing.faq': 'Questions',
@@ -643,8 +643,8 @@ export const en = {
 
   'contact.title': 'Contact',
   'contact.subtitle': 'We usually reply within one business day.',
-  'contact.support.title': 'Support and invitations',
-  'contact.support.body': 'Questions about your account, a browser, or an invitation.',
+  'contact.support.title': 'Support',
+  'contact.support.body': 'Questions about your account or a browser.',
   'contact.billing.title': 'Billing',
   'contact.billing.body': 'Top-ups, receipts and refunds. Include the email you sign in with.',
   'contact.security.title': 'Security',
@@ -663,8 +663,6 @@ export const en = {
   'auth.signedOut': 'You have signed out.',
   'auth.agree': 'By signing in you agree to the {terms} and the {privacy}.',
   'auth.backHome': 'Home',
-  'auth.inviteHint': 'No invitation yet? {contact}.',
-  'auth.requestInvite': 'Request one',
 } as const;
 
 export type MessageKey = keyof typeof en;

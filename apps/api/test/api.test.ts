@@ -46,7 +46,14 @@ describe('auth', () => {
     expect(await res.text()).toBe('203.0.113.9');
   });
 
-  it('never sends a code to an address that was not invited', async () => {
+  it('lets anyone sign up while sign-up is open', async () => {
+    expect(await signIn(t, 'stranger@example.com')).not.toBeNull();
+    const users = t.d1.sqlite.prepare('SELECT count(*) AS n FROM user').get() as { n: number };
+    expect(users.n).toBe(1);
+  });
+
+  it('never sends a code to an address that was not invited while invite only is on', async () => {
+    t.d1.sqlite.exec("UPDATE control_flags SET value = 'true' WHERE key = 'invite_only'");
     expect(await signIn(t, 'stranger@example.com')).toBeNull();
     const users = t.d1.sqlite.prepare('SELECT count(*) AS n FROM user').get() as { n: number };
     expect(users.n).toBe(0);

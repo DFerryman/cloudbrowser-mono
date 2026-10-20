@@ -71,7 +71,7 @@ export async function claimTrial(db: Db, userId: string, now: Date): Promise<boo
   return claimed.length > 0;
 }
 
-export const trialSecondsLeft = (row: { trialUsedS: number; trialUsedMs?: number }) => Math.ceil(Math.max(0, TRIAL.runningSeconds * 1000 - Math.max(row.trialUsedMs ?? 0, row.trialUsedS * 1000)) / 1000);
+export const trialSecondsLeft = (row: { trialSeconds: number; trialUsedS: number; trialUsedMs?: number }) => Math.ceil(Math.max(0, row.trialSeconds * 1000 - Math.max(row.trialUsedMs ?? 0, row.trialUsedS * 1000)) / 1000);
 
 const usd = (micros: number) => `$${(micros / MICROS_PER_USD).toFixed(2)}`;
 

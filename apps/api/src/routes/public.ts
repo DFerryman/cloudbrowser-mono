@@ -3,7 +3,7 @@
  * GET only, no session, the same answer for every visitor, cacheable for a minute. Nothing about a single user or browser is exposed.
  */
 import { DATA_KEPT_DAYS, TRIAL, costRates, type ComponentStatus, type PublicPricing, type PublicStatus } from '@cloudbrowser/contracts';
-import { priceSheets, pricingSettings, schema } from '@cloudbrowser/db';
+import { priceSheets, pricingSettings, schema, trialMinutes } from '@cloudbrowser/db';
 import { desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { regionViews } from '../availability.js';
@@ -47,7 +47,7 @@ publicRoute.get('/pricing', async (c) => {
     },
     minBalanceMicros: settings.minBalanceMicros,
     retentionDays: DATA_KEPT_DAYS,
-    trial: { regionId: TRIAL.regionId, minutes: TRIAL.runningSeconds / 60, storageGb: TRIAL.storageGb, keptDays: TRIAL.keptDays },
+    trial: { regionId: TRIAL.regionId, minutes: await trialMinutes(db), storageGb: TRIAL.storageGb, keptDays: TRIAL.keptDays },
   };
   return c.json(out);
 });

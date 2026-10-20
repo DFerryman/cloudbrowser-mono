@@ -199,6 +199,8 @@ export const browserInstances = sqliteTable(
     backupsEnabled: integer('backups_enabled', { mode: 'boolean' }).notNull().default(false),
     /** Free trial (page 6): active | ended | converted; null for every other browser. Owner: api and engine. */
     trialState: text('trial_state'),
+    /** Running seconds the trial allows, fixed when it is created (operator setting trial_minutes). */
+    trialSeconds: integer('trial_seconds').notNull().default(600),
     /** Running seconds used by the trial (metered by the engine). */
     trialUsedS: integer('trial_used_s').notNull().default(0),
     trialUsedMs: integer('trial_used_ms').notNull().default(0),

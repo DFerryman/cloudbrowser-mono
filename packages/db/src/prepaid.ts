@@ -80,7 +80,7 @@ export async function prepaidAccess(db: Db, userId: string, instanceId: string, 
   if (account?.frozenAt) return denied('frozen');
   if (row.inst.suspendedAt) return denied('suspended');
   if (row.inst.trialState === 'active' || row.inst.trialState === 'ended') {
-    const remainingMs = Math.max(0, TRIAL.runningSeconds * 1000 - Math.max(row.inst.trialUsedMs, row.inst.trialUsedS * 1000));
+    const remainingMs = Math.max(0, row.inst.trialSeconds * 1000 - Math.max(row.inst.trialUsedMs, row.inst.trialUsedS * 1000));
     const origin = row.health?.meteredAt?.getTime() ?? row.inst.lastActiveAt?.getTime() ?? 0;
     const deadlineAt = row.inst.status === 'running' && origin ? new Date(origin + remainingMs) : null;
     return row.inst.trialState === 'ended' || remainingMs <= 0 || (deadlineAt && now >= deadlineAt) ? denied('trial', deadlineAt) : { allowed: true, reason: null, deadlineAt, balanceDeadlineAt: null };
@@ -188,9 +188,9 @@ export function settleRunningStatements(db: Db, instanceId: string, now: Date, f
     db.update(instanceHealth).set({ pendingComputeMs: sql`${instanceHealth.pendingComputeMs} + coalesce((SELECT ${elapsed} FROM browser_instances WHERE id = ${instanceId}), 0)` })
       .where(and(eq(instanceHealth.instanceId, instanceId), running)),
     db.update(browserInstances).set({
-      trialUsedMs: sql`CASE WHEN trial_state = 'active' THEN min(${TRIAL.runningSeconds * 1000}, max(trial_used_ms, trial_used_s * 1000) + ${elapsed}) ELSE trial_used_ms END`,
-      trialUsedS: sql`CASE WHEN trial_state = 'active' THEN cast(min(${TRIAL.runningSeconds * 1000}, max(trial_used_ms, trial_used_s * 1000) + ${elapsed}) / 1000 AS integer) ELSE trial_used_s END`,
-      trialState: sql`CASE WHEN trial_state = 'active' AND max(trial_used_ms, trial_used_s * 1000) + ${elapsed} >= ${TRIAL.runningSeconds * 1000} THEN 'ended' ELSE trial_state END`,
+      trialUsedMs: sql`CASE WHEN trial_state = 'active' THEN min(trial_seconds * 1000, max(trial_used_ms, trial_used_s * 1000) + ${elapsed}) ELSE trial_used_ms END`,
+      trialUsedS: sql`CASE WHEN trial_state = 'active' THEN cast(min(trial_seconds * 1000, max(trial_used_ms, trial_used_s * 1000) + ${elapsed}) / 1000 AS integer) ELSE trial_used_s END`,
+      trialState: sql`CASE WHEN trial_state = 'active' AND max(trial_used_ms, trial_used_s * 1000) + ${elapsed} >= trial_seconds * 1000 THEN 'ended' ELSE trial_state END`,
       lastActiveAt: now,
     }).where(and(eq(browserInstances.id, instanceId), eq(browserInstances.status, 'running'), fence)),
     db.update(instanceHealth).set({ meteredAt: null }).where(and(eq(instanceHealth.instanceId, instanceId), running)),

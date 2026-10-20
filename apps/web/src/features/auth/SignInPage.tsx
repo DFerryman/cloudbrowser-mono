@@ -8,7 +8,6 @@ import { api, ApiError } from '../../lib/api.js';
 import { useI18n } from '../../lib/i18n.js';
 import { queryClient } from '../../lib/query.js';
 import { rich } from '../../lib/rich.js';
-import { SUPPORT_EMAIL } from '../../lib/site.js';
 import { useSignedIn } from '../../site/hooks.js';
 
 type Step = 'email' | 'code' | 'second-factor';
@@ -17,7 +16,7 @@ type Step = 'email' | 'code' | 'second-factor';
 const safeNext = (next: string | null) => (next && next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\') ? next : '/browsers');
 
 /**
- * Email one-time code sign-in (page 1, "Auth"), invite-only. Google is unavailable from mainland
+ * Email one-time code sign-in (page 1, "Auth"); a new address creates an account. Google is unavailable from mainland
  * China. With two-factor sign-in on, the email code is followed by a code from an authenticator
  * app (or a one-time backup code) before a session exists: the second factor guards the whole
  * account at its one entrance, rather than single pages or actions later on.
@@ -140,15 +139,6 @@ export function SignInPage() {
             {rich(t('auth.agree'), {
               terms: <Link to="/terms" className="underline hover:text-fg">{t('footer.terms')}</Link>,
               privacy: <Link to="/privacy" className="underline hover:text-fg">{t('footer.privacy')}</Link>,
-            })}
-          </p>
-          <p>
-            {rich(t('auth.inviteHint'), {
-              contact: (
-                <a href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Nevazu invitation')}`} className="text-accent hover:underline">
-                  {t('auth.requestInvite')}
-                </a>
-              ),
             })}
           </p>
         </div>

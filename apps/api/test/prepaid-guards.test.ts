@@ -17,6 +17,8 @@ async function credit(amountMicros: number) {
   return applyBalance(db(), { userId, kind: 'adjustment', amountMicros, actor: 'test', reference: `guard-credit:${++seq}` }, new Date());
 }
 async function create(trial = true) {
+  // Ten-minute trials keep the arithmetic below readable; the default is 30.
+  if (trial) t.d1.sqlite.exec("UPDATE caps SET `limit` = 10 WHERE scope = 'user:default' AND metric = 'trial_minutes'");
   const price = (await t.call('GET', '/api/v1/pricing')).body.find((p: { regionId: string }) => p.regionId === (trial ? 'syd1' : 'tyo1'));
   const result = await t.call('POST', '/api/v1/instances', { name: 'Browser', regionId: trial ? 'syd1' : 'tyo1', storageGb: trial ? 2 : 10, priceVersion: price.version, ...(trial ? { trial: true } : {}) }, { 'idempotency-key': `guard-create:${++seq}` });
   expect(result.status).toBe(202); await t.settle();

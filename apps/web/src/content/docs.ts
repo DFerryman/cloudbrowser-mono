@@ -13,7 +13,7 @@ const en: Article[] = [
     blocks: [
       { p: 'Nevazu gives you a real Chrome running on its own computer in the cloud. Each browser has a dedicated IP address that no one else uses, and encrypted storage that keeps your profile, cookies and sign-ins between sessions.' },
       { h: 'Sign in' },
-      { p: 'Nevazu is invite-only during the pilot. Enter your invited email on the sign-in page and we send you a 6-digit code, valid for 5 minutes. If you turned on two-step verification, you then enter a code from your authenticator app.' },
+      { p: 'Enter your email on the sign-in page and we send you a 6-digit code, valid for 5 minutes. A new email creates your account. If you turned on two-step verification, you then enter a code from your authenticator app.' },
       { h: 'Create a browser' },
       { ul: [
         'Open Browsers and choose New browser.',
@@ -141,11 +141,11 @@ const en: Article[] = [
   {
     slug: 'trial',
     title: 'Free trial',
-    summary: 'One free browser for ten minutes of use.',
+    summary: 'One free browser to try, no credit needed.',
     blocks: [
-      { p: 'Every invited account can create one browser for free, once, in Sydney: 10 minutes of running time with a 2 GB data volume and a 5-minute auto-sleep. No credit is needed.' },
+      { p: 'Every new account can create one browser for free, once, in Sydney: 30 minutes of running time (the current length is shown on Pricing and when you create it) with a 2 GB data volume and a 5-minute auto-sleep. No credit is needed.' },
       { ul: [
-        'It goes to sleep when the 10 minutes are used.',
+        'It goes to sleep when its free running time is used.',
         'It is kept until a fixed deadline of up to seven days, shown on the browser, then deleted. Stopping and starting it does not extend the deadline.',
         'Add enough credit before then to keep it: it becomes a normal browser with the same data and IP, charged like any other from then on.',
       ] },
@@ -181,7 +181,7 @@ const en: Article[] = [
     summary: 'What to do when something does not work.',
     blocks: [
       { h: 'I did not get a sign-in code', id: 'no-code' },
-      { p: 'Check spam. Codes are sent only to invited addresses, and expire after 5 minutes. After several requests you may need to wait a minute.' },
+      { p: 'Check spam. Codes expire after 5 minutes. After several requests you may need to wait a minute.' },
       { h: 'My browser will not open', id: 'no-open' },
       { ul: [
         'Add credit if your available balance is used up; a paid browser needs available credit to wake.',
@@ -204,7 +204,7 @@ const zh: Article[] = [
     blocks: [
       { p: 'Nevazu 为你提供运行在云端独立计算机上的真实 Chrome。每个浏览器都有一个不与他人共享的独享 IP，以及在会话之间保存个人资料、Cookie 和登录状态的加密存储。' },
       { h: '登录', id: 'sign-in' },
-      { p: '试用期间 Nevazu 仅限受邀用户。在登录页输入受邀邮箱，我们会发送 6 位验证码，5 分钟内有效。如果你开启了两步验证，接着还需输入身份验证器应用中的验证码。' },
+      { p: '在登录页输入邮箱，我们会发送 6 位验证码，5 分钟内有效。新邮箱会自动创建账户。如果你开启了两步验证，接着还需输入身份验证器应用中的验证码。' },
       { h: '创建浏览器', id: 'create' },
       { ul: [
         '打开“浏览器”，选择“新建浏览器”。',
@@ -332,11 +332,11 @@ const zh: Article[] = [
   {
     slug: 'trial',
     title: '免费试用',
-    summary: '一个免费浏览器，可使用十分钟。',
+    summary: '一个免费浏览器，无需充值即可试用。',
     blocks: [
-      { p: '每个受邀账户都可以在悉尼免费创建一次浏览器：10 分钟运行时间、2 GB 数据盘、5 分钟自动休眠，无需充值。' },
+      { p: '每个新账户都可以在悉尼免费创建一次浏览器：30 分钟运行时间（当前时长以定价页和创建时显示为准）、2 GB 数据盘、5 分钟自动休眠，无需充值。' },
       { ul: [
-        '10 分钟用完后会自动休眠。',
+        '免费运行时间用完后会自动休眠。',
         '它会保留到浏览器上显示的固定截止日期（最多七天），然后删除。停止和启动不会延长截止日期。',
         '在此之前充值足够的余额即可保留：它会变成普通浏览器，保留相同的数据和 IP，之后与其他浏览器同样计费。',
       ] },
@@ -372,7 +372,7 @@ const zh: Article[] = [
     summary: '遇到问题时该怎么办。',
     blocks: [
       { h: '没有收到登录验证码', id: 'no-code' },
-      { p: '请检查垃圾邮件。验证码只发送给受邀地址，5 分钟后过期。多次请求后可能需要等待一分钟。' },
+      { p: '请检查垃圾邮件。验证码 5 分钟后过期。多次请求后可能需要等待一分钟。' },
       { h: '浏览器打不开', id: 'no-open' },
       { ul: [
         '如果可用余额已用完，请充值；付费浏览器需要可用余额才能唤醒。',

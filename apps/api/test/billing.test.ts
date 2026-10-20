@@ -348,11 +348,14 @@ describe('free trial', () => {
     await t.settle();
   };
 
-  it('gives each user one free browser in Sydney: 10 minutes, 2 GB, kept 7 days after it sleeps, then reclaimed', async () => {
+  it('gives each user one free browser in Sydney: the operator\'s minutes, 2 GB, kept 7 days after it sleeps, then reclaimed', async () => {
     const { reclaimTrials } = await import('@cloudbrowser/engine');
     prepaid();
     syd();
-    expect((await t.call('GET', '/api/v1/billing')).body.trial).toMatchObject({ eligible: true, regionId: 'syd1', minutes: 10, storageGb: 2, keptDays: 7 });
+    expect((await t.call('GET', '/api/v1/billing')).body.trial).toMatchObject({ eligible: true, regionId: 'syd1', minutes: 30, storageGb: 2, keptDays: 7 });
+    // The operator shortens new trials to 10 minutes.
+    t.d1.sqlite.exec("UPDATE caps SET `limit` = 10 WHERE scope = 'user:default' AND metric = 'trial_minutes'");
+    expect((await t.call('GET', '/api/v1/billing')).body.trial).toMatchObject({ minutes: 10 });
     expect((await t.call('POST', '/api/v1/instances', { name: 'x', regionId: 'tyo1', trial: true , storageGb: 2, priceVersion: await quoteVersion('tyo1')}, { 'idempotency-key': 'x' })).status).toBe(400);
     const created = await t.call('POST', '/api/v1/instances', { name: 'Trial', regionId: 'syd1', trial: true , storageGb: 2, priceVersion: await quoteVersion('syd1')}, { 'idempotency-key': 't1' });
     expect(created.status).toBe(202);
@@ -657,6 +660,7 @@ describe('payment reconciliation regressions', () => {
 describe('trial enforcement regressions', () => {
   async function trial() {
     prepaid();
+    t.d1.sqlite.exec("UPDATE caps SET `limit` = 10 WHERE scope = 'user:default' AND metric = 'trial_minutes'");
     t.d1.sqlite.exec("UPDATE regions SET enabled = 1, executor = 'fake' WHERE id = 'syd1'; UPDATE provider_prices SET executor = 'fake' WHERE region_id = 'syd1'");
     const created = await t.call('POST', '/api/v1/instances', { name: 'Trial', regionId: 'syd1', trial: true, storageGb: 2, priceVersion: await quoteVersion('syd1') }, { 'idempotency-key': 'regression-trial' });
     expect(created.status).toBe(202);

@@ -18,7 +18,6 @@
 import {
   BYTES_PER_GB,
   splitUsagePeriod,
-  TRIAL,
   costRates,
   customerRates,
   type Rates,
@@ -71,7 +70,7 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
     const computeFrom = new Date(Math.max(origin, now.getTime() - MAX_METER_STEP_MS));
     const pendingMs = health?.pendingComputeMs ?? 0;
     const transitionMs = health?.transitionMs ?? 0;
-    const trialMillis = running && inst.trialState === 'active' ? Math.min(TRIAL.runningSeconds * 1000 - Math.max(inst.trialUsedMs, inst.trialUsedS * 1000), Math.max(0, now.getTime() - origin)) : 0;
+    const trialMillis = running && inst.trialState === 'active' ? Math.min(inst.trialSeconds * 1000 - Math.max(inst.trialUsedMs, inst.trialUsedS * 1000), Math.max(0, now.getTime() - origin)) : 0;
     const tx = health?.netTxBytes ?? null;
     const billedTx = health?.netTxBilledBytes ?? null;
     const txBytes = tx === null || billedTx === null ? 0 : tx >= billedTx ? tx - billedTx : tx;
@@ -91,9 +90,9 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
       if (missingType) await raiseAlert(db, { source: 'billing', severity: 'warning', title: `Missing price for ${placement.instanceType} in ${inst.regionId}`, detail: { instanceId: inst.id }, dedupeKey: `machine-price:${inst.regionId}:${placement.instanceType}` }, now);
       // Trial enforcement is independent of AWS price availability and the five-minute billing cap.
       if (trialMillis > 0) await db.batch([
-        db.update(browserInstances).set({ trialUsedMs: sql`min(${TRIAL.runningSeconds * 1000}, max(${browserInstances.trialUsedMs}, ${browserInstances.trialUsedS} * 1000) + ${trialMillis})`,
-          trialUsedS: sql`cast(min(${TRIAL.runningSeconds * 1000}, max(${browserInstances.trialUsedMs}, ${browserInstances.trialUsedS} * 1000) + ${trialMillis}) / 1000 AS integer)`,
-          trialState: sql`CASE WHEN max(${browserInstances.trialUsedMs}, ${browserInstances.trialUsedS} * 1000) + ${trialMillis} >= ${TRIAL.runningSeconds * 1000} THEN 'ended' ELSE 'active' END`, updatedAt: now,
+        db.update(browserInstances).set({ trialUsedMs: sql`min(${browserInstances.trialSeconds} * 1000, max(${browserInstances.trialUsedMs}, ${browserInstances.trialUsedS} * 1000) + ${trialMillis})`,
+          trialUsedS: sql`cast(min(${browserInstances.trialSeconds} * 1000, max(${browserInstances.trialUsedMs}, ${browserInstances.trialUsedS} * 1000) + ${trialMillis}) / 1000 AS integer)`,
+          trialState: sql`CASE WHEN max(${browserInstances.trialUsedMs}, ${browserInstances.trialUsedS} * 1000) + ${trialMillis} >= ${browserInstances.trialSeconds} * 1000 THEN 'ended' ELSE 'active' END`, updatedAt: now,
         }).where(and(eq(browserInstances.id, inst.id), eq(browserInstances.trialState, 'active'), claim)),
         db.update(instanceHealth).set({ meteredAt: now }).where(and(eq(instanceHealth.instanceId, inst.id), claim)),
       ]);
@@ -176,9 +175,9 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
       if (retaining) stmts.push(db.update(browserReservations).set({ reservedMicros: sql`max(0,${browserReservations.reservedMicros}+${actualDebit})`, updatedAt: now }).where(and(eq(browserReservations.instanceId, inst.id), journal, claim)));
       stmts.push(db.update(balanceTransactions).set({ appliedAt: now }).where(and(eq(balanceTransactions.reference, reference), isNull(balanceTransactions.appliedAt), claim)));
     }
-    if (trialMillis > 0) stmts.push(db.update(browserInstances).set({ trialUsedMs: sql`min(${TRIAL.runningSeconds * 1000},max(${browserInstances.trialUsedMs},${browserInstances.trialUsedS}*1000)+${trialMillis})`,
-      trialUsedS: sql`cast(min(${TRIAL.runningSeconds * 1000},max(${browserInstances.trialUsedMs},${browserInstances.trialUsedS}*1000)+${trialMillis})/1000 AS integer)`,
-      trialState: sql`CASE WHEN max(${browserInstances.trialUsedMs},${browserInstances.trialUsedS}*1000)+${trialMillis}>=${TRIAL.runningSeconds * 1000} THEN 'ended' ELSE 'active' END`, updatedAt: now,
+    if (trialMillis > 0) stmts.push(db.update(browserInstances).set({ trialUsedMs: sql`min(${browserInstances.trialSeconds} * 1000,max(${browserInstances.trialUsedMs},${browserInstances.trialUsedS}*1000)+${trialMillis})`,
+      trialUsedS: sql`cast(min(${browserInstances.trialSeconds} * 1000,max(${browserInstances.trialUsedMs},${browserInstances.trialUsedS}*1000)+${trialMillis})/1000 AS integer)`,
+      trialState: sql`CASE WHEN max(${browserInstances.trialUsedMs},${browserInstances.trialUsedS}*1000)+${trialMillis}>=${browserInstances.trialSeconds} * 1000 THEN 'ended' ELSE 'active' END`, updatedAt: now,
     }).where(and(eq(browserInstances.id,inst.id),eq(browserInstances.trialState,'active'),claim)));
     stmts.push(db.update(instanceHealth).set({ baseMeteredAt: now, meteredAt: running ? now : null, pendingComputeMs: 0, transitionMs: 0, ...(tx !== null ? { netTxBilledBytes: tx } : {}) })
       .where(and(eq(instanceHealth.instanceId, inst.id), claim)).returning({ id: instanceHealth.instanceId }));
@@ -213,7 +212,7 @@ async function enforce(deps: EngineDeps, prepaid: boolean, now: Date): Promise<n
       const access = await prepaidAccess(db, userId, inst.id, now);
       if (!reason && access.reason === 'trial') {
         reason = 'trial';
-        await db.update(browserInstances).set({ trialState: 'ended', trialUsedS: TRIAL.runningSeconds, trialUsedMs: TRIAL.runningSeconds * 1000, updatedAt: now }).where(and(eq(browserInstances.id, inst.id), eq(browserInstances.trialState, 'active')));
+        await db.update(browserInstances).set({ trialState: 'ended', trialUsedS: inst.trialSeconds, trialUsedMs: inst.trialSeconds * 1000, updatedAt: now }).where(and(eq(browserInstances.id, inst.id), eq(browserInstances.trialState, 'active')));
       }
       if (!reason && prepaid && access.reason === 'balance') reason = 'balance';
       if (!reason) continue;

@@ -1,4 +1,4 @@
-import { IDLE_TIMEOUT_OPTIONS_S, NEVER_SLEEP_TIMEOUT_S } from '@cloudbrowser/contracts';
+import { IDLE_TIMEOUT_OPTIONS_S, NEVER_SLEEP_TIMEOUT_S, TRIAL } from '@cloudbrowser/contracts';
 import { Button, Input, Label, Select, useToast } from '@cloudbrowser/ui';
 import { Trash2 } from 'lucide-react';
 import { useState } from 'react';
@@ -19,6 +19,10 @@ export function LimitsPage() {
   const remove = useAdminAction((c: Cap) => del('/caps', { scope: c.scope, metric: c.metric }));
   const perUser = caps.data?.find((c) => c.scope === 'user:default' && c.metric === 'instances')?.limit;
   const [perUserDraft, setPerUserDraft] = useState<string | null>(null);
+  // Without a row the api uses the default (30 minutes).
+  const trialMinutes = caps.data?.find((c) => c.scope === 'user:default' && c.metric === 'trial_minutes')?.limit ?? TRIAL.runningSeconds / 60;
+  const [trialDraft, setTrialDraft] = useState<string | null>(null);
+  const trialValid = trialDraft !== null && Number.isInteger(Number(trialDraft)) && Number(trialDraft) >= 1 && Number(trialDraft) <= TRIAL.maxMinutes;
   const neverSleep = caps.data?.find((c) => c.scope === 'user:default' && c.metric === 'never_sleep')?.limit === 1;
   // Without a row the api allows up to an hour.
   const idleMax = caps.data?.find((c) => c.scope === 'user:default' && c.metric === 'idle_timeout_max_s')?.limit ?? 3600;
@@ -45,6 +49,32 @@ export function LimitsPage() {
           </Button>
         </form>
         <p className="mt-2 text-xs text-muted">{t('limits.perUserHelp')}</p>
+      </section>
+      <section className="max-w-3xl rounded-[var(--radius-card)] border border-border p-4" data-testid="trial-minutes-setting">
+        <form
+          className="flex flex-wrap items-end gap-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!trialValid) return;
+            save.mutate({ scope: 'user:default', metric: 'trial_minutes', limit: Number(trialDraft) }, { onSuccess: () => { setTrialDraft(null); toast(t('common.saved')); }, onError: (err) => toast(errorText(err), 'error') });
+          }}
+        >
+          <div>
+            <Label htmlFor="trial-minutes">{t('limits.trialMinutes')}</Label>
+            <Input id="trial-minutes" type="number" min={1} max={TRIAL.maxMinutes} step={1} value={trialDraft ?? trialMinutes} onChange={(e) => setTrialDraft(e.target.value)} className="w-28" />
+          </div>
+          <div className="flex gap-1 pb-0.5">
+            {[10, 30, 60].map((m) => (
+              <Button key={m} type="button" size="sm" variant={Number(trialDraft ?? trialMinutes) === m ? 'secondary' : 'ghost'} onClick={() => setTrialDraft(String(m))}>
+                {t('limits.minutes', { n: m })}
+              </Button>
+            ))}
+          </div>
+          <Button type="submit" variant="primary" disabled={!trialValid || Number(trialDraft) === trialMinutes || save.isPending}>
+            {t('common.save')}
+          </Button>
+        </form>
+        <p className="mt-2 text-xs text-muted">{t('limits.trialMinutesHelp', { max: TRIAL.maxMinutes })}</p>
       </section>
       <section className="max-w-3xl rounded-[var(--radius-control)] border border-border p-4" data-testid="idle-max-setting">
         <div className="flex flex-wrap items-end gap-3">

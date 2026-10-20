@@ -14,7 +14,7 @@ import {
   RedirectResult,
   RegionPricing,
 } from '@cloudbrowser/contracts';
-import { accountRunway, newId, pricingSettings, schema } from '@cloudbrowser/db';
+import { accountRunway, newId, pricingSettings, schema, trialMinutes } from '@cloudbrowser/db';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { creemFrom, type Creem } from '../billing/creem.js';
@@ -102,7 +102,7 @@ billingRoute.openapi(
         // The free trial is offered only where usage is paid (not during the free pilot), once.
         eligible: (await entitlementsFor(db, user.id)).billing === 'prepaid' && !account.trialUsedAt && !account.frozenAt,
         regionId: TRIAL.regionId,
-        minutes: TRIAL.runningSeconds / 60,
+        minutes: await trialMinutes(db),
         storageGb: TRIAL.storageGb,
         keptDays: TRIAL.keptDays,
       },

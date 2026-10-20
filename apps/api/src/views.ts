@@ -1,4 +1,4 @@
-import { StopReason, TRIAL, type Instance, type Operation } from '@cloudbrowser/contracts';
+import { StopReason, type Instance, type Operation } from '@cloudbrowser/contracts';
 import { schema, type Db } from '@cloudbrowser/db';
 import { and, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 
@@ -84,7 +84,7 @@ export async function toInstances(db: Db, rows: InstanceRow[]): Promise<Instance
       trial: r.trialState
         ? {
             state: r.trialState as NonNullable<Instance['trial']>['state'],
-            secondsLeft: r.trialState === 'active' ? Math.ceil(Math.max(0, TRIAL.runningSeconds * 1000 - Math.max(r.trialUsedMs, r.trialUsedS * 1000)) / 1000) : 0,
+            secondsLeft: r.trialState === 'active' ? Math.ceil(Math.max(0, r.trialSeconds * 1000 - Math.max(r.trialUsedMs, r.trialUsedS * 1000)) / 1000) : 0,
             reclaimAt: r.trialState === 'converted' ? null : iso(r.trialReclaimAt),
           }
         : null,

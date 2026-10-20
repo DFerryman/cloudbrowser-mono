@@ -1,4 +1,5 @@
-import { eq, inArray } from 'drizzle-orm';
+import { TRIAL } from '@cloudbrowser/contracts';
+import { and, eq, inArray } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import * as schema from './schema.js';
 
@@ -15,6 +16,13 @@ export async function userCaps(db: Db, userId: string): Promise<Map<string, numb
   const out = new Map<string, number>();
   for (const scope of scopes) for (const r of rows) if (r.scope === scope) out.set(r.metric, r.limit);
   return out;
+}
+
+/** The free trial's running time in minutes (operator cap user:default / trial_minutes). */
+export async function trialMinutes(db: Db): Promise<number> {
+  const [row] = await db.select().from(schema.caps).where(and(eq(schema.caps.scope, 'user:default'), eq(schema.caps.metric, 'trial_minutes')));
+  const minutes = row?.limit ?? TRIAL.runningSeconds / 60;
+  return Math.min(TRIAL.maxMinutes, Math.max(1, minutes));
 }
 
 /**

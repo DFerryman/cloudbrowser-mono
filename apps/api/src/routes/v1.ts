@@ -26,7 +26,7 @@ import {
 } from '@cloudbrowser/contracts';
 import { turnIceServers } from '../turn.js';
 import { callerLocation, regionViews } from '../availability.js';
-import { awsInventory, billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, sha256Hex, settleRunningStatements } from '@cloudbrowser/db';
+import { awsInventory, billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, sha256Hex, settleRunningStatements, trialMinutes } from '@cloudbrowser/db';
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import type { AppEnv } from '../env.js';
 import { admitCreate, admitInstanceSpend, admitSpend, admitStart, claimTrial, entitlementsFor, isTrial, regionAcceptingNew, trialSecondsLeft, usage } from '../limits.js';
@@ -210,7 +210,7 @@ v1.openapi(
               storageGb,
               backupsEnabled: false,
               idleTimeoutS: trial ? TRIAL.idleTimeoutS : DEFAULT_IDLE_TIMEOUT_S,
-              ...(trial ? { trialState: 'active' } : {}),
+              ...(trial ? { trialState: 'active', trialSeconds: (await trialMinutes(db)) * 60 } : {}),
               screen,
               fingerprint: { timezone: info.timezone, screen, chromeMajor: null },
               createdAt: now,

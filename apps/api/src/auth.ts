@@ -8,7 +8,10 @@ import { sendSignInCode } from './email.js';
 import type { Env } from './env.js';
 import { twoFactorGuard, twoFactorPlugin } from './two-factor.js';
 
+/** Sign-up is open unless the operator turns on `invite_only`; then only invited addresses may sign in. */
 async function isInvited(db: Db, email: string) {
+  const [flag] = await db.select().from(schema.controlFlags).where(eq(schema.controlFlags.key, 'invite_only'));
+  if (flag?.value !== 'true') return true;
   const [row] = await db.select().from(schema.invites).where(eq(schema.invites.email, email.trim().toLowerCase()));
   return !!row;
 }
@@ -20,8 +23,9 @@ export function relyingParty(env: Env) {
 }
 
 /**
- * Better Auth with email one-time codes (page 1, "Auth"). The pilot is invite-only, so codes are
- * only sent to, and accounts only created for, addresses in the `invites` table. Signed-in users
+ * Better Auth with email one-time codes (page 1, "Auth"). Anyone may sign up; while the operator
+ * switch `invite_only` is on, codes are only sent to, and accounts only created for, addresses in
+ * the `invites` table. Signed-in users
  * can add passkeys and turn on two-factor sign-in with an authenticator app (two-factor.ts).
  * OAuth comes later.
  */
