@@ -1,6 +1,7 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "cloudbrowser",
+  "workers_dev": true,
   // Keep every public hostname in source control; www is canonicalized by the
   // zone redirect recorded in deploy/cloudflare-www-redirect.json.
   "routes": [
