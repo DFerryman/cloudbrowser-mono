@@ -57,18 +57,17 @@ export function SidePanel({
   return (
     <D.Root open={open} onOpenChange={onOpenChange}>
       <D.Portal container={container}>
-        <D.Overlay className="fixed inset-0 z-40 bg-black/30 backdrop-blur-[2px] [animation:cb-fade_150ms_var(--ease-out)]" />
+        <D.Overlay className="fixed inset-0 z-40 bg-black/40 [animation:cb-fade_150ms_var(--ease-out)]" />
         <D.Content
           style={desktop ? { width: Math.min(width, max) } : undefined}
           className={cn(
-            'fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-border-strong bg-bg shadow-[-24px_0_64px_-24px_rgb(0_0_0/0.35)] outline-none',
+            'fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-border bg-bg shadow-float outline-none',
             'pb-[env(safe-area-inset-bottom)] [animation:cb-panel_220ms_var(--ease-out)]',
           )}
         >
           <div className="relative shrink-0 overflow-hidden border-b border-border px-5 pt-5 pb-4 pr-14 sm:px-7">
-            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(120%_140%_at_0%_0%,color-mix(in_oklab,var(--color-indigo)_14%,transparent),transparent_60%),radial-gradient(90%_120%_at_100%_0%,color-mix(in_oklab,var(--color-violet)_10%,transparent),transparent_55%)]" aria-hidden />
             <div className="relative flex items-center gap-3">
-              {icon ? <span className="grid size-9 shrink-0 place-items-center bg-indigo text-white [&_svg]:size-[18px]">{icon}</span> : null}
+              {icon ? <span className="grid size-9 shrink-0 place-items-center border border-border bg-surface text-fg [&_svg]:size-4">{icon}</span> : null}
               <div className="min-w-0">
                 <D.Title className="truncate text-lg font-semibold tracking-tight">{title}</D.Title>
                 {description ? <D.Description className="truncate text-xs text-muted">{description}</D.Description> : <D.Description className="sr-only">{title}</D.Description>}

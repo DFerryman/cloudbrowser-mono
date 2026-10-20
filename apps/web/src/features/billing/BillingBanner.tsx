@@ -31,13 +31,13 @@ export function BillingBanner() {
       role="status"
       className={
         urgent
-          ? 'mb-4 rounded-[var(--radius-control)] border border-error/40 bg-error/10 px-3 py-2 text-sm'
-          : 'mb-4 rounded-[var(--radius-control)] border border-border bg-surface-2 px-3 py-2 text-sm'
+          ? 'mb-6 border-l-2 border-error bg-error/5 px-4 py-3 text-sm'
+          : 'mb-6 border-l-2 border-fg bg-surface px-4 py-3 text-sm'
       }
     >
       {message}{' '}
       {b.frozen ? null : (
-        <Link to="/billing" className="font-medium text-accent hover:underline">
+        <Link to="/billing" className="font-medium whitespace-nowrap text-accent underline-offset-4 hover:underline">
           {t('banner.manage')}
         </Link>
       )}

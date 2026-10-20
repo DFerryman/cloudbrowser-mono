@@ -1,5 +1,5 @@
 import { HOURS_PER_MONTH, USAGE_UNITS, UsageItem } from '@cloudbrowser/contracts';
-import { Card, Hint, Pagination, Section, Select, Skeleton, usePaged } from '@cloudbrowser/ui';
+import { Card, Eyebrow, Hint, Pagination, Section, Select, Skeleton, usePaged } from '@cloudbrowser/ui';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
@@ -30,10 +30,10 @@ export function UsagePage() {
   return (
     <div className="space-y-4">
       <div className="grid gap-4 lg:grid-cols-3">
-        <Card className="p-5">
-          <h2 className="text-base font-semibold">{monthLabel(month, locale)}</h2>
-          <p className="mt-2 text-3xl font-semibold tabular-nums">{u ? m(u.totalMicros) : '…'}</p>
-          <div className="mt-3 w-48"><Select aria-label={t('usage.monthLabel')} value={month} onChange={(e) => setMonth(e.target.value)}>
+        <Card className="p-5 md:p-6">
+          <Eyebrow as="h2">{monthLabel(month, locale)}</Eyebrow>
+          <p className="mt-4 text-[36px] leading-none font-semibold tracking-[-0.03em] tabular-nums">{u ? m(u.totalMicros) : '…'}</p>
+          <div className="mt-6 w-48"><Select aria-label={t('usage.monthLabel')} value={month} onChange={(e) => setMonth(e.target.value)}>
             {recentMonths().map((mo) => (
               <option key={mo} value={mo}>
                 {monthLabel(mo, locale)}
@@ -41,8 +41,8 @@ export function UsagePage() {
             ))}
           </Select></div>
         </Card>
-        <Card className="p-5 lg:col-span-2">
-          <h2 className="text-base font-semibold">{t('usage.ratesTitle')}</h2>
+        <Card className="p-5 md:p-6 lg:col-span-2">
+          <Eyebrow as="h2">{t('usage.ratesTitle')}</Eyebrow>
           {!u ? (
             <Skeleton className="mt-3 h-20" />
           ) : trial ? (
@@ -71,19 +71,19 @@ export function UsagePage() {
           <p className="text-sm text-muted">{t('usage.none')}</p>
         ) : (
           <table className="w-full text-sm">
-            <thead className="text-left text-xs text-muted">
+            <thead className="text-left text-[11px] tracking-[0.1em] text-subtle uppercase">
               <tr className="border-b border-border">
-                <th className="py-2 pr-3 font-medium">{t('usage.col.item')}</th>
-                <th className="py-2 pr-3 text-right font-medium">{t('usage.col.quantity')}</th>
-                <th className="py-2 text-right font-medium">{t('usage.col.amount')}</th>
+                <th className="py-2.5 pr-3 font-semibold">{t('usage.col.item')}</th>
+                <th className="py-2.5 pr-3 text-right font-semibold">{t('usage.col.quantity')}</th>
+                <th className="py-2.5 text-right font-semibold">{t('usage.col.amount')}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
               {u.items.filter((row) => row.quantity > 0 || row.amountMicros !== 0).map((row) => (
                 <tr key={row.item}>
-                  <td className="py-2 pr-3">{t(`billing.item.${row.item}`)}</td>
-                  <td className="py-2 pr-3 text-right tabular-nums text-muted">{t(`usage.unit.${USAGE_UNITS[row.item]}`, { n: quantity(row.quantity, locale) })}</td>
-                  <td className="py-2 text-right tabular-nums">{m(row.amountMicros)}</td>
+                  <td className="py-3 pr-3">{t(`billing.item.${row.item}`)}</td>
+                  <td className="py-3 pr-3 text-right tabular-nums text-muted">{t(`usage.unit.${USAGE_UNITS[row.item]}`, { n: quantity(row.quantity, locale) })}</td>
+                  <td className="py-3 text-right tabular-nums">{m(row.amountMicros)}</td>
                 </tr>
               ))}
             </tbody>
@@ -95,27 +95,27 @@ export function UsagePage() {
         <Section title={t('usage.byDay')}>
           <div>
             <table className="w-full text-sm">
-              <thead className="text-left text-xs text-muted">
+              <thead className="text-left text-[11px] tracking-[0.1em] text-subtle uppercase">
                 <tr className="border-b border-border">
-                  <th className="py-2 pr-3 font-medium">{t('usage.col.day')}</th>
+                  <th className="py-2.5 pr-3 font-semibold">{t('usage.col.day')}</th>
                   {items.map((item) => (
-                    <th key={item} className="hidden py-2 pr-3 text-right font-medium sm:table-cell">
+                    <th key={item} className="hidden py-2.5 pr-3 text-right font-semibold sm:table-cell">
                       {t(`billing.item.${item}`)}
                     </th>
                   ))}
-                  <th className="py-2 text-right font-medium">{t('usage.col.amount')}</th>
+                  <th className="py-2.5 text-right font-semibold">{t('usage.col.amount')}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {days.rows.map((d) => (
                   <tr key={d.day}>
-                    <td className="py-2 pr-3 whitespace-nowrap">{new Date(`${d.day}T00:00:00Z`).toLocaleDateString(locale, { timeZone: 'UTC' })}</td>
+                    <td className="py-3 pr-3 whitespace-nowrap">{new Date(`${d.day}T00:00:00Z`).toLocaleDateString(locale, { timeZone: 'UTC' })}</td>
                     {items.map((item) => (
-                      <td key={item} className="hidden py-2 pr-3 text-right tabular-nums text-muted sm:table-cell">
+                      <td key={item} className="hidden py-3 pr-3 text-right tabular-nums text-muted sm:table-cell">
                         {m(d.byItem[item])}
                       </td>
                     ))}
-                    <td className="py-2 text-right tabular-nums">{m(d.totalMicros)}</td>
+                    <td className="py-3 text-right tabular-nums">{m(d.totalMicros)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -126,7 +126,7 @@ export function UsagePage() {
       ) : null}
 
       <p className="text-sm">
-        <Link to="/billing" className="text-accent hover:underline">
+        <Link to="/billing" className="text-accent underline-offset-4 hover:underline">
           {t('usage.accountLink')}
         </Link>
       </p>

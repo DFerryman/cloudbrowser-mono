@@ -28,7 +28,7 @@ export function StatusPage() {
         {status.isPending ? (
           <Skeleton className="h-20" />
         ) : (
-          <div role="status" className={cn('flex items-center gap-4 border border-l-4 border-border px-6 py-6', LOOK[overall].banner)}>
+          <div role="status" className={cn('flex items-center gap-4 border border-l-2 border-border px-6 py-6', LOOK[overall].banner)}>
             <Overall className={cn('size-7 shrink-0', LOOK[overall].color)} aria-hidden />
             <div>
               <p className="text-xl font-semibold tracking-tight">{status.isError ? t('status.unreachable') : t(`status.all.${overall}`)}</p>
@@ -39,16 +39,16 @@ export function StatusPage() {
         {s?.creationPaused ? <p className="border-l-2 border-starting bg-surface px-4 py-3 text-sm">{t('status.paused')}</p> : null}
         {s ? (
           <div className="grid gap-4 md:grid-cols-2">
-            <Card className="p-5">
-              <h2 className="text-[15px] font-semibold">{t('status.components')}</h2>
+            <Card className="p-5 md:p-6">
+              <h2 className="text-[15px] font-semibold tracking-tight">{t('status.components')}</h2>
               <ul className="mt-3 divide-y divide-border">
                 {s.components.map((c) => (
                   <Row key={c.id} label={t(`status.component.${c.id}`)} status={c.status} />
                 ))}
               </ul>
             </Card>
-            <Card className="p-5">
-              <h2 className="text-[15px] font-semibold">{t('status.regions')}</h2>
+            <Card className="p-5 md:p-6">
+              <h2 className="text-[15px] font-semibold tracking-tight">{t('status.regions')}</h2>
               <ul className="mt-3 divide-y divide-border">
                 {s.regions.map((r) => (
                   <Row

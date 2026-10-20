@@ -1,5 +1,5 @@
 import { REGION_AREAS, browserEstimate, type PublicPricing, type RegionId } from '@cloudbrowser/contracts';
-import { Button, Card, cn, Eyebrow, Hint, Menu, MenuItem, MenuLabel, Skeleton } from '@cloudbrowser/ui';
+import { Button, Card, cn, CountryTag, Eyebrow, Hint, Menu, MenuItem, MenuLabel, Skeleton } from '@cloudbrowser/ui';
 import { ArrowRight, Check, ChevronDown, ChevronsUpDown, Gift, MapPin, Minus, Plus } from 'lucide-react';
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router';
@@ -7,7 +7,6 @@ import { regionPlace } from '../features/instances/region-names.js';
 import type { MessageKey } from '../messages/en.js';
 import { useI18n } from '../lib/i18n.js';
 import { money } from '../lib/money.js';
-import { TONE, toneFor } from '../lib/tones.js';
 import { usePublicPricing, useSignedIn } from './hooks.js';
 import { container, PublicHero } from './PublicShell.js';
 
@@ -66,11 +65,11 @@ export function PricingPage() {
 
       <section className="border-y border-border bg-surface py-16">
         <div className={container}>
-          <h2 className="text-2xl font-semibold tracking-tight md:text-[40px] md:leading-tight">{t('pricing.how')}</h2>
+          <h2 className="text-[28px] leading-tight font-semibold tracking-[-0.03em] md:text-[40px]">{t('pricing.how')}</h2>
           <ol className="mt-10 grid gap-8 sm:grid-cols-2 lg:grid-cols-4">
             {([1, 2, 3, 4] as const).map((n) => (
-              <li key={n} className="border-t-2 border-fg pt-5">
-                <span className="font-mono text-sm font-medium">{String(n).padStart(2, '0')}</span>
+              <li key={n} className="border-t border-fg pt-5">
+                <span className="font-mono text-sm font-medium text-subtle">{String(n).padStart(2, '0')}</span>
                 <h3 className="mt-4 text-base font-semibold">{t(`pricing.how.${n}.title`)}</h3>
                 <p className="mt-1 text-sm leading-relaxed text-muted">{t(`pricing.how.${n}.body`, { days: pricing.data?.retentionDays ?? 7 })}</p>
               </li>
@@ -79,8 +78,8 @@ export function PricingPage() {
           <div className="mt-8 flex flex-col gap-2 text-xs text-subtle">
             {pricing.data ? <p>{t('pricing.minBalance', { amount: m(pricing.data.minBalanceMicros) })}</p> : null}
             <p>{t('pricing.source')}</p>
-            <Link to="/docs/billing" className="inline-flex items-center gap-1 font-medium text-accent hover:underline">
-              {t('pricing.more')} <ArrowRight className="size-3.5" />
+            <Link to="/docs/billing" className="group inline-flex items-center gap-1 font-medium text-accent underline-offset-4 hover:underline">
+              {t('pricing.more')} <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
             </Link>
           </div>
         </div>
@@ -88,7 +87,7 @@ export function PricingPage() {
 
       {pricing.data ? (
         <section className={`${container} pt-16`}>
-          <Card className="flex flex-col gap-4 border-fg p-6 sm:flex-row sm:items-center sm:justify-between md:p-8">
+          <Card className="flex flex-col gap-4 border-l-2 border-l-fg p-6 sm:flex-row sm:items-center sm:justify-between md:p-8">
             <div className="flex gap-3">
               <Gift className="mt-0.5 size-5 shrink-0" aria-hidden />
               <div>
@@ -121,13 +120,12 @@ function RegionCard({ region }: { region: RegionPrice }) {
     { label: t('pricing.transfer'), hint: t('pricing.transferHint'), value: m(region.rates.transfer), unit: t('pricing.unit.gb') },
   ];
   return (
-    <Card className="relative overflow-hidden border-border-strong">
-      <span className="absolute inset-x-0 top-0 h-[3px] bg-gradient-to-r from-indigo via-violet to-teal" aria-hidden />
+    <Card className="relative overflow-hidden">
       <div className="grid grid-cols-2 md:grid-cols-[1.4fr_1fr_1fr]">
         {cells.map((c, n) => (
           <div key={c.label} className={cn('p-4 md:border-l md:p-8 md:first:border-l-0', n === 0 ? 'col-span-2 border-b md:col-span-1 md:border-b-0' : 'border-l first-of-type:border-l-0', n === 1 && 'border-l-0')}>
-            <Eyebrow as="h2" className={cn(c.strong && 'text-indigo')}>{c.label}</Eyebrow>
-            <p className={cn('mt-3 font-semibold tracking-tight tabular-nums md:mt-4', c.strong ? 'text-[40px] leading-none md:text-[56px]' : 'text-[22px] leading-none md:text-[28px]')}>
+            <Eyebrow as="h2" className={cn(c.strong && 'text-fg')}>{c.label}</Eyebrow>
+            <p className={cn('mt-3 font-semibold tracking-[-0.03em] tabular-nums md:mt-4', c.strong ? 'text-[40px] leading-none md:text-[56px]' : 'text-[22px] leading-none md:text-[28px]')}>
               {c.value} <span className="text-xs font-normal tracking-normal text-subtle md:text-sm">{c.unit}</span>
             </p>
             <Hint className={cn('mt-2 md:mt-3', !c.strong && 'hidden sm:block')}>{c.hint}</Hint>
@@ -159,16 +157,16 @@ function UnitRates({ region, model }: { region: RegionPrice; model: PublicPricin
   ];
   return (
     <Card className="min-w-0 p-5 md:p-6" data-testid="pricing-model">
-      <h2 className="text-base font-semibold">{t('pricing.model')}</h2>
+      <h2 className="text-[15px] font-semibold tracking-tight">{t('pricing.model')}</h2>
       <p className="mt-1 text-sm text-muted">{t('pricing.modelIntro')}</p>
       <div className="mt-3">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-left text-xs text-subtle">
-              <th className="py-2 pr-3 font-medium">{t('pricing.model.item')}</th>
-              <th className="hidden py-2 pr-3 text-right font-medium sm:table-cell">{t('pricing.model.cost')}</th>
-              <th className="hidden py-2 pr-3 text-right font-medium sm:table-cell">{t('pricing.model.markup')}</th>
-              <th className="py-2 text-right font-medium">{t('pricing.model.price')}</th>
+            <tr className="border-b border-border text-left text-[11px] tracking-[0.1em] text-subtle uppercase">
+              <th className="py-2.5 pr-3 font-semibold">{t('pricing.model.item')}</th>
+              <th className="hidden py-2.5 pr-3 text-right font-semibold sm:table-cell">{t('pricing.model.cost')}</th>
+              <th className="hidden py-2.5 pr-3 text-right font-semibold sm:table-cell">{t('pricing.model.markup')}</th>
+              <th className="py-2.5 text-right font-semibold">{t('pricing.model.price')}</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
@@ -208,10 +206,10 @@ function RegionMenu({ groups, value, onChange }: { groups: (readonly [string | n
         align="start"
         className="w-[var(--radix-dropdown-menu-trigger-width)] max-h-[min(420px,var(--radix-dropdown-menu-content-available-height))]"
         trigger={
-          <button type="button" className="flex h-12 w-full items-center gap-3 border border-border-strong bg-bg px-3 text-left transition-colors hover:border-fg/60 focus-visible:border-fg data-[state=open]:border-fg">
+          <button type="button" className="flex h-12 w-full items-center gap-3 border border-border-strong bg-bg px-3 text-left transition-colors hover:border-fg/40 focus-visible:border-fg data-[state=open]:border-fg">
             {value ? (
               <>
-                <span className={cn('grid size-7 shrink-0 place-items-center font-mono text-[11px] font-semibold text-white', TONE[toneFor(value.regionId)].bg)}>{value.country}</span>
+                <CountryTag code={value.country} size="sm" />
                 <span className="min-w-0 flex-1 truncate text-sm font-medium">{regionPlace(value, locale)}</span>
                 <span className="shrink-0 text-xs text-muted tabular-nums">{hourly(value)}</span>
               </>
@@ -229,10 +227,10 @@ function RegionMenu({ groups, value, onChange }: { groups: (readonly [string | n
               const ok = supported(r);
               return (
                 <MenuItem key={r.regionId} disabled={!ok} onSelect={() => onChange(r.regionId)}>
-                  <span className={cn('w-7 shrink-0 font-mono text-[11px] font-medium', ok ? TONE[toneFor(r.regionId)].text : 'text-subtle')}>{r.country}</span>
+                  <span className={cn('w-7 shrink-0 font-mono text-[11px] font-medium', ok ? 'text-muted' : 'text-subtle')}>{r.country}</span>
                   <span className={cn('min-w-0 flex-1 truncate', !ok && 'text-subtle')}>{regionPlace(r, locale)}</span>
                   <span className="shrink-0 text-xs text-muted tabular-nums">{ok ? hourly(r) : t('pricing.regionUnsupported')}</span>
-                  {value?.regionId === r.regionId ? <Check className="text-indigo" aria-hidden /> : <span className="w-4" />}
+                  {value?.regionId === r.regionId ? <Check className="text-fg" aria-hidden /> : <span className="w-4" />}
                 </MenuItem>
               );
             })}
@@ -267,14 +265,14 @@ function Estimator({ region }: { region: RegionPrice }) {
   const transfer = region.rates!.transfer * GB_PER_HOUR * (watching / 100) * hours * days * count;
   const total = running + kept + transfer;
   const parts = [
-    { key: 'running', label: t('pricing.part.running'), value: running, tone: 'indigo' as const },
-    { key: 'kept', label: t('pricing.part.kept'), value: kept, tone: 'violet' as const },
-    { key: 'transfer', label: t('pricing.part.transfer'), value: transfer, tone: 'teal' as const },
+    { key: 'running', label: t('pricing.part.running'), value: running, color: 'bg-chart-1' },
+    { key: 'kept', label: t('pricing.part.kept'), value: kept, color: 'bg-chart-2' },
+    { key: 'transfer', label: t('pricing.part.transfer'), value: transfer, color: 'bg-chart-3' },
   ];
   const preset = PRESETS.find((p) => p.hours === hours && p.days === days)?.key ?? null;
 
   return (
-    <Card className="overflow-hidden border-border-strong" data-testid="pricing-estimator">
+    <Card className="overflow-hidden" data-testid="pricing-estimator">
       <div className="grid lg:grid-cols-[1.25fr_1fr]">
         <div className="p-5 md:p-8">
           <h2 className="text-lg font-semibold tracking-tight md:text-xl">{t('pricing.estimate')}</h2>
@@ -288,12 +286,12 @@ function Estimator({ region }: { region: RegionPrice }) {
                 aria-checked={preset === p.key}
                 onClick={() => { setHours(p.hours); setDays(p.days); }}
                 className={cn(
-                  'border px-3 py-2.5 text-left transition-colors',
-                  preset === p.key ? 'border-indigo bg-indigo/10' : 'border-border hover:border-border-strong hover:bg-surface',
+                  'border px-3 py-2.5 text-left transition-colors duration-150',
+                  preset === p.key ? 'border-fg bg-fg text-bg' : 'border-border hover:border-border-strong hover:bg-surface',
                 )}
               >
-                <span className={cn('block text-sm font-semibold', preset === p.key && 'text-indigo')}>{t(`pricing.preset.${p.key}`)}</span>
-                <span className="block text-[11px] text-subtle tabular-nums">{t('pricing.presetHint', { hours: p.hours, days: p.days })}</span>
+                <span className="block text-sm font-semibold">{t(`pricing.preset.${p.key}`)}</span>
+                <span className={cn('block text-[11px] tabular-nums', preset === p.key ? 'text-bg/70' : 'text-subtle')}>{t('pricing.presetHint', { hours: p.hours, days: p.days })}</span>
               </button>
             ))}
           </div>
@@ -316,26 +314,25 @@ function Estimator({ region }: { region: RegionPrice }) {
           </div>
         </div>
         <div className="relative flex flex-col justify-between gap-6 overflow-hidden border-t border-border bg-surface p-5 md:p-8 lg:border-t-0 lg:border-l">
-          <div className="pointer-events-none absolute -top-24 -right-24 size-64 bg-indigo/15 blur-3xl" aria-hidden />
           <div className="relative">
             <Eyebrow>{t('pricing.perMonth')}</Eyebrow>
-            <p className="mt-2 text-[44px] font-semibold leading-none tracking-tight tabular-nums md:text-[56px]" aria-live="polite">{m(total)}</p>
+            <p className="mt-3 text-[44px] font-semibold leading-none tracking-[-0.03em] tabular-nums md:text-[56px]" aria-live="polite">{m(total)}</p>
             <p className="mt-2 text-sm text-muted tabular-nums">
               {t('pricing.perDay', { amount: m(days ? total / days : 0) })}
               {count > 1 ? <> · {t('pricing.perBrowser', { amount: m(total / count) })}</> : null}
             </p>
           </div>
           <div className="relative">
-            <div className="flex h-3 w-full overflow-hidden bg-surface-2" aria-hidden>
+            <div className="flex h-2 w-full gap-px overflow-hidden bg-surface-2" aria-hidden>
               {parts.map((p) => (
-                <span key={p.key} className={cn('h-full transition-[width] duration-300 ease-out', TONE[p.tone].bg)} style={{ width: `${total ? (p.value / total) * 100 : 0}%` }} />
+                <span key={p.key} className={cn('h-full transition-[width] duration-300 ease-out', p.color)} style={{ width: `${total ? (p.value / total) * 100 : 0}%` }} />
               ))}
             </div>
             <dl className="mt-4 space-y-2 text-sm">
               {parts.map((p) => (
                 <div key={p.key} className="flex items-center justify-between gap-3">
                   <dt className="flex items-center gap-2 text-muted">
-                    <span className={cn('size-2.5', TONE[p.tone].bg)} aria-hidden /> {p.label}
+                    <span className={cn('size-2', p.color)} aria-hidden /> {p.label}
                   </dt>
                   <dd className="font-medium tabular-nums">{m(p.value)}</dd>
                 </div>
@@ -377,11 +374,11 @@ function Faq() {
   const { t } = useI18n();
   return (
     <section className={`${container} py-16`}>
-      <h2 className="text-xl font-semibold tracking-tight md:text-2xl">{t('pricing.faq')}</h2>
-      <div className="mt-6 divide-y divide-border rounded-[var(--radius-card)] border border-border">
+      <h2 className="text-[22px] font-semibold tracking-[-0.02em] md:text-[28px]">{t('pricing.faq')}</h2>
+      <div className="mt-6 divide-y divide-border border border-border">
         {([1, 2, 3, 4, 5] as const).map((n) => (
-          <details key={n} className="group px-5 py-4">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 font-medium [&::-webkit-details-marker]:hidden">
+          <details key={n} className="group px-5 py-4 transition-colors open:bg-surface md:px-6">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 py-1 font-medium [&::-webkit-details-marker]:hidden">
               {t(`pricing.faq.${n}.q`)}
               <ChevronDown className="size-4 shrink-0 text-muted transition-transform group-open:rotate-180" aria-hidden />
             </summary>
@@ -390,7 +387,7 @@ function Faq() {
               {n === 4 ? (
                 <>
                   {' '}
-                  <Link to="/refunds" className="text-accent hover:underline">
+                  <Link to="/refunds" className="text-accent underline-offset-4 hover:underline">
                     {t('footer.refunds')}
                   </Link>
                 </>

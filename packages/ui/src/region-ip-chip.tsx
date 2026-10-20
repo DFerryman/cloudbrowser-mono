@@ -54,8 +54,8 @@ export function RegionIpChip({
         <span className="italic">{pendingLabel}</span>
       )}
       {ip ? (
-        <button type="button" onClick={copy} aria-label={copyLabel} title={copyLabel} className="p-0.5 hover:bg-surface-2/60">
-          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+        <button type="button" onClick={copy} aria-label={copyLabel} title={copyLabel} className={cn('grid size-6 place-items-center transition-colors', tone === 'dark' ? 'text-zinc-400 hover:bg-white/10 hover:text-zinc-100' : 'text-subtle hover:bg-surface-2 hover:text-fg')}>
+          {copied ? <Check className="size-3.5 text-running" /> : <Copy className="size-3.5" />}
         </button>
       ) : null}
       {dedicatedLabel && ip ? (
@@ -68,6 +68,25 @@ export function RegionIpChip({
           {dedicatedLabel}
         </span>
       ) : null}
+    </span>
+  );
+}
+
+/** A region's country code as a small neutral tag, the same everywhere a region is named. */
+export function CountryTag({ code, size = 'md', muted, className }: { code: string; size?: 'sm' | 'md' | 'lg'; muted?: boolean; className?: string }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        'grid shrink-0 place-items-center border border-border bg-surface font-mono font-semibold tracking-wide',
+        muted ? 'text-subtle' : 'text-fg',
+        size === 'sm' && 'h-5 w-7 text-[10px]',
+        size === 'md' && 'size-8 text-[11px]',
+        size === 'lg' && 'size-10 text-xs',
+        className,
+      )}
+    >
+      {code || '··'}
     </span>
   );
 }

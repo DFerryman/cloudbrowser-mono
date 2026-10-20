@@ -14,7 +14,7 @@ export function Menu({ trigger, children, align = 'end', className }: { trigger:
           sideOffset={4}
           collisionPadding={8}
           className={cn(
-            'z-50 max-h-[var(--radix-dropdown-menu-content-available-height)] min-w-48 overflow-y-auto overscroll-contain border border-border-strong bg-bg py-1 shadow-[0_8px_24px_-12px_rgb(0_0_0/0.25)] [animation:cb-in_150ms_var(--ease-out)]',
+            'z-50 max-h-[var(--radix-dropdown-menu-content-available-height)] min-w-48 overflow-y-auto overscroll-contain border border-border bg-bg p-1 shadow-pop [animation:cb-in_150ms_var(--ease-out)]',
             className,
           )}
         >
@@ -41,8 +41,8 @@ export function MenuItem({
       disabled={disabled}
       onSelect={onSelect}
       className={cn(
-        'flex cursor-default items-center gap-2.5 px-3 py-2 text-sm outline-none select-none data-[disabled]:opacity-40 data-[highlighted]:bg-surface-2 [&_svg]:size-4',
-        danger && 'text-error',
+        'flex cursor-default items-center gap-2.5 px-2.5 py-2 text-sm outline-none select-none transition-colors data-[disabled]:opacity-40 data-[highlighted]:bg-surface-2 [&_svg]:size-4 [&_svg]:shrink-0',
+        danger ? 'text-error data-[highlighted]:bg-error/8' : '[&_svg]:text-subtle data-[highlighted]:[&_svg]:text-fg',
       )}
     >
       {children}
@@ -50,9 +50,9 @@ export function MenuItem({
   );
 }
 
-export const MenuSeparator = () => <M.Separator className="my-1 h-px bg-border" />;
+export const MenuSeparator = () => <M.Separator className="-mx-1 my-1 h-px bg-border" />;
 
 /** A small heading inside a menu, e.g. a continent above its regions. */
 export const MenuLabel = ({ children }: { children: ReactNode }) => (
-  <M.Label className="px-3 pt-2.5 pb-1 text-[11px] font-semibold tracking-[0.12em] text-subtle uppercase">{children}</M.Label>
+  <M.Label className="px-2.5 pt-2.5 pb-1 text-[11px] font-semibold tracking-[0.12em] text-subtle uppercase">{children}</M.Label>
 );

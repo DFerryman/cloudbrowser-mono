@@ -95,7 +95,7 @@ export function SignInPage() {
             <CheckCircle2 className="size-4 shrink-0 text-running" aria-hidden /> {t('auth.signedOut')}
           </p>
         ) : null}
-        <Card className="border-fg p-8">
+        <Card className="p-8 shadow-pop sm:p-10">
           {step === 'second-factor' ? (
             <SecondFactor onSignedIn={enter} onRestart={restart} />
           ) : (
@@ -197,7 +197,7 @@ function SecondFactor({ onSignedIn, onRestart }: { onSignedIn: () => void; onRes
 
   return (
     <form onSubmit={verify}>
-      <span className="mb-4 grid size-10 place-items-center border border-fg" aria-hidden>
+      <span className="mb-5 grid size-10 place-items-center border border-border bg-surface" aria-hidden>
         <ShieldCheck className="size-5" />
       </span>
       <h1 className="text-2xl font-semibold tracking-tight">{t('auth.2fa.title')}</h1>
@@ -242,7 +242,7 @@ function SecondFactor({ onSignedIn, onRestart }: { onSignedIn: () => void; onRes
         </button>
         <button
           type="button"
-          className="font-medium text-accent hover:underline"
+          className="font-medium text-accent underline-offset-4 hover:underline"
           onClick={() => {
             setBackup((b) => !b);
             setCode('');

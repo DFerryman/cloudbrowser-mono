@@ -40,15 +40,23 @@ export function Passkeys() {
 
   return (
     <div>
-      <h3 className="mb-1 text-sm font-medium">{t('passkeys.title')}</h3>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <h3 className="text-sm font-medium">{t('passkeys.title')}</h3>
+          {list.data?.length ? null : <Hint className="mt-1">{t('passkeys.none')}</Hint>}
+        </div>
+        <Button size="sm" className="self-start" disabled={!supported || add.isPending} onClick={() => add.mutate()}>
+          <KeyRound /> {t('passkeys.add')}
+        </Button>
+      </div>
       {list.data?.length ? (
-        <ul className="mb-2 divide-y divide-border text-sm">
+        <ul className="mt-3 divide-y divide-border border-y border-border text-sm">
           {paged.rows.map((p) => (
             <li key={p.id} className="flex items-center justify-between gap-2 py-2">
               <span className="flex min-w-0 items-center gap-2">
                 <KeyRound className="size-4 shrink-0 text-muted" aria-hidden />
                 <span className="truncate">{p.name || t('passkeys.unnamed')}</span>
-                <span className="shrink-0 text-muted">· {new Date(p.createdAt).toLocaleDateString(locale)}</span>
+                <span className="shrink-0 text-subtle">· {new Date(p.createdAt).toLocaleDateString(locale)}</span>
               </span>
               <Button size="icon" variant="ghost" aria-label={t('passkeys.remove')} disabled={remove.isPending} onClick={() => remove.mutate(p.id)}>
                 <Trash2 />
@@ -56,13 +64,8 @@ export function Passkeys() {
             </li>
           ))}
         </ul>
-      ) : (
-        <Hint className="mb-3">{t('passkeys.none')}</Hint>
-      )}
-      <Pagination className="mb-3" page={paged.page} pages={paged.pages} onPage={paged.setPage} labels={pagerLabels} />
-      <Button size="sm" disabled={!supported || add.isPending} onClick={() => add.mutate()}>
-        <KeyRound /> {t('passkeys.add')}
-      </Button>
+      ) : null}
+      <Pagination page={paged.page} pages={paged.pages} onPage={paged.setPage} labels={pagerLabels} />
     </div>
   );
 }

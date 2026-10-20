@@ -6,7 +6,7 @@ export { Dialog } from './dialog.js';
 export { Menu, MenuItem, MenuLabel, MenuSeparator } from './menu.js';
 export { ResizeHandle, useResizableWidth } from './resizable.js';
 export { SidePanel } from './side-panel.js';
-export { RegionIpChip } from './region-ip-chip.js';
+export { CountryTag, RegionIpChip } from './region-ip-chip.js';
 export { StatusBadge, type StatusTone } from './status-badge.js';
 export { ToastProvider, useToast } from './toast.js';
 export { Hint } from './hint.js';

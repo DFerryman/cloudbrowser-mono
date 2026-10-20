@@ -1,6 +1,6 @@
 import { UsageItem, type BillingState, type UsageTotals } from '@cloudbrowser/contracts';
 import { Button, Card, cn, Eyebrow, Hint, Pagination, Section, Select, Skeleton, usePaged, useToast } from '@cloudbrowser/ui';
-import { AlertTriangle, ExternalLink, Gift, Plus } from 'lucide-react';
+import { AlertTriangle, ExternalLink, Gift } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { PageHeader } from '../../app/AppShell.js';
@@ -13,12 +13,13 @@ import { fundedHours, isLowBalance, runwayLabel } from './access.js';
 import { DailyCharges } from './DailyCharges.js';
 import { currentMonth, monthLabel, recentMonths, useAccountUsage, useBilling, useCheckout, usePortal, useTransactions } from './hooks.js';
 
+/** One ramp of the accent, strongest for the largest item, so the breakdown reads as one family. */
 const ITEM_COLOR: Record<UsageItem, string> = {
-  compute: 'bg-indigo',
-  ip: 'bg-teal',
-  storage: 'bg-violet',
-  snapshot: 'bg-sky',
-  transfer: 'bg-amber',
+  compute: 'bg-chart-1',
+  ip: 'bg-chart-2',
+  storage: 'bg-chart-3',
+  snapshot: 'bg-border-strong',
+  transfer: 'bg-chart-4',
 };
 
 /**
@@ -97,8 +98,7 @@ function BalanceCard({ state }: { state: BillingState }) {
   const topUp = (productId: string) => checkout.mutate(productId, { onError: (e) => toast(errorMessage(e), 'error') });
 
   return (
-    <Card id="top-up" className="relative flex scroll-mt-6 flex-col overflow-hidden p-5">
-      <span className="absolute inset-x-0 top-0 h-[3px] bg-gradient-to-r from-teal to-indigo" aria-hidden />
+    <Card id="top-up" className="flex scroll-mt-6 flex-col p-5 md:p-6">
       <div className="flex items-start justify-between gap-3">
         <Eyebrow as="h2">{t('billing.balance')}</Eyebrow>
         {state.enabled ? (
@@ -107,35 +107,35 @@ function BalanceCard({ state }: { state: BillingState }) {
           </Button>
         ) : null}
       </div>
-      <p className={cn('mt-3 text-[44px] leading-none font-semibold tracking-tight tabular-nums', state.balanceMicros < 0 && 'text-error')}>{m(state.balanceMicros)}</p>
-      <dl className="mt-5 grid grid-cols-2 border-t border-border text-sm">
+      <p className={cn('mt-4 text-[44px] leading-none font-semibold tracking-[-0.03em] tabular-nums', state.balanceMicros < 0 && 'text-error')}>{m(state.balanceMicros)}</p>
+      <dl className="mt-6 grid grid-cols-2 border-t border-border text-sm">
         <div className="border-r border-border py-3 pr-3">
-          <dt className="text-xs text-muted">{t('billing.availableBalance')}</dt>
+          <dt className="text-xs text-subtle">{t('billing.availableBalance')}</dt>
           <dd className={cn('mt-0.5 text-base font-semibold tabular-nums', state.availableMicros <= 0 && state.mode === 'prepaid' && !state.trial.eligible && 'text-error')}>{m(state.availableMicros)}</dd>
         </div>
         <div className="py-3 pl-4">
-          <dt className="text-xs text-muted">{t('billing.reservedBalance')}</dt>
+          <dt className="text-xs text-subtle">{t('billing.reservedBalance')}</dt>
           <dd className="mt-0.5 text-base font-semibold tabular-nums">{m(state.reservedMicros)}</dd>
         </div>
       </dl>
-      <Hint className="mt-1 pt-2">
+      <Hint className="border-t border-border pt-3">
         {t('billing.reserveHint')} <DocsLink to="billing#held" />
       </Hint>
 
-      <div className="mt-6">
+      <div className="mt-6 mb-6">
         {!state.enabled ? (
           <p className="text-sm text-muted">{t('billing.unavailable')}</p>
         ) : state.topUps.length === 0 ? (
           <p className="text-sm text-muted">{t('billing.noTopUps')}</p>
         ) : state.topUps.length === 1 ? (
           <Button variant="primary" className="w-full justify-center" disabled={checkout.isPending || state.frozen} onClick={() => topUp(state.topUps[0]!.productId)}>
-            <Plus /> {t('billing.topUp')}
+            {t('billing.topUp')}
           </Button>
         ) : (
           <div className="grid grid-cols-2 gap-2">
             {state.topUps.map((p) => (
               <Button key={p.productId} variant="secondary" className="justify-center tabular-nums" disabled={checkout.isPending || state.frozen} onClick={() => topUp(p.productId)}>
-                <Plus /> {money(cents(p.amountCents), locale)}
+                {money(cents(p.amountCents), locale)}
               </Button>
             ))}
           </div>
@@ -161,7 +161,7 @@ function BalanceCard({ state }: { state: BillingState }) {
         </div>
       ) : null}
 
-      <div className="mt-4 space-y-1 bg-surface p-3 text-sm">
+      <div className="mt-auto space-y-1 border-t border-border pt-4 text-sm">
         <p>{state.burnHourMicros > 0 ? t('billing.burnShort', { amount: m(state.burnHourMicros) }) : t('billing.burnNone')}</p>
         {hours !== null ? (
           <p className="text-muted">
@@ -181,17 +181,17 @@ function ItemBreakdown({ totals }: { totals: UsageTotals }) {
   return (
     <div>
       {totals.totalMicros > 0 ? (
-        <div className="flex h-1.5 overflow-hidden bg-surface-2" aria-hidden>
+        <div className="flex h-2 gap-px overflow-hidden bg-surface-2" aria-hidden>
           {items.map((i) => (
-            <div key={i} className={ITEM_COLOR[i]} style={{ width: `${(totals.byItem[i] / totals.totalMicros) * 100}%` }} />
+            <div key={i} className={cn('transition-[width] duration-500 ease-out', ITEM_COLOR[i])} style={{ width: `${(totals.byItem[i] / totals.totalMicros) * 100}%` }} />
           ))}
         </div>
       ) : null}
-      <dl className="mt-3 grid gap-x-6 gap-y-1.5 sm:grid-cols-2">
+      <dl className="mt-4 grid gap-x-8 gap-y-2 sm:grid-cols-2">
         {items.map((i) => (
           <div key={i} className="flex items-center justify-between gap-3 text-sm">
             <dt className="flex items-center gap-2 text-muted">
-              <span className={cn('size-2.5 rounded-sm', ITEM_COLOR[i])} aria-hidden />
+              <span className={cn('size-2', ITEM_COLOR[i])} aria-hidden />
               {t(`billing.item.${i}`)}
             </dt>
             <dd className="tabular-nums">{money(totals.byItem[i], locale)}</dd>
@@ -207,11 +207,13 @@ function MonthCard({ totals, month, className }: { totals: UsageTotals; month: s
   const usage = useAccountUsage(month);
   const days = usage.data?.byDay ?? [];
   return (
-    <Card className={cn('p-5', className)}>
-      <Eyebrow as="h2">{t('billing.thisMonth')}</Eyebrow>
-      <p className="mt-3 text-[44px] leading-none font-semibold tracking-tight tabular-nums">{money(totals.totalMicros, locale)}</p>
-      <p className="mt-2 text-sm text-muted">{monthLabel(month, locale)}</p>
-      <div className="mt-6">
+    <Card className={cn('p-5 md:p-6', className)}>
+      <div className="flex items-baseline justify-between gap-3">
+        <Eyebrow as="h2">{t('billing.thisMonth')}</Eyebrow>
+        <p className="text-xs text-subtle">{monthLabel(month, locale)}</p>
+      </div>
+      <p className="mt-4 text-[44px] leading-none font-semibold tracking-[-0.03em] tabular-nums">{money(totals.totalMicros, locale)}</p>
+      <div className="mt-8">
         <ItemBreakdown totals={totals} />
       </div>
       <DailyCharges days={days} />
@@ -246,29 +248,29 @@ function UsageByBrowser({ month, setMonth }: { month: string; setMonth: (m: stri
         <>
           <div className="hidden md:block">
             <table className="w-full text-sm">
-              <thead className="text-left text-xs text-muted">
+              <thead className="text-left text-[11px] tracking-[0.1em] text-subtle uppercase">
                 <tr className="border-b border-border">
-                  <th className="py-2 pr-3 font-medium">{t('settings.name')}</th>
+                  <th className="py-2.5 pr-3 font-semibold">{t('settings.name')}</th>
                   {items.map((i) => (
-                    <th key={i} className="py-2 pr-3 text-right font-medium">
+                    <th key={i} className="py-2.5 pr-3 text-right font-semibold">
                       {t(`billing.item.${i}`)}
                     </th>
                   ))}
-                  <th className="py-2 text-right font-medium">{t('usage.col.amount')}</th>
+                  <th className="py-2.5 text-right font-semibold">{t('usage.col.amount')}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {rows.map((r) => (
                   <tr key={r.instanceId}>
-                    <td className="py-2 pr-3">
+                    <td className="py-3 pr-3">
                       <BrowserName {...r} />
                     </td>
                     {items.map((i) => (
-                      <td key={i} className="py-2 pr-3 text-right tabular-nums text-muted">
+                      <td key={i} className="py-3 pr-3 text-right tabular-nums text-muted">
                         {money(r.byItem[i], locale)}
                       </td>
                     ))}
-                    <td className="py-2 text-right font-medium tabular-nums">{money(r.totalMicros, locale)}</td>
+                    <td className="py-3 text-right font-medium tabular-nums">{money(r.totalMicros, locale)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -300,11 +302,11 @@ function BrowserName({ instanceId, name, regionId, deleted }: { instanceId: stri
       {deleted ? (
         <span className="font-medium">{name}</span>
       ) : (
-        <Link to={`/browsers/${instanceId}/usage`} className="font-medium text-accent hover:underline">
+        <Link to={`/browsers/${instanceId}/usage`} className="font-medium underline-offset-4 hover:underline">
           {name}
         </Link>
       )}
-      <span className="text-xs text-muted">
+      <span className="text-xs text-subtle">
         {' '}
         · {region.name}
         {deleted ? ` · ${t('billing.deletedBrowser')}` : ''}
@@ -327,16 +329,16 @@ function Transactions() {
       ) : (
         <ul className={cn('divide-y divide-border text-sm transition-opacity', tx.isPlaceholderData && 'opacity-60')}>
           {tx.rows.map((x) => (
-            <li key={x.id} className="flex items-center justify-between gap-3 py-2">
+            <li key={x.id} className="flex items-center justify-between gap-3 py-3">
               <span className="min-w-0">
                 {t(`billing.tx.${x.kind}`)}
-                <span className="text-muted">
+                <span className="text-subtle">
                   {' '}
                   · {new Date(x.createdAt).toLocaleDateString(locale)}
                   {x.description && x.kind !== 'topup' ? ` · ${x.description}` : ''}
                 </span>
               </span>
-              <span className={cn('shrink-0 tabular-nums', x.amountMicros < 0 ? 'text-error' : 'text-running')}>
+              <span className={cn('shrink-0 font-medium tabular-nums', x.amountMicros < 0 ? 'text-fg' : 'text-running')}>
                 {x.amountMicros > 0 ? '+' : ''}
                 {money(x.amountMicros, locale)}
               </span>

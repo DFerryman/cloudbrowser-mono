@@ -20,8 +20,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         <div
           key={t.id}
           className={cn(
-            'pointer-events-auto border border-l-4 bg-bg px-4 py-3 text-sm shadow-[0_8px_24px_-12px_rgb(0_0_0/0.3)] [animation:cb-in_150ms_var(--ease-out)]',
-            t.tone === 'error' ? 'border-error/40 border-l-error' : 'border-border-strong border-l-fg',
+            'pointer-events-auto border border-l-2 bg-bg px-4 py-3 text-sm shadow-pop [animation:cb-in_150ms_var(--ease-out)]',
+            t.tone === 'error' ? 'border-border border-l-error text-error' : 'border-border border-l-fg',
           )}
         >
           {t.message}

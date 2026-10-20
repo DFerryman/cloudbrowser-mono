@@ -14,17 +14,17 @@ export function DailyCharges({ days }: { days: { day: string; totalMicros: numbe
   const { rows, page, pages, setPage } = usePaged(sorted, PAGE_SIZE.dailyCharges);
   const pagerLabels = usePagerLabels();
   return (
-    <section className="mt-5 min-w-0" aria-labelledby={`${id}-heading`}>
+    <section className="mt-8 min-w-0 border-t border-border pt-6" aria-labelledby={`${id}-heading`}>
       <h3 id={`${id}-heading`} className="text-sm font-medium">{t('billing.dailyCharges')}</h3>
       <p id={`${id}-order`} className="mt-1 text-xs text-subtle">{t('billing.dailyChargesHint')}</p>
       {sorted.length === 0 ? (
         <p className="mt-3 text-sm text-muted">{t('billing.dailyEmpty')}</p>
       ) : (
         <table className="mt-3 w-full table-fixed text-sm" aria-describedby={`${id}-order`}>
-          <thead className="text-xs text-muted">
+          <thead className="text-[11px] tracking-[0.1em] text-subtle uppercase">
             <tr className="border-b border-border">
-              <th scope="col" className="w-1/2 pb-2 pr-3 text-left font-medium">{t('billing.dailyDate')}</th>
-              <th scope="col" className="pb-2 text-right font-medium">{t('billing.dailyCharged')}</th>
+              <th scope="col" className="w-1/2 pb-2.5 pr-3 text-left font-semibold">{t('billing.dailyDate')}</th>
+              <th scope="col" className="pb-2.5 text-right font-semibold">{t('billing.dailyCharged')}</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
@@ -37,7 +37,7 @@ export function DailyCharges({ days }: { days: { day: string; totalMicros: numbe
                   <span className="block [overflow-wrap:anywhere]">{money(day.totalMicros, locale)}</span>
                   {sorted.length > 1 && max > 0 ? (
                     <div className="mt-1 ml-auto h-1 w-20 max-w-full overflow-hidden bg-surface-2" aria-hidden>
-                      <div className="h-full bg-fg/70" style={{ width: `${Math.max(0, day.totalMicros / max * 100)}%` }} />
+                      <div className="h-full bg-chart-1" style={{ width: `${Math.max(0, day.totalMicros / max * 100)}%` }} />
                     </div>
                   ) : null}
                 </td>

@@ -15,8 +15,8 @@ import { regionPlace } from './region-names.js';
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="grid gap-1 border-b border-border/50 py-2.5 last:border-0 sm:grid-cols-[160px_1fr] sm:gap-4">
-      <dt className="text-sm text-muted">{label}</dt>
+    <div className="grid gap-1 border-b border-border py-3 first:pt-0 last:border-0 last:pb-0 sm:grid-cols-[160px_1fr] sm:gap-4">
+      <dt className="text-sm text-subtle">{label}</dt>
       <dd className="min-w-0 text-sm">{children}</dd>
     </div>
   );
@@ -78,7 +78,7 @@ export function SettingsPage() {
             )}
           </Row>
         </dl>
-        <div className="mt-4 flex flex-wrap items-center gap-2">
+        <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-border pt-5">
           <Button
             disabled={verify.isPending || (i.status !== 'running' && i.status !== 'needs_attention')}
             onClick={() => verify.mutate(i.id, { onError: (e) => toast(errorMessage(e), 'error') })}
@@ -131,7 +131,7 @@ export function SettingsPage() {
           {sessions.rows?.length ? (
             <ul className={cn('divide-y divide-border text-sm transition-opacity', sessions.isPlaceholderData && 'opacity-60')}>
               {sessions.rows.map((s) => (
-                <li key={s.id} className="flex flex-wrap justify-between gap-2 py-2">
+                <li key={s.id} className="flex flex-wrap justify-between gap-2 py-2.5 tabular-nums">
                   <span>{fmt(s.startedAt)}</span>
                   <span className="text-muted">
                     {s.country ?? '—'} ·{' '}
@@ -147,7 +147,7 @@ export function SettingsPage() {
         </Section>
       </div>
 
-      <Section title={t('settings.danger')} description={t('settings.deleteBody')} className="border-error/40 lg:col-span-2">
+      <Section title={t('settings.danger')} description={t('settings.deleteBody')} className="border-error/30 lg:col-span-2">
         <DeleteBrowserForm instance={i} onDeleted={() => navigate('/browsers')} />
       </Section>
 

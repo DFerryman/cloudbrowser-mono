@@ -1,7 +1,7 @@
 import { CreateInstanceBody, DEFAULT_REGION, browserEstimate, retentionReserve, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
 import { Button, cn, Hint, Input, Label, SidePanel } from '@cloudbrowser/ui';
 import { DocsLink } from '../../app/DocsLink.js';
-import { AlertCircle, ChevronDown, ChevronRight, Gift, Plus, Wallet } from 'lucide-react';
+import { AlertCircle, ChevronDown, ChevronRight, Gift, Wallet } from 'lucide-react';
 import { useEffect, useId, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
@@ -104,7 +104,6 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
       onOpenChange={(o) => !o && onClose()}
       title={t('create.title')}
       description={t('create.subtitle')}
-      icon={<Plus />}
       storageKey="nevazu.create.width"
       minWidth={460}
       maxWidth={1040}
@@ -134,7 +133,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
     >
       <form id={formId} onSubmit={submit} className="space-y-6">
         {initialInstance?.trial && initialInstance.trial.state !== 'converted' ? (
-          <p className="rounded-[var(--radius-control)] border border-border bg-surface px-3 py-2 text-xs text-muted">{t('create.retryTrial')}</p>
+          <p className="border-l-2 border-fg bg-surface px-3 py-2.5 text-xs text-muted">{t('create.retryTrial')}</p>
         ) : null}
 
         {trialOffer && b ? (
@@ -174,7 +173,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
         <section aria-labelledby={`${formId}-cost`} className="border border-border">
           <button
             type="button"
-            className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-surface"
+            className="group flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-surface"
             aria-expanded={costOpen}
             aria-controls={`${formId}-cost-body`}
             onClick={() => setCostOpen((o) => !o)}
@@ -187,7 +186,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
                 {trial ? t('trial.free') : price?.rates ? t('create.cost.summary', { amount: money(browserEstimate(price.rates, { storageGb: price.defaultStorageGb, rootVolumeGb: price.rootVolumeGb, backups: false }).runningTotalHour, locale) }) : pricing.isError ? t('price.unavailable') : t('common.loading')}
               </span>
             </span>
-            <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-indigo">
+            <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-muted transition-colors group-hover:text-fg">
               {costOpen ? t('create.cost.hide') : t('create.cost.show')}
               <ChevronDown className={cn('size-4 transition-transform duration-200', costOpen && 'rotate-180')} aria-hidden />
             </span>
@@ -217,11 +216,11 @@ function Choice({ name, checked, onChange, icon, title, hint }: { name: string; 
     <label
       className={cn(
         'relative flex cursor-pointer gap-3 border p-3 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent',
-        checked ? 'border-indigo bg-indigo/5' : 'border-border hover:border-border-strong',
+        checked ? 'border-fg bg-surface shadow-[inset_0_0_0_1px_var(--color-fg)]' : 'border-border hover:border-border-strong',
       )}
     >
       <input type="radio" name={name} className="sr-only" checked={checked} onChange={onChange} />
-      <span className={cn('mt-0.5 grid size-7 shrink-0 place-items-center', checked ? 'bg-indigo text-white' : 'bg-surface-2 text-muted')} aria-hidden>
+      <span className={cn('mt-0.5 grid size-7 shrink-0 place-items-center', checked ? 'bg-fg text-bg' : 'bg-surface-2 text-muted')} aria-hidden>
         {icon}
       </span>
       <span className="min-w-0">
@@ -247,7 +246,7 @@ function PaidCost({ pricing, reserve }: { pricing: RegionPricing; reserve: numbe
         <RateRow label={t('create.cost.held')} hint={t('create.cost.heldHint')} value={m(reserve)} />
       </div>
       <Hint className="mt-2">{t('create.chargesStart')}</Hint>
-      <button type="button" className="mt-3 flex items-center gap-1 text-sm font-medium text-accent hover:underline" aria-expanded={details} onClick={() => setDetails((d) => !d)}>
+      <button type="button" className="mt-3 flex items-center gap-1 text-sm font-medium text-accent underline-offset-4 hover:underline" aria-expanded={details} onClick={() => setDetails((d) => !d)}>
         <ChevronRight className={cn('size-4 transition-transform', details && 'rotate-90')} aria-hidden />
         {t('create.cost.details')}
       </button>

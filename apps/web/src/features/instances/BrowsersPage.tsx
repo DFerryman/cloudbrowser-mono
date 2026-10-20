@@ -1,13 +1,12 @@
 import type { Instance } from '@cloudbrowser/contracts';
 import { Button, Card, cn, Menu, MenuItem, Pagination, Skeleton, usePaged } from '@cloudbrowser/ui';
-import { ArrowDownUp, Check, CircleDot, Gauge, LayoutGrid, List, Moon, Plus, Search, Wallet, X } from 'lucide-react';
+import { ArrowDownUp, Check, LayoutGrid, List, Plus, Search, X } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { PageHeader } from '../../app/AppShell.js';
 import { useI18n } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
 import { PAGE_SIZE, usePagerLabels } from '../../lib/paging.js';
-import { TONE, type Tone } from '../../lib/tones.js';
 import type { MessageKey } from '../../messages/en.js';
 import { fundedHours, isLowBalance, runwayLabel } from '../billing/access.js';
 import { useBilling } from '../billing/hooks.js';
@@ -102,7 +101,7 @@ export function BrowsersPage() {
   const paged = usePaged(shown, view === 'list' ? PAGE_SIZE.browsers * 2 : PAGE_SIZE.browsers);
 
   const newButton = (
-    <Button variant="primary" className="bg-gradient-to-r from-indigo to-violet text-white hover:bg-transparent hover:brightness-110" onClick={() => navigate('/browsers/new')}>
+    <Button variant="primary" onClick={() => navigate('/browsers/new')}>
       <Plus /> {t('browsers.new')}
     </Button>
   );
@@ -129,11 +128,11 @@ export function BrowsersPage() {
         <EmptyState action={newButton} />
       ) : (
         <>
-          <div className="mb-5 hidden grid-cols-3 gap-3 sm:grid lg:grid-cols-4">
-            <StatTile tone="teal" icon={CircleDot} label={t('browsers.stat.running')} value={String(counts.running)} note={me.data ? t('browsers.stat.ofMax', { max: me.data.entitlements.maxBrowsers }) : undefined} onClick={() => setFilter(filter === 'running' ? 'all' : 'running')} active={filter === 'running'} />
-            <StatTile tone="sky" icon={Moon} label={t('browsers.stat.sleeping')} value={String(counts.sleeping)} note={t('browsers.stat.sleepingNote')} onClick={() => setFilter(filter === 'sleeping' ? 'all' : 'sleeping')} active={filter === 'sleeping'} />
-            <StatTile tone="indigo" icon={Wallet} label={t('browsers.stat.balance')} value={b ? money(b.availableMicros, locale) : '—'} note={hours !== null ? t('nav.runway', { time: runwayLabel(t, hours) }) : undefined} warn={!!b && isLowBalance(b)} to="/billing" />
-            <StatTile className="hidden lg:flex" tone="amber" icon={Gauge} label={t('browsers.stat.spend')} value={b ? t('browsers.stat.spendValue', { amount: money(b.burnHourMicros, locale) }) : '—'} note={b ? t('browsers.stat.month', { amount: money(b.month.totalMicros, locale) }) : undefined} to="/billing" />
+          <div className="mb-6 hidden grid-cols-3 border border-border sm:grid lg:grid-cols-4">
+            <StatTile label={t('browsers.stat.running')} value={String(counts.running)} note={me.data ? t('browsers.stat.ofMax', { max: me.data.entitlements.maxBrowsers }) : undefined} onClick={() => setFilter(filter === 'running' ? 'all' : 'running')} active={filter === 'running'} />
+            <StatTile label={t('browsers.stat.sleeping')} value={String(counts.sleeping)} note={t('browsers.stat.sleepingNote')} onClick={() => setFilter(filter === 'sleeping' ? 'all' : 'sleeping')} active={filter === 'sleeping'} />
+            <StatTile label={t('browsers.stat.balance')} value={b ? money(b.availableMicros, locale) : '—'} note={hours !== null ? t('nav.runway', { time: runwayLabel(t, hours) }) : undefined} warn={!!b && isLowBalance(b)} to="/billing" />
+            <StatTile className="hidden lg:flex" label={t('browsers.stat.spend')} value={b ? t('browsers.stat.spendValue', { amount: money(b.burnHourMicros, locale) }) : '—'} note={b ? t('browsers.stat.month', { amount: money(b.month.totalMicros, locale) }) : undefined} to="/billing" />
           </div>
 
           <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -145,7 +144,7 @@ export function BrowsersPage() {
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={t('browsers.search')}
                 aria-label={t('browsers.search')}
-                className="h-9 w-full bg-surface pr-8 pl-9 text-sm outline-none ring-indigo/60 transition-[background-color,box-shadow] placeholder:text-subtle hover:bg-surface-2 focus-visible:bg-bg focus-visible:ring-2"
+                className="h-9 w-full border border-border bg-bg pr-8 pl-9 text-sm outline-none transition-[border-color,box-shadow] duration-150 placeholder:text-subtle hover:border-border-strong focus:border-fg focus:shadow-[0_0_0_1px_var(--color-fg)]"
               />
               {query ? (
                 <button type="button" className="absolute top-1/2 right-2 grid size-6 -translate-y-1/2 place-items-center text-subtle hover:text-fg" onClick={() => setQuery('')} aria-label={t('browsers.clearFilters')}>
@@ -154,7 +153,7 @@ export function BrowsersPage() {
               ) : null}
             </div>
             <div className="flex items-center gap-2">
-              <div className="flex min-w-0 flex-1 gap-0.5 bg-surface p-0.5" role="tablist" aria-label={t('browsers.title')}>
+              <div className="flex min-w-0 flex-1 gap-0.5 border border-border bg-surface p-0.5" role="tablist" aria-label={t('browsers.title')}>
                 {(['all', 'running', 'sleeping', 'attention'] as const).map((f) => (
                   <button
                     key={f}
@@ -163,19 +162,19 @@ export function BrowsersPage() {
                     aria-selected={filter === f}
                     onClick={() => setFilter(f)}
                     className={cn(
-                      'flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 px-2.5 text-[13px] font-medium whitespace-nowrap transition-colors sm:flex-none',
-                      filter === f ? 'bg-bg text-fg shadow-[0_1px_3px_rgb(0_0_0/0.12)]' : 'text-muted hover:text-fg',
+                      'flex h-7 min-w-0 flex-1 items-center justify-center gap-1.5 px-2.5 text-[13px] font-medium whitespace-nowrap transition-colors sm:flex-none',
+                      filter === f ? 'bg-bg text-fg shadow-[0_0_0_1px_var(--color-border)]' : 'text-muted hover:text-fg',
                       f === 'attention' && counts.attention > 0 && filter !== f && 'text-error',
                     )}
                   >
                     <span className="truncate">{t(`browsers.filter.${f}` as MessageKey)}</span>
-                    <span className={cn('font-mono text-[11px] tabular-nums', filter === f ? 'text-indigo' : 'text-subtle')}>{counts[f]}</span>
+                    <span className={cn('text-[11px] tabular-nums', filter === f ? 'text-muted' : 'text-subtle')}>{counts[f]}</span>
                   </button>
                 ))}
               </div>
               <Menu
                 trigger={
-                  <Button size="icon" variant="ghost" className="size-9 bg-surface hover:bg-surface-2" aria-label={t('browsers.sort')} title={t('browsers.sort')}>
+                  <Button size="icon" variant="ghost" className="size-9 border border-border hover:border-border-strong hover:bg-bg" aria-label={t('browsers.sort')} title={t('browsers.sort')}>
                     <ArrowDownUp />
                   </Button>
                 }
@@ -183,13 +182,13 @@ export function BrowsersPage() {
                 {(['recent', 'name', 'status', 'created'] as const).map((s) => (
                   <MenuItem key={s} onSelect={() => setSort(s)}>
                     <span className="flex-1">{t(`browsers.sort.${s}` as MessageKey)}</span>
-                    {sort === s ? <Check className="text-indigo" aria-hidden /> : null}
+                    {sort === s ? <Check className="text-fg" aria-hidden /> : null}
                   </MenuItem>
                 ))}
               </Menu>
-              <div className="hidden gap-0.5 bg-surface p-0.5 sm:flex" role="radiogroup" aria-label={t('browsers.view.grid')}>
+              <div className="hidden gap-0.5 border border-border bg-surface p-0.5 sm:flex" role="radiogroup" aria-label={t('browsers.view.grid')}>
                 {([['grid', LayoutGrid], ['list', List]] as const).map(([v, Icon]) => (
-                  <button key={v} type="button" role="radio" aria-checked={view === v} onClick={() => setView(v)} title={t(`browsers.view.${v}`)} aria-label={t(`browsers.view.${v}`)} className={cn('grid size-8 place-items-center transition-colors [&_svg]:size-4', view === v ? 'bg-bg text-fg shadow-[0_1px_3px_rgb(0_0_0/0.12)]' : 'text-subtle hover:text-fg')}>
+                  <button key={v} type="button" role="radio" aria-checked={view === v} onClick={() => setView(v)} title={t(`browsers.view.${v}`)} aria-label={t(`browsers.view.${v}`)} className={cn('grid size-7 place-items-center transition-colors [&_svg]:size-4', view === v ? 'bg-bg text-fg shadow-[0_0_0_1px_var(--color-border)]' : 'text-subtle hover:text-fg')}>
                     <Icon />
                   </button>
                 ))}
@@ -198,7 +197,7 @@ export function BrowsersPage() {
           </div>
 
           {shown.length === 0 ? (
-            <Card className="flex flex-col items-center gap-3 p-10 text-center">
+            <Card className="flex flex-col items-center gap-4 border-dashed p-12 text-center">
               <p className="text-sm text-muted">{t('browsers.noMatch')}</p>
               {filtered ? <Button size="sm" onClick={() => { setFilter('all'); setQuery(''); }}>{t('browsers.clearFilters')}</Button> : null}
             </Card>
@@ -209,9 +208,9 @@ export function BrowsersPage() {
               ))}
             </div>
           ) : (
-            <div className="divide-y divide-border/70">
-              <div className={cn('hidden gap-4 bg-surface px-4 py-2.5 text-[11px] font-semibold tracking-[0.12em] text-subtle uppercase lg:grid', ROW_COLUMNS)}>
-                <span className="pl-11">{t('browsers.col.name')}</span>
+            <div className="divide-y divide-border border border-border">
+              <div className={cn('hidden gap-4 bg-surface px-4 py-2.5 text-[11px] font-semibold tracking-[0.1em] text-subtle uppercase lg:grid', ROW_COLUMNS)}>
+                <span>{t('browsers.col.name')}</span>
                 <span>{t('browsers.col.where')}</span>
                 <span>{t('browsers.col.used')}</span>
                 <span />
@@ -237,25 +236,24 @@ export function BrowsersPage() {
   );
 }
 
-/** A key figure that is also a shortcut: it filters the list or opens the page behind it. */
-function StatTile({ tone, icon: Icon, label, value, note, onClick, to, active, warn, className }: {
-  tone: Tone; icon: typeof Wallet; label: string; value: string; note?: string; onClick?: () => void; to?: string; active?: boolean; warn?: boolean; className?: string;
+/**
+ * A key figure that is also a shortcut: it filters the list or opens the page behind it. The
+ * tiles share one frame, split by hairlines; the active filter is marked by an ink rule.
+ */
+function StatTile({ label, value, note, onClick, to, active, warn, className }: {
+  label: string; value: string; note?: string; onClick?: () => void; to?: string; active?: boolean; warn?: boolean; className?: string;
 }) {
   const body: ReactNode = (
     <>
-      <span className="flex items-center gap-2">
-        <span className={cn('hidden size-7 shrink-0 place-items-center sm:grid', active ? cn(TONE[tone].bg, 'text-white') : cn(TONE[tone].soft, TONE[tone].text))} aria-hidden>
-          <Icon className="size-4" />
-        </span>
-        <span className="truncate text-[11px] font-semibold tracking-[0.1em] text-subtle uppercase sm:text-xs sm:tracking-[0.08em]">{label}</span>
-      </span>
-      <span className={cn('mt-2 block truncate text-xl font-semibold tracking-tight tabular-nums sm:mt-3 sm:text-[26px] sm:leading-none', warn ? 'text-error' : active && TONE[tone].text)}>{value}</span>
-      {note ? <span className={cn('mt-1.5 hidden truncate text-xs sm:block', warn ? 'text-error' : 'text-subtle')}>{note}</span> : null}
+      <span className="truncate text-[11px] font-semibold tracking-[0.1em] text-subtle uppercase">{label}</span>
+      <span className={cn('mt-3 block truncate text-[26px] leading-none font-semibold tracking-[-0.02em] tabular-nums', warn && 'text-error')}>{value}</span>
+      {note ? <span className={cn('mt-2 block truncate text-xs', warn ? 'text-error' : 'text-subtle')}>{note}</span> : null}
+      <span className={cn('absolute inset-x-0 bottom-0 h-0.5 bg-fg transition-opacity duration-200', active ? 'opacity-100' : 'opacity-0')} aria-hidden />
     </>
   );
   const cls = cn(
-    'relative flex min-w-0 flex-col overflow-hidden p-3 text-left transition-[background-color,box-shadow] sm:p-4',
-    active ? cn(TONE[tone].soft, 'ring-1 ring-inset', TONE[tone].ring) : 'bg-surface hover:bg-surface-2',
+    'relative flex min-w-0 flex-col border-border p-4 text-left transition-colors duration-150 not-first:border-l md:p-5',
+    active ? 'bg-surface' : 'bg-bg hover:bg-surface',
     className,
   );
   if (to) return <Link to={to} className={cls}>{body}</Link>;
@@ -264,27 +262,22 @@ function StatTile({ tone, icon: Icon, label, value, note, onClick, to, active, w
 
 function EmptyState({ action }: { action: ReactNode }) {
   const { t } = useI18n();
-  const items = [
-    { key: 'browsers.guarantee.ip', tone: 'teal' },
-    { key: 'browsers.guarantee.data', tone: 'violet' },
-    { key: 'browsers.guarantee.view', tone: 'indigo' },
-  ] as const;
+  const items = ['browsers.guarantee.ip', 'browsers.guarantee.data', 'browsers.guarantee.view'] as const;
   return (
-    <Card className="relative mx-auto max-w-2xl overflow-hidden p-8 text-center md:p-12">
-      <div className="pointer-events-none absolute -top-24 left-1/2 size-72 -translate-x-1/2 bg-indigo/15 blur-3xl" aria-hidden />
-      <span className="relative mx-auto grid size-14 place-items-center bg-gradient-to-br from-indigo to-violet text-white" aria-hidden>
-        <Plus className="size-6" />
+    <Card className="mx-auto max-w-2xl p-8 text-center md:p-14">
+      <span className="mx-auto grid size-12 place-items-center border border-border bg-surface" aria-hidden>
+        <Plus className="size-5" />
       </span>
-      <p className="relative mt-5 text-lg font-semibold tracking-tight md:text-xl">{t('browsers.emptyTitle')}</p>
-      <ul className="relative mx-auto mt-6 inline-flex flex-col gap-2.5 text-left text-sm text-muted">
-        {items.map(({ key, tone }) => (
-          <li key={key} className="flex items-start gap-2.5">
-            <span className={cn('mt-0.5 grid size-5 shrink-0 place-items-center', TONE[tone].soft, TONE[tone].text)}><Check className="size-3.5" aria-hidden /></span>
+      <p className="mt-6 text-xl font-semibold tracking-tight">{t('browsers.emptyTitle')}</p>
+      <ul className="mx-auto mt-6 inline-flex flex-col gap-3 text-left text-sm text-muted">
+        {items.map((key) => (
+          <li key={key} className="flex items-start gap-3">
+            <Check className="mt-0.5 size-4 shrink-0 text-fg" aria-hidden />
             {t(key)}
           </li>
         ))}
       </ul>
-      <div className="relative mt-8">{action}</div>
+      <div className="mt-8">{action}</div>
     </Card>
   );
 }

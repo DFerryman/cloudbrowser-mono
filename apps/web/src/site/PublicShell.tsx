@@ -25,7 +25,7 @@ export function PublicShell() {
     { to: '/status', label: t('nav.status') },
   ];
   const linkClass = ({ isActive }: { isActive: boolean }) =>
-    cn('flex h-16 items-center border-b-2 px-3 text-[13px] font-medium transition-colors', isActive ? 'border-indigo text-fg' : 'border-transparent text-muted hover:text-fg');
+    cn('flex h-16 items-center border-b-2 px-3 text-[13px] font-medium transition-colors', isActive ? 'border-fg text-fg' : 'border-transparent text-muted hover:text-fg');
 
   return (
     <div className="flex min-h-dvh flex-col">
@@ -100,7 +100,7 @@ function Footer() {
             <ul className="mt-4 space-y-2.5 text-sm">
               {col.links.map(([to, label]) => (
                 <li key={to}>
-                  <Link to={to!} className="text-muted hover:text-fg">
+                  <Link to={to!} className="text-muted transition-colors hover:text-fg">
                     {label}
                   </Link>
                 </li>
@@ -127,7 +127,7 @@ export function PublicHero({ title, subtitle, eyebrow, children, className }: { 
   return (
     <section className={cn('mx-auto w-full max-w-[1200px] px-4 pt-14 pb-10 md:px-8 md:pt-20 md:pb-14', className)}>
       {eyebrow ? <Eyebrow className="mb-4">{eyebrow}</Eyebrow> : null}
-      <h1 className="max-w-3xl text-3xl font-semibold tracking-tight md:text-[52px] md:leading-[1.04]">{title}</h1>
+      <h1 className="max-w-3xl text-[34px] leading-[1.1] font-semibold tracking-[-0.03em] md:text-[52px] md:leading-[1.04]">{title}</h1>
       {subtitle ? <p className="mt-5 max-w-2xl text-base leading-relaxed text-muted md:text-lg">{subtitle}</p> : null}
       {children}
     </section>

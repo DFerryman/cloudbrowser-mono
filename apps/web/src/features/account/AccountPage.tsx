@@ -16,9 +16,9 @@ export function AccountPage() {
       <PageHeader title={t('account.title')} />
       <div className="grid gap-4 lg:grid-cols-2">
         <Section title={t('account.profile')}>
-          <p className="text-xs text-muted">{t('account.email')}</p>
+          <p className="text-xs text-subtle">{t('account.email')}</p>
           <p className="mt-1 text-lg font-semibold tracking-tight break-all">{me.data?.user.email ?? '…'}</p>
-          <div className="mt-6 max-w-xs">
+          <div className="mt-6 max-w-xs border-t border-border pt-5">
             <label htmlFor="ui-locale" className="mb-1.5 block text-[13px] font-medium">
               {t('account.language')}
             </label>
@@ -42,7 +42,7 @@ export function AccountPage() {
               <Passkeys />
             </div>
           </div>
-          <div className="flex flex-wrap gap-2 pt-3">
+          <div className="flex flex-wrap gap-2 border-t border-border pt-5">
             <Button onClick={() => void signOut({ everywhere: true })}>
               {t('account.signOutEverywhere')}
             </Button>

@@ -29,7 +29,7 @@ export function LanguageButton({ className, align = 'end' }: { className?: strin
         <MenuItem key={l.locale} onSelect={() => setLocale(l.locale)}>
           <span className="w-6 font-mono text-[11px] text-subtle" aria-hidden>{l.short}</span>
           <span className="flex-1" lang={l.locale}>{l.label}</span>
-          {locale === l.locale ? <Check className="text-indigo" aria-hidden /> : null}
+          {locale === l.locale ? <Check className="text-fg" aria-hidden /> : null}
         </MenuItem>
       ))}
     </Menu>

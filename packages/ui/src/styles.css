@@ -1,15 +1,17 @@
 /*
- * Design tokens (page 1, "Visual style"): minimal and square. Corners are sharp everywhere (only
- * status dots and spinners are round). Neutrals carry the layout; primary actions are solid ink
- * (`fg`), and the one blue accent is kept for links, focus and progress so it stays meaningful.
- * Hierarchy comes from size and weight: small uppercase eyebrows, tight headings, tabular figures.
- * Status colors are always paired with an icon and a label. Light and dark follow the system
- * setting unless `data-theme="light"` or `data-theme="dark"` on <html> picks one. `subtle` is for
- * secondary explanations: softer than `muted`, still at least 4.5:1 against the page.
+ * Design tokens (page 1, "Visual style"): minimal, square and quiet. Corners are sharp everywhere
+ * (only status dots and spinners are round). Neutrals carry the layout; every primary action is
+ * solid ink (`fg`), and the one blue accent is kept for links, focus, selection and progress so it
+ * stays meaningful. There are no decorative hues: color means status (running, starting, error),
+ * always paired with an icon and a label. Hierarchy comes from size, weight and space: small
+ * uppercase eyebrows, tight headings, tabular figures. Surfaces are separated by hairlines, and
+ * only floating layers (menus, dialogs, toasts) cast a shadow, from the shared `shadow-pop` and
+ * `shadow-float` scale. Light and dark follow the system setting unless `data-theme="light"` or
+ * `data-theme="dark"` on <html> picks one. `subtle` is for secondary explanations: softer than
+ * `muted`, still at least 4.5:1 against the page.
  *
- * A palette of six hues (`indigo`, `violet`, `teal`, `amber`, `rose`, `sky`) gives each kind of
- * thing its own color: regions, figures, sections, icons. Each hue is retuned for dark mode so
- * text in it keeps its contrast; tints come from opacity (`bg-violet/10`), so they work in both.
+ * Charts draw from one ramp of the accent (`chart-1` strongest … `chart-4` lightest), so a
+ * breakdown reads as one family rather than a rainbow.
  */
 @theme {
   --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
@@ -56,97 +58,86 @@
   --color-subtle: var(--cb-subtle);
   --color-accent: var(--cb-accent);
   --color-accent-fg: #ffffff;
-  --color-running: #16a34a;
-  --color-starting: #d97706;
-  --color-sleeping: #a1a1aa;
-  --color-error: #dc2626;
+  --color-running: var(--cb-running);
+  --color-starting: var(--cb-starting);
+  --color-sleeping: var(--cb-subtle);
+  --color-error: var(--cb-error);
   --color-frame: #09090b;
-  --color-indigo: var(--cb-indigo);
-  --color-violet: var(--cb-violet);
-  --color-teal: var(--cb-teal);
-  --color-amber: var(--cb-amber);
-  --color-rose: var(--cb-rose);
-  --color-sky: var(--cb-sky);
+  --color-chart-1: var(--cb-accent);
+  --color-chart-2: color-mix(in oklab, var(--cb-accent) 62%, var(--cb-bg));
+  --color-chart-3: color-mix(in oklab, var(--cb-accent) 36%, var(--cb-bg));
+  --color-chart-4: color-mix(in oklab, var(--cb-accent) 18%, var(--cb-bg));
+
+  --shadow-pop: 0 1px 2px rgb(0 0 0 / 0.04), 0 12px 32px -12px rgb(0 0 0 / 0.18);
+  --shadow-float: 0 1px 2px rgb(0 0 0 / 0.04), 0 32px 80px -24px rgb(0 0 0 / 0.32);
 
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 :root {
   --cb-bg: #ffffff;
-  --cb-surface: #f7f7f7;
-  --cb-surface-2: #efefef;
-  --cb-border: #e5e5e5;
-  --cb-border-strong: #c7c7c7;
+  --cb-surface: #fafafa;
+  --cb-surface-2: #f2f2f2;
+  --cb-border: #ebebeb;
+  --cb-border-strong: #d4d4d4;
   --cb-fg: #0a0a0a;
-  --cb-muted: #4f4f4f;
-  --cb-subtle: #6e6e6e;
+  --cb-muted: #525252;
+  --cb-subtle: #707070;
   --cb-accent: #2557d6;
-  --cb-indigo: #4f46e5;
-  --cb-violet: #7c3aed;
-  --cb-teal: #0d9488;
-  --cb-amber: #b45309;
-  --cb-rose: #e11d48;
-  --cb-sky: #0284c7;
+  --cb-running: #15803d;
+  --cb-starting: #b45309;
+  --cb-error: #dc2626;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     --cb-bg: #0a0a0a;
-    --cb-surface: #121212;
-    --cb-surface-2: #1c1c1c;
-    --cb-border: #262626;
-    --cb-border-strong: #3d3d3d;
-    --cb-fg: #f5f5f5;
-    --cb-muted: #a8a8a8;
-    --cb-subtle: #8f8f8f;
-    --cb-accent: #5b8cff;
-    --cb-indigo: #818cf8;
-    --cb-violet: #a78bfa;
-    --cb-teal: #2dd4bf;
-    --cb-amber: #fbbf24;
-    --cb-rose: #fb7185;
-    --cb-sky: #38bdf8;
+    --cb-surface: #111111;
+    --cb-surface-2: #1a1a1a;
+    --cb-border: #222222;
+    --cb-border-strong: #363636;
+    --cb-fg: #fafafa;
+    --cb-muted: #a3a3a3;
+    --cb-subtle: #8a8a8a;
+    --cb-accent: #6b96ff;
+    --cb-running: #22c55e;
+    --cb-starting: #f59e0b;
+    --cb-error: #f87171;
     color-scheme: dark;
   }
 }
 
 :root[data-theme='dark'] {
   --cb-bg: #0a0a0a;
-  --cb-surface: #121212;
-  --cb-surface-2: #1c1c1c;
-  --cb-border: #262626;
-  --cb-border-strong: #3d3d3d;
-  --cb-fg: #f5f5f5;
-  --cb-muted: #a8a8a8;
-  --cb-subtle: #8f8f8f;
-  --cb-accent: #5b8cff;
-  --cb-indigo: #818cf8;
-  --cb-violet: #a78bfa;
-  --cb-teal: #2dd4bf;
-  --cb-amber: #fbbf24;
-  --cb-rose: #fb7185;
-  --cb-sky: #38bdf8;
+  --cb-surface: #111111;
+  --cb-surface-2: #1a1a1a;
+  --cb-border: #222222;
+  --cb-border-strong: #363636;
+  --cb-fg: #fafafa;
+  --cb-muted: #a3a3a3;
+  --cb-subtle: #8a8a8a;
+  --cb-accent: #6b96ff;
+  --cb-running: #22c55e;
+  --cb-starting: #f59e0b;
+  --cb-error: #f87171;
   color-scheme: dark;
 }
 
 /* Always dark, whatever the page theme: the live view's frame and its overlays. */
 .cb-dark {
   --cb-bg: #0a0a0a;
-  --cb-surface: #121212;
-  --cb-surface-2: #1c1c1c;
-  --cb-border: #262626;
-  --cb-border-strong: #3d3d3d;
-  --cb-fg: #f5f5f5;
-  --cb-muted: #a8a8a8;
-  --cb-subtle: #8f8f8f;
-  --cb-accent: #5b8cff;
-  --cb-indigo: #818cf8;
-  --cb-violet: #a78bfa;
-  --cb-teal: #2dd4bf;
-  --cb-amber: #fbbf24;
-  --cb-rose: #fb7185;
-  --cb-sky: #38bdf8;
+  --cb-surface: #111111;
+  --cb-surface-2: #1a1a1a;
+  --cb-border: #222222;
+  --cb-border-strong: #363636;
+  --cb-fg: #fafafa;
+  --cb-muted: #a3a3a3;
+  --cb-subtle: #8a8a8a;
+  --cb-accent: #6b96ff;
+  --cb-running: #22c55e;
+  --cb-starting: #f59e0b;
+  --cb-error: #f87171;
   color-scheme: dark;
 }
 
@@ -222,6 +213,15 @@
   }
 }
 
+/* A select with a plain chevron in place of the system arrow; mid gray reads in both themes. */
+.cb-select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23808080' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-position: right 10px center;
+  background-repeat: no-repeat;
+  background-size: 16px;
+}
+
 /* A range input with a filled track: set --cb-range to the filled share (e.g. 40%). */
 .cb-range {
   appearance: none;
@@ -231,11 +231,11 @@
 }
 .cb-range::-webkit-slider-runnable-track {
   height: 4px;
-  background: linear-gradient(to right, var(--color-indigo) var(--cb-range, 0%), var(--color-surface-2) var(--cb-range, 0%));
+  background: linear-gradient(to right, var(--color-fg) var(--cb-range, 0%), var(--color-surface-2) var(--cb-range, 0%));
 }
 .cb-range::-moz-range-track {
   height: 4px;
-  background: linear-gradient(to right, var(--color-indigo) var(--cb-range, 0%), var(--color-surface-2) var(--cb-range, 0%));
+  background: linear-gradient(to right, var(--color-fg) var(--cb-range, 0%), var(--color-surface-2) var(--cb-range, 0%));
 }
 .cb-range::-webkit-slider-thumb {
   appearance: none;
@@ -243,7 +243,7 @@
   width: 16px;
   height: 16px;
   background: var(--color-bg);
-  border: 2px solid var(--color-indigo);
+  border: 2px solid var(--color-fg);
   transition: transform 120ms var(--ease-out);
 }
 .cb-range::-moz-range-thumb {
@@ -251,7 +251,7 @@
   height: 12px;
   border-radius: 0;
   background: var(--color-bg);
-  border: 2px solid var(--color-indigo);
+  border: 2px solid var(--color-fg);
 }
 .cb-range:active::-webkit-slider-thumb {
   transform: scale(1.2);

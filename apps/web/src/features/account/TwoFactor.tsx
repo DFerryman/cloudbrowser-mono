@@ -37,7 +37,7 @@ export function TwoFactorSettings() {
             <Button size="sm" onClick={() => setDialog('codes')}>
               <KeyRound /> {t('twofa.newCodes')}
             </Button>
-            <Button size="sm" variant="ghost" className="text-error" onClick={() => setDialog('disable')}>
+            <Button size="sm" variant="ghost" className="text-error hover:bg-error/8 hover:text-error" onClick={() => setDialog('disable')}>
               {t('twofa.turnOff')}
             </Button>
           </>

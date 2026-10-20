@@ -4,12 +4,12 @@ import { cn } from './cn.js';
 export type StatusTone = 'running' | 'progress' | 'sleeping' | 'waiting' | 'error' | 'deleted';
 
 const TONES: Record<StatusTone, { icon: LucideIcon; color: string; pill: string; spin?: boolean }> = {
-  running: { icon: CircleDot, color: 'text-running', pill: 'bg-running/12 text-running' },
-  progress: { icon: Loader2, color: 'text-starting', pill: 'bg-starting/12 text-starting', spin: true },
-  waiting: { icon: Hourglass, color: 'text-starting', pill: 'bg-starting/12 text-starting' },
-  sleeping: { icon: Moon, color: 'text-sky', pill: 'bg-sky/12 text-sky' },
-  error: { icon: AlertTriangle, color: 'text-error', pill: 'bg-error/12 text-error' },
-  deleted: { icon: Trash2, color: 'text-sleeping', pill: 'bg-surface-2 text-muted' },
+  running: { icon: CircleDot, color: 'text-running', pill: 'bg-running/10 text-running' },
+  progress: { icon: Loader2, color: 'text-starting', pill: 'bg-starting/10 text-starting', spin: true },
+  waiting: { icon: Hourglass, color: 'text-starting', pill: 'bg-starting/10 text-starting' },
+  sleeping: { icon: Moon, color: 'text-subtle', pill: 'bg-surface-2 text-muted' },
+  error: { icon: AlertTriangle, color: 'text-error', pill: 'bg-error/10 text-error' },
+  deleted: { icon: Trash2, color: 'text-subtle', pill: 'bg-surface-2 text-subtle' },
 };
 
 
@@ -18,7 +18,7 @@ export function StatusBadge({ tone, label, icon, className, pill }: { tone: Stat
   const t = TONES[tone];
   const Icon = icon ?? t.icon;
   return (
-    <span className={cn('inline-flex items-center gap-1.5 text-sm font-medium', pill && cn('px-2 py-0.5 text-xs font-semibold', t.pill), className)}>
+    <span className={cn('inline-flex items-center gap-1.5 text-sm font-medium', pill && cn('h-6 px-2 text-xs font-medium', t.pill), className)}>
       <Icon className={cn(pill ? 'size-3.5' : 'size-4', !pill && t.color, t.spin && 'animate-spin')} aria-hidden />
       <span>{label}</span>
     </span>

@@ -28,10 +28,10 @@ export function TrialNotice({ trial }: { trial: Instance['trial'] }) {
       ? t('trial.activeBody', { minutes: minutesLeft(trial) })
       : t('trial.endedBody', { date: trial.reclaimAt ? new Date(trial.reclaimAt).toLocaleDateString(locale) : '…' });
   return (
-    <p role="status" className="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 border-l-2 border-fg bg-surface px-3 py-2 text-sm">
+    <p role="status" className="mb-6 flex flex-wrap items-center gap-x-2.5 gap-y-1 border-l-2 border-fg bg-surface px-4 py-3 text-sm">
       <Gift className="size-4 shrink-0" aria-hidden />
       <span className="min-w-0 flex-1">{body}</span>
-      <Link to="/billing" className="font-medium text-accent hover:underline">
+      <Link to="/billing" className="font-medium text-accent underline-offset-4 hover:underline">
         {t('create.addCredit')}
       </Link>
     </p>

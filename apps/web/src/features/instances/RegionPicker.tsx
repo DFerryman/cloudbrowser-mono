@@ -1,12 +1,11 @@
 import { browserEstimate, type Region, type RegionPricing } from '@cloudbrowser/contracts';
-import { cn, Input } from '@cloudbrowser/ui';
-import { AlertTriangle, CircleCheck, CircleDot, CircleSlash, Info, Search, Sparkles } from 'lucide-react';
+import { CountryTag, cn, Input } from '@cloudbrowser/ui';
+import { AlertTriangle, CircleCheck, CircleSlash, Info, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { DocsLink } from '../../app/DocsLink.js';
 import { useI18n } from '../../lib/i18n.js';
 import type { MessageKey } from '../../messages/en.js';
 import { money } from '../../lib/money.js';
-import { TONE, toneFor } from '../../lib/tones.js';
 import { regionPlace, regionSearchText } from './region-names.js';
 
 const CACHE_KEY = 'nevazu.latency.v1';
@@ -89,9 +88,9 @@ export type Latency = { ms: number; measured: boolean };
 const AVAILABILITY: Record<Region['availability'], { icon: typeof CircleCheck; color: string; key: MessageKey }> = {
   available: { icon: CircleCheck, color: 'text-running', key: 'create.region.available' },
   limited: { icon: AlertTriangle, color: 'text-starting', key: 'create.region.limited' },
-  unavailable: { icon: CircleSlash, color: 'text-sleeping', key: 'create.region.unavailableShort' },
+  unavailable: { icon: CircleSlash, color: 'text-subtle', key: 'create.region.unavailableShort' },
 };
-const latencyTone = (ms: number) => (ms <= 80 ? 'text-running' : ms <= 160 ? 'text-starting' : 'text-error');
+const latencyTone = (ms: number) => (ms <= 80 ? 'bg-running' : ms <= 160 ? 'bg-starting' : 'bg-error');
 
 /**
  * Where a new browser lives. Each region shows where its IP is, how far it is from the user
@@ -150,7 +149,7 @@ export function RegionPicker({ open, regions, loading, pricing, value, onChange,
           />
         </div>
       ) : null}
-      <div className="divide-y divide-border overflow-hidden rounded-[var(--radius-control)] border border-border" role="radiogroup" aria-label={t('create.region')}>
+      <div className="divide-y divide-border overflow-hidden border border-border" role="radiogroup" aria-label={t('create.region')}>
         {shown.map((r) => {
           const p = pricing?.find((x) => x.regionId === r.id);
           const hourly = p?.rates ? browserEstimate(p.rates, { storageGb: storageFor(p), rootVolumeGb: p.rootVolumeGb, backups: false }).runningTotalHour : null;
@@ -178,18 +177,18 @@ export function RegionPicker({ open, regions, loading, pricing, value, onChange,
         {!loading && q && !shown.length ? <p className="px-3 py-4 text-sm text-muted">{t('create.region.noMatch')}</p> : null}
       </div>
       {long && !q ? (
-        <button type="button" className="mt-2 text-sm font-medium text-accent hover:underline" aria-expanded={showAll} onClick={() => setShowAll((s) => !s)}>
+        <button type="button" className="mt-2.5 text-sm font-medium text-accent underline-offset-4 hover:underline" aria-expanded={showAll} onClick={() => setShowAll((s) => !s)}>
           {showAll ? t('create.region.showNearest') : t('create.region.showAll', { count: sorted.length })}
         </button>
       ) : null}
       {selected?.availability === 'limited' && selected.availabilityReason === 'capacity' ? (
-        <p role="status" className="mt-2 flex gap-2 rounded-[var(--radius-control)] border border-starting/40 bg-starting/5 px-3 py-2 text-xs leading-relaxed">
+        <p role="status" className="mt-2 flex gap-2 border-l-2 border-starting bg-starting/5 px-3 py-2.5 text-xs leading-relaxed">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-starting" aria-hidden />
           <span>{t('create.region.limitedNotice', { region: regionPlace(selected, locale) })}</span>
         </p>
       ) : null}
       {selected && untested(selected) ? (
-        <p role="status" className="mt-2 flex gap-2 rounded-[var(--radius-control)] border border-border bg-surface px-3 py-2 text-xs leading-relaxed">
+        <p role="status" className="mt-2 flex gap-2 border-l-2 border-border-strong bg-surface px-3 py-2.5 text-xs leading-relaxed">
           <Info className="mt-0.5 size-3.5 shrink-0 text-muted" aria-hidden />
           <span>{t('create.region.untestedNotice', { region: regionPlace(selected, locale) })}</span>
         </p>
@@ -214,29 +213,26 @@ function RegionRow({ region, place, checked, disabled, recommended, onChange, re
   return (
     <label
       className={cn(
-        'relative flex items-center gap-3 px-3 py-3 transition-colors has-[:focus-visible]:bg-surface-2',
+        'relative flex items-center gap-3 px-3 py-3 transition-colors duration-150 has-[:focus-visible]:bg-surface-2',
         disabled ? 'cursor-not-allowed opacity-55' : 'cursor-pointer',
-        checked && !disabled ? 'bg-indigo/5 shadow-[inset_3px_0_0_0_var(--color-indigo)]' : !disabled && 'hover:bg-surface',
+        checked && !disabled ? 'bg-surface shadow-[inset_2px_0_0_0_var(--color-fg)]' : !disabled && 'hover:bg-surface',
       )}
     >
       <input type="radio" name="region" value={region.id} className="peer sr-only" checked={checked} disabled={disabled} onChange={onChange} />
-      <span className={cn('grid size-4 shrink-0 place-items-center rounded-full border', checked && !disabled ? 'border-indigo' : 'border-border-strong')} aria-hidden>
-        {checked && !disabled ? <span className="size-2 rounded-full bg-indigo" /> : null}
+      <span className={cn('grid size-4 shrink-0 place-items-center rounded-full border transition-colors', checked && !disabled ? 'border-fg' : 'border-border-strong')} aria-hidden>
+        {checked && !disabled ? <span className="size-2 rounded-full bg-fg" /> : null}
       </span>
-      <span className={cn('w-7 shrink-0 py-0.5 text-center font-mono text-[11px] font-semibold', disabled ? 'border border-border text-subtle' : cn(TONE[toneFor(region.id)].soft, TONE[toneFor(region.id)].text))} aria-hidden>
-        {region.country}
-      </span>
+      <CountryTag code={region.country} size="sm" muted={disabled} />
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center gap-1.5">
           <span className="truncate text-sm font-medium">{place}</span>
           {recommended ? (
-            <span className="inline-flex shrink-0 items-center gap-1 bg-gradient-to-r from-indigo to-violet px-1.5 py-0.5 text-[10px] font-semibold tracking-wider text-white uppercase">
-              <Sparkles className="size-3" aria-hidden />
+            <span className="inline-flex shrink-0 items-center border border-accent/40 px-1.5 py-px text-[10px] font-semibold tracking-[0.08em] text-accent uppercase">
               {t('create.region.recommended')}
             </span>
           ) : null}
         </span>
-        <span className="flex min-w-0 items-center gap-1 text-xs text-muted">
+        <span className="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-subtle">
           <StatusIcon className={cn('size-3.5 shrink-0', a.color)} aria-hidden />
           <span className="shrink-0">{t(a.key)}</span>
           {reason ? (
@@ -253,10 +249,10 @@ function RegionRow({ region, place, checked, disabled, recommended, onChange, re
         {price ? <span className="block text-sm font-medium tabular-nums">{price}</span> : null}
         {latency && !disabled ? (
           <span
-            className="flex items-center justify-end gap-1 font-mono text-xs text-muted"
+            className="mt-0.5 flex items-center justify-end gap-1.5 text-xs text-subtle tabular-nums"
             title={latency.measured ? t('create.region.latencyMeasured') : t('create.region.latencyEstimated')}
           >
-            <CircleDot className={cn('size-3', latencyTone(latency.ms))} aria-hidden />
+            <span className={cn('size-1.5 rounded-full', latencyTone(latency.ms))} aria-hidden />
             {latency.measured ? '' : '≈'}{latency.ms} ms
           </span>
         ) : null}

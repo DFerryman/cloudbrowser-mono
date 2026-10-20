@@ -11,7 +11,6 @@ import { api, isUnauthenticated } from '../lib/api.js';
 import { useLiveEvents } from '../lib/events.js';
 import { useI18n } from '../lib/i18n.js';
 import { queryClient } from '../lib/query.js';
-import { TONE, type Tone } from '../lib/tones.js';
 import { ThemeItems } from './Preferences.js';
 
 export function Logo({ compact }: { compact?: boolean }) {
@@ -106,26 +105,26 @@ export function AppShell() {
   };
 
   const nav = [
-    { to: '/browsers', label: t('nav.browsers'), icon: LayoutGrid, tone: 'indigo' as const },
-    { to: '/billing', label: t('nav.billing'), icon: Wallet, tone: 'teal' as const },
-    { to: '/account', label: t('nav.account'), icon: UserRound, tone: 'violet' as const },
+    { to: '/browsers', label: t('nav.browsers'), icon: LayoutGrid },
+    { to: '/billing', label: t('nav.billing'), icon: Wallet },
+    { to: '/account', label: t('nav.account'), icon: UserRound },
   ];
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     cn(
-      'group relative flex items-center gap-3 px-2.5 py-2 text-sm transition-colors',
+      'group relative flex h-9 items-center gap-3 px-2.5 text-sm font-medium transition-colors',
       collapsed && 'justify-center px-0',
-      isActive ? 'bg-bg font-semibold text-fg shadow-[0_1px_2px_rgb(0_0_0/0.06)]' : 'font-medium text-muted hover:bg-bg/60 hover:text-fg',
+      isActive ? 'bg-fg/[0.06] text-fg' : 'text-muted hover:bg-fg/[0.04] hover:text-fg',
     );
 
   const account = me.data ? (
     <Menu
       align="start"
       trigger={
-        <button type="button" className={cn('flex w-full min-w-0 items-center gap-2.5 px-2 py-2 text-left text-sm transition-colors hover:bg-surface-2', collapsed && 'justify-center px-0')}>
-          <span className="grid size-8 shrink-0 place-items-center bg-gradient-to-br from-indigo to-violet text-xs font-semibold text-white uppercase">
+        <button type="button" className={cn('flex w-full min-w-0 items-center gap-2.5 px-2 py-2 text-left text-sm transition-colors hover:bg-fg/[0.04]', collapsed && 'justify-center px-0')}>
+          <span className="grid size-7 shrink-0 place-items-center bg-fg text-xs font-semibold text-bg uppercase">
             {me.data.user.email[0]}
           </span>
-          {!collapsed ? <span className="min-w-0 flex-1 truncate">{me.data.user.email}</span> : null}
+          {!collapsed ? <span className="min-w-0 flex-1 truncate text-muted">{me.data.user.email}</span> : null}
         </button>
       }
     >
@@ -154,7 +153,7 @@ export function AppShell() {
     <div className="flex min-h-dvh flex-col md:flex-row">
       <aside
         style={collapsed ? undefined : { width: sidebar.width }}
-        className={cn('sticky top-0 hidden h-dvh shrink-0 flex-col bg-surface md:flex', collapsed ? 'w-[68px] p-2.5' : 'p-3', !sidebar.dragging && 'transition-[width] duration-200 ease-out')}
+        className={cn('sticky top-0 hidden h-dvh shrink-0 flex-col border-r border-border bg-surface md:flex', collapsed ? 'w-[68px] p-2.5' : 'p-3', !sidebar.dragging && 'transition-[width] duration-200 ease-out')}
       >
         {!collapsed ? <ResizeHandle {...sidebar.handleProps} edge="right" dragging={sidebar.dragging} label={t('nav.resize')} /> : null}
         <div className={cn('flex items-center gap-2 py-2', collapsed ? 'justify-center' : 'px-1.5')}>
@@ -174,7 +173,7 @@ export function AppShell() {
           title={collapsed ? t('browsers.new') : t('nav.shortcuts')}
           aria-label={t('browsers.new')}
           className={cn(
-            'mt-5 flex h-10 items-center gap-2 bg-gradient-to-r from-indigo to-violet text-sm font-semibold text-white shadow-[0_8px_24px_-12px_var(--color-indigo)] transition-[filter,transform] hover:brightness-110 active:translate-y-px',
+            'mt-5 flex h-9 items-center gap-2 bg-fg text-sm font-medium text-bg transition-[background-color,transform] duration-150 hover:bg-fg/88 active:translate-y-px',
             collapsed ? 'justify-center' : 'px-3',
           )}
         >
@@ -182,7 +181,7 @@ export function AppShell() {
           {!collapsed ? (
             <>
               <span className="flex-1 text-left">{t('browsers.new')}</span>
-              <kbd className="border border-white/30 px-1.5 font-mono text-[10px] font-medium">N</kbd>
+              <kbd className="border border-bg/25 px-1.5 font-mono text-[10px] font-medium text-bg/70">N</kbd>
             </>
           ) : null}
         </button>
@@ -192,10 +191,8 @@ export function AppShell() {
             <NavLink key={n.to} to={n.to} className={linkClass} title={n.label}>
               {({ isActive }) => (
                 <>
-                  {isActive ? <span className={cn('absolute inset-y-1.5 left-0 w-[3px]', TONE[n.tone].bg)} aria-hidden /> : null}
-                  <span className={cn('grid size-7 shrink-0 place-items-center transition-colors', isActive ? cn(TONE[n.tone].bg, 'text-white') : cn(TONE[n.tone].soft, TONE[n.tone].text))}>
-                    <n.icon className="size-4" />
-                  </span>
+                  {isActive ? <span className="absolute inset-y-2 left-0 w-0.5 bg-fg" aria-hidden /> : null}
+                  <n.icon className={cn('size-4 shrink-0 transition-colors', isActive ? 'text-fg' : 'text-subtle group-hover:text-fg')} />
                   {!collapsed ? <span className="truncate">{n.label}</span> : null}
                 </>
               )}
@@ -205,37 +202,36 @@ export function AppShell() {
 
         <div className="mt-auto flex flex-col gap-2">
           {me.data && b && !collapsed ? (
-            <div className="relative overflow-hidden bg-bg p-3.5 shadow-[0_1px_2px_rgb(0_0_0/0.06)]">
-              <div className="pointer-events-none absolute -top-10 -right-10 size-28 bg-teal/20 blur-2xl" aria-hidden />
-              <Link to="/billing" className="relative block">
+            <div className="border border-border bg-bg p-4">
+              <Link to="/billing" className="group block">
                 <Eyebrow>{t('nav.balanceLabel')}</Eyebrow>
-                <p className="mt-1.5 text-2xl font-semibold tracking-tight text-fg tabular-nums">{money(b.balanceMicros, locale)}</p>
-                <p className={cn('mt-0.5 truncate text-xs text-muted tabular-nums', isLowBalance(b) && 'text-error')} title={t('nav.availableHeld', { available: money(b.availableMicros, locale), reserved: money(b.reservedMicros, locale) })}>
+                <p className="mt-2 text-[22px] leading-none font-semibold tracking-[-0.02em] text-fg tabular-nums">{money(b.balanceMicros, locale)}</p>
+                <p className={cn('mt-2 truncate text-xs text-subtle tabular-nums', isLowBalance(b) && 'text-error')} title={t('nav.availableHeld', { available: money(b.availableMicros, locale), reserved: money(b.reservedMicros, locale) })}>
                   {t('nav.availableHeld', { available: money(b.availableMicros, locale), reserved: money(b.reservedMicros, locale) })}
                 </p>
                 {hours !== null ? (
-                  <p className={cn('mt-0.5 truncate text-xs tabular-nums', hours < 24 ? 'font-medium text-error' : 'text-muted')} data-testid="nav-runway">
+                  <p className={cn('mt-0.5 truncate text-xs tabular-nums', hours < 24 ? 'font-medium text-error' : 'text-subtle')} data-testid="nav-runway">
                     {t('nav.runway', { time: runwayLabel(t, hours) })}
                   </p>
                 ) : null}
               </Link>
-              <div className="relative mt-3">
+              <div className="mt-4 border-t border-border pt-3">
                 <div className="flex items-center justify-between text-[11px] text-subtle">
                   <span>{t('nav.browsersUsed')}</span>
-                  <span className="font-mono tabular-nums">{t('nav.usage', { used, max })}</span>
+                  <span className="tabular-nums">{t('nav.usage', { used, max })}</span>
                 </div>
-                <div className="mt-1 h-1 bg-surface-2" aria-hidden>
-                  <div className={cn('h-full transition-[width]', used >= max ? 'bg-rose' : 'bg-indigo')} style={{ width: `${max ? Math.min(100, (used / max) * 100) : 0}%` }} />
+                <div className="mt-1.5 h-0.5 bg-surface-2" aria-hidden>
+                  <div className={cn('h-full transition-[width] duration-300', used >= max ? 'bg-error' : 'bg-fg')} style={{ width: `${max ? Math.min(100, (used / max) * 100) : 0}%` }} />
                 </div>
               </div>
               {b.mode === 'prepaid' ? (
-                <Link to="/billing#top-up" className="relative mt-3 flex h-8 items-center justify-center gap-1.5 bg-teal/10 text-xs font-semibold text-teal transition-colors hover:bg-teal hover:text-white">
-                  <Plus className="size-3.5" /> {t('nav.addCredit')}
+                <Link to="/billing#top-up" className="mt-4 flex h-8 items-center justify-center border border-border-strong text-xs font-medium transition-colors hover:border-fg/50 hover:bg-surface">
+                  {t('nav.addCredit')}
                 </Link>
               ) : null}
             </div>
           ) : me.data && b && collapsed ? (
-            <Link to="/billing" title={`${t('nav.balanceLabel')}: ${money(b.balanceMicros, locale)}`} className={cn('grid h-10 place-items-center bg-bg text-[11px] font-semibold tabular-nums transition-colors hover:bg-surface-2', isLowBalance(b) ? 'text-error' : 'text-teal')}>
+            <Link to="/billing" title={`${t('nav.balanceLabel')}: ${money(b.balanceMicros, locale)}`} className={cn('grid h-10 place-items-center border border-border bg-bg text-[11px] font-semibold tabular-nums transition-colors hover:border-border-strong', isLowBalance(b) ? 'text-error' : 'text-fg')}>
               {money(b.balanceMicros, locale).replace(/\.\d+$/, '')}
             </Link>
           ) : (
@@ -255,7 +251,7 @@ export function AppShell() {
           <Logo />
         </Link>
         {b ? (
-          <Link to="/billing" className={cn('ml-auto bg-surface px-2 py-1 font-mono text-xs font-semibold tabular-nums', isLowBalance(b) ? 'text-error' : 'text-teal')}>
+          <Link to="/billing" className={cn('ml-auto border border-border px-2 py-1 text-xs font-semibold tabular-nums', isLowBalance(b) ? 'text-error' : 'text-fg')}>
             {money(b.balanceMicros, locale)}
           </Link>
         ) : <span className="ml-auto" />}
@@ -265,14 +261,17 @@ export function AppShell() {
       <main className="min-w-0 flex-1 pb-[calc(64px+env(safe-area-inset-bottom))] md:pb-0">
         <div className="mx-auto w-full max-w-[1280px] px-4 py-5 md:px-8 md:py-8 lg:px-10">
           <BillingBanner />
-          <Outlet />
+          {/* Each section fades in when the user moves to it; moving within one (a dialog, a tab) does not. */}
+          <div key={location.pathname.split('/')[1]} className="[animation:cb-in_220ms_var(--ease-out)]">
+            <Outlet />
+          </div>
         </div>
       </main>
 
       <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-border bg-bg/90 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl md:hidden" aria-label={t('nav.menu')}>
         {nav.slice(0, 1).map((n) => <TabLink key={n.to} {...n} />)}
-        <button type="button" onClick={() => navigate('/browsers/new')} className="flex flex-col items-center justify-center gap-0.5 py-2 text-[11px] font-medium text-indigo">
-          <span className="grid size-7 place-items-center bg-gradient-to-br from-indigo to-violet text-white"><Plus className="size-4" /></span>
+        <button type="button" onClick={() => navigate('/browsers/new')} className="flex flex-col items-center justify-center gap-0.5 py-2 text-[11px] font-medium text-fg">
+          <span className="grid size-7 place-items-center bg-fg text-bg"><Plus className="size-4" /></span>
           {t('nav.new')}
         </button>
         {nav.slice(1).map((n) => <TabLink key={n.to} {...n} />)}
@@ -281,9 +280,9 @@ export function AppShell() {
   );
 }
 
-function TabLink({ to, label, icon: Icon, tone }: { to: string; label: string; icon: typeof Wallet; tone: Tone }) {
+function TabLink({ to, label, icon: Icon }: { to: string; label: string; icon: typeof Wallet }) {
   return (
-    <NavLink to={to} className={({ isActive }) => cn('flex min-w-0 flex-col items-center justify-center gap-0.5 py-2 text-[11px] font-medium', isActive ? TONE[tone].text : 'text-muted')}>
+    <NavLink to={to} className={({ isActive }) => cn('flex min-w-0 flex-col items-center justify-center gap-0.5 py-2 text-[11px] font-medium transition-colors', isActive ? 'text-fg' : 'text-subtle')}>
       <span className="grid size-7 place-items-center"><Icon className="size-5" /></span>
       <span className="max-w-full truncate px-1">{label}</span>
     </NavLink>

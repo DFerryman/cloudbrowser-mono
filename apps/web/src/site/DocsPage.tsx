@@ -52,7 +52,7 @@ export function DocsPage() {
         </nav>
       </aside>
       <article className="min-w-0 max-w-[68ch]">
-        <h1 className="text-3xl font-semibold tracking-tight md:text-[44px] md:leading-[1.08]">{article.title}</h1>
+        <h1 className="text-[32px] leading-[1.1] font-semibold tracking-[-0.03em] md:text-[44px] md:leading-[1.08]">{article.title}</h1>
         <p className="mt-4 mb-10 border-b border-border pb-8 text-lg leading-relaxed text-muted">{article.summary}</p>
         <ArticleBody article={article} />
       </article>
@@ -62,7 +62,7 @@ export function DocsPage() {
           <ul className="space-y-2.5 border-l border-border pl-4 text-[13px]">
             {toc.map((h) => (
               <li key={anchor(h)}>
-                <Link to={`#${anchor(h)}`} className="text-muted hover:text-fg">
+                <Link to={`#${anchor(h)}`} className="text-muted transition-colors hover:text-fg">
                   {h.h}
                 </Link>
               </li>

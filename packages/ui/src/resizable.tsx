@@ -98,15 +98,15 @@ export function ResizeHandle({ edge, dragging, label, className, ...props }: Ret
       <span
         className={cn(
           'absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors duration-150',
-          'group-hover:w-0.5 group-hover:bg-indigo group-focus-visible:w-0.5 group-focus-visible:bg-indigo',
-          dragging && 'w-0.5 bg-indigo',
+          'group-hover:w-0.5 group-hover:bg-accent group-focus-visible:w-0.5 group-focus-visible:bg-accent',
+          dragging && 'w-0.5 bg-accent',
         )}
       />
       <span
         className={cn(
           'absolute top-1/2 left-1/2 h-8 w-1 -translate-x-1/2 -translate-y-1/2 bg-border-strong opacity-0 transition-opacity',
           'group-hover:opacity-100 group-focus-visible:opacity-100',
-          dragging && 'bg-indigo opacity-100',
+          dragging && 'bg-accent opacity-100',
         )}
       />
     </div>

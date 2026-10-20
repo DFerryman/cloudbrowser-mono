@@ -14,7 +14,6 @@ import { TrialBadge } from './Trial.js';
 import { useBilling } from '../billing/hooks.js';
 import { canSpend, canUseBrowser } from '../billing/access.js';
 import { BalanceRequired } from '../billing/BalanceRequired.js';
-import { TONE, toneFor } from '../../lib/tones.js';
 
 /**
  * Why a browser was stopped when the user did not do it, and when an unfunded browser will be
@@ -24,7 +23,7 @@ export function StopNotice({ instance: i, className }: { instance: Instance; cla
   const { t, locale } = useI18n();
   if (!i.stopReason && !i.deletesAt) return null;
   return (
-    <div className={cn('mt-3 border-l-2 border-error bg-error/5 px-3 py-2.5 text-xs text-error', className)} role="status" data-testid="stop-notice">
+    <div className={cn('mt-4 border-l-2 border-error bg-error/5 px-3 py-2.5 text-xs text-error', className)} role="status" data-testid="stop-notice">
       {i.stopReason ? <p>{t(`browsers.stopped.${i.stopReason}` as MessageKey)}</p> : null}
       {i.deletesAt ? <p className={i.stopReason ? 'mt-1 font-medium' : 'font-medium'}>{t('browsers.deletesAt', { date: new Date(i.deletesAt).toLocaleString(locale) })}</p> : null}
     </div>
@@ -162,9 +161,9 @@ function InlineName({ name, editing, setEditing, onSave, disabled, className }: 
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => { onSave(draft); setEditing(false); }}
           onKeyDown={(e) => e.key === 'Escape' && (e.preventDefault(), setEditing(false))}
-          className={cn('h-8 min-w-0 flex-1 border border-indigo bg-bg px-2 text-base font-semibold outline-none', className)}
+          className={cn('h-8 min-w-0 flex-1 border border-fg bg-bg px-2 text-base font-semibold outline-none', className)}
         />
-        <button type="submit" className="grid size-8 place-items-center bg-indigo text-white" aria-label={t('browsers.saveName')} onMouseDown={(e) => e.preventDefault()}>
+        <button type="submit" className="grid size-8 place-items-center bg-fg text-bg" aria-label={t('browsers.saveName')} onMouseDown={(e) => e.preventDefault()}>
           <Check className="size-4" />
         </button>
       </form>
@@ -204,27 +203,20 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
   const region = useRegionInfo(i.regionId);
   const a = useBrowserActions(i);
   const [editing, setEditing] = useState(false);
-  const tone = TONE[toneFor(i.regionId)];
 
   return (
-    <Card className="group relative flex flex-col overflow-hidden border-border/70 p-5 transition-[border-color,box-shadow] duration-200 hover:border-border-strong hover:shadow-[0_18px_40px_-28px_rgb(0_0_0/0.35)]">
-      <span className={cn('absolute inset-x-0 top-0 h-[3px]', a.status === 'running' ? 'bg-running' : tone.bg, a.status !== 'running' && 'opacity-60')} aria-hidden />
+    <Card className="group relative flex flex-col p-5 transition-colors duration-200 hover:border-border-strong">
       <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-1 items-center gap-3">
-          <span className={cn('grid size-10 shrink-0 place-items-center font-mono text-xs font-semibold', tone.soft, tone.text)} aria-hidden>
-            {region.country || '··'}
-          </span>
-          <div className="min-w-0 flex-1">
-            <InlineName name={i.name} editing={editing} setEditing={setEditing} onSave={a.rename} disabled={a.deleted} className="text-[17px]" />
-            <p className="truncate text-xs text-subtle"><UsedLine instance={i} /></p>
-          </div>
+        <div className="min-w-0 flex-1">
+          <InlineName name={i.name} editing={editing} setEditing={setEditing} onSave={a.rename} disabled={a.deleted} className="text-[17px] leading-snug" />
+          <p className="mt-0.5 truncate text-xs text-subtle"><UsedLine instance={i} /></p>
         </div>
-        <StatusBadge pill className="mt-0.5 shrink-0" tone={STATUS_TONE[a.status]} label={t(statusKey(a.status))} />
+        <StatusBadge pill className="shrink-0" tone={STATUS_TONE[a.status]} label={t(statusKey(a.status))} />
       </div>
-      <TrialBadge className="mt-2" trial={i.trial} />
-      <div className="mt-4 bg-surface px-3 py-2.5">
+      <TrialBadge className="mt-3" trial={i.trial} />
+      <div className="mt-4 flex min-h-10 items-center border-y border-border py-2">
         <RegionIpChip
-          className="text-[14px]"
+          className="text-[13px]"
           country={region.country}
           city={region.city}
           ip={i.ipAddress}
@@ -244,7 +236,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
         <p className="mt-3 text-sm text-muted">{i.statusReason}</p>
       ) : null}
 
-      <div className="min-h-4 flex-1" />
+      <div className="flex-1" />
       <div className="mt-4 flex items-center gap-1">
         {a.primary('flex-1 justify-center')}
         {a.quick}
@@ -263,13 +255,9 @@ export function BrowserRow({ instance: i }: { instance: Instance }) {
   const region = useRegionInfo(i.regionId);
   const a = useBrowserActions(i);
   const [editing, setEditing] = useState(false);
-  const tone = TONE[toneFor(i.regionId)];
   return (
     <div className={cn('group flex flex-col gap-2 px-3 py-3 transition-colors hover:bg-surface sm:px-4 lg:grid lg:items-center lg:gap-4', ROW_COLUMNS)} data-testid="browser-row">
       <div className="flex min-w-0 items-center gap-3">
-        <span className={cn('grid size-8 shrink-0 place-items-center font-mono text-[11px] font-semibold', tone.soft, tone.text)} aria-hidden>
-          {region.country || '··'}
-        </span>
         <div className="min-w-0 flex-1">
           <InlineName name={i.name} editing={editing} setEditing={setEditing} onSave={a.rename} disabled={a.deleted} className="text-sm" />
           <StatusBadge pill className="mt-0.5 lg:hidden" tone={STATUS_TONE[a.status]} label={t(statusKey(a.status))} />
@@ -279,7 +267,7 @@ export function BrowserRow({ instance: i }: { instance: Instance }) {
           {a.menu(() => setEditing(true))}
         </div>
       </div>
-      <div className="min-w-0 pl-11 lg:pl-0">
+      <div className="min-w-0">
         <RegionIpChip className="text-[13px]" country={region.country} city={region.city} ip={i.ipAddress} copyLabel={t('browsers.copyIp')} pendingLabel={t('browsers.reservingIp')} />
         {a.creating ? <div className="mt-2"><CreateProgress instance={i} /></div> : null}
         <StopNotice instance={i} className="mt-2" />
