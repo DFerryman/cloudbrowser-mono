@@ -81,9 +81,9 @@ function Console({ session }: { session: AdminSession }) {
   return (
     <div className="flex min-h-dvh flex-col md:flex-row">
       <aside className="border-b border-border bg-surface p-3 md:sticky md:top-0 md:h-dvh md:w-52 md:shrink-0 md:border-r md:border-b-0">
-        <div className="flex items-center gap-2 px-2 py-2 text-sm font-semibold">
+        <a href={APP_URL} className="flex w-fit items-center gap-2 px-2 py-2 text-sm font-semibold">
           <Shield className="size-4" aria-hidden /> {t('shell.title')}
-        </div>
+        </a>
         <nav className="mt-2 flex gap-1 overflow-x-auto md:flex-col">
           {NAV.map(([to, label]) => (
             <NavLink
