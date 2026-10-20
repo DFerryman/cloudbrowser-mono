@@ -135,7 +135,7 @@ const en: Article[] = [
       ] },
       { p: 'The sidebar and Billing page show how long your available credit lasts at the combined spending of all your browsers. We email you once each when it falls below about 24, 6 and 1 hours, and the app shows a warning below 24 hours.' },
       { h: 'Refunds and disputes', id: 'refunds' },
-      { p: 'See the Refund Policy. A refund or a payment dispute takes the refunded amount off your balance; while a dispute is open the account is on hold.' },
+      { p: 'Credit is non-refundable, except for duplicate or mistaken charges and where the law gives you a right to a refund; the Refund Policy has the details. A refund or a payment dispute takes the refunded amount off your balance; while a dispute is open the account is on hold.' },
     ],
   },
   {
@@ -326,7 +326,7 @@ const zh: Article[] = [
       ] },
       { p: '侧边栏和账单页会显示按你所有浏览器的总花费，可用余额还能使用多久。当剩余时间低于约 24、6 和 1 小时时，我们会各发送一次邮件，低于 24 小时时应用内也会提醒。' },
       { h: '退款与争议', id: 'refunds' },
-      { p: '参见退款政策。退款或支付争议会从余额中扣除相应金额；争议处理期间账户会被暂停。' },
+      { p: '余额不予退款，重复或错误扣款以及法律赋予退款权利的情况除外，详见退款政策。退款或支付争议会从余额中扣除相应金额；争议处理期间账户会被暂停。' },
     ],
   },
   {
