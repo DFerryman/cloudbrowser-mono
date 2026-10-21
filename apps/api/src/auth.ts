@@ -30,9 +30,9 @@ export const REGISTRATION_LINK_SECONDS = 30 * 60;
  * Better Auth, email only (page 1, "Auth"):
  *
  * - Sign-up: the address gets a single-use registration link (magic-link plugin). Opening it and
- *   confirming creates the account and signs in. A sign-up for an address that already has an
- *   account emails a pointer to sign-in instead, so the sign-up form cannot be used to find
- *   accounts, nor to sign in past a passkey or two-step verification.
+ *   confirming creates the account and signs in. The sign-up form sends an email code to an
+ *   existing account and continues through the normal sign-in checks, including two-factor.
+ *   Direct requests to the legacy magic-link endpoint still receive a pointer to sign-in.
  * - Sign-in: a 6-digit email code (email-OTP plugin, which no longer creates accounts) or, once
  *   the user has added one, a passkey. `startSignIn` picks the method from the address. Email codes
  *   always work, passkey or not, and are followed by the authenticator-app code when two-step
@@ -141,4 +141,14 @@ export async function startSignIn(auth: ReturnType<typeof createAuth>, db: Db, e
     await auth.api.signInMagicLink({ body: { email, metadata: { from: 'sign-in' } }, headers });
   }
   return 'code';
+}
+
+/** New addresses get a registration link; existing accounts continue by email code. */
+export async function startSignUp(auth: ReturnType<typeof createAuth>, db: Db, email: string, headers: Headers): Promise<'registration' | 'code'> {
+  if (await findAccount(db, email)) {
+    await auth.api.sendVerificationOTP({ body: { email, type: 'sign-in' }, headers });
+    return 'code';
+  }
+  await auth.api.signInMagicLink({ body: { email }, headers });
+  return 'registration';
 }

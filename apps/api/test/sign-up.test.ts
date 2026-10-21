@@ -46,6 +46,35 @@ describe('sign-up by registration link', () => {
     expect((await t.call('GET', '/api/v1/me')).status).toBe(401);
   });
 
+  it('sends a sign-in code for an existing address submitted on the sign-up form', async () => {
+    await signIn(t, 'pilot@example.com');
+    await signOut();
+    const beforeUsers = users();
+    const beforeMail = t.emails.length;
+    expect((await post('/sign-up/start', { email: 'PILOT@Example.com' })).body).toEqual({ method: 'code' });
+    const mail = (await sentTo('pilot@example.com')).slice(-1)[0]!;
+    expect(t.emails.length).toBe(beforeMail + 1);
+    expect(mail.subject).toMatch(/sign-in code: \d{6}$/);
+    expect(registrationToken(mail.text)).toBeNull();
+    expect(users()).toBe(beforeUsers);
+    expect((await t.call('GET', '/api/v1/me')).status).toBe(401);
+    const otp = mail.text.match(/(\d{6})/)![1];
+    expect((await post('/sign-in/email-otp', { email: 'pilot@example.com', otp })).status).toBe(200);
+  });
+
+  it('sends a registration link for a new address submitted on the sign-up form', async () => {
+    expect((await post('/sign-up/start', { email: 'fresh@example.com' })).body).toEqual({ method: 'registration' });
+    const [mail] = await sentTo('fresh@example.com');
+    expect(mail?.subject).toBe('Create your Nevazu account');
+    expect(registrationToken(mail!.text)).toBeTruthy();
+    expect(users()).toBe(0);
+  });
+
+  it('validates and checks the origin of sign-up starts', async () => {
+    expect((await post('/sign-up/start', { email: 'bad' })).status).toBe(400);
+    expect((await post('/sign-up/start', { email: 'a@example.com' }, { origin: 'https://evil.test' })).status).toBe(403);
+  });
+
   it('never sends a sign-in link to an existing account, only a pointer to sign-in', async () => {
     await signIn(t, 'pilot@example.com');
     await signOut();
@@ -122,6 +151,7 @@ describe('Cloudflare Turnstile', () => {
   it('publishes the site key and guards every request that sends an email', async () => {
     expect((await t.call('GET', '/api/auth/sign-in/options')).body).toEqual({ turnstileSiteKey: 'site' });
     for (const [path, body] of [
+      ['/sign-up/start', { email: 'a@example.com' }],
       ['/sign-in/start', { email: 'a@example.com' }],
       ['/sign-in/magic-link', { email: 'a@example.com' }],
       ['/email-otp/send-verification-otp', { email: 'a@example.com', type: 'sign-in' }],
@@ -130,6 +160,6 @@ describe('Cloudflare Turnstile', () => {
       expect((await post(path, body, { 'cf-turnstile-response': 'bad' })).status).toBe(403);
       expect((await post(path, body, { 'cf-turnstile-response': 'good' })).status).toBe(200);
     }
-    expect(await sentTo('a@example.com')).toHaveLength(2);
+    expect(await sentTo('a@example.com')).toHaveLength(3);
   });
 });

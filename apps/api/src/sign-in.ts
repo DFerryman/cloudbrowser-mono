@@ -4,6 +4,7 @@
  *
  * - GET  /sign-in/options     what the sign-in and sign-up forms need (the Turnstile site key)
  * - POST /sign-in/start       first sign-in step: passkey or email code for this address
+ * - POST /sign-up/start       registration link for a new address, email code for an existing one
  * - POST /sign-up/complete    finishes sign-up with the token from a registration link
  *
  * Every request that sends an email (the start step, a registration link, an email code) must carry
@@ -11,11 +12,11 @@
  */
 import { Hono, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
-import { startSignIn } from './auth.js';
+import { startSignIn, startSignUp } from './auth.js';
 import type { AppEnv, Env } from './env.js';
 
 /** Better Auth endpoints (and ours) that send an email. */
-export const SENDS_EMAIL = /\/api\/auth\/(sign-in\/start|sign-in\/magic-link|email-otp\/send-verification-otp)$/;
+export const SENDS_EMAIL = /\/api\/auth\/(sign-up\/start|sign-in\/start|sign-in\/magic-link|email-otp\/send-verification-otp)$/;
 const SITEVERIFY = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 
 export const tooMany = { code: 'TOO_MANY_REQUESTS', message: 'Too many attempts. Try again in a minute.' };
@@ -59,6 +60,13 @@ const sameOrigin: MiddlewareHandler<AppEnv> = async (c, next) => {
 
 export const signInRoute = new Hono<AppEnv>();
 signInRoute.get('/sign-in/options', (c) => c.json({ turnstileSiteKey: c.env.TURNSTILE_SITE_KEY ?? null }));
+
+signInRoute.post('/sign-up/start', sameOrigin, async (c) => {
+  const body = z.object({ email: z.email() }).safeParse(await c.req.json().catch(() => null));
+  if (!body.success) return c.json({ code: 'INVALID_EMAIL', message: 'Enter a valid email address.' }, 400);
+  const method = await startSignUp(c.get('auth'), c.get('db'), body.data.email.trim().toLowerCase(), c.req.raw.headers);
+  return c.json({ method });
+});
 
 signInRoute.post('/sign-in/start', sameOrigin, async (c) => {
   const body = z.object({ email: z.email() }).safeParse(await c.req.json().catch(() => null));

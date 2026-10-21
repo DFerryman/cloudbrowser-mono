@@ -160,7 +160,7 @@ const en: Article[] = [
     summary: 'Creating an account, email codes, passkeys, two-step verification and signing out.',
     blocks: [
       { h: 'Creating an account', id: 'sign-up' },
-      { p: 'All you need is an email address. Choose Create account, enter your email, and open the link we send you within 30 minutes. The link works once.' },
+      { p: 'All you need is an email address. Choose Create account, enter your email, and open the link we send you within 30 minutes. The link works once. If your email already has an account, we send a sign-in code instead and take you to sign-in.' },
       { h: 'Email codes', id: 'email' },
       { p: 'You sign in with a one-time code sent to your email. There is no password to leak or reuse. Email codes always work, even after you add a passkey.' },
       { h: 'Two-step verification', id: 'two-step' },
@@ -355,7 +355,7 @@ const zh: Article[] = [
     summary: '创建账户、邮箱验证码、通行密钥、两步验证与退出登录。',
     blocks: [
       { h: '创建账户', id: 'sign-up' },
-      { p: '只需一个邮箱。点击“创建账户”，输入邮箱，并在 30 分钟内打开我们发送的链接即可。链接仅可使用一次。' },
+      { p: '只需一个邮箱。点击“创建账户”，输入邮箱，并在 30 分钟内打开我们发送的链接即可。链接仅可使用一次。如果邮箱已注册，我们会改发登录验证码，并带你进入登录页面。' },
       { h: '邮箱验证码', id: 'email' },
       { p: '你通过发送到邮箱的一次性验证码登录，没有可能泄露或重复使用的密码。即使添加了通行密钥，邮箱验证码也始终可用。' },
       { h: '两步验证', id: 'two-step' },

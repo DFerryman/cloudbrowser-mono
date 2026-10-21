@@ -14,8 +14,8 @@ const signInLink = 'font-medium text-accent underline-offset-4 hover:underline';
 
 /**
  * Sign-up with an email address only: the api emails a single-use registration link (30 minutes)
- * that opens SignUpCompletePage. An address that already has an account gets a pointer to sign-in
- * instead; the page reads the same either way.
+ * that opens SignUpCompletePage. An existing address gets a sign-in code and goes straight to
+ * the code-entry step, where the normal sign-in and two-factor checks apply.
  */
 export function SignUpPage() {
   const { t } = useI18n();
@@ -39,8 +39,12 @@ export function SignUpPage() {
     setBusy(true);
     setError(null);
     try {
-      await api('POST', '/api/auth/sign-in/magic-link', { body: { email: address }, headers: await turnstile.headers() });
-      setSent(true);
+      const res = await api<{ method: 'registration' | 'code' }>('POST', '/api/auth/sign-up/start', { body: { email: address }, headers: await turnstile.headers() });
+      if (res.method === 'code') {
+        navigate(`/sign-in?email=${encodeURIComponent(address)}`, { replace: true, state: { emailCodeSentFor: address } });
+      } else {
+        setSent(true);
+      }
     } catch (err) {
       setError(sendError(t, err));
     } finally {
@@ -87,7 +91,7 @@ export function SignUpPage() {
           </form>
         </>
       )}
-      <div className="mt-4">{turnstile.widget}</div>
+      <div className="mt-6 flex justify-center">{turnstile.widget}</div>
       {turnstile.checking ? <p role="status" className="mt-4 text-sm text-muted">{t('auth.captchaChecking')}</p> : null}
       {turnstile.failed ? (
         <p role="alert" className="mt-4 text-sm text-error">

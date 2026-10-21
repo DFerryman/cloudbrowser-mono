@@ -69,7 +69,20 @@ export function useTurnstile() {
   const currentToken = useRef<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [checking, setChecking] = useState(false);
+  const [size, setSize] = useState<'flexible' | 'compact'>('compact');
   const pending = useRef<{ resolve: (value: string) => void; reject: (error: Error) => void } | null>(null);
+
+  // Flexible widgets need at least 300px; use the compact widget inside narrower cards.
+  useEffect(() => {
+    if (!siteKey || !ref.current) return;
+    const el = ref.current;
+    const measure = () => setSize(el.clientWidth >= 300 ? 'flexible' : 'compact');
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [siteKey]);
 
   useEffect(() => {
     currentToken.current = null;
@@ -86,7 +99,7 @@ export function useTurnstile() {
           sitekey: siteKey,
           theme: theme === 'system' ? 'auto' : theme,
           language: locale === 'zh-CN' ? 'zh-cn' : 'en',
-          size: 'flexible',
+          size,
           appearance: 'always',
           retry: 'auto',
           'refresh-expired': 'auto',
@@ -127,7 +140,7 @@ export function useTurnstile() {
       widget.current = null;
       widgetSiteKey.current = null;
     };
-  }, [siteKey, locale, theme, attempt]);
+  }, [siteKey, locale, theme, attempt, size]);
 
   const retry = useCallback(() => {
     currentToken.current = null;
@@ -185,7 +198,7 @@ export function useTurnstile() {
   }, []);
 
   return {
-    widget: siteKey ? <div ref={ref} className="min-h-0 empty:hidden" /> : null,
+    widget: siteKey ? <div ref={ref} className="mx-auto flex min-h-0 w-full justify-center" /> : null,
     ready: options.isSuccess && !options.isFetching && (!siteKey || !!token),
     failed: failed || options.isError,
     checking,

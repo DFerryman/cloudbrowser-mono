@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import React from 'react';
 import { act, create } from 'react-test-renderer';
+import { SignUpPage } from '../src/features/auth/SignUpPage.js';
 import { SignInPage } from '../src/features/auth/SignInPage.js';
 import { api } from '../src/lib/api.js';
 import { useTurnstile } from '../src/features/auth/turnstile.js';
 
-const state = vi.hoisted(() => ({ cached: 'site-key' as string | null, fresh: 'site-key' as string | null }));
+const state = vi.hoisted(() => ({ cached: 'site-key' as string | null, fresh: 'site-key' as string | null, navigate: vi.fn(), location: null as any, search: '' }));
 vi.mock('../src/lib/i18n.js', () => ({ useI18n: () => ({ locale: 'en', t: (key: string) => key }) }));
 vi.mock('../src/lib/theme.js', () => ({ useTheme: () => ({ theme: 'system' }) }));
 vi.mock('@tanstack/react-query', async () => {
@@ -23,7 +24,7 @@ vi.mock('@tanstack/react-query', async () => {
 vi.mock('../src/lib/api.js', async (original) => ({ ...await original(), api: vi.fn() }));
 vi.mock('../src/lib/query.js', () => ({ queryClient: { clear: vi.fn() } }));
 vi.mock('../src/site/hooks.js', () => ({ useSignedIn: () => false }));
-vi.mock('react-router', () => ({ useNavigate: () => vi.fn(), useSearchParams: () => [new URLSearchParams()], Link: ({ children }: any) => children }));
+vi.mock('react-router', () => ({ useNavigate: () => state.navigate, useLocation: () => ({ state: state.location }), useSearchParams: () => [new URLSearchParams(state.search)], Link: ({ children }: any) => children }));
 vi.mock('../src/features/auth/AuthLayout.js', () => ({ AuthLayout: ({ children }: any) => children, safeNext: () => '/browsers' }));
 vi.mock('@cloudbrowser/ui', () => ({ Button: (props: any) => React.createElement('button', props), Input: (props: any) => React.createElement('input', props), Label: (props: any) => React.createElement('label', props) }));
 let latest: ReturnType<typeof useTurnstile>;
@@ -33,6 +34,9 @@ let ts: any;
 function Harness() { latest = useTurnstile(); return latest.widget; }
 beforeEach(() => {
  vi.mocked(api).mockReset();
+ state.navigate.mockReset();
+ state.location = null;
+ state.search = '';
  state.cached = state.fresh = 'site-key';
  callbacks = {};
  ts = { render: vi.fn((_el, opts) => { callbacks = opts; return 'widget-id'; }), reset: vi.fn(), remove: vi.fn() };
@@ -97,7 +101,7 @@ test('keeps Email me a code instead clickable and sends the code after one click
  vi.mocked(api).mockResolvedValueOnce({ method: 'passkey' }).mockResolvedValueOnce({});
  await act(async () => { rendered = create(React.createElement(SignInPage), { createNodeMock: () => ({}) }); });
  expect(rendered.root.findAllByType('button').find((b: any) => b.props.children === 'auth.continue').props.disabled).toBe(false);
- await act(async () => rendered.root.findByType('form').props.onSubmit({ preventDefault() {} }));
+ await act(async () => { void rendered.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
  await act(async () => callbacks.callback('first-token'));
  const emailCode = () => rendered.root.findAllByType('button').find((b: any) => b.props.children === 'auth.passkey.emailCode');
  expect(emailCode().props.disabled).toBe(false);
@@ -125,4 +129,22 @@ test('automatically recovers a failed initial script download without refreshing
  let value;
  await act(async () => { value = await latest.headers(); });
  expect(value).toEqual({ 'cf-turnstile-response': 'recovered-token' });
+});
+
+test('an existing email on sign-up continues directly to sign-in code entry', async () => {
+ vi.mocked(api).mockResolvedValueOnce({ method: 'code' });
+ await act(async () => { rendered = create(React.createElement(SignUpPage), { createNodeMock: () => ({}) }); });
+ await act(async () => rendered.root.findByType('input').props.onChange({ target: { value: 'Pilot@Example.com' } }));
+ await act(async () => { void rendered.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
+ await act(async () => callbacks.callback('signup-token'));
+ expect(vi.mocked(api)).toHaveBeenCalledWith('POST', '/api/auth/sign-up/start', expect.objectContaining({ body: { email: 'pilot@example.com' } }));
+ expect(state.navigate).toHaveBeenCalledWith('/sign-in?email=pilot%40example.com', { replace: true, state: { emailCodeSentFor: 'pilot@example.com' } });
+});
+
+test('the redirected sign-in starts at code entry without sending another email', async () => {
+ state.search = 'email=pilot%40example.com';
+ state.location = { emailCodeSentFor: 'pilot@example.com' };
+ await act(async () => { rendered = create(React.createElement(SignInPage), { createNodeMock: () => ({}) }); });
+ expect(rendered.root.findAllByType('input').some((input: any) => input.props.id === 'code')).toBe(true);
+ expect(vi.mocked(api)).not.toHaveBeenCalled();
 });

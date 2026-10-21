@@ -2,7 +2,7 @@ import { Button, Input, Label } from '@cloudbrowser/ui';
 import { startAuthentication, type PublicKeyCredentialRequestOptionsJSON } from '@simplewebauthn/browser';
 import { ArrowLeft, CheckCircle2, Fingerprint, ShieldCheck } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router';
 import { api, ApiError } from '../../lib/api.js';
 import { useI18n } from '../../lib/i18n.js';
 import { queryClient } from '../../lib/query.js';
@@ -31,12 +31,13 @@ export function sendError(t: ReturnType<typeof useI18n>['t'], err: unknown) {
 export function SignInPage() {
   const { t } = useI18n();
   const navigate = useNavigate();
+  const location = useLocation();
   const [params] = useSearchParams();
   const signedIn = useSignedIn();
   const turnstile = useTurnstile();
   const [email, setEmail] = useState(params.get('email') ?? '');
   const [code, setCode] = useState('');
-  const [step, setStep] = useState<Step>('email');
+  const [step, setStep] = useState<Step>(() => location.state?.emailCodeSentFor === email.trim().toLowerCase() ? 'code' : 'email');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const address = email.trim().toLowerCase();
@@ -153,7 +154,7 @@ export function SignInPage() {
       ) : (
         <>
           <h1 className="text-2xl font-semibold tracking-tight">{t('auth.title')}</h1>
-          <p className="mt-2 text-sm leading-relaxed text-muted">{step === 'email' ? t('auth.subtitle') : t('auth.codeSent', { email: address })}</p>
+          <p className="mt-2 text-sm leading-relaxed text-muted">{step === 'email' ? t('auth.subtitle') : t(location.state?.emailCodeSentFor === address ? 'signup.existingCodeSent' : 'auth.codeSent', { email: address })}</p>
           {step === 'email' ? (
             <form onSubmit={start} className="mt-8 space-y-4">
               <div>
@@ -179,7 +180,7 @@ export function SignInPage() {
         </>
       )}
       {/* Outside the steps, so the widget lives as long as the page. */}
-      {step !== 'second-factor' ? <div className="mt-4">{turnstile.widget}</div> : null}
+      {step !== 'second-factor' ? <div className="mt-6 flex justify-center">{turnstile.widget}</div> : null}
       {turnstile.checking ? <p role="status" className="mt-4 text-sm text-muted">{t('auth.captchaChecking')}</p> : null}
       {turnstile.failed && step !== 'second-factor' ? (
         <p role="alert" className="mt-4 text-sm text-error">
