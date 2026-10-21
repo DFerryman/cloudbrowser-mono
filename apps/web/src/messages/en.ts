@@ -19,6 +19,7 @@ export const en = {
   'auth.notRegistered': 'This email has no account yet. Create an account first.',
   'auth.noAccount': 'New to Nevazu?',
   'auth.createAccount': 'Create an account',
+  'auth.captchaLoading': 'Loading the security check. If it does not appear, try again.',
   'auth.captchaChecking': 'Complete the security check. We will continue automatically.',
   'auth.captchaFailed': 'The security check did not pass. Please complete the check or try again.',
   'auth.passkey.title': 'Sign in with your passkey',

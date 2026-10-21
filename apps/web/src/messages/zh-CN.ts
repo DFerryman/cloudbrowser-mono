@@ -21,6 +21,7 @@ export const zhCN: Messages = {
   'auth.notRegistered': '该邮箱尚未注册，请先创建账户。',
   'auth.noAccount': '首次使用 Nevazu？',
   'auth.createAccount': '创建账户',
+  'auth.captchaLoading': '正在加载人机验证。如未出现，请点击重试。',
   'auth.captchaChecking': '请完成人机验证，完成后将自动继续。',
   'auth.captchaFailed': '安全检查未通过，请完成人机验证，或点击重试。',
   'auth.passkey.title': '使用通行密钥登录',

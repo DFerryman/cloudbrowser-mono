@@ -92,7 +92,12 @@ export function SignUpPage() {
         </>
       )}
       {turnstile.active ? <div className="mt-6 w-full">{turnstile.widget}</div> : null}
-      {turnstile.checking ? <p role="status" className="mt-4 text-sm text-muted">{t('auth.captchaChecking')}</p> : null}
+      {turnstile.checking && !turnstile.failed ? (
+        <p role="status" className="mt-4 text-sm text-muted">
+          {t(turnstile.loadingWidget ? 'auth.captchaLoading' : 'auth.captchaChecking')}{' '}
+          <button type="button" className="underline underline-offset-4" onClick={turnstile.retry}>{t('browsers.tryAgain')}</button>
+        </p>
+      ) : null}
       {turnstile.failed ? (
         <p role="alert" className="mt-4 text-sm text-error">
           {t('auth.captchaFailed')}{' '}

@@ -12,10 +12,11 @@ type Turnstile = {
 declare global {
   interface Window {
     turnstile?: Turnstile;
+    nevazuTurnstileReady?: () => void;
   }
 }
 
-const SCRIPT = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+const SCRIPT = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=nevazuTurnstileReady';
 let loading: Promise<Turnstile> | null = null;
 function loadTurnstile(): Promise<Turnstile> {
   if (window.turnstile) return Promise.resolve(window.turnstile);
@@ -25,18 +26,25 @@ function loadTurnstile(): Promise<Turnstile> {
       const fail = () => {
         window.clearTimeout(timer);
         s.remove();
+        delete window.nevazuTurnstileReady;
         reject(new Error('turnstile'));
       };
       const timer = window.setTimeout(fail, 15_000);
       s.src = SCRIPT;
       s.async = true;
-      s.onload = () => {
+      // Wait for the API's ready callback, rather than just the script download event.
+      window.nevazuTurnstileReady = () => {
         window.clearTimeout(timer);
-        if (window.turnstile) resolve(window.turnstile);
-        else fail();
+        if (window.turnstile) {
+          delete window.nevazuTurnstileReady;
+          resolve(window.turnstile);
+        } else fail();
       };
       s.onerror = fail;
       document.head.appendChild(s);
+    }).then((ts) => {
+      loading = null;
+      return ts;
     }).catch((err) => {
       loading = null;
       throw err;
@@ -59,6 +67,7 @@ export function useTurnstile() {
   const [active, setActive] = useState(false);
   const [failed, setFailed] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [loadingWidget, setLoadingWidget] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [size, setSize] = useState<'flexible' | 'compact'>('flexible');
   const mounted = useRef(true);
@@ -81,6 +90,7 @@ export function useTurnstile() {
     let widget: string | undefined;
     let instance: Turnstile | undefined;
     const el = ref.current;
+    setLoadingWidget(true);
     loadTurnstile().then((ts) => {
       if (cancelled) return;
       instance = ts;
@@ -89,7 +99,7 @@ export function useTurnstile() {
         theme: theme === 'system' ? 'auto' : theme,
         language: locale === 'zh-CN' ? 'zh-cn' : 'en',
         size,
-        appearance: 'interaction-only',
+        appearance: 'always',
         retry: 'auto',
         'refresh-expired': 'auto',
         'refresh-timeout': 'auto',
@@ -101,7 +111,11 @@ export function useTurnstile() {
         },
         'error-callback': () => { if (!cancelled) setFailed(true); },
       });
-    }).catch(() => { if (!cancelled) setFailed(true); });
+      if (!widget) throw new Error('Security check did not render');
+      setLoadingWidget(false);
+    }).catch(() => {
+      if (!cancelled) { setLoadingWidget(false); setFailed(true); }
+    });
     return () => {
       cancelled = true;
       if (widget !== undefined) instance?.remove(widget);
@@ -109,6 +123,7 @@ export function useTurnstile() {
   }, [active, siteKey, locale, theme, attempt, size]);
 
   const retry = useCallback(() => {
+    setLoadingWidget(true);
     setFailed(false);
     setAttempt((n) => n + 1);
   }, []);
@@ -124,6 +139,7 @@ export function useTurnstile() {
     pending.current?.reject(new Error('Security check cancelled'));
     pending.current = null;
     setActive(false);
+    setLoadingWidget(false);
     setChecking(false);
     setFailed(false);
   }, []);
@@ -135,6 +151,7 @@ export function useTurnstile() {
     if (!fresh.data.turnstileSiteKey) return {};
     if (pending.current) throw new Error('Security check already in progress');
     setActive(true);
+    setLoadingWidget(true);
     setChecking(true);
     try {
       const value = await new Promise<string>((resolve, reject) => {
@@ -163,10 +180,11 @@ export function useTurnstile() {
   }, []);
 
   return {
-    widget: active && siteKey ? <div ref={ref} className={size === 'flexible' ? 'min-h-0 w-full [&>div]:w-full' : 'flex min-h-0 w-full justify-center'} /> : null,
+    widget: active && siteKey ? <div ref={ref} className={size === 'flexible' ? 'min-h-[65px] w-full [&>div]:w-full' : 'flex min-h-[140px] w-full justify-center'} /> : null,
     active,
     failed: active && (failed || options.isError),
     checking,
+    loadingWidget,
     retry,
     finish,
     headers,

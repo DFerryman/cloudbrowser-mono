@@ -52,7 +52,7 @@ test('mounts no challenge until an email is requested, then removes it without r
  let request: Promise<any>;
  await act(async () => { request = latest.headers(); });
  expect(latest.checking).toBe(true);
- expect(callbacks.appearance).toBe('interaction-only');
+ expect(callbacks.appearance).toBe('always');
  expect(callbacks.size).toBe('flexible');
  await act(async () => callbacks.callback('verified-token'));
  expect(await request!).toEqual({ 'cf-turnstile-response': 'verified-token' });
@@ -138,7 +138,7 @@ test('automatically recovers a failed script download during an email request', 
  let loads = 0;
  vi.stubGlobal('document', { createElement: () => ({ remove: vi.fn() }), head: { appendChild: (script: any) => {
   if (++loads === 1) script.onerror();
-  else { (window as any).turnstile = ts; script.onload(); }
+  else { (window as any).turnstile = ts; (window as any).nevazuTurnstileReady(); }
  }} });
  await mount();
  expect(loads).toBe(0);
@@ -205,4 +205,38 @@ test('email-code sign-in verifies only the mail request, then code and TOTP have
  expect(rendered.root.findAllByType('input').some((input: any) => input.props.id === 'second-factor')).toBe(true);
  expect(ts.render).toHaveBeenCalledOnce();
  expect(ts.reset).not.toHaveBeenCalled();
+});
+
+test('waits for the script API ready callback and exposes loading instead of hiding the check', async () => {
+ (window as any).turnstile = undefined;
+ let script: any;
+ vi.stubGlobal('document', { createElement: () => ({ remove: vi.fn() }), head: { appendChild: (s: any) => { script = s; } } });
+ await mount();
+ let request: Promise<any>;
+ await act(async () => { request = latest.headers(); });
+ expect(script.src).toContain('onload=nevazuTurnstileReady');
+ expect(ts.render).not.toHaveBeenCalled();
+ expect(latest.loadingWidget).toBe(true);
+ await act(async () => { (window as any).turnstile = ts; (window as any).nevazuTurnstileReady(); });
+ expect(ts.render).toHaveBeenCalledOnce();
+ expect(callbacks.appearance).toBe('always');
+ expect(latest.loadingWidget).toBe(false);
+ await act(async () => callbacks.callback('ready-token'));
+ expect(await request!).toEqual({ 'cf-turnstile-response': 'ready-token' });
+ await act(async () => latest.finish());
+});
+
+test('a stalled verification has an in-page retry button and still sends only one email', async () => {
+ vi.mocked(api).mockResolvedValueOnce({ method: 'registration' });
+ await act(async () => { rendered = create(React.createElement(SignUpPage), { createNodeMock: () => ({ clientWidth: 360 }) }); });
+ await act(async () => { void rendered.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
+ expect(vi.mocked(api)).not.toHaveBeenCalled();
+ const retry = rendered.root.findAllByType('button').find((b: any) => b.props.children === 'browsers.tryAgain');
+ expect(retry).toBeDefined();
+ expect(retry.props.disabled).not.toBe(true);
+ await act(async () => retry.props.onClick());
+ expect(ts.render).toHaveBeenCalledTimes(2);
+ await act(async () => callbacks.callback('retry-token'));
+ expect(vi.mocked(api)).toHaveBeenCalledTimes(1);
+ expect(ts.remove).toHaveBeenCalledWith('widget-id');
 });
