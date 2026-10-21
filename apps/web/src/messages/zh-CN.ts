@@ -717,7 +717,7 @@ export const zhCN: Messages = {
   'status.components': '服务',
   'status.component.api': '网页应用与 API',
   'status.component.database': '数据库',
-  'status.component.automation': '后台任务（休眠、计量、检查）',
+  'status.component.automation': '云资源同步',
   'status.regions': '地区',
   'status.region.ok': '可新建浏览器',
   'status.region.noNew': '现有浏览器正常，暂停新建',

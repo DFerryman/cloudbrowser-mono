@@ -715,7 +715,7 @@ export const en = {
   'status.components': 'Services',
   'status.component.api': 'Web app and API',
   'status.component.database': 'Database',
-  'status.component.automation': 'Background jobs (sleep, metering, checks)',
+  'status.component.automation': 'Cloud resource synchronization',
   'status.regions': 'Regions',
   'status.region.ok': 'Accepting new browsers',
   'status.region.noNew': 'Existing browsers work; new browsers paused',

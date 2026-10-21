@@ -40,20 +40,30 @@ describe('public pages', () => {
     expect((await t.call('POST', '/api/public/status', {})).status).toBe(404);
   });
 
-  it('uses the five-minute AWS catalog heartbeat instead of treating hourly quota snapshots as stale', async () => {
+  it('uses completed sync runs instead of daily catalog updates as the heartbeat', async () => {
     const now = Date.now();
-    t.d1.sqlite.prepare(`INSERT INTO quota_snapshots (executor,region,metric,used,\"limit\",taken_at) VALUES ('aws-ec2','ap-northeast-1','vcpus',0,10,?)`).run(now - 55 * 60_000);
-    t.d1.sqlite.prepare('UPDATE aws_provider_state SET catalog_at=? WHERE id=1').run(now - 5 * 60_000);
+    t.d1.sqlite.prepare('UPDATE aws_provider_state SET catalog_at=?, last_run=? WHERE id=1')
+      .run(now - 12 * 3_600_000, JSON.stringify({ finishedAt: new Date(now - 5 * 60_000).toISOString() }));
     const automation = async () => (await t.call('GET', '/api/public/status')).body.components.find((c: { id: string }) => c.id === 'automation').status;
     expect(await automation()).toBe('operational');
-    t.d1.sqlite.prepare('UPDATE aws_provider_state SET catalog_at=? WHERE id=1').run(now - 31 * 60_000);
+    // Refreshing metadata must not mask the fact that normal synchronization has stopped.
+    t.d1.sqlite.prepare('UPDATE aws_provider_state SET catalog_at=?, last_run=? WHERE id=1')
+      .run(now, JSON.stringify({ finishedAt: new Date(now - 31 * 60_000).toISOString() }));
     expect(await automation()).toBe('degraded');
-    // Without the newer AWS heartbeat, the hourly cadence still gets a 30-minute grace period.
-    t.d1.sqlite.exec('UPDATE aws_provider_state SET catalog_at=NULL WHERE id=1');
+  });
+
+  it('falls back to hourly quota snapshots when a completed run is missing or invalid', async () => {
+    const now = Date.now();
+    t.d1.sqlite.prepare(`INSERT INTO quota_snapshots (executor,region,metric,used,"limit",taken_at) VALUES ('aws-ec2','ap-northeast-1','vcpus',0,10,?)`).run(now - 55 * 60_000);
+    const automation = async () => (await t.call('GET', '/api/public/status')).body.components.find((c: { id: string }) => c.id === 'automation').status;
+    t.d1.sqlite.exec('UPDATE aws_provider_state SET last_run=NULL WHERE id=1');
+    expect(await automation()).toBe('operational');
+    t.d1.sqlite.prepare('UPDATE aws_provider_state SET last_run=? WHERE id=1').run(JSON.stringify({ finishedAt: 'invalid' }));
     expect(await automation()).toBe('operational');
     t.d1.sqlite.prepare('UPDATE quota_snapshots SET taken_at=?').run(now - 91 * 60_000);
     expect(await automation()).toBe('degraded');
   });
+
 });
 
 describe('paging', () => {

@@ -12,8 +12,8 @@ import { allRegionPricing } from '../pricing.js';
 
 const { awsProviderState, controlFlags, quotaSnapshots } = schema;
 
-/** AWS catalog sync runs every five minutes; the legacy quota snapshot runs hourly. */
-const CATALOG_STALE_MS = 30 * 60_000;
+/** AWS synchronization runs every five minutes; the legacy quota snapshot runs hourly. */
+const SYNC_STALE_MS = 30 * 60_000;
 const QUOTA_STALE_MS = 90 * 60_000;
 
 export const publicRoute = new Hono<AppEnv>();
@@ -68,12 +68,19 @@ publicRoute.get('/status', async (c) => {
       regionViews(db, null, now),
       db.select().from(controlFlags).where(eq(controlFlags.key, 'creation_freeze')),
       db.select({ takenAt: quotaSnapshots.takenAt }).from(quotaSnapshots).orderBy(desc(quotaSnapshots.takenAt)).limit(1),
-      db.select({ catalogAt: awsProviderState.catalogAt }).from(awsProviderState).where(eq(awsProviderState.id, 1)),
+      db.select({ lastRun: awsProviderState.lastRun }).from(awsProviderState).where(eq(awsProviderState.id, 1)),
     ]);
     creationPaused = freeze?.value === 'true';
-    // Prefer the frequent provider heartbeat. Older deployments only have hourly snapshots.
-    const heartbeat = provider?.catalogAt ?? snapshot?.takenAt;
-    if (heartbeat) automation = now.getTime() - heartbeat.getTime() > (provider?.catalogAt ? CATALOG_STALE_MS : QUOTA_STALE_MS) ? 'degraded' : 'operational';
+    // catalogAt tracks daily metadata refreshes, not the five-minute synchronization heartbeat.
+    // A completed run proves the sync finished; a newer catalog alone cannot hide a stalled run.
+    const finishedAt = provider?.lastRun?.finishedAt;
+    const completedMs = typeof finishedAt === 'string' ? Date.parse(finishedAt) : NaN;
+    if (Number.isFinite(completedMs)) {
+      automation = now.getTime() - completedMs > SYNC_STALE_MS ? 'degraded' : 'operational';
+    } else if (snapshot?.takenAt) {
+      // Older deployments without run summaries only have hourly quota snapshots.
+      automation = now.getTime() - snapshot.takenAt.getTime() > QUOTA_STALE_MS ? 'degraded' : 'operational';
+    }
     // Regions not offered (switched off by the operator) are not shown, rather than reported down.
     // A region whose stock is used up is working as intended, not degraded.
     regionRows = listed.filter((r) => r.enabled).map((r) => {
