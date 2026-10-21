@@ -46,7 +46,6 @@ export function PricingPage() {
   const m = (v: number) => money(v, locale);
   // Many regions: one list grouped by continent, each option with its running price.
   const groups = [...REGION_AREAS, null].map((area) => [area, regions.filter((r) => r.area === area).sort((a, b) => regionPlace(a, locale).localeCompare(regionPlace(b, locale)))] as const).filter(([, list]) => list.length);
-  const trialRegion = regions.find((r) => r.regionId === pricing.data?.trial.regionId);
 
   return (
     <>
@@ -100,20 +99,20 @@ export function PricingPage() {
         </div>
       </section>
 
-      {pricing.data ? (
+      {pricing.data && pricing.data.signupCreditMicros > 0 && !signedIn ? (
         <section className={`${container} pt-16`}>
           <Card className="flex flex-col gap-4 border-l-2 border-l-fg p-6 sm:flex-row sm:items-center sm:justify-between md:p-8">
             <div className="flex gap-3">
               <Gift className="mt-0.5 size-5 shrink-0" aria-hidden />
               <div>
-                <h2 className="font-semibold">{t('pricing.trial.title')}</h2>
+                <h2 className="font-semibold">{t('signup.creditTitle', { amount: m(pricing.data.signupCreditMicros) })}</h2>
                 <p className="mt-1 text-sm text-muted">
-                  {t('pricing.trial.body', { minutes: pricing.data.trial.minutes, region: trialRegion ? regionPlace(trialRegion, locale) : pricing.data.trial.regionId })}
+                  {t('signup.creditBody')}
                 </p>
               </div>
             </div>
             <Button variant="primary" onClick={() => navigate(signedIn ? '/browsers/new' : '/sign-up')}>
-              {signedIn ? t('trial.start') : t('nav.signIn')}
+              {t('signup.createAccount')}
             </Button>
           </Card>
         </section>

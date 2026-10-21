@@ -18,10 +18,10 @@ const change = (kind: 'topup' | 'adjustment', amountMicros: number) =>
 /** Sets available credit to exactly `micros` with an adjustment (not a top-up). */
 const setAvailable = async (micros: number) => change('adjustment', micros - (await prepaidBalance(db(), userId)).availableMicros);
 
-async function create(trial = false) {
-  const regionId = trial ? 'syd1' : 'tyo1';
+async function create() {
+  const regionId = 'tyo1';
   const price = (await t.call('GET', '/api/v1/pricing')).body.find((p: { regionId: string }) => p.regionId === regionId);
-  const r = await t.call('POST', '/api/v1/instances', { name: trial ? 'Trial' : 'Work', regionId, storageGb: trial ? 2 : 10, priceVersion: price.version, ...(trial ? { trial: true } : {}) }, { 'idempotency-key': `create:${++seq}` });
+  const r = await t.call('POST', '/api/v1/instances', { name: 'Work', regionId, storageGb: 10, priceVersion: price.version }, { 'idempotency-key': `create:${++seq}` });
   expect(r.status).toBe(202);
   await t.settle();
   return r.body.instanceId as string;
@@ -89,23 +89,6 @@ describe('who may turn on Never sleep', () => {
     // Turning the switch off later leaves a browser that already uses it alone.
     t.d1.sqlite.prepare(`DELETE FROM caps WHERE scope = ?`).run(`user:${userId}`);
     expect((await t.call('GET', `/api/v1/instances/${id}`)).body.idleTimeoutS).toBe(0);
-  });
-
-  it('never applies to a free trial, and a trial converts to paid with the 10-minute default', async () => {
-    const trial = await create(true);
-    expect((await t.call('GET', `/api/v1/instances/${trial}`)).body.idleTimeoutS).toBe(300);
-    expect(await quote(trial)).toMatchObject({ allowed: false, reason: 'trial' });
-    expect(await enable(trial, 'any')).toMatchObject({ status: 403, body: { type: 'plan_limit', limit: 'never_sleep_trial' } });
-    // Converting by adding credit keeps auto-sleep on, at the paid default; Never sleep stays a separate choice.
-    await change('topup', 20_000_000);
-    expect((await t.call('GET', `/api/v1/instances/${trial}`)).body).toMatchObject({ idleTimeoutS: 600, trial: { state: 'converted' } });
-  });
-
-  it('turns a trial that had Never sleep from an older release back to auto-sleep when it converts', async () => {
-    const trial = await create(true);
-    t.d1.sqlite.prepare('UPDATE browser_instances SET idle_timeout_s = 0 WHERE id = ?').run(trial);
-    await change('topup', 20_000_000);
-    expect((await t.call('GET', `/api/v1/instances/${trial}`)).body).toMatchObject({ idleTimeoutS: 600, trial: { state: 'converted' } });
   });
 });
 

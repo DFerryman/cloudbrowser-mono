@@ -387,37 +387,6 @@ describe('browsers', () => {
     expect(JSON.parse(op.params).storageGb).toBe(20);
   });
 
-  it('blocks frozen accounts from claiming a free trial, including after billing is disabled', async () => {
-    const userId = (await t.call('GET', '/api/v1/me')).body.user.id;
-    t.d1.sqlite.prepare('INSERT INTO billing_accounts (user_id, frozen_at, updated_at) VALUES (?, ?, ?)').run(userId, Date.now(), Date.now());
-    t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()}) ON CONFLICT(key) DO UPDATE SET value = 'true'`);
-    t.d1.sqlite.exec("UPDATE regions SET enabled = 1, executor = 'fake' WHERE id = 'syd1'");
-    t.d1.sqlite.exec("UPDATE provider_prices SET executor = 'fake' WHERE region_id = 'syd1'");
-    const create = { name: 'Trial', regionId: 'syd1', storageGb: 2, trial: true, priceVersion: await quote('syd1') };
-    expect((await t.call('GET', '/api/v1/billing')).body.trial.eligible).toBe(false);
-    expect((await t.call('POST', '/api/v1/instances', create, { 'idempotency-key': 'frozen-trial' })).body.type).toBe('account_frozen');
-    t.d1.sqlite.exec("UPDATE control_flags SET value = 'false' WHERE key = 'billing_required'");
-    expect((await t.call('POST', '/api/v1/instances', create, { 'idempotency-key': 'frozen-pilot' })).body.type).toBe('account_frozen');
-    expect(t.d1.sqlite.prepare('SELECT trial_used_at AS used FROM billing_accounts WHERE user_id = ?').get(userId)).toEqual({ used: null });
-    expect(t.d1.sqlite.prepare('SELECT count(*) AS n FROM browser_instances').get()).toEqual({ n: 0 });
-  });
-
-  it('blocks frozen accounts from waking an active trial through either start endpoint', async () => {
-    t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()}) ON CONFLICT(key) DO UPDATE SET value = 'true'`);
-    t.d1.sqlite.exec("UPDATE regions SET enabled = 1, executor = 'fake' WHERE id = 'syd1'");
-    t.d1.sqlite.exec("UPDATE provider_prices SET executor = 'fake' WHERE region_id = 'syd1'");
-    const created = await t.call('POST', '/api/v1/instances', { name: 'Trial', regionId: 'syd1', storageGb: 2, trial: true, priceVersion: await quote('syd1') }, { 'idempotency-key': 'trial' });
-    await t.settle();
-    const path = `/api/v1/instances/${created.body.instanceId}`;
-    await t.call('POST', `${path}/stop`, undefined, { 'idempotency-key': 'trial-stop' });
-    await t.settle();
-    t.d1.sqlite.exec(`UPDATE billing_accounts SET frozen_at = ${Date.now()}`);
-    expect((await t.call('POST', `${path}/start`, undefined, { 'idempotency-key': 'frozen-start' })).body.type).toBe('account_frozen');
-    expect((await t.call('POST', `${path}/sessions`)).body.type).toBe('account_frozen');
-    expect((await t.call('GET', path)).body.status).toBe('sleeping');
-    expect(t.d1.sqlite.prepare("SELECT count(*) AS n FROM operations WHERE kind = 'start'").get()).toEqual({ n: 0 });
-  });
-
   it('keeps another user out of browser storage, usage, snapshots, operations and sessions', async () => {
     const created = await t.call('POST', '/api/v1/instances', { name: 'Private', regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': 'private' });
     await t.settle();

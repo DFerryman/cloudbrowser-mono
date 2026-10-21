@@ -157,9 +157,9 @@ describe('deletion releases owned data without profile reuse', () => {
     await w.permanentDelete('private-a'); await reaperTick(w.deps('reaper'));
     expect(owners).toHaveLength(4); expect(new Set(owners)).toEqual(new Set(['test:private-a']));
   });
-  it('purges a reclaimed trial even if stopping its VM failed before delete finished', async () => {
+  it('finishes explicit immediate cleanup even if stopping its VM failed before delete finished', async () => {
     w.faults = (method) => method === 'ensureStopped' ? 'forbidden' : null;
-    expect((await w.settle(await w.enqueue('private-a', 'delete', { reason: 'trial_expired', purgeNow: true }))).state).toBe('failed');
+    expect((await w.settle(await w.enqueue('private-a', 'delete', { reason: 'immediate_cleanup', purgeNow: true }))).state).toBe('failed');
     expect((await w.instance()).purgeAfter).toBeInstanceOf(Date);
     w.faults = () => null; await reaperTick(w.deps('reaper'));
     expect((await w.instance()).status).toBe('purged');

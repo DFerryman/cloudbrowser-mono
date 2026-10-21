@@ -81,9 +81,7 @@ User-facing (keep these few and quiet):
 3. **Top-up confirmation** — only if Creem's own receipt is not enough; otherwise skip to avoid two
    emails per payment.
 4. **Refund processed** — once per refund.
-5. **Free trial ending** (5 minutes before the trial browser stops is too late for email — show it in
-   the app; email only if the trial ends while no tab is open).
-6. **Notification preferences** — a Settings switch to turn off advisory emails (low balance,
+5. **Notification preferences** — a Settings switch to turn off advisory emails (low balance,
    rewards). Required if any marketing-like email (new regions, new promotions) is ever added.
 
 Administrator:

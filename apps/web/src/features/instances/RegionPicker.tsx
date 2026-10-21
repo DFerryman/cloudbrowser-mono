@@ -97,15 +97,13 @@ const latencyTone = (ms: number) => (ms <= 80 ? 'bg-running' : ms <= 160 ? 'bg-s
  * (measured, or estimated until measured), whether it can take a browser now and what an hour
  * costs. The nearest regions come first; the nearest available one is marked.
  */
-export function RegionPicker({ open, regions, loading, pricing, value, onChange, trialRegionId, storageFor, priceLabel, reasonFor }: {
+export function RegionPicker({ open, regions, loading, pricing, value, onChange, storageFor, priceLabel, reasonFor }: {
   open: boolean;
   regions: Region[] | undefined;
   loading: boolean;
   pricing: RegionPricing[] | undefined;
   value: string;
   onChange: (id: string) => void;
-  /** During the free trial only this region can be chosen. */
-  trialRegionId: string | null;
   storageFor: (p: RegionPricing) => number;
   priceLabel?: string;
   /** Why a region cannot be chosen, in place of its own availability (e.g. Premium is not offered there). */
@@ -118,12 +116,12 @@ export function RegionPicker({ open, regions, loading, pricing, value, onChange,
 
   const latency = (r: Region): Latency | null =>
     measured[r.id] !== undefined ? { ms: measured[r.id]!, measured: true } : typeof r.estimatedRttMs === 'number' ? { ms: r.estimatedRttMs, measured: false } : null;
-  const selectable = (r: Region) => r.acceptingNew && (!trialRegionId || r.id === trialRegionId);
+  const selectable = (r: Region) => r.acceptingNew;
 
   const sorted = useMemo(() => {
     const rank = (r: Region) => (selectable(r) ? 0 : 1);
     return [...(regions ?? [])].sort((a, b) => rank(a) - rank(b) || (latency(a)?.ms ?? Infinity) - (latency(b)?.ms ?? Infinity) || a.name.localeCompare(b.name, undefined, { numeric: true }));
-  }, [regions, measured, trialRegionId]);
+  }, [regions, measured]);
   const recommended = sorted.find((r) => selectable(r) && r.availability === 'available' && latency(r))?.id ?? null;
 
   const q = query.trim().toLowerCase();
@@ -156,9 +154,7 @@ export function RegionPicker({ open, regions, loading, pricing, value, onChange,
           const p = pricing?.find((x) => x.regionId === r.id);
           const hourly = p?.rates ? browserEstimate(p.rates, { storageGb: storageFor(p), rootVolumeGb: p.rootVolumeGb, backups: false }).runningTotalHour : null;
           const disabled = !selectable(r);
-          const status = reasonFor?.(r) ?? (trialRegionId && r.id !== trialRegionId && r.acceptingNew
-            ? t('create.region.notInTrial')
-            : r.availabilityReason ? t(`create.region.reason.${r.availabilityReason}` as MessageKey) : r.inventory ? t('create.region.stock', { count: r.inventory.available }) : null);
+          const status = reasonFor?.(r) ?? (r.availabilityReason ? t(`create.region.reason.${r.availabilityReason}` as MessageKey) : r.inventory ? t('create.region.stock', { count: r.inventory.available }) : null);
           const reason = [status, untested(r) ? t('create.region.untested') : null].filter(Boolean).join(' · ') || null;
           return (
             <RegionRow

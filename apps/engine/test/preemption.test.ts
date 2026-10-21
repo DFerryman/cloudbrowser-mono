@@ -177,21 +177,6 @@ describe('operation preemption fences in-flight workers', () => {
     expect(await w.db.select().from(schema.agentCommands)).toEqual([]); expect(pokes).toEqual([]);
   });
 
-  it('does not extend a trial retention deadline through repeated stop requests or retries', async () => {
-    const w = new World(); await w.settle(await w.seed());
-    await w.db.update(browserInstances).set({ trialState: 'ended' });
-    await w.settle(await w.enqueue('stop'));
-    const first = (await w.instance()).trialReclaimAt;
-    expect(first).toBeInstanceOf(Date);
-    w.clock = new Date(w.clock.getTime() + 2 * 86_400_000);
-    await w.settle(await w.enqueue('stop'));
-    expect((await w.instance()).trialReclaimAt).toEqual(first);
-    await w.db.update(browserInstances).set({ trialState: 'active' });
-    w.clock = new Date(w.clock.getTime() + 86_400_000);
-    await w.settle(await w.enqueue('stop'));
-    expect((await w.instance()).trialReclaimAt).toEqual(first);
-  });
-
   it('records a completed resize after cancellation without restoring the old running status', async () => {
     const w = new World(); await w.settle(await w.seed()); const gate = barrier(); let once = false;
     w.afterProvider = async (method) => { if (method === 'resizeVolume' && !once) { once = true; await gate.pause(); } };

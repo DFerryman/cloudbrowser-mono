@@ -82,13 +82,6 @@ export async function toInstances(db: Db, rows: InstanceRow[]): Promise<Instance
       storageGb: r.storageGb,
       stopReason: r.status === 'sleeping' && stop.success ? stop.data : null,
       deletesAt: iso(retained.find((x) => x.instanceId === r.id)?.endsAt),
-      trial: r.trialState
-        ? {
-            state: r.trialState as NonNullable<Instance['trial']>['state'],
-            secondsLeft: r.trialState === 'active' ? Math.ceil(Math.max(0, r.trialSeconds * 1000 - Math.max(r.trialUsedMs, r.trialUsedS * 1000)) / 1000) : 0,
-            reclaimAt: r.trialState === 'converted' ? null : iso(r.trialReclaimAt),
-          }
-        : null,
     };
   });
 }

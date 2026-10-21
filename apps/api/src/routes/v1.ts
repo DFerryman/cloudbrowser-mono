@@ -18,7 +18,6 @@ import {
   Region,
   ResizeStorageBody,
   BALANCE_GRACE_MS,
-  TRIAL,
   UpdateInstanceBody,
   ViewerSession,
   signViewerToken,
@@ -26,10 +25,10 @@ import {
 } from '@cloudbrowser/contracts';
 import { turnIceServers } from '../turn.js';
 import { callerLocation, regionViews } from '../availability.js';
-import { awsInventory, billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, sha256Hex, settleRunningStatements, trialMinutes } from '@cloudbrowser/db';
+import { awsInventory, billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, sha256Hex, settleRunningStatements } from '@cloudbrowser/db';
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import type { AppEnv } from '../env.js';
-import { admitCreate, admitInstanceSpend, admitSpend, admitStart, claimTrial, entitlementsFor, isTrial, regionAcceptingNew, trialSecondsLeft, usage } from '../limits.js';
+import { admitCreate, admitInstanceSpend, admitSpend, admitStart, entitlementsFor, regionAcceptingNew, usage } from '../limits.js';
 import { currentBurn, instancePrice, regionPrice, requirePrice, storageLimits } from '../pricing.js';
 import { instanceUsage, monthOf } from '../usage.js';
 import { billingRoute, PageQuery } from './billing.js';
@@ -176,67 +175,55 @@ v1.openapi(
     if (earlier) return c.json(earlier, 202);
 
     const body = c.req.valid('json');
+    if (Object.hasOwn(await c.req.json(), 'trial')) throw problem(400, 'validation_failed', 'Timed free trials are no longer supported. Create a regular browser using your available credit.');
     const now = new Date();
-    // The free trial (page 6): only where usage is paid, only in its region, once per user.
-    const trial = body.trial === true && (await entitlementsFor(db, user.id)).billing === 'prepaid';
     const tier = body.tier ?? 'basic';
-    if (trial && body.regionId !== TRIAL.regionId) throw problem(400, 'validation_failed', `The free trial runs in ${REGION_INFO[TRIAL.regionId]?.city ?? TRIAL.regionId} only.`);
-    await admitCreate(db, user.id, body.regionId, now, { trial, tier });
+    await admitCreate(db, user.id, body.regionId, now, { tier });
     // The user must have been shown this region's current prices for the tier (create dialog).
     const confirmedPrice = await requirePrice(db, body.regionId, body.priceVersion, tier);
-    const storageGb = trial ? TRIAL.storageGb : (await storageLimits(db, user.id)).defaultGb;
+    const storageGb = (await storageLimits(db, user.id)).defaultGb;
     if (body.storageGb !== storageGb) throw problem(409, 'price_changed', 'The storage included with a new browser changed. Review the new price and try again.');
-    if (trial && !(await claimTrial(db, user.id, now))) throw problem(409, 'invalid_state', 'You have already used your free trial.');
 
     const [info] = await db.select().from(regions).where(eq(regions.id, body.regionId));
     if (!info) throw problem(409, 'region_unavailable');
     const screen = body.screen ?? 'auto';
     const instanceId = newId(now.getTime());
-    const funding = !trial && (await billingRequired(db)) ? await reservationQuote(db, body.regionId, { storageGb, backupsEnabled: false }) : null;
-    const result = await (async () => {
-      try {
-        return await enqueueOperation(c, {
-          instanceId,
-          kind: 'create',
-          key,
-          route,
-          params: { storageGb, maxVmHour: confirmedPrice.sheet.vmHour },
-          before: [
-            db.insert(browserInstances).values({
-              id: instanceId,
-              userId: user.id,
-              name: body.name,
-              regionId: body.regionId,
-              tier,
-              status: 'creating',
-              desiredState: 'running',
-              storageGb,
-              backupsEnabled: false,
-              idleTimeoutS: trial ? TRIAL.idleTimeoutS : DEFAULT_IDLE_TIMEOUT_S,
-              ...(trial ? { trialState: 'active', trialSeconds: (await trialMinutes(db)) * 60 } : {}),
-              screen,
-              fingerprint: { timezone: info.timezone, screen, chromeMajor: null },
-              createdAt: now,
-              updatedAt: now,
-            }),
-          ],
-          after: [
-            ...(funding ? [reservationWrite(db, user.id, instanceId, funding, now)] : []),
-            db.insert(auditLog).values({
-              actor: `user:${user.id}`,
-              action: 'instance.create',
-              target: `instance:${instanceId}`,
-              detail: { regionId: body.regionId, tier, priceVersion: body.priceVersion ?? null, trial },
-              createdAt: now,
-            }),
-          ],
-        });
-      } catch (e) {
-        // Nothing was created: the trial is still unused.
-        if (trial) await db.update(schema.billingAccounts).set({ trialUsedAt: null }).where(eq(schema.billingAccounts.userId, user.id));
-        throw e;
-      }
-    })();
+    const funding = (await billingRequired(db)) ? await reservationQuote(db, body.regionId, { storageGb, backupsEnabled: false }) : null;
+    const result = await enqueueOperation(c, {
+      instanceId,
+      kind: 'create',
+      key,
+      route,
+      params: { storageGb, maxVmHour: confirmedPrice.sheet.vmHour },
+      before: [
+        db.insert(browserInstances).values({
+          id: instanceId,
+          userId: user.id,
+          name: body.name,
+          regionId: body.regionId,
+          tier,
+          status: 'creating',
+          desiredState: 'running',
+          storageGb,
+          backupsEnabled: false,
+          idleTimeoutS: DEFAULT_IDLE_TIMEOUT_S,
+          screen,
+          fingerprint: { timezone: info.timezone, screen, chromeMajor: null },
+          createdAt: now,
+          updatedAt: now,
+        }),
+      ],
+      after: [
+        ...(funding ? [reservationWrite(db, user.id, instanceId, funding, now)] : []),
+        db.insert(auditLog).values({
+          actor: `user:${user.id}`,
+          action: 'instance.create',
+          target: `instance:${instanceId}`,
+          detail: { regionId: body.regionId, tier, priceVersion: body.priceVersion ?? null },
+          createdAt: now,
+        }),
+      ],
+    });
     return c.json(result, 202);
   },
 );
@@ -496,9 +483,7 @@ async function storageOf(c: Vars, row: typeof browserInstances.$inferSelect): Pr
   const [busy] = await db.select({ id: operations.id }).from(operations).where(and(eq(operations.instanceId, row.id), isNull(operations.finishedAt)));
   const { maxGb } = await storageLimits(db, row.userId);
   const price = await regionPrice(db, row.regionId);
-  const blockedReason: InstanceStorage['blockedReason'] = isTrial(row)
-    ? 'trial'
-    : !['running', 'sleeping'].includes(row.status)
+  const blockedReason: InstanceStorage['blockedReason'] = !['running', 'sleeping'].includes(row.status)
     ? 'state'
     : busy
       ? 'busy'
@@ -558,7 +543,6 @@ v1.openapi(
     if (sizeGb > storage.maxGb) throw problem(403, 'plan_limit', `Storage can grow up to ${storage.maxGb} GB.`, { limit: 'storage_max_gb' });
     if (storage.blockedReason === 'cooldown') throw problem(409, 'invalid_state', 'Storage allows four resize attempts per rolling 24 hours. Try again when the current quota resets.');
     if (storage.blockedReason === 'state') throw problem(409, 'invalid_state', 'Storage can grow while the browser is running or sleeping.');
-    if (storage.blockedReason === 'trial') throw problem(409, 'invalid_state', 'Add credit to keep this trial browser before adding storage.');
     if (storage.blockedReason === 'agent') throw problem(409, 'invalid_state', 'This browser was created before storage could grow. Create a new browser to get more space.');
     await requirePrice(db, row.regionId, priceVersion);
     await admitInstanceSpend(db, user.id, row, 'add storage', { storageGb: sizeGb });
@@ -607,7 +591,7 @@ async function requireViewerCredit(db: import('@cloudbrowser/db').Db, userId: st
   await db.update(viewerSessions).set({ endedAt: new Date() }).where(and(eq(viewerSessions.instanceId, instanceId), isNull(viewerSessions.endedAt)));
   if (access.reason === 'frozen') throw problem(403, 'account_frozen', 'This account is frozen.');
   if (access.reason === 'deleted') throw problem(409, 'invalid_state', 'This browser is unavailable.');
-  throw problem(402, 'insufficient_balance', access.reason === 'trial' ? 'The free ten-minute trial has ended. Add credit to continue.' : 'Available prepaid credit is insufficient. Usage is stopped; data and IP are kept for seven days.');
+  throw problem(402, 'insufficient_balance', 'Available prepaid credit is insufficient. Usage is stopped; data and IP are kept for seven days.');
 }
 
 const OpenSessionResult = z.object({ session: ViewerSession, operationId: z.string().nullable() });
@@ -640,7 +624,7 @@ v1.openapi(
       throw problem(409, 'invalid_state', 'This viewer session has ended. Open a new session to use this browser here.');
     }
     // Replaying a successful open must not wake a browser, invalidate another controller, or
-    // reset the trial. Credit and ownership are always checked again before returning it.
+    // replenish credit. Credit and ownership are always checked again before returning it.
     if (earlier) {
       await requireViewerCredit(db, user.id, row.id);
       const [op] = await db.select({ id: operations.id }).from(operations)
@@ -693,7 +677,7 @@ v1.openapi(
       db.insert(viewerSessions).select(sql`SELECT ${sessionId}, ${row.id}, ${user.id}, ${now.getTime()}, ${now.getTime()}, NULL,
         ${c.req.header('cf-ipcountry') ?? null}, ${c.req.header('user-agent')?.slice(0, 300) ?? null}
         WHERE ${available}`).onConflictDoNothing(),
-      // Opening another viewer is input activity, not a new billable run or a fresh trial.
+      // Opening another viewer is input activity, not a new billable run or fresh credit.
       db.insert(instanceHealth).values({ instanceId: row.id, lastInputAt: sql`CASE WHEN ${openActive} THEN ${now.getTime()} ELSE NULL END` })
         .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastInputAt: now }, setWhere: openActive }),
       // Read back in the same transaction rather than another round trip.
@@ -774,7 +758,7 @@ const HeartbeatBody = z.object({ input: z.boolean() });
 const HeartbeatResult = z.object({
   sleepAt: z.string().nullable(),
   /** `balance`: available prepaid credit is projected to run out at `sleepAt` regardless of input. */
-  reason: z.enum(['idle', 'balance', 'trial']).optional(),
+  reason: z.enum(['idle', 'balance']).optional(),
 });
 
 v1.openapi(
@@ -812,12 +796,7 @@ v1.openapi(
     // A paid authorization lease is renewed every minute. Its renewal time is not a sleep
     // deadline: only a genuine depletion projection should produce a balance warning.
     const access = await prepaidAccess(db, inst.userId, inst.id, now);
-    // A free trial browser sleeps when its minutes are used, whatever the input.
-    if (inst.trialState === 'active') {
-      const trialAt = access.deadlineAt?.getTime() ?? now.getTime() + trialSecondsLeft(inst) * 1000;
-      if (trialAt < idleAt) return c.json({ sleepAt: new Date(trialAt).toISOString(), reason: 'trial' as const }, 200);
-    }
-    const balanceAt = !isTrial(inst) ? access.balanceDeadlineAt?.getTime() ?? Infinity : Infinity;
+    const balanceAt = access.balanceDeadlineAt?.getTime() ?? Infinity;
     if (balanceAt < idleAt) return c.json({ sleepAt: new Date(balanceAt).toISOString(), reason: 'balance' as const }, 200);
     return Number.isFinite(idleAt)
       ? c.json({ sleepAt: new Date(idleAt).toISOString(), reason: 'idle' as const }, 200)

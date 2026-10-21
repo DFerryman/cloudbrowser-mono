@@ -116,7 +116,7 @@ export async function runwayWarnings(env: Env, db: Db, now: Date): Promise<numbe
   const accounts = await db.select({ userId: billingAccounts.userId, warned: billingAccounts.runwayWarnedHours }).from(billingAccounts)
     .where(and(isNull(billingAccounts.exhaustedAt), isNull(billingAccounts.frozenAt),
       sql`(${billingAccounts.runwayWarnedHours} IS NOT NULL OR EXISTS (SELECT 1 FROM browser_instances b WHERE b.user_id = ${billingAccounts.userId}
-        AND (b.trial_state IS NULL OR b.trial_state = 'converted') AND b.status NOT IN ('deleting', 'purged', 'failed')))`));
+        AND b.status NOT IN ('deleting', 'purged', 'failed')))`));
   const thresholds = [...RUNWAY_WARNING_HOURS].sort((a, b) => a - b);
   let sent = 0;
   for (const a of accounts) {

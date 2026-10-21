@@ -26,30 +26,6 @@ export const DATA_KEPT_DAYS = 7;
  */
 export const RUNWAY_WARNING_HOURS = [24, 6, 1] as const;
 
-/**
- * The free trial (page 6): each user may create one browser for free, once. It runs in one region
- * on the smallest practical setup (a 2 GB data volume, no snapshots, 5-minute auto-sleep) and for
- * a set running time in all (30 minutes unless the operator changes trial_minutes; each trial
- * keeps the allowance it was created with); then it sleeps. A trial browser is kept 7 days after it last
- * went to sleep, then deleted and purged (its IP released). Adding credit before that turns it
- * into a normal browser with the same data and IP, charged like any other from then on: running
- * time, plus its dedicated IP and storage for as long as it exists (AWS bills both even while the
- * VM is stopped). The trial itself is never charged.
- */
-export const TRIAL = {
-  regionId: 'syd1',
-  /** Default running time; the operator's user:default / trial_minutes cap overrides it. */
-  runningSeconds: 30 * 60,
-  /** The longest trial the operator console accepts. */
-  maxMinutes: 24 * 60,
-  storageGb: 2,
-  idleTimeoutS: 300,
-  keptDays: 7,
-} as const;
-
-export const TrialState = z.enum(['active', 'ended', 'converted']);
-export type TrialState = z.infer<typeof TrialState>;
-
 export const TopUpPack = z.object({
   productId: z.string(),
   name: z.string(),
@@ -95,14 +71,12 @@ export const BillingState = z.object({
   topUps: z.array(TopUpPack),
   /** This calendar month (UTC). */
   month: UsageTotals.extend({ month: z.string() }),
-  /** Whether the user can still start their one free trial, and where. */
-  trial: z.object({ eligible: z.boolean(), regionId: RegionId, minutes: z.number().int(), storageGb: z.number().int(), keptDays: z.number().int() }),
 });
 export type BillingState = z.infer<typeof BillingState>;
 
 export const BalanceTransaction = z.object({
   id: z.string(),
-  kind: z.enum(['topup', 'refund', 'dispute', 'adjustment', 'promotion']),
+  kind: z.enum(['topup', 'refund', 'dispute', 'adjustment', 'promotion', 'signup']),
   amountMicros: z.number().int(),
   description: z.string().nullable(),
   createdAt: z.string(),

@@ -36,7 +36,8 @@ export const PublicPricing = z.object({
   minBalanceMicros: z.number().int(),
   /** Days a browser and its data are kept after available credit runs out. */
   retentionDays: z.number().int(),
-  trial: z.object({ regionId: RegionId, minutes: z.number().int(), storageGb: z.number().int(), keptDays: z.number().int() }),
+  /** Credit granted once when a new account is registered; zero disables the offer. */
+  signupCreditMicros: z.number().int().nonnegative(),
 });
 export type PublicPricing = z.infer<typeof PublicPricing>;
 

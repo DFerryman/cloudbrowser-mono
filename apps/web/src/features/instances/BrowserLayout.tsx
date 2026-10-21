@@ -7,7 +7,6 @@ import { useI18n } from '../../lib/i18n.js';
 import { useInstance } from './hooks.js';
 import { shownStatus, STATUS_TONE, statusKey } from './status.js';
 import { StopNotice } from './BrowserCard.js';
-import { TrialBadge, TrialNotice } from './Trial.js';
 import { useBilling } from '../billing/hooks.js';
 import { canUseBrowser } from '../billing/access.js';
 import { BalanceRequired } from '../billing/BalanceRequired.js';
@@ -45,14 +44,12 @@ export function BrowserLayout() {
               copyLabel={t('browsers.copyIp')}
               pendingLabel={t('browsers.reservingIp')}
             />
-            <TrialBadge trial={i.trial} />
           </div>
         </div>
         <Button variant="primary" className="min-w-32 justify-center" onClick={() => navigate(`/b/${i.id}`)} disabled={i.status === 'deleting' || i.status === 'failed' || !canUseBrowser(billing.data, i)}>
           {shownStatus(i) === 'sleeping' ? t('browsers.wakeOpen') : t('browsers.open')}
         </Button>
       </div>
-      <TrialNotice trial={i.trial} />
       <StopNotice instance={i} className="mb-4 max-w-3xl text-sm" />
       {i.status !== 'deleting' && i.status !== 'failed' ? <BalanceRequired instance={i} /> : null}
       <nav className="mb-8 flex gap-6 overflow-x-auto overflow-y-hidden border-b border-border" aria-label={i.name}>

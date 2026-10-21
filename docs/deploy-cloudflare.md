@@ -139,7 +139,7 @@ markup, default 120%), the minimum balance to start browsers and the low-balance
 operator console → *Pricing & margin*, which also shows each region's cost and price and can
 refresh prices now.
 
-**Billing** is a prepaid balance. Only the one ten-minute trial may run without funded credit.
+**Billing** is a prepaid balance. New registrations receive configurable signup credit (default $2); there is no timed trial.
 Missing payment-provider settings do not grant free paid-browser use. Top-ups turn on when every value below is set; until then
 `/v1/billing/checkout` answers 503.
 
@@ -162,7 +162,7 @@ pnpm exec wrangler secret put CREEM_WEBHOOK_SECRET
 ```
 
 5. **Require prepaid usage**: after reserving seven days of IP/disk retention, the remaining
-   available balance must fund new paid usage. The one free trial browser is ten minutes in Sydney.
+   available balance must fund new paid usage. Signup credit uses the same deposit and minimum-balance checks as other credit.
    An absent flag defaults to prepaid enforcement; an explicit false is a development/pilot override.
 
 ```sql
@@ -234,7 +234,7 @@ priority; repeated requests merge, and a late stop cannot undo deletion. Cancele
 before provider calls and lifecycle writes. AWS calls already in flight still require drain and
 confirmation, so accepting intent does not claim instantaneous physical termination. Stop revokes
 viewers while retaining the agent channel for cleanup. Normal input has at most a one-second
-authorization lease; trusted stop/delete RPCs revoke it immediately, and alarms enforce trial or
+authorization lease; trusted stop/delete RPCs revoke it immediately, and alarms enforce
 credit expiry even without another input event. A lease in use is re-checked shortly before it
 lapses, off the relay path, so signaling and typing do not wait on D1; the checks and the lease
 length are the same.
@@ -352,7 +352,7 @@ UPDATE caps SET "limit" = 3 WHERE scope = 'user:default' AND metric = 'instances
 INSERT INTO caps VALUES ('user:<user id>', 'instances', 5);    -- per-user override
 UPDATE control_flags SET value = 'false' WHERE key = 'creation_freeze';   -- clear the circuit breaker
 SELECT * FROM drift_findings WHERE status = 'open';
-SELECT * FROM billing_accounts;                                -- balances, when they ran out, trial used
+SELECT * FROM billing_accounts;                                -- balances, when they ran out
 SELECT * FROM balance_transactions ORDER BY created_at DESC;   -- top-ups, refunds, disputes, adjustments
 SELECT * FROM webhook_events WHERE processed_at IS NULL;      -- Creem events not applied yet (with error)
 SELECT user_id, SUM(amount_micros) / 1e6 AS usd, SUM(cost_micros) / 1e6 AS aws_usd
@@ -365,3 +365,23 @@ Most of these are also in the operator console (`https://admin.console.nevazu.co
 
 For chaos testing on staging, set `FAKE_FAULTS` on the engine, e.g.
 `{"ensureRunning":{"class":"capacity","rate":0.5}}`.
+
+
+### Signup credit (migration 0032)
+
+Deploy the signup-credit release from clean main after applying D1 migration `0032_signup_credit`.
+Deploy gateway, engine, reaper and reconciler as well as API, since shared authorization and
+metering no longer have timed-trial exemptions. There were no live trial browsers at rollout.
+Historical SQL columns remain inert for rolling deployment compatibility; live schemas, API
+contracts and UI no longer expose trial state. Existing accounts are never backfilled.
+
+Admin → Limits → **Signup credit (USD)** sets the global `user:default / signup_credit_cents` cap.
+The default is 200 cents. A value of 0 disables new awards and hides all signup-credit offers on
+Home, Pricing and Sign-up (public pricing has a 60-second cache). The minimum available credit
+remains $1 plus the seven-day refundable resource deposit. Promotions and top-ups can supplement
+the registration credit; a $2 award alone need not cover admission in every region.
+
+A D1 `AFTER INSERT ON user` trigger awards only verified new registrations. Account creation,
+balance increment and `signup:<user id>` ledger entry are atomic. Email-link requests, repeat
+sign-ins, setting changes and existing accounts do not receive additional credit. Registration
+must fail atomically if its award cannot be committed; no deferred grant or backfill runs.

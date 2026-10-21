@@ -311,23 +311,6 @@ describe('gateway revocation', () => {
     expect((await open('viewer')).response.status).toBe(403);
   });
 
-  it('ends an exhausted trial on its deadline without requiring another input event', async () => {
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
-      d1.sqlite.prepare(`UPDATE browser_instances SET trial_state='active',trial_used_s=599,last_active_at=?`).run(Date.now());
-      const agent = await open('agent');
-      const viewer = await open('viewer');
-      expect(viewer.response.status).toBe(101);
-      expect(await ctx.storage.get('alarm')).toBe(Date.now()+1000);
-      vi.advanceTimersByTime(1000);
-      await gateway.alarm();
-      expect(viewer.socket.closed?.code).toBe(4003);
-      expect(agent.socket.closed).toBeNull();
-      expect((await open('viewer')).response.status).toBe(403);
-    } finally { vi.useRealTimers(); }
-  });
-
   it('uses available credit rather than a positive total balance to retain viewer access', async () => {
     d1.sqlite.exec(`
       UPDATE control_flags SET value='true' WHERE key='billing_required';
@@ -408,32 +391,6 @@ describe('gateway revocation', () => {
     expect(previous.socket.sent.at(-1)).toEqual({ t: 'taken_over' });
     expect(previous.socket.closed).toEqual({ code: 4001, reason: 'taken over' });
     expect(current.socket.closed).toBeNull();
-  });
-
-  it('does not let a short remaining trial run past its exact deadline', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
-    d1.sqlite.prepare(`UPDATE browser_instances SET trial_state='active',trial_used_s=599,trial_used_ms=599750,last_active_at=?`).run(Date.now());
-    const agent = await open('agent');
-    const viewer = await open('viewer');
-    const deadline = Date.now() + 250;
-    expect(viewer.response.status).toBe(101);
-    expect(await ctx.storage.get('alarm')).toBe(deadline);
-    vi.setSystemTime(deadline);
-    const before = viewer.socket.sent.length;
-    await frame(agent.socket, { t: 'viewer', sessionId: 'viewer1', data: { event: 'signal/provide' } });
-    expect(viewer.socket.closed?.code).toBe(4003);
-    expect(viewer.socket.sent).toHaveLength(before);
-    expect(agent.socket.closed).toBeNull();
-  });
-
-  it('rejects an authorization that expires while its alarm write is pending', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
-    d1.sqlite.prepare(`UPDATE browser_instances SET trial_state='active',trial_used_s=599,trial_used_ms=599750,last_active_at=?`).run(Date.now());
-    vi.spyOn(ctx.storage, 'setAlarm').mockImplementation(async at => { vi.setSystemTime(at); });
-    expect((await open('viewer')).response.status).toBe(403);
-    expect(ctx.getWebSockets('viewer')).toHaveLength(0);
   });
 
   it('caps a paid authorization by its remaining funded time after a slow DB response', async () => {

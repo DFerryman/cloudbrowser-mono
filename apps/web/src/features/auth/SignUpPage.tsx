@@ -5,7 +5,8 @@ import { Link, useNavigate, useSearchParams } from 'react-router';
 import { api, ApiError } from '../../lib/api.js';
 import { useI18n } from '../../lib/i18n.js';
 import { queryClient } from '../../lib/query.js';
-import { useSignedIn } from '../../site/hooks.js';
+import { money } from '../../lib/money.js';
+import { usePublicPricing, useSignedIn } from '../../site/hooks.js';
 import { AuthLayout } from './AuthLayout.js';
 import { SecondFactor, sendError } from './SignInPage.js';
 import { useTurnstile } from './turnstile.js';
@@ -18,7 +19,8 @@ const signInLink = 'font-medium text-accent underline-offset-4 hover:underline';
  * the code-entry step, where the normal sign-in and two-factor checks apply.
  */
 export function SignUpPage() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const pricing = usePublicPricing();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const signedIn = useSignedIn();
@@ -79,6 +81,7 @@ export function SignUpPage() {
       ) : (
         <>
           <h1 className="text-2xl font-semibold tracking-tight">{t('signup.title')}</h1>
+          {pricing.data && pricing.data.signupCreditMicros > 0 ? <p className="mt-3 border-l-2 border-fg bg-surface px-3 py-2 text-sm" data-testid="signup-credit-offer">{t('signup.creditOffer', { amount: money(pricing.data.signupCreditMicros, locale) })}</p> : null}
           <p className="mt-2 text-sm leading-relaxed text-muted">{t('signup.subtitle')}</p>
           <form onSubmit={send} className="mt-8 space-y-4">
             <div>

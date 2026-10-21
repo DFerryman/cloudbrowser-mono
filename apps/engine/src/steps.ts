@@ -1,4 +1,4 @@
-import { BrowserTier, ProviderPriceSheet, TRIAL, resourceMonthlyCostCents, tierSheet } from '@cloudbrowser/contracts';
+import { BrowserTier, ProviderPriceSheet, resourceMonthlyCostCents, tierSheet } from '@cloudbrowser/contracts';
 import { blocksRegion, eventRow, launchHealthFor, newArchiveKey, newId, openProviderIssue, raiseAlert, recentCapacityAt, recordLaunch, schema, settleRunningStatements, sha256Hex, userCaps, type Db } from '@cloudbrowser/db';
 import { ExecutorError, isRegionDenial, LaunchFailed, NoLaunchCandidate, ProviderFailed, type ExecutorKind, type ResourceKind, type VmRef } from '@cloudbrowser/executors';
 import { and, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
@@ -29,8 +29,6 @@ async function newVolumeGb(env: StepEnv): Promise<number> {
   // Keep the capacity the customer confirmed even if an operator changes defaults while queued.
   const quoted = env.op.params?.storageGb;
   if (typeof quoted === 'number' && Number.isInteger(quoted) && quoted > 0) return quoted;
-  // The free trial runs on the smallest practical volume (page 6); it can grow after conversion.
-  if (env.instance.trialState) return TRIAL.storageGb;
   return (await userCaps(env.deps.db, env.instance.userId)).get('storage_gb') ?? VOLUME_GB;
 }
 
@@ -393,7 +391,7 @@ async function prepareShutdown(env: StepEnv): Promise<StepOutcome> {
   // profile copy or wait for an agent that is intentionally unable to authenticate.
   if (env.op.kind === 'delete' && env.op.params?.purgeNow === true) {
     const at = env.deps.now();
-    // System trial reclamation has no API acceptance transaction. Record its purge eligibility
+    // System cleanup has no API acceptance transaction. Record its purge eligibility
     // before stopping the VM too, so a failed provider stop cannot strand the deleted profile.
     await env.deps.db.update(browserInstances).set({
       status: 'deleting', desiredState: 'deleted', deletedAt: env.instance.deletedAt ?? at,
@@ -1097,8 +1095,7 @@ async function finishStop(env: StepEnv): Promise<StepOutcome> {
   // The VM ran from this stop's start (running time was settled then) until ensure_stopped; a
   // stop that found no VM to shut down (skipped) adds nothing.
   const shutDown = env.results.prepare_shutdown && 'acked' in env.results.prepare_shutdown ? env.op.createdAt.getTime() : null;
-  return finishWithStatus(env, 'sleeping', env.instance.trialState === 'active' || env.instance.trialState === 'ended'
-    ? { trialReclaimAt: env.instance.trialReclaimAt ?? new Date(env.op.createdAt.getTime() + TRIAL.keptDays * 86_400_000) } : {}, shutDown);
+  return finishWithStatus(env, 'sleeping', {}, shutDown);
 }
 
 // --- resize_volume (page 4: more storage) --------------------------------------------------------
@@ -1198,7 +1195,7 @@ export const HANDLERS: Record<string, Record<string, Handler>> = {
     ensure_stopped: ensureStopped,
     finish: (env) => {
       const at = env.deps.now();
-      // A reclaimed trial browser is purged at once; a deleted browser is restorable for 7 days.
+      // Explicit immediate cleanup is purged at once; a deleted browser is restorable for 7 days.
       const purgeNow = (env.op.params as { purgeNow?: boolean } | null)?.purgeNow === true;
       return finishWithStatus(env, 'deleting', {
         deletedAt: at,

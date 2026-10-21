@@ -21,7 +21,7 @@ const INPUT_AUTH_LEASE_MS = 1000;
 const RENEW_BEFORE_MS = 500;
 /**
  * With no frames to re-check, the alarm re-checks open viewers this often (or at an earlier
- * trial or credit deadline). Frames still use the one-second lease; stop and delete RPCs still
+ * credit deadline). Frames still use the one-second lease; stop and delete RPCs still
  * revoke at once. Re-reading D1 every second for an idle viewer only multiplied the chance that a
  * transient read error closed a healthy connection.
  */
@@ -171,7 +171,7 @@ export class InstanceGateway extends DurableObject<Env> {
       const recheckAt = Math.min(Date.now() + IDLE_RECHECK_MS, access.deadlineAt?.getTime() ?? Infinity);
       const grant = { instanceId, row, until, recheckAt };
       this.inputGrants.set(sessionId, grant);
-      // A trial or depleted balance is revoked even if the viewer sends no more input frames.
+      // A depleted balance is revoked even if the viewer sends no more input frames.
       await this.ctx.storage.setAlarm(recheckAt);
       if (epoch !== this.revocationEpoch || until <= Date.now()) {
         if (this.inputGrants.get(sessionId) === grant) this.inputGrants.delete(sessionId);

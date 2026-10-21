@@ -65,11 +65,12 @@ Cloudflare deployment.
   rounding. The console's margin table includes internal snapshot cost (so rows add up), payment
   fees are estimated on the amount paid including tax, and the users list shows available and
   held credit like the user's own page.
-- **Free trial** (page 6): each user may create one browser for free, once, in Sydney: 10 minutes
-  of running time, a 2 GB data volume, no snapshots, 5-minute auto-sleep. It is metered at cost
-  but charged nothing, sleeps when the 10 minutes are used, and is kept until its fixed seven-day
-  deadline; repeated stops do not extend it. It is then deleted and purged. Adding enough credit before then converts it into a normal browser
-  with the same data and IP; from then on it is charged like any other.
+- **Signup credit**: verified registration receives one balance credit, default $2. Operators
+  configure `user:default / signup_credit_cents` in Limits (USD input). Zero disables awards and
+  hides the offer on Home, Pricing and Sign-up. Migration 0032 installs an atomic user-insert
+  trigger; credit and its ledger entry commit with the new user, so retries cannot double-award.
+  Existing accounts receive no backfill. The $1 minimum and seven-day deposit still apply.
+  Promotion rewards and top-ups combine with this credit. Timed trials have been removed.
 - **Right-sized VMs**: one dedicated VM per browser, 2 vCPU / 4 GB (`c7i-flex.large`, then
   `c6i.large` and `c5.large` on a capacity error), with a 1 GB swap file, a 1 GB shared-memory cap
   for the browser container and the agent protected from the out-of-memory killer. The VM is
@@ -82,7 +83,7 @@ Cloudflare deployment.
   with the same adaptation. Premium is priced from the same AWS price list (`ProviderPriceSheet.premium`, its
   own price version), metered at its machine's price, and counted in a shared vCPU inventory
   (migration 0029). The operator switch `premium` (user:default or user:<id>, off by default)
-  offers it; the free trial is always Basic. The region list shows each tier's own stock. An
+  offers it. The region list shows each tier's own stock. An
   earlier release streamed Premium in H.264 at up to 60 fps and Basic in VP8; both now share the
   H.264 stream. neko is rebuilt with `images/browser/neko/keyframes-and-resends.patch` (keyframe on
   RTCP PLI, a budget for resends) for every browser. See `docs/aws.md`.
@@ -158,7 +159,7 @@ Cloudflare deployment.
   the engine pauses the network if the last check failed or is older than 15 minutes.
 - **Public site**: `/` (home), `/pricing` (per-region running, asleep and data rates from
   `GET /api/public/pricing`, unit rates, a monthly estimator, how prepaid charges and the held
-  amount work, the free trial and an FAQ), `/docs` (the user guide; long explanations live here
+  amount work, signup credit when enabled and an FAQ), `/docs` (the user guide; long explanations live here
   instead of on the app's pages), `/status` (`GET /api/public/status`: database, background jobs,
   and whether each offered region takes new browsers), `/terms`, `/privacy`, `/refunds`,
   `/contact` and a 404 page, all in English and Chinese. The public endpoints are GET-only, carry
@@ -194,11 +195,10 @@ Cloudflare deployment.
   with search. Public pricing, status and home pages list the live regions by continent.
 - **Never sleep** (`idle_timeout_s = 0`): its own operator switch (`never_sleep` cap, 1 or 0, for
   user:default or user:<id>; migration 0023 offers it by default), never a value that slips under
-  `idle_timeout_max_s`. Refused for free trial browsers; on a paid deployment it also needs a
+  `idle_timeout_max_s`. On a paid deployment it needs a
   top-up on the account and available credit for 24 hours of the account's combined spending with
   the browser always on. `GET /instances/{id}/never-sleep` quotes 24 hours of compute, IP and
-  storage in the browser's region; PATCH needs that quote's priceVersion. A converting trial gets
-  the 10-minute paid default. Changing the timeout restarts the idle countdown
+  storage in the browser's region; PATCH needs that quote's priceVersion. Changing the timeout restarts the idle countdown
   (`instance_health.last_input_at`). An idle stop queued before the user acts is rechecked in the
   transaction that starts it (input since it was queued, or Never sleep, cancels it and restores
   the running intent); a stop that has started finishes, and the new setting applies to the next run.
@@ -237,7 +237,7 @@ Cloudflare deployment.
   Verified against the real neko image with the real viewer: throttled to 350 kbit/s it stepped
   down to `low` within about 20 s and back to `full` about a minute after recovery. Browsers on an
   older image keep their single stream.
-- **Cron isolation**: each engine cron step (idle stops, metering, trial reclamation, pending
+- **Cron isolation**: each engine cron step (idle stops, metering, pending
   operations, IP checks, stopped intent) runs even if an earlier one failed, and one browser's
   provider error no longer skips the fail-closed IP check of the others; failures are reported
   together.
@@ -261,7 +261,7 @@ Cloudflare deployment.
   backoff and a fresh single-use token, take-over. HTTP/token and transport waits are bounded;
   stale asynchronous responses cannot overwrite a replacement session. Authorization uses one
   current D1 batch and an existing one-second grant for relay bursts; stop/delete RPC revocation
-  and hard trial/funding deadlines remain enforced. Same-session reconnects do not report take-over.
+  and hard funding deadlines remain enforced. Same-session reconnects do not report take-over.
 - **Files into the browser** (agent 0.3.0): files and images pasted (Ctrl+V / Cmd+V, or the
   toolbar's Upload button) or dragged onto the view travel to the VM as acknowledged base64 chunks
   on the viewer socket (`FILE_TRANSFER` in contracts: up to 10 files, 50 MB, three chunks in
@@ -298,8 +298,7 @@ Cloudflare deployment.
 - **Images** (`images/`): browser and agent containers are built and published to GHCR. The
   pre-built Packer golden VM image remains planned.
 - **Web** (`apps/web`, `packages/ui`): design tokens from page 1, app shell, sign-in (with the
-  second step), dashboard with live status, create dialog (plan choice when the free trial is
-  offered, regions with price and latency, permanence note, collapsed advanced options, a cost
+  second step), dashboard with live status, create dialog (regions with price and latency, permanence note, collapsed advanced options, a cost
   summary with the full breakdown on request, actions and balance status in a footer that stays
   visible; a bottom sheet on phones), four progress steps and auto-open when ready, session view (44 px toolbar, region/IP chip, every state overlay, idle
   warning, fullscreen with Keyboard Lock), browser settings (identity, verify IP,
@@ -332,7 +331,7 @@ Cloudflare does not offer VMs with a dedicated static egress IP.
 | `agent.v1` / `viewer.v1` protobuf with Buf | JSON text frames, zod in `packages/contracts/src/protocol.ts`, mirrored in Go | The payload the gateway relays most (neko v3 signaling) is JSON already; no codegen toolchain for two languages. |
 | Engine → gateway via `agent_commands` + `NOTIFY` | `agent_commands` + a `cloudbrowser-agent-commands` queue message | No binding from engine to gateway, so no deploy-order cycle; heartbeats are a delivery backstop. |
 | S3 archives with per-instance keys wrapped by KMS | **R2** (presigned PUT/GET via the S3 API) with per-instance keys wrapped by a Worker secret (`ARCHIVE_MASTER_KEY`, AES-256-GCM) | Same envelope scheme without a KMS: the plain key exists only in the gateway's frame to the agent, never in D1. Presigned URLs keep archive bytes off the Workers. |
-| Subscription plans (Personal, Pro) with an hours allowance | A prepaid balance topped up with Creem one-time products, charged per minute at AWS cost times a markup | Costs depend on the region and on what a browser keeps while asleep (IP, disks); a balance charges exactly that, with no plan maths, and the trial converts by adding credit. |
+| Subscription plans (Personal, Pro) with an hours allowance | A prepaid balance topped up with Creem one-time products, charged per minute at AWS cost times a markup | Costs depend on the region and on what a browser keeps while asleep (IP, disks); a balance charges exactly that, with no plan maths, and signup credit uses the same balance. |
 | pg-boss job for Creem webhooks; nightly reconciliation job | `cloudbrowser-billing` queue consumed by the api Worker; cron retries lost events and expires seven-day prepaid retention, plus a nightly paid-order backstop | Same asynchronous, idempotent processing with Cloudflare primitives. |
 | Running-hours cap enforced by the engine | Elapsed-time metering, available credit after a seven-day fixed-resource reserve, and immediate exhaustion stop intent | Gateway alarms expire input access; paid starts require sufficient available credit and a funded reserve. |
 | `/admin` limited by source IP at the load balancer | Dedicated `admin.console.nevazu.com` behind Cloudflare Access email OTP; API verifies signed JWT and exact email allowlist | No IP restriction; main-site cookies, the legacy admin table, and preview URLs cannot grant admin access. |

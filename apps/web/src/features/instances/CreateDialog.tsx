@@ -1,7 +1,7 @@
 import { CreateInstanceBody, DEFAULT_REGION, TIERS, browserEstimate, retentionReserve, type BrowserTier, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
 import { Button, cn, Hint, Input, Label, SidePanel } from '@cloudbrowser/ui';
 import { DocsLink } from '../../app/DocsLink.js';
-import { AlertCircle, ChevronDown, ChevronRight, Gauge, Gift, Monitor, Wallet } from 'lucide-react';
+import { AlertCircle, ChevronDown, ChevronRight, Gauge, Monitor } from 'lucide-react';
 import { useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
@@ -16,12 +16,11 @@ import { regionPlace } from './region-names.js';
 import { pricingForTier, regionForTier } from './tiers.js';
 
 
-type Plan = 'trial' | 'paid';
 
 /**
  * Creating a browser (page 1): what it is called, where it lives (permanently) and what it costs,
  * read top to bottom. The price the user saw is sent back with the request, so it cannot change
- * unseen. When the free trial is on offer it is a plan of its own, next to paying as you go.
+ * unseen.
  * Where the operator offers Premium, the machine is chosen first: regions and prices then show
  * that tier's availability and cost.
  */
@@ -37,7 +36,6 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
 
   const [name, setName] = useState('');
   const [regionId, setRegionId] = useState<Region['id']>(DEFAULT_REGION);
-  const [plan, setPlan] = useState<Plan>('paid');
   const [tier, setTier] = useState<BrowserTier>('basic');
   const [error, setError] = useState<string | null>(null);
   // The cost stays folded away so the panel reads cleanly; one click shows the whole estimate.
@@ -55,27 +53,16 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
 
   const b = billing.data;
   const atLimit = me.data ? me.data.usage.browsers >= me.data.entitlements.maxBrowsers : false;
-  // The one free trial (page 6): offered once, in its own region, while that region takes new browsers.
-  const trialOffer = !!b?.trial.eligible && !!regions.data?.find((r) => r.id === b.trial.regionId)?.acceptingNew;
-  const trial = trialOffer && plan === 'trial';
-  // The free trial is a Basic browser; Premium is offered where the operator turned it on.
-  const premiumOffer = !!me.data?.entitlements.premium && !trial;
+  const premiumOffer = !!me.data?.entitlements.premium;
   const machine: BrowserTier = premiumOffer ? tier : 'basic';
   const tierRegions = useMemo(() => regions.data?.map((r) => regionForTier(r, machine)), [regions.data, machine]);
   const tierPricing = useMemo(() => pricing.data?.map((p) => pricingForTier(p, machine)), [pricing.data, machine]);
-  const storageFor = (p: RegionPricing) => (trial && b ? b.trial.storageGb : p.defaultStorageGb);
+  const storageFor = (p: RegionPricing) => p.defaultStorageGb;
   const price = tierPricing?.find((p) => p.regionId === regionId);
   const reserve = price?.rates ? retentionReserve(price.rates, { storageGb: price.defaultStorageGb, rootVolumeGb: price.rootVolumeGb, backups: false }) : 0;
   const balanceTooLow = !!b && !canSpend(b, reserve);
-  const needsCredit = balanceTooLow && !trial;
+  const needsCredit = balanceTooLow;
 
-  // Suggest the trial when the balance cannot pay for a browser yet; the user can still switch.
-  useEffect(() => {
-    if (open) setPlan(trialOffer && balanceTooLow ? 'trial' : 'paid');
-  }, [open, trialOffer, balanceTooLow]);
-  useEffect(() => {
-    if (trial && b) setRegionId(b.trial.regionId);
-  }, [trial, b]);
   // Never preselect a region that cannot take new browsers (of the chosen machine).
   useEffect(() => {
     const list = tierRegions;
@@ -87,7 +74,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    const parsed = CreateInstanceBody.safeParse({ name, regionId, priceVersion: price?.version ?? undefined, storageGb: trial ? b!.trial.storageGb : price?.defaultStorageGb, ...(trial ? { trial: true } : {}), ...(machine === 'premium' ? { tier: machine } : {}) });
+    const parsed = CreateInstanceBody.safeParse({ name, regionId, priceVersion: price?.version ?? undefined, storageGb: price?.defaultStorageGb, ...(machine === 'premium' ? { tier: machine } : {}) });
     if (!parsed.success) {
       setError(t('error.validation_failed'));
       return;
@@ -129,7 +116,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
             </p>
           ) : null}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <CreateSummary pricing={price} trial={trial} needsCredit={needsCredit} needed={b ? minimumSpendBalance(b) + reserve : 0} />
+            <CreateSummary pricing={price} needsCredit={needsCredit} needed={b ? minimumSpendBalance(b) + reserve : 0} />
             <div className="flex gap-2 sm:shrink-0">
               <Button className="flex-1 justify-center sm:flex-none" onClick={onClose}>
                 {t('common.cancel')}
@@ -143,24 +130,6 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
       }
     >
       <form id={formId} onSubmit={submit} className="space-y-6">
-        {initialInstance?.trial && initialInstance.trial.state !== 'converted' ? (
-          <p className="border-l-2 border-fg bg-surface px-3 py-2.5 text-xs text-muted">{t('create.retryTrial')}</p>
-        ) : null}
-
-        {trialOffer && b ? (
-          <fieldset>
-            <legend className="mb-2 text-sm font-medium">{t('create.plan')}</legend>
-            <div className="grid gap-2 sm:grid-cols-2" role="radiogroup">
-              <Choice name="plan" checked={plan === 'trial'} onChange={() => setPlan('trial')} icon={<Gift className="size-4" />}
-                title={t('create.plan.trial')}
-                hint={t('create.plan.trialHint', { minutes: b.trial.minutes, region: regions.data?.find((r) => r.id === b.trial.regionId)?.name ?? b.trial.regionId })} />
-              <Choice name="plan" checked={plan === 'paid'} onChange={() => setPlan('paid')} icon={<Wallet className="size-4" />}
-                title={t('create.plan.paid')}
-                hint={t('create.plan.paidHint')} />
-            </div>
-          </fieldset>
-        ) : null}
-
         <div>
           <Label htmlFor="name">{t('create.name')}</Label>
           <Input id="name" value={name} maxLength={64} required onChange={(e) => setName(e.target.value)} />
@@ -190,9 +159,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
             pricing={tierPricing}
             value={regionId}
             onChange={setRegionId}
-            trialRegionId={trial && b ? b.trial.regionId : null}
             storageFor={storageFor}
-            priceLabel={trial ? t('trial.free') : undefined}
             reasonFor={machine === 'premium' ? (r) => (r.premium ? null : t('create.region.noPremium')) : undefined}
           />
         </fieldset>
@@ -210,7 +177,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
                 {t('create.cost', { region: (() => { const r = regions.data?.find((x) => x.id === regionId); return r ? regionPlace(r, locale) : regionId; })() })}
               </span>
               <span className="block truncate text-xs text-muted tabular-nums">
-                {trial ? t('trial.free') : price?.rates ? t('create.cost.summary', { amount: money(browserEstimate(price.rates, { storageGb: price.defaultStorageGb, rootVolumeGb: price.rootVolumeGb, backups: false }).runningTotalHour, locale) }) : pricing.isError ? t('price.unavailable') : t('common.loading')}
+                {price?.rates ? t('create.cost.summary', { amount: money(browserEstimate(price.rates, { storageGb: price.defaultStorageGb, rootVolumeGb: price.rootVolumeGb, backups: false }).runningTotalHour, locale) }) : pricing.isError ? t('price.unavailable') : t('common.loading')}
               </span>
             </span>
             <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-muted transition-colors group-hover:text-fg">
@@ -224,8 +191,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
                 <p className="mt-2 text-sm text-muted">{pricing.isError ? t('price.unavailable') : t('common.loading')}</p>
               ) : !price.rates ? (
                 <p className="mt-2 text-sm text-muted">{t('price.unavailable')}</p>
-              ) : trial && b ? (
-                <TrialCost pricing={price} minutes={b.trial.minutes} days={b.trial.keptDays} gb={b.trial.storageGb} />
+
               ) : (
                 <PaidCost pricing={price} reserve={reserve} />
               )}
@@ -290,33 +256,11 @@ function PaidCost({ pricing, reserve }: { pricing: RegionPricing; reserve: numbe
   );
 }
 
-/** What the free trial costs (nothing), what happens to it, and what it costs once kept. */
-function TrialCost({ pricing, minutes, days, gb }: { pricing: RegionPricing; minutes: number; days: number; gb: number }) {
-  const { t, locale } = useI18n();
-  const e = browserEstimate(pricing.rates!, { storageGb: gb, rootVolumeGb: pricing.rootVolumeGb, backups: false });
-  return (
-    <div className="mt-2 space-y-2 text-sm">
-      <p className="flex items-baseline justify-between gap-4">
-        <span className="font-medium">{t('create.cost.trialTitle', { minutes })}</span>
-        <span className="text-base font-semibold text-running">{t('trial.free')}</span>
-      </p>
-      {pricing.machine ? <p className="text-xs text-muted">{t('price.machineShort', { vcpu: pricing.machine.vcpu, memory: pricing.machine.memoryGb })} · {t('create.cost.trialStorage', { gb })}</p> : null}
-      <Hint>
-        {t('trial.how', { minutes, days })} <DocsLink to="trial" />
-      </Hint>
-      <p className="border-t border-border pt-2 text-xs text-subtle">
-        {t('create.cost.afterTrial', { running: money(e.runningTotalHour, locale), asleep: money(e.alwaysOnHour, locale) })}
-      </p>
-    </div>
-  );
-}
-
 /** Keep the selected region's monthly example visible beside the confirmation action. */
-function CreateSummary({ pricing, trial, needsCredit, needed }: { pricing?: RegionPricing; trial: boolean; needsCredit: boolean; needed: number }) {
+function CreateSummary({ pricing, needsCredit, needed }: { pricing?: RegionPricing; needsCredit: boolean; needed: number }) {
   const { t, locale } = useI18n();
   const { data: b } = useBilling();
   if (!b) return <span />;
-  if (trial) return <p className="text-sm text-muted">{t('create.footer.noCredit')}</p>;
   const estimate = pricing?.available && pricing.rates
     ? browserEstimate(pricing.rates, { storageGb: pricing.defaultStorageGb, rootVolumeGb: pricing.rootVolumeGb, backups: false }) : null;
   return (

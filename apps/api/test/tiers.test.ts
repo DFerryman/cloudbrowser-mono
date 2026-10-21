@@ -89,13 +89,4 @@ describe('premium browsers', () => {
     const sydney = await pricing('syd1');
     expect(await create({ tier: 'premium', regionId: 'syd1', priceVersion: sydney.version }, 'p1')).toMatchObject({ status: 409, body: { type: 'region_unavailable' } });
   });
-
-  it('keeps the free trial on Basic', async () => {
-    offerPremium();
-    t.d1.sqlite.exec(`UPDATE control_flags SET value = 'true' WHERE key = 'billing_required'`);
-    t.d1.sqlite.prepare(`UPDATE provider_prices SET sheet = ? WHERE region_id = 'syd1'`).run(JSON.stringify(PREMIUM_SHEET));
-    const sydney = await pricing('syd1');
-    const refused = await create({ tier: 'premium', regionId: 'syd1', trial: true, storageGb: 2, priceVersion: sydney.premium!.version }, 'trial');
-    expect(refused).toMatchObject({ status: 400, body: { type: 'validation_failed' } });
-  });
 });

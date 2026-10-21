@@ -10,11 +10,10 @@ import {
   CheckoutBody,
   DATA_KEPT_DAYS,
   Problem,
-  TRIAL,
   RedirectResult,
   RegionPricing,
 } from '@cloudbrowser/contracts';
-import { accountRunway, newId, pricingSettings, schema, trialMinutes } from '@cloudbrowser/db';
+import { accountRunway, newId, pricingSettings, schema } from '@cloudbrowser/db';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { creemFrom, type Creem } from '../billing/creem.js';
@@ -98,14 +97,6 @@ billingRoute.openapi(
       restoreNeededMicros: retention.restoreNeededMicros,
       topUps,
       month: { month, ...(await monthTotals(db, user.id, month)) },
-      trial: {
-        // The free trial is offered only where usage is paid (not during the free pilot), once.
-        eligible: (await entitlementsFor(db, user.id)).billing === 'prepaid' && !account.trialUsedAt && !account.frozenAt,
-        regionId: TRIAL.regionId,
-        minutes: await trialMinutes(db),
-        storageGb: TRIAL.storageGb,
-        keptDays: TRIAL.keptDays,
-      },
     };
     return c.json(out, 200);
   },

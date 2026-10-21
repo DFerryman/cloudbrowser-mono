@@ -36,12 +36,12 @@ const regions = REGIONS.map(([id, city, country, area, availability, rtt]) => ({
 const pricing = REGIONS.map(([id], n) => ({ regionId: id, available: true, source: 'aws-price-list', updatedAt: new Date().toISOString(), rates: rates(90_000 + n * 7_000),
   rootVolumeGb: 16, machine: { vcpu: 2, memoryGb: 4 }, defaultStorageGb: 10, maxStorageGb: 100, version: 'q1' }));
 const base = { desiredState: 'running', idleTimeoutS: 600, screen: 'auto', videoQuality: 'full', videoAuto: true, dedicatedSince: null, lastIpCheck: null,
-  createdAt: ago(5000), deletedAt: null, purgeAfter: null, currentOperation: null, storageGb: 10, trial: null, stopReason: null, deletesAt: null, statusReason: null };
+  createdAt: ago(5000), deletedAt: null, purgeAfter: null, currentOperation: null, storageGb: 10, stopReason: null, deletesAt: null, statusReason: null };
 const instances = [
   { ...base, id: 'b1', name: 'Shop admin — Tokyo', regionId: 'ap-northeast-1', status: 'running', ipAddress: '203.0.113.24', lastActiveAt: ago(2) },
   { ...base, id: 'b2', name: 'Research', regionId: 'us-west-2', status: 'sleeping', ipAddress: '198.51.100.7', lastActiveAt: ago(300) },
   { ...base, id: 'b3', name: 'Ads account EU', regionId: 'eu-central-1', status: 'sleeping', ipAddress: '192.0.2.88', lastActiveAt: ago(3000) },
-  { ...base, id: 'b4', name: 'Trial browser', regionId: 'syd1', status: 'running', ipAddress: '192.0.2.10', lastActiveAt: ago(1), storageGb: 2, trial: { state: 'active', secondsLeft: 1320, reclaimAt: null } },
+  { ...base, id: 'b4', name: 'Research browser', regionId: 'syd1', status: 'running', ipAddress: '192.0.2.10', lastActiveAt: ago(1), storageGb: 10 },
   { ...base, id: 'b5', name: 'Social SG', regionId: 'ap-southeast-1', status: 'starting', ipAddress: '203.0.113.90', lastActiveAt: ago(30), currentOperation: { id: 'o', kind: 'start', status: 'running' } },
 ];
 const promotions = [
@@ -53,7 +53,7 @@ const promotions = [
 const publicPricing = {
   regions: REGIONS.map(([id, city, country, area, availability], n) => ({ ...pricing[n], name: `AWS ${city}`, city, country, area, availability, acceptingNew: availability !== 'unavailable', available: availability !== 'unavailable', cost: rates(40_000) })),
   model: { computeMarkupPercent: 220, fixedMarkupPercent: 150, transferMarkupPercent: 150, relayGbMicros: 50_000, billTransitions: true },
-  minBalanceMicros: 1_000_000, retentionDays: 7, trial: { regionId: 'syd1', minutes: 30, storageGb: 2, keptDays: 7 },
+  minBalanceMicros: 1_000_000, retentionDays: 7, signupCreditMicros: 2_000_000,
 };
 
 async function shoot({ path, name, width, height = 900, signedIn = true, locale = 'en-US', theme = 'light', empty = false, action }) {
@@ -76,7 +76,7 @@ async function shoot({ path, name, width, height = 900, signedIn = true, locale 
       else if (p === '/api/public/status') body = { status: 'operational', checkedAt: new Date().toISOString(), components: [], regions: [], creationPaused: false };
       else if (p === '/api/v1/billing') body = { mode: 'prepaid', enabled: true, balanceMicros: 42_500_000, reservedMicros: 3_100_000, availableMicros: 39_400_000, retentionDays: 7, exhaustedAt: null, dataKeptUntil: null, frozen: false,
         minBalanceMicros: 1_000_000, lowBalanceMicros: 2_000_000, burnHourMicros: 310_000, topUps: [], month: { totalMicros: 18_420_000, byItem: { compute: 12_000_000, ip: 3_000_000, storage: 2_000_000, snapshot: 0, transfer: 1_420_000 }, month },
-        fundedUntil: new Date(Date.now() + 127 * 3_600_000).toISOString(), retained: [], restoreNeededMicros: null, trial: { eligible: empty, regionId: 'syd1', minutes: 30, storageGb: 2, keptDays: 7 } };
+        fundedUntil: new Date(Date.now() + 127 * 3_600_000).toISOString(), retained: [], restoreNeededMicros: null };
       else if (p === '/api/v1/instances') body = empty ? [] : instances;
       else if (p.startsWith('/api/v1/instances/') && p.split('/').length === 5) body = instances.find((i) => i.id === p.split('/')[4]);
       else if (p === '/api/v1/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });

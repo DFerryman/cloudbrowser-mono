@@ -10,7 +10,7 @@ import type { OperationMessage } from '@cloudbrowser/db';
 import { makeDeps, type Env } from './deps.js';
 import { reaperTick } from './reaper.js';
 import { runOperation } from './runner.js';
-import { meterUsage, reclaimTrials } from './metering.js';
+import { meterUsage } from './metering.js';
 import { refreshPrices } from './prices.js';
 import { enforceStoppedIntent } from './enforce-stopped.js';
 import { checkInstanceIp, idleStops, periodicIpChecks, runPending } from './scheduler.js';
@@ -21,7 +21,7 @@ export { EventHub } from './event-hub.js';
 export { runOperation } from './runner.js';
 export { reaperTick } from './reaper.js';
 export { runPending, idleStops, checkInstanceIp } from './scheduler.js';
-export { meterUsage, reclaimTrials } from './metering.js';
+export { meterUsage } from './metering.js';
 export { refreshPrices } from './prices.js';
 export type { EngineDeps } from './context.js';
 
@@ -86,7 +86,6 @@ export default {
       await step('idle stops', () => idleStops(deps));
       // Four-minute settlement leaves one cron tick of headroom under the five-minute billing cap.
       await step('metering', () => meterUsage(deps, { minIntervalMs: 4 * 60_000 }));
-      await step('trial reclamation', () => reclaimTrials(deps));
       await step('pending operations', () => runPending(deps));
       const minute = new Date(controller.scheduledTime).getUTCMinutes();
       if (minute % 5 === 0) {

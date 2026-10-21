@@ -18,7 +18,7 @@ describe('public pages', () => {
     expect(res.body.regions.map((r: { regionId: string }) => r.regionId)).toEqual(enabled);
     expect(res.body.regions[0]).toMatchObject({ available: true, acceptingNew: true, rates: { compute: expect.any(Number) } });
     expect(res.body.regions[0]).not.toHaveProperty('version');
-    expect(res.body).toMatchObject({ retentionDays: 7, trial: { regionId: 'syd1', minutes: 30 }, minBalanceMicros: expect.any(Number) });
+    expect(res.body).toMatchObject({ retentionDays: 7, signupCreditMicros: 0, minBalanceMicros: expect.any(Number) });
   });
 
   it('reports status and a paused creation switch', async () => {

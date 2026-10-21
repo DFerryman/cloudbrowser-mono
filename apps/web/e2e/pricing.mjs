@@ -25,18 +25,18 @@ const instance = {
   id: 'browser-fixture', name: 'Quoted browser', regionId: 'syd1', status: 'sleeping', statusReason: null,
   desiredState: 'stopped', idleTimeoutS: 600, screen: 'auto', videoQuality: 'full', videoAuto: true, ipAddress: '192.0.2.1',
   dedicatedSince: null, lastIpCheck: null, lastActiveAt: null, createdAt: new Date().toISOString(),
-  deletedAt: null, purgeAfter: null, currentOperation: null, storageGb: 10, trial: null, stopReason: null, deletesAt: null,
+  deletedAt: null, purgeAfter: null, currentOperation: null, storageGb: 10, stopReason: null, deletesAt: null,
 };
 const results = [];
 
-async function fixture({ trial = false, failed = false, noPrice = false, width = 1365, height = 1024, sizeGb = 10, totalBytes, status = 'sleeping', purgeAfter = null,
-  balanceMicros = trial ? 0 : 10_000_000, reservedMicros = 0, availableMicros = Math.max(0, balanceMicros - reservedMicros), mode = 'prepaid', trialEligible = false, trialSeconds = 600, busy = false, legacySnapshots = false, rootVolumeGb = 16, locale = 'en-US', maxBrowsers = 10, idleTimeoutMaxS = 3600, neverSleep = true, neverSleepReason = null, premium = false } = {}) {
+async function fixture({ failed = false, noPrice = false, width = 1365, height = 1024, sizeGb = 10, totalBytes, status = 'sleeping', purgeAfter = null,
+  balanceMicros = 10_000_000, reservedMicros = 0, availableMicros = Math.max(0, balanceMicros - reservedMicros), mode = 'prepaid', busy = false, legacySnapshots = false, rootVolumeGb = 16, locale = 'en-US', maxBrowsers = 10, idleTimeoutMaxS = 3600, neverSleep = true, neverSleepReason = null, premium = false } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, locale, hasTouch: width === 820 });
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  const i = { ...instance, storageGb: sizeGb, status, purgeAfter, ...(legacySnapshots ? { backupsEnabled: true } : {}), ...(busy ? { currentOperation: { id: 'busy-op', kind: 'start', status: 'running' } } : {}), ...(failed ? { status: 'failed' } : {}), ...(trial ? { storageGb: 2, trial: { state: trialSeconds > 0 ? 'active' : 'ended', secondsLeft: trialSeconds, reclaimAt: null } } : {}) };
+  const i = { ...instance, storageGb: sizeGb, status, purgeAfter, ...(legacySnapshots ? { backupsEnabled: true } : {}), ...(busy ? { currentOperation: { id: 'busy-op', kind: 'start', status: 'running' } } : {}), ...(failed ? { status: 'failed' } : {}) };
   const fsTotalBytes = totalBytes === undefined ? i.storageGb * 1024 ** 3 * 0.93 : totalBytes;
   const state = { stockAvailable: true, extraRegion: false, extraRegions: [], version: 'quote-1', storageGb: 10, requests: [], reads: [], priceReads: 0, reject: false };
   await context.route('**/*', async (route) => {
@@ -85,7 +85,6 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
         mode, enabled: false, balanceMicros, reservedMicros, availableMicros, retentionDays: 7, exhaustedAt: null, dataKeptUntil: null, frozen: false,
         minBalanceMicros: 1_000_000, lowBalanceMicros: 2_000_000, burnHourMicros: 10_000, topUps: [], month: { ...zero, month },
         fundedUntil: new Date(Date.now() + (availableMicros / 10_000) * 3_600_000).toISOString(), retained: [], restoreNeededMicros: null,
-        trial: { eligible: trialEligible, regionId: 'syd1', minutes: 10, storageGb: 2, keptDays: 7 },
       };
       else if (url.pathname === '/api/v1/instances') body = [i];
       else if (url.pathname === `/api/v1/instances/${i.id}`) body = i;
@@ -94,10 +93,10 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
         day: { computeMicros: 2_400_000, ipMicros: 144_000, storageMicros: 86_000, totalMicros: 2_630_000 }, availableMicros, requiredMicros: 2_640_000,
       };
       else if (url.pathname.endsWith('/storage')) body = { sizeGb: i.storageGb, rootVolumeGb, maxGb: 100, usedBytes: fsTotalBytes === null ? null : 1_000_000_000, totalBytes: fsTotalBytes,
-        reportedAt: null, resizable: !trial, blockedReason: trial ? 'trial' : null, nextResizeAt: null };
+        reportedAt: null, resizable: true, blockedReason: null, nextResizeAt: null };
       else if (url.pathname.endsWith('/usage') && url.pathname.includes('/instances/')) {
         const fixed = 6_000 * 730 + 100_000 * (i.storageGb + rootVolumeGb);
-        body = { month, totalMicros: 0, items: [], byDay: [], now: { hourMicros: trial ? 0 : Math.round(fixed / 730) + (i.status === 'running' ? 100_000 : 0), runningHourMicros: 100_000, alwaysOnMonthMicros: fixed } };
+        body = { month, totalMicros: 0, items: [], byDay: [], now: { hourMicros: Math.round(fixed / 730) + (i.status === 'running' ? 100_000 : 0), runningHourMicros: 100_000, alwaysOnMonthMicros: fixed } };
       }
       else if (url.pathname === '/api/v1/usage') body = { ...zero, month, byBrowser: [], byDay: [] };
       else if (url.pathname === '/api/v1/events') return route.fulfill({ contentType: 'text/event-stream', body: ': local fixture\n\n' });
@@ -186,18 +185,13 @@ try {
   }
 
   {
-    // Not offered by the operator, and never for a free trial browser.
+    // Not offered by the operator.
     const off = await fixture({ neverSleep: false });
     await off.page.goto(`${origin}/browsers/${instance.id}/settings`);
     await off.page.getByLabel('Auto-sleep after', { exact: true }).waitFor();
     assert.equal(await off.page.locator('#idle option[value="0"]').count(), 0, 'Not offered when the operator turned it off');
     await finish(off, 'never sleep is hidden when the operator does not offer it');
-    const trial = await fixture({ trial: true });
-    await trial.page.goto(`${origin}/browsers/${instance.id}/settings`);
-    await trial.page.getByLabel('Auto-sleep after', { exact: true }).waitFor();
-    assert.equal(await trial.page.locator('#idle option[value="0"]').isDisabled(), true, 'A free trial browser always auto-sleeps');
-    await trial.page.getByText('Free trial browsers always auto-sleep. Add credit to convert this browser, then turn on Never sleep.').waitFor();
-    await finish(trial, 'a free trial browser cannot choose never sleep');
+
   }
 
   {
@@ -432,22 +426,14 @@ try {
     await finish(picture, 'the browser settings have no picture option; the live view adapts on its own');
   }
 
-  const trial = await fixture({ trial: true, width: 820 });
-  await trial.page.goto(`${origin}/browsers/${instance.id}/storage`);
-  await trial.page.getByRole('heading', { name: 'Storage', exact: true }).waitFor();
-  assert.equal(await trial.page.getByText(/snapshot|backup|profile archive/i).count(), 0);
-  await trial.page.getByRole('link', { name: 'Usage', exact: true }).click();
-  await trial.page.waitForURL('**/usage');
-  assert.equal(trial.state.requests.length, 0);
-  await finish(trial, 'tablet browser management tabs work without snapshot or backup features');
-
-  const retry = await fixture({ failed: true, trial: true });
-  await retry.page.goto(`${origin}/browsers`);
-  await retry.page.getByRole('button', { name: 'Try again', exact: true }).click();
-  await retry.page.getByText(/This replaces a failed trial browser/).waitFor();
-  assert.equal(await retry.page.getByRole('button', { name: 'Create browser', exact: true }).isDisabled(), true);
-  assert.equal(retry.state.requests.length, 0, 'Reviewing a failed trial replacement must not delete or charge anything');
-  await finish(retry, 'failed trial retry reviews paid replacement without deleting the failed browser or bypassing the balance requirement');
+  const tablet = await fixture({ width: 820 });
+  await tablet.page.goto(`${origin}/browsers/${instance.id}/storage`);
+  await tablet.page.getByRole('heading', { name: 'Storage', exact: true }).waitFor();
+  assert.equal(await tablet.page.getByText(/snapshot|backup|profile archive/i).count(), 0);
+  await tablet.page.getByRole('link', { name: 'Usage', exact: true }).click();
+  await tablet.page.waitForURL('**/usage');
+  assert.equal(tablet.state.requests.length, 0);
+  await finish(tablet, 'tablet browser management tabs work without snapshot or backup features');
 
   const paidRetry = await fixture({ failed: true });
   await paidRetry.page.goto(`${origin}/browsers`);
@@ -596,27 +582,6 @@ try {
     assert.equal(await locked.page.getByRole('button', { name: 'Add storage', exact: true }).isDisabled(), true);
     assert.equal(locked.state.requests.length, 0);
     await finish(locked, `${mode} mode never treats reserved credit or zero available credit as spendable balance`);
-  }
-
-  const freeCreate = await fixture({ balanceMicros: 0, trialEligible: true });
-  await freeCreate.page.goto(`${origin}/browsers/new`);
-  await freeCreate.page.getByText('Free', { exact: true }).first().waitFor();
-  // With no credit the trial plan is preselected, and paying as you go stays one click away.
-  assert.equal(await freeCreate.page.getByRole('radio', { name: /Free trial/ }).isChecked(), true);
-  assert.equal(await freeCreate.page.getByRole('radio', { name: /Pay as you go/ }).isChecked(), false);
-  await freeCreate.page.getByRole('button', { name: 'Create browser', exact: true }).click();
-  await freeCreate.page.waitForURL('**/browsers');
-  assert.equal(freeCreate.state.requests[0].body.trial, true);
-  assert.equal(freeCreate.state.requests[0].body.storageGb, 2);
-  await finish(freeCreate, 'zero credit allows only the explicitly selected free trial with its own 2 GB storage quote');
-
-  for (const trialSeconds of [600, 0]) {
-    const trialAccess = await fixture({ trial: true, trialSeconds });
-    await trialAccess.page.goto(`${origin}/browsers/${instance.id}/usage`);
-    await trialAccess.page.getByText('This trial is free. Paid hourly rates apply only after you add credit and keep the browser.', { exact: true }).waitFor();
-    assert.equal(await trialAccess.page.getByRole('button', { name: 'Wake & open', exact: true }).isDisabled(), trialSeconds === 0);
-    assert.equal(await trialAccess.page.getByText(/Compute only:/).count(), 0, 'Free trial must not look like a current paid hourly charge');
-    await finish(trialAccess, trialSeconds > 0 ? 'remaining trial minutes are the only zero-credit access exception' : 'exhausted trial is blocked at zero credit');
   }
 
   for (const options of [{}, { legacySnapshots: true }, { legacySnapshots: true, balanceMicros: 0 }]) {

@@ -1,7 +1,7 @@
 import { browserEstimate, HOURS_PER_MONTH, MICROS_PER_USD, type NeverSleepQuote } from '@cloudbrowser/contracts';
 import { accountRunway, billingRequired, schema, type Db } from '@cloudbrowser/db';
 import { and, eq, gt, isNotNull } from 'drizzle-orm';
-import { entitlementsFor, isTrial } from './limits.js';
+import { entitlementsFor } from './limits.js';
 import { instancePrice } from './pricing.js';
 import { problem } from './problem.js';
 
@@ -11,8 +11,7 @@ type InstanceRow = typeof schema.browserInstances.$inferSelect;
 const usd = (micros: number) => `$${(micros / MICROS_PER_USD).toFixed(2)}`;
 
 /**
- * Never sleep (page 6) is offered where the operator allows it (`never_sleep` cap), never to a free
- * trial browser, and on a paid deployment only after a top-up and with available credit for 24
+ * Never sleep (page 6) is offered where the operator allows it (`never_sleep` cap), and on a paid deployment only after a top-up and with available credit for 24
  * hours of the account's spending with this browser always on. The quote is what the user confirms.
  */
 export async function neverSleepQuote(db: Db, userId: string, inst: InstanceRow, now = new Date()): Promise<NeverSleepQuote> {
@@ -39,7 +38,6 @@ export async function neverSleepQuote(db: Db, userId: string, inst: InstanceRow,
     requiredMicros,
   });
   if (!entitlements.neverSleep) return quote('disabled');
-  if (isTrial(inst)) return quote('trial');
   if (!price) return quote('price_unavailable');
   // The free pilot charges nothing, so there is no credit to check.
   if (!paid) return quote(null);
@@ -55,8 +53,6 @@ export function neverSleepRefused(q: NeverSleepQuote) {
   switch (q.reason) {
     case 'disabled':
       return problem(403, 'plan_limit', 'Never sleep is not available on this account.', { limit: 'never_sleep' });
-    case 'trial':
-      return problem(403, 'plan_limit', 'A free trial browser always goes to sleep when idle. Add credit to convert it, then turn on Never sleep.', { limit: 'never_sleep_trial' });
     case 'no_topup':
       return problem(402, 'insufficient_balance', 'Never sleep is available after your first top-up.', { limit: 'never_sleep_topup' });
     case 'insufficient_credit':

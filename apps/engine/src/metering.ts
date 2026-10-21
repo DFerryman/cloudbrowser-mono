@@ -10,9 +10,6 @@
  *  - when a balance reaches zero, records it (the session view warns) and puts the user's running
  *    browsers to sleep immediately; a frozen account also sleeps at once;
  *  - puts suspended browsers to sleep (operator kill switch).
- *  - counts a free trial browser's running time, sleeps it when its 10 minutes are used, and
- *    deletes it 7 days after it last went to sleep unless the user added credit (page 6). A trial
- *    browser is metered at its AWS cost but charged nothing, so operators see what trials cost.
  * Data and IPs are never touched here. Creating, waking and deleted browsers are not charged.
  */
 import {
@@ -65,14 +62,12 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
       if (inst.status !== 'running' || (await prepaidAccess(db, inst.userId, inst.id, now)).allowed) continue;
     }
     const running = inst.status === 'running';
-    const trial = inst.trialState === 'active' || inst.trialState === 'ended';
     const from = health?.baseMeteredAt?.getTime() ?? now.getTime();
     const baseFrom = new Date(Math.max(from, now.getTime() - MAX_METER_STEP_MS));
     const origin = health?.meteredAt?.getTime() ?? inst.lastActiveAt?.getTime() ?? now.getTime();
     const computeFrom = new Date(Math.max(origin, now.getTime() - MAX_METER_STEP_MS));
     const pendingMs = health?.pendingComputeMs ?? 0;
     const transitionMs = health?.transitionMs ?? 0;
-    const trialMillis = running && inst.trialState === 'active' ? Math.min(inst.trialSeconds * 1000 - Math.max(inst.trialUsedMs, inst.trialUsedS * 1000), Math.max(0, now.getTime() - origin)) : 0;
     const tx = health?.netTxBytes ?? null;
     const billedTx = health?.netTxBilledBytes ?? null;
     const txBytes = tx === null || billedTx === null ? 0 : tx >= billedTx ? tx - billedTx : tx;
@@ -90,14 +85,6 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
     const missingType = priced && placement?.instanceType && priced.sheet.instanceTypes[placement.instanceType] === undefined;
     if (!priced || missingType) {
       if (missingType) await raiseAlert(db, { source: 'billing', severity: 'warning', title: `Missing price for ${placement.instanceType} in ${inst.regionId}`, detail: { instanceId: inst.id }, dedupeKey: `machine-price:${inst.regionId}:${placement.instanceType}` }, now);
-      // Trial enforcement is independent of AWS price availability and the five-minute billing cap.
-      if (trialMillis > 0) await db.batch([
-        db.update(browserInstances).set({ trialUsedMs: sql`min(${browserInstances.trialSeconds} * 1000, max(${browserInstances.trialUsedMs}, ${browserInstances.trialUsedS} * 1000) + ${trialMillis})`,
-          trialUsedS: sql`cast(min(${browserInstances.trialSeconds} * 1000, max(${browserInstances.trialUsedMs}, ${browserInstances.trialUsedS} * 1000) + ${trialMillis}) / 1000 AS integer)`,
-          trialState: sql`CASE WHEN max(${browserInstances.trialUsedMs}, ${browserInstances.trialUsedS} * 1000) + ${trialMillis} >= ${browserInstances.trialSeconds} * 1000 THEN 'ended' ELSE 'active' END`, updatedAt: now,
-        }).where(and(eq(browserInstances.id, inst.id), eq(browserInstances.trialState, 'active'), claim)),
-        db.update(instanceHealth).set({ meteredAt: now }).where(and(eq(instanceHealth.instanceId, inst.id), claim)),
-      ]);
       continue;
     }
     // The machine's own price; a placement that has not recorded its type yet uses its tier's.
@@ -107,8 +94,8 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
     const hold = holds.get(inst.id);
     const retaining = !!hold?.retentionStartedAt;
     const free: Rates = { compute: 0, ip: 0, storage: 0, snapshot: 0, transfer: 0 };
-    const quoted = trial || removed ? free : retaining ? { ...hold.rates, compute: 0, transfer: 0, snapshot: 0 } : { ...customerRates(priced.sheet, settings), snapshot: 0 };
-    if (!trial && !removed && !retaining) quoted.compute = Math.round(cost.compute * settings.markupPercent / 100);
+    const quoted = removed ? free : retaining ? { ...hold.rates, compute: 0, transfer: 0, snapshot: 0 } : { ...customerRates(priced.sheet, settings), snapshot: 0 };
+    if (!removed && !retaining) quoted.compute = Math.round(cost.compute * settings.markupPercent / 100);
     const rootGb = placement?.rootVolumeGb ?? priced.sheet.rootVolumeGb;
     const ledger = retained.filter((r) => r.instanceId === inst.id);
     const live = ledger.filter((r) => r.state !== 'deleted' && r.providerId !== null);
@@ -178,10 +165,6 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
       if (retaining) stmts.push(db.update(browserReservations).set({ reservedMicros: sql`max(0,${browserReservations.reservedMicros}+${actualDebit})`, updatedAt: now }).where(and(eq(browserReservations.instanceId, inst.id), journal, claim)));
       stmts.push(db.update(balanceTransactions).set({ appliedAt: now }).where(and(eq(balanceTransactions.reference, reference), isNull(balanceTransactions.appliedAt), claim)));
     }
-    if (trialMillis > 0) stmts.push(db.update(browserInstances).set({ trialUsedMs: sql`min(${browserInstances.trialSeconds} * 1000,max(${browserInstances.trialUsedMs},${browserInstances.trialUsedS}*1000)+${trialMillis})`,
-      trialUsedS: sql`cast(min(${browserInstances.trialSeconds} * 1000,max(${browserInstances.trialUsedMs},${browserInstances.trialUsedS}*1000)+${trialMillis})/1000 AS integer)`,
-      trialState: sql`CASE WHEN max(${browserInstances.trialUsedMs},${browserInstances.trialUsedS}*1000)+${trialMillis}>=${browserInstances.trialSeconds} * 1000 THEN 'ended' ELSE 'active' END`, updatedAt: now,
-    }).where(and(eq(browserInstances.id,inst.id),eq(browserInstances.trialState,'active'),claim)));
     stmts.push(db.update(instanceHealth).set({ baseMeteredAt: now, meteredAt: running ? now : null, pendingComputeMs: 0, transitionMs: 0, ...(tx !== null ? { netTxBilledBytes: tx } : {}) })
       .where(and(eq(instanceHealth.instanceId, inst.id), claim)).returning({ id: instanceHealth.instanceId }));
     const result = await db.batch(stmts as [BatchItem<'sqlite'>,...BatchItem<'sqlite'>[]]);
@@ -202,7 +185,7 @@ async function enforce(deps: EngineDeps, prepaid: boolean, now: Date): Promise<n
   const users = [...new Set(all.map((r) => r.userId))];
   for (const userId of users) {
     const account = await prepaidBalance(db, userId);
-    const paid = all.filter((r) => r.userId === userId && !['active', 'ended'].includes(r.trialState ?? ''));
+    const paid = all.filter((r) => r.userId === userId);
     if (prepaid && paid.length && (account.availableMicros <= 0 || account.frozenAt)) {
       await beginRetention(db, userId, now);
       if (!account.exhaustedAt) {
@@ -213,10 +196,6 @@ async function enforce(deps: EngineDeps, prepaid: boolean, now: Date): Promise<n
     for (const inst of all.filter((r) => r.userId === userId)) {
       let reason: string | null = account.frozenAt ? 'frozen' : inst.suspendedAt ? 'suspended' : null;
       const access = await prepaidAccess(db, userId, inst.id, now);
-      if (!reason && access.reason === 'trial') {
-        reason = 'trial';
-        await db.update(browserInstances).set({ trialState: 'ended', trialUsedS: inst.trialSeconds, trialUsedMs: inst.trialSeconds * 1000, updatedAt: now }).where(and(eq(browserInstances.id, inst.id), eq(browserInstances.trialState, 'active')));
-      }
       if (!reason && prepaid && access.reason === 'balance') reason = 'balance';
       if (!reason) continue;
       await db.update(schema.viewerSessions).set({ endedAt: now }).where(and(eq(schema.viewerSessions.instanceId, inst.id), isNull(schema.viewerSessions.endedAt)));
@@ -226,45 +205,4 @@ async function enforce(deps: EngineDeps, prepaid: boolean, now: Date): Promise<n
     }
   }
   return stopped;
-}
-
-/**
- * Deletes and purges free trial browsers that were not converted (no credit added) 7 days after
- * they last went to sleep (page 6). The delete is a normal operation; its purge follows at once.
- */
-export async function reclaimTrials(deps: EngineDeps) {
-  const { db } = deps;
-  const now = deps.now();
-  const due = await db
-    .select({ id: browserInstances.id, userId: browserInstances.userId })
-    .from(browserInstances)
-    .where(
-      and(
-        inArray(browserInstances.trialState, ['active', 'ended']),
-        lte(browserInstances.trialReclaimAt, now),
-        inArray(browserInstances.status, ['sleeping', 'needs_attention']),
-      ),
-    );
-  let n = 0;
-  for (const inst of due) {
-    const row = operationRow({ instanceId: inst.id, userId: null, kind: 'delete', params: { reason: 'trial_expired', purgeNow: true }, now });
-    try {
-      const eligible = sql`EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${inst.id}
-        AND ${browserInstances.trialState} IN ('active', 'ended') AND ${browserInstances.trialReclaimAt} <= ${now.getTime()}
-        AND ${browserInstances.status} IN ('sleeping', 'needs_attention'))`;
-      const [inserted] = await db.batch([
-        db.insert(operations).select(sql`SELECT ${row.id}, ${inst.id}, NULL, 'delete', 'queued', NULL, 0, NULL, NULL, NULL,
-          ${row.deadlineAt.getTime()}, NULL, NULL, ${JSON.stringify(row.params)}, ${now.getTime()}, ${now.getTime()}, NULL WHERE ${eligible}`)
-          .returning({ id: operations.id }),
-        db.update(browserInstances).set({ desiredState: 'deleted', updatedAt: now })
-          .where(and(eq(browserInstances.id, inst.id), sql`EXISTS (SELECT 1 FROM ${operations} WHERE ${operations.id} = ${row.id})`)),
-        db.insert(events).select(sql`SELECT NULL, ${inst.userId}, 'operation.updated', ${JSON.stringify({ operationId: row.id, instanceId: inst.id })}, ${now.getTime()}
-          WHERE EXISTS (SELECT 1 FROM ${operations} WHERE ${operations.id} = ${row.id})`),
-      ]);
-      if (inserted.length) { deps.notify(inst.userId); n++; }
-    } catch {
-      // Another operation is running for it; the next minute tries again.
-    }
-  }
-  return n;
 }

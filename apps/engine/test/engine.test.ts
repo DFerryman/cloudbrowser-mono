@@ -26,7 +26,10 @@ class World {
   deletedArchives: string[] = [];
 
   constructor() {
-    this.db = createDb(createTestD1());
+    const d1 = createTestD1();
+    // These tests fund accounts explicitly; signup awards are covered by API registration tests.
+    d1.sqlite.exec("UPDATE caps SET `limit` = 0 WHERE metric = 'signup_credit_cents'");
+    this.db = createDb(d1);
   }
 
   executor(mode: 'runtime' | 'reaper') {
@@ -969,51 +972,6 @@ describe('metering and the prepaid balance', () => {
     await w.db.insert(operations).values(shrink);
     expect((await w.settle(shrink.id)).state).toBe('failed');
     expect((await w.instance()).status).toBe('running'); // a failed resize is not a problem with the browser
-  });
-
-  it('runs a free trial for 10 minutes at no charge, then keeps it 7 days and purges it', async () => {
-    await prepaid();
-    await w.db.update(browserInstances).set({ trialState: 'active', trialUsedS: 0 }).where(eq(browserInstances.id, 'inst1'));
-    await meter();
-    w.advance(5 * 60_000);
-    await meter();
-    expect((await w.instance()).trialState).toBe('active');
-    expect(await stopReasons()).toEqual([]);
-    w.advance(5 * 60_000);
-    await meter(); // the 10 minutes are used
-    expect((await w.instance()).trialState).toBe('ended');
-    expect(await stopReasons()).toEqual(['trial']);
-    // Metered at cost so operators see what trials cost, but charged nothing; an empty balance is not "run out".
-    expect(await usage('compute')).toMatchObject({ amountMicros: 0, costMicros: 16_667 });
-    expect((await balance())?.exhaustedAt ?? null).toBeNull();
-    expect((await balance())?.balanceMicros ?? 0).toBe(0);
-
-    const [stop] = await w.db.select().from(operations).where(eq(operations.kind, 'stop'));
-    await w.settle(stop!.id);
-    const asleep = await w.instance();
-    expect(asleep.status).toBe('sleeping');
-    expect(asleep.trialReclaimAt).toEqual(new Date(w.clock.getTime() + 7 * 86_400_000));
-
-    const { reclaimTrials } = await import('../src/metering.js');
-    w.advance(7 * 86_400_000 - 60_000);
-    expect(await reclaimTrials(w.deps())).toBe(0);
-    w.advance(60_000);
-    expect(await reclaimTrials(w.deps())).toBe(1);
-    const [del] = await w.db.select().from(operations).where(eq(operations.kind, 'delete'));
-    expect(del?.params).toMatchObject({ reason: 'trial_expired', purgeNow: true });
-    await w.settle(del!.id);
-    expect((await w.instance()).status).toBe('deleting');
-  });
-
-  it('charges a converted trial like any browser', async () => {
-    await prepaid();
-    await w.db.update(browserInstances).set({ trialState: 'converted', trialUsedS: 600 }).where(eq(browserInstances.id, 'inst1'));
-    await w.db.insert(billingAccounts).values({ userId: 'u1', balanceMicros: 5_000_000, updatedAt: w.clock });
-    await meter();
-    w.advance(5 * 60_000);
-    await meter();
-    expect((await usage('compute'))?.amountMicros).toBe(10_000);
-    expect(await stopReasons()).toEqual([]);
   });
 
   it('keeps snapshots for the retention cap, and none once snapshots are off', async () => {

@@ -20,8 +20,10 @@ export const SIMULATED_SHEET = {
   effectiveDate: null,
 };
 
-export function setup(opts: { prices?: boolean } = {}) {
+export function setup(opts: { prices?: boolean; signupCreditCents?: number } = {}) {
   const d1 = createTestD1();
+  // Keep explicit-balance fixtures deterministic; registration tests opt into the production award.
+  d1.sqlite.prepare("UPDATE caps SET `limit` = ? WHERE scope = 'user:default' AND metric = 'signup_credit_cents'").run(opts.signupCreditCents ?? 0);
   if (opts.prices !== false) {
     d1.sqlite.exec(
       `INSERT INTO provider_prices (region_id, executor, provider_region, sheet, fetched_at)

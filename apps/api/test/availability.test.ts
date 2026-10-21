@@ -48,22 +48,24 @@ describe('region availability', () => {
 
   it('refuses new browsers in a region whose last launch failed for a provider reason, until a launch succeeds', async () => {
     const d1 = createTestD1();
+    d1.sqlite.exec("UPDATE control_flags SET value='false' WHERE key='billing_required'");
     const db = createDb(d1);
     const t = Date.now();
     d1.sqlite.exec(`INSERT INTO user (id,name,email,email_verified,created_at,updated_at) VALUES ('u','test','u@example.test',1,${t},${t});
       UPDATE regions SET enabled = 1;`);
-    await admitCreate(db, 'u', 'tyo1', new Date(), { trial: true });
+    await admitCreate(db, 'u', 'tyo1', new Date());
     await recordLaunch(db, 'tyo1', 'ap-northeast-1a', { kind: 'failure', errorClass: 'invalid', message: 'VM ended during launch: KMS key' }, new Date());
-    await expect(admitCreate(db, 'u', 'tyo1', new Date(), { trial: true })).rejects.toMatchObject({ status: 409, type: 'region_unavailable' });
+    await expect(admitCreate(db, 'u', 'tyo1', new Date())).rejects.toMatchObject({ status: 409, type: 'region_unavailable' });
     const views = await regionViews(db, { lat: 35.7, lon: 139.7 });
     expect(views.find((r) => r.id === 'tyo1')).toMatchObject({ availability: 'unavailable', availabilityReason: 'provider_issue', acceptingNew: false });
     expect(views.find((r) => r.id === 'syd1')).toMatchObject({ availability: 'available', acceptingNew: true });
     await recordLaunch(db, 'tyo1', 'ap-northeast-1c', { kind: 'success' }, new Date());
-    await admitCreate(db, 'u', 'tyo1', new Date(), { trial: true });
+    await admitCreate(db, 'u', 'tyo1', new Date());
   });
 
   it('refuses a blocked region with its own reason, marks regions without a launch as not yet tested, and reopens', async () => {
     const d1 = createTestD1();
+    d1.sqlite.exec("UPDATE control_flags SET value='false' WHERE key='billing_required'");
     const db = createDb(d1);
     const t = Date.now();
     d1.sqlite.exec(`INSERT INTO user (id,name,email,email_verified,created_at,updated_at) VALUES ('u','test','u@example.test',1,${t},${t});
@@ -71,17 +73,18 @@ describe('region availability', () => {
     const launched = new Date(t - 3_600_000);
     await recordLaunch(db, 'syd1', 'ap-southeast-2a', { kind: 'success' }, launched);
     await recordLaunch(db, 'tyo1', 'ap-northeast-1a', { kind: 'failure', errorClass: 'forbidden', message: 'VM ended during launch: KMS key' }, new Date(t - 6 * 3_600_000));
-    await expect(admitCreate(db, 'u', 'tyo1', new Date(), { trial: true })).rejects.toMatchObject({ status: 409, detail: expect.stringContaining('provider configuration problem') });
+    await expect(admitCreate(db, 'u', 'tyo1', new Date())).rejects.toMatchObject({ status: 409, detail: expect.stringContaining('provider configuration problem') });
     const views = await regionViews(db, null);
     expect(views.find((r) => r.id === 'tyo1')).toMatchObject({ availability: 'unavailable', availabilityReason: 'blocked', launchVerifiedAt: null });
     expect(views.find((r) => r.id === 'syd1')).toMatchObject({ availability: 'available', launchVerifiedAt: launched.toISOString() });
     expect(views.find((r) => r.id === 'usw1')).toMatchObject({ availability: 'available', launchVerifiedAt: null });
     await reopenRegion(db, 'tyo1');
-    await admitCreate(db, 'u', 'tyo1', new Date(), { trial: true });
+    await admitCreate(db, 'u', 'tyo1', new Date());
   });
 
   it('counts a region as tested from history only when its last create there succeeded (migration 0016)', async () => {
     const d1 = createTestD1();
+    d1.sqlite.exec("UPDATE control_flags SET value='false' WHERE key='billing_required'");
     const t = Date.UTC(2026, 9, 18);
     const op = (id: string, inst: string, status: string, at: number) =>
       `INSERT INTO operations (id,instance_id,user_id,kind,status,attempt,deadline_at,created_at,updated_at,finished_at) VALUES ('${id}','${inst}','u','create','${status}',0,${at + 3_600_000},${at},${at},${at + 60_000});`;
@@ -97,6 +100,7 @@ describe('region availability', () => {
 
   it('offers a latency probe and estimate for AWS regions', async () => {
     const d1 = createTestD1();
+    d1.sqlite.exec("UPDATE control_flags SET value='false' WHERE key='billing_required'");
     d1.sqlite.exec(`UPDATE regions SET executor = 'aws-ec2', enabled = 1`);
     const views = await regionViews(createDb(d1), { lat: 35.7, lon: 139.7 });
     expect(views.find((r) => r.id === 'tyo1')).toMatchObject({

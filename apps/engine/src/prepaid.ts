@@ -5,7 +5,6 @@ import { StepFailed, type EngineDeps, type StepEnv } from './context.js';
 import { errorMessages, retryD1 } from './errors.js';
 
 const { browserInstances, browserReservations, billingAccounts, operations, viewerSessions } = schema;
-const paid = (s: string | null) => s !== 'active' && s !== 'ended';
 
 /** Legacy assets receive a safe seven-day window; a deployment never destroys their data at once. */
 export async function reconcileReservations(deps: EngineDeps) {
@@ -20,7 +19,7 @@ export async function reconcileReservations(deps: EngineDeps) {
     const hold = holds.get(inst.id);
     const removed = inst.desiredState === 'deleted' || ['deleting', 'purged', 'failed'].includes(inst.status);
     if (removed) {
-      // Historic purged/trial browsers often have no deposit. Do not write them every minute.
+      // Historic purged browsers often have no deposit. Do not write them every minute.
       // Recheck lifecycle in SQL so a concurrent funded recovery cannot lose its new deposit.
       if (hold && hold.reservedMicros > 0) await retryD1(async () => {
         await db.update(browserReservations).set({ reservedMicros: 0, updatedAt: now }).where(and(
@@ -31,7 +30,6 @@ export async function reconcileReservations(deps: EngineDeps) {
       }, deps.sleep);
       continue;
     }
-    if (!paid(inst.trialState)) continue;
     if (hold?.retentionStartedAt) continue;
     const resize = pending.find((o) => o.instanceId === inst.id && o.kind === 'resize_volume');
     const target = Number((resize?.params as { sizeGb?: number } | null)?.sizeGb ?? inst.storageGb);
@@ -67,12 +65,6 @@ export async function assertOperationFunded(env: StepEnv) {
   const account = await prepaidBalance(env.deps.db, env.instance.userId);
   if (account.frozenAt) throw new StepFailed('Your account is frozen because of a payment dispute.');
   if (!(await billingRequired(env.deps.db))) return;
-  const free = env.instance.trialState === 'active' && ['create', 'start'].includes(env.op.kind);
-  if (free) {
-    const access = await prepaidAccess(env.deps.db, env.instance.userId, env.instance.id, env.deps.now());
-    if (!access.allowed) throw new StepFailed('Your free trial has ended. Add prepaid credit before using this browser.');
-    return;
-  }
   const [hold] = await env.deps.db.select().from(browserReservations).where(eq(browserReservations.instanceId, env.instance.id));
   if (!hold || hold.retentionStartedAt || hold.reservedMicros < hold.requiredMicros || account.availableMicros <= 0) {
     throw new StepFailed('Insufficient prepaid credit. Usage is stopped; existing data and IP are kept for seven days.');
@@ -88,10 +80,8 @@ export async function beginRetention(db: Db, userId: string, now: Date) {
       retentionEndsAt: new Date(now.getTime() + DATA_KEPT_DAYS * 86_400_000), updatedAt: now,
     }).where(and(eq(browserReservations.userId, userId), isNull(browserReservations.retentionStartedAt), insufficient)),
     db.update(billingAccounts).set({ exhaustedAt: now, updatedAt: now }).where(and(eq(billingAccounts.userId, userId), isNull(billingAccounts.exhaustedAt), insufficient)),
-    db.update(viewerSessions).set({ endedAt: now }).where(and(eq(viewerSessions.userId, userId), isNull(viewerSessions.endedAt), insufficient,
-      sql`EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${viewerSessions.instanceId} AND (${browserInstances.trialState} IS NULL OR ${browserInstances.trialState} = 'converted'))`)),
+    db.update(viewerSessions).set({ endedAt: now }).where(and(eq(viewerSessions.userId, userId), isNull(viewerSessions.endedAt), insufficient)),
     db.update(browserInstances).set({ desiredState: 'stopped', updatedAt: now }).where(and(eq(browserInstances.userId, userId),
-      sql`(${browserInstances.trialState} IS NULL OR ${browserInstances.trialState} = 'converted')`,
       inArray(browserInstances.status, ['creating', 'starting', 'running', 'waiting_capacity', 'needs_attention']), insufficient)),
   ]);
 }

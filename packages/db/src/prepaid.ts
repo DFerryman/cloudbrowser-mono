@@ -1,4 +1,4 @@
-import { browserEstimate, BrowserTier, customerRates, retentionReserve, tierSheet, TRIAL, BYTES_PER_GB, DEFAULT_PRICING_SETTINGS, DEFAULT_IDLE_TIMEOUT_S, NEVER_SLEEP_TIMEOUT_S, ProviderPriceSheet, type PriceFactors, type Rates } from '@cloudbrowser/contracts';
+import { browserEstimate, BrowserTier, customerRates, retentionReserve, tierSheet, BYTES_PER_GB, DEFAULT_PRICING_SETTINGS, ProviderPriceSheet, type PriceFactors, type Rates } from '@cloudbrowser/contracts';
 import { and, eq, notInArray, sql, type SQL } from 'drizzle-orm';
 import type { Db } from './index.js';
 import { priceSheets, pricingSettings } from './pricing.js';
@@ -8,13 +8,13 @@ export const reservedTotalSql = (userId: string) => sql`coalesce((SELECT sum(res
 
 export async function prepaidBalance(db: Db, userId: string) {
   const [a] = await db.select({ balanceMicros: billingAccounts.balanceMicros, exhaustedAt: billingAccounts.exhaustedAt,
-    frozenAt: billingAccounts.frozenAt, trialUsedAt: billingAccounts.trialUsedAt }).from(billingAccounts).where(eq(billingAccounts.userId, userId));
+    frozenAt: billingAccounts.frozenAt }).from(billingAccounts).where(eq(billingAccounts.userId, userId));
   const [held] = await db.select({ amount: sql<number>`coalesce(sum(${browserReservations.reservedMicros}), 0)` })
     .from(browserReservations).where(eq(browserReservations.userId, userId));
   const balanceMicros = a?.balanceMicros ?? 0;
   const reservedMicros = Number(held?.amount ?? 0);
   return { balanceMicros, reservedMicros, availableMicros: Math.max(0, balanceMicros - reservedMicros),
-    exhaustedAt: a?.exhaustedAt ?? null, frozenAt: a?.frozenAt ?? null, trialUsedAt: a?.trialUsedAt ?? null };
+    exhaustedAt: a?.exhaustedAt ?? null, frozenAt: a?.frozenAt ?? null };
 }
 
 export interface ReservationQuote {
@@ -41,7 +41,7 @@ export function reservationWrite(db: Db, userId: string, instanceId: string, quo
     .onConflictDoUpdate({ target: browserReservations.instanceId, set: values });
 }
 
-export type PrepaidAccessReason = 'balance' | 'trial' | 'frozen' | 'suspended' | 'deleted' | null;
+export type PrepaidAccessReason = 'balance' | 'frozen' | 'suspended' | 'deleted' | null;
 export interface PrepaidAccess {
   allowed: boolean;
   reason: PrepaidAccessReason;
@@ -79,17 +79,11 @@ export async function prepaidAccess(db: Db, userId: string, instanceId: string, 
   if (!row || row.inst.desiredState === 'deleted' || ['deleting', 'purged', 'failed'].includes(row.inst.status)) return denied('deleted');
   if (account?.frozenAt) return denied('frozen');
   if (row.inst.suspendedAt) return denied('suspended');
-  if (row.inst.trialState === 'active' || row.inst.trialState === 'ended') {
-    const remainingMs = Math.max(0, row.inst.trialSeconds * 1000 - Math.max(row.inst.trialUsedMs, row.inst.trialUsedS * 1000));
-    const origin = row.health?.meteredAt?.getTime() ?? row.inst.lastActiveAt?.getTime() ?? 0;
-    const deadlineAt = row.inst.status === 'running' && origin ? new Date(origin + remainingMs) : null;
-    return row.inst.trialState === 'ended' || remainingMs <= 0 || (deadlineAt && now >= deadlineAt) ? denied('trial', deadlineAt) : { allowed: true, reason: null, deadlineAt, balanceDeadlineAt: null };
-  }
   if (flags[0]?.value === 'false') return { allowed: true, reason: null, deadlineAt: null, balanceDeadlineAt: null };
   const hold = holds.get(instanceId);
   if (!hold || hold.retentionStartedAt || hold.reservedMicros < hold.requiredMicros || availableMicros <= 0) return denied('balance');
   // The gateway closes before another funded minute can be spent. Rechecks can extend this lease
-  // only when fresh credit still covers it; input and reconnecting never change trial deadlines.
+  // only when fresh credit still covers it; input and reconnecting never replenish credit.
   const spend = spendProjection({ all, holds, prices, settings: settingsRows[0] ?? DEFAULT_PRICING_SETTINGS, placementRows }, now);
   if (!spend) return denied('balance');
   const hour = spend.hourMicros;
@@ -123,7 +117,7 @@ function spendProjection({ all, holds, prices, settings, placementRows }: SpendI
   let hour = 0;
   let pending = 0;
   for (const { inst, health } of all) {
-    if (inst.trialState === 'active' || inst.trialState === 'ended' || holds.get(inst.id)?.retentionStartedAt) continue;
+    if (holds.get(inst.id)?.retentionStartedAt) continue;
     const sheet = sheets.get(inst.regionId);
     if (!sheet) return null;
     const machine = machines.get(inst.id);
@@ -189,29 +183,8 @@ export function settleRunningStatements(db: Db, instanceId: string, now: Date, f
     db.update(instanceHealth).set({ pendingComputeMs: sql`${instanceHealth.pendingComputeMs} + coalesce((SELECT ${elapsed} FROM browser_instances WHERE id = ${instanceId}), 0)` })
       .where(and(eq(instanceHealth.instanceId, instanceId), running)),
     db.update(browserInstances).set({
-      trialUsedMs: sql`CASE WHEN trial_state = 'active' THEN min(trial_seconds * 1000, max(trial_used_ms, trial_used_s * 1000) + ${elapsed}) ELSE trial_used_ms END`,
-      trialUsedS: sql`CASE WHEN trial_state = 'active' THEN cast(min(trial_seconds * 1000, max(trial_used_ms, trial_used_s * 1000) + ${elapsed}) / 1000 AS integer) ELSE trial_used_s END`,
-      trialState: sql`CASE WHEN trial_state = 'active' AND max(trial_used_ms, trial_used_s * 1000) + ${elapsed} >= trial_seconds * 1000 THEN 'ended' ELSE trial_state END`,
       lastActiveAt: now,
     }).where(and(eq(browserInstances.id, instanceId), eq(browserInstances.status, 'running'), fence)),
     db.update(instanceHealth).set({ meteredAt: null }).where(and(eq(instanceHealth.instanceId, instanceId), running)),
   ];
-}
-
-/** Start paid metering in the same transaction that converts a funded trial. Free time/traffic
- * before this boundary must never be debited after conversion. A concurrent meter's cursor CAS
- * also fails once these cursors move. */
-export function convertTrialStatements(db: Db, userId: string, now: Date, condition: SQL = sql`1`) {
-  const eligible = sql`browser_instances.user_id = ${userId} AND browser_instances.trial_state IN ('active', 'ended')
-    AND browser_instances.desired_state <> 'deleted' AND browser_instances.status NOT IN ('deleting', 'purged', 'failed') AND (${condition})`;
-  return [
-    db.update(instanceHealth).set({ baseMeteredAt: now,
-      meteredAt: sql`CASE WHEN (SELECT status FROM browser_instances WHERE id = ${instanceHealth.instanceId}) = 'running' THEN ${now.getTime()} ELSE NULL END`,
-      pendingComputeMs: 0, netTxBilledBytes: sql`${instanceHealth.netTxBytes}`,
-    }).where(sql`EXISTS (SELECT 1 FROM browser_instances WHERE browser_instances.id = ${instanceHealth.instanceId} AND ${eligible})`),
-    // A converted browser keeps auto-sleep: the paid default, never the trial's or never sleep.
-    db.update(browserInstances).set({ trialState: 'converted', trialReclaimAt: null, updatedAt: now,
-      idleTimeoutS: sql`CASE WHEN browser_instances.idle_timeout_s IN (${NEVER_SLEEP_TIMEOUT_S}, ${TRIAL.idleTimeoutS}) THEN ${DEFAULT_IDLE_TIMEOUT_S} ELSE browser_instances.idle_timeout_s END` })
-      .where(eligible).returning({ id: browserInstances.id }),
-  ] as const;
 }

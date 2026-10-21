@@ -2,6 +2,7 @@ import { REGION_AREAS } from '@cloudbrowser/contracts';
 import { Button, cn, Eyebrow } from '@cloudbrowser/ui';
 import { ArrowRight, Check, Cloud, Globe2, HardDrive, Lock, MonitorSmartphone, MoonStar, ShieldCheck, Wallet, Zap } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
+import { money } from '../lib/money.js';
 import { regionPlace } from '../features/instances/region-names.js';
 import { useI18n } from '../lib/i18n.js';
 import type { MessageKey } from '../messages/en.js';
@@ -56,10 +57,10 @@ export function HomePage() {
                 {t('home.ctaPricing')}
               </Button>
             </div>
-            {pricing.data && !signedIn ? (
+            {pricing.data && pricing.data.signupCreditMicros > 0 && !signedIn ? (
               <p className="mt-4 flex items-center gap-2 text-sm text-muted">
                 <Check className="size-4 shrink-0 text-fg" aria-hidden />
-                {t('home.trialNote', { minutes: pricing.data.trial.minutes })}
+                {t('signup.creditOffer', { amount: money(pricing.data.signupCreditMicros, locale) })}
               </p>
             ) : null}
             <ul className="mt-8 hidden flex-wrap gap-x-5 gap-y-2 text-[13px] text-subtle sm:flex">

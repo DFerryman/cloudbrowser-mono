@@ -6,7 +6,7 @@ import { SignInPage } from '../src/features/auth/SignInPage.js';
 import { api } from '../src/lib/api.js';
 import { useTurnstile } from '../src/features/auth/turnstile.js';
 
-const state = vi.hoisted(() => ({ cached: 'site-key' as string | null, fresh: 'site-key' as string | null, navigate: vi.fn(), location: null as any, search: '' }));
+const state = vi.hoisted(() => ({ cached: 'site-key' as string | null, fresh: 'site-key' as string | null, navigate: vi.fn(), location: null as any, search: '', signupCreditMicros: 0 }));
 vi.mock('../src/lib/i18n.js', () => ({ useI18n: () => ({ locale: 'en', t: (key: string) => key }) }));
 vi.mock('../src/lib/theme.js', () => ({ useTheme: () => ({ theme: 'system' }) }));
 vi.mock('@tanstack/react-query', async () => {
@@ -23,7 +23,7 @@ vi.mock('@tanstack/react-query', async () => {
 });
 vi.mock('../src/lib/api.js', async (original) => ({ ...await original(), api: vi.fn() }));
 vi.mock('../src/lib/query.js', () => ({ queryClient: { clear: vi.fn() } }));
-vi.mock('../src/site/hooks.js', () => ({ useSignedIn: () => false }));
+vi.mock('../src/site/hooks.js', () => ({ useSignedIn: () => false, usePublicPricing: () => ({ data: { signupCreditMicros: state.signupCreditMicros } }) }));
 vi.mock('react-router', () => ({ useNavigate: () => state.navigate, useLocation: () => ({ state: state.location }), useSearchParams: () => [new URLSearchParams(state.search)], Link: ({ children, to }: any) => React.createElement('a', { href: to }, children) }));
 vi.mock('../src/features/auth/AuthLayout.js', () => ({ AuthLayout: ({ children }: any) => children, safeNext: () => '/browsers' }));
 vi.mock('@cloudbrowser/ui', () => ({ Button: (props: any) => React.createElement('button', props), Input: (props: any) => React.createElement('input', props), Label: (props: any) => React.createElement('label', props) }));
@@ -37,6 +37,7 @@ beforeEach(() => {
  state.navigate.mockReset();
  state.location = null;
  state.search = '';
+ state.signupCreditMicros = 0;
  state.cached = state.fresh = 'site-key';
  callbacks = {};
  ts = { render: vi.fn((_el, opts) => { callbacks = opts; return 'widget-id'; }), reset: vi.fn(), remove: vi.fn() };
@@ -239,4 +240,16 @@ test('a stalled verification has an in-page retry button and still sends only on
  await act(async () => callbacks.callback('retry-token'));
  expect(vi.mocked(api)).toHaveBeenCalledTimes(1);
  expect(ts.remove).toHaveBeenCalledWith('widget-id');
+});
+
+
+test('the signup credit offer disappears at zero and returns when an award is configured', async () => {
+ await act(async () => { rendered = create(React.createElement(SignUpPage), { createNodeMock: () => ({ clientWidth: 360 }) }); });
+ expect(rendered.root.findAllByProps({ 'data-testid': 'signup-credit-offer' })).toHaveLength(0);
+ state.signupCreditMicros = 2_000_000;
+ await act(async () => { rendered.update(React.createElement(SignUpPage)); });
+ expect(rendered.root.findAllByProps({ 'data-testid': 'signup-credit-offer' })).toHaveLength(1);
+ state.signupCreditMicros = 0;
+ await act(async () => { rendered.update(React.createElement(SignUpPage)); });
+ expect(rendered.root.findAllByProps({ 'data-testid': 'signup-credit-offer' })).toHaveLength(0);
 });

@@ -65,7 +65,7 @@ async function sessionRequest<T>(method: string, path: string, body?: unknown, i
   }
 }
 
-type HeartbeatResult = { sleepAt: string | null; reason?: 'idle' | 'balance' | 'trial' };
+type HeartbeatResult = { sleepAt: string | null; reason?: 'idle' | 'balance' };
 
 /**
  * Live session (`/b/:id`, page 1 and page 5). The dark frame keeps attention on the remote page.
@@ -94,7 +94,7 @@ export function SessionPage() {
   const [takenOver, setTakenOver] = useState(false);
   const [sleepAt, setSleepAt] = useState<number | null>(null);
   /** `balance`: the prepaid balance ran out; input does not keep the browser awake. */
-  const [sleepReason, setSleepReason] = useState<'idle' | 'balance' | 'trial'>('idle');
+  const [sleepReason, setSleepReason] = useState<'idle' | 'balance'>('idle');
   const [now, setNow] = useState(Date.now());
   const [fullscreen, setFullscreen] = useState(false);
   const viewerRef = useRef<RemoteBrowserHandle>(null);
@@ -207,12 +207,12 @@ export function SessionPage() {
     };
   }, [session, takenOver, status]);
 
-  // Out of credit, or the free trial ending: say so once, while there is still time to finish up (page 6).
+  // Out of credit: say so once, while there is still time to finish up (page 6).
   const toast = useToast();
   useEffect(() => {
     if (sleepReason === 'idle' || !sleepAt) return;
     const minutes = Math.max(1, Math.round((sleepAt - Date.now()) / 60_000));
-    toast(t(sleepReason === 'balance' ? 'session.balanceOut' : 'session.trialOut', { minutes }), 'error');
+    toast(t('session.balanceOut', { minutes }), 'error');
   }, [sleepReason]);
 
   useEffect(() => {
@@ -376,7 +376,7 @@ export function SessionPage() {
           overlay = <Overlay message={t('overlay.connecting')} busy />;
         } else if (sleepReason !== 'idle' && idleLeft < IDLE_WARNING_MS) {
           const seconds = Math.max(0, Math.ceil(idleLeft / 1000));
-          overlay = <Overlay message={t(sleepReason === 'balance' ? 'overlay.balanceEnding' : 'overlay.trialEnding', { seconds })} />;
+          overlay = <Overlay message={t('overlay.balanceEnding', { seconds })} />;
         } else if (idleLeft < IDLE_WARNING_MS) {
           overlay = (
             <Overlay

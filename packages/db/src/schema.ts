@@ -197,15 +197,6 @@ export const browserInstances = sqliteTable(
     storageGb: integer('storage_gb').notNull().default(10),
     /** Daily snapshots of the data volume (billed). Owner: api; off for new browsers. */
     backupsEnabled: integer('backups_enabled', { mode: 'boolean' }).notNull().default(false),
-    /** Free trial (page 6): active | ended | converted; null for every other browser. Owner: api and engine. */
-    trialState: text('trial_state'),
-    /** Running seconds the trial allows, fixed when it is created (operator setting trial_minutes). */
-    trialSeconds: integer('trial_seconds').notNull().default(600),
-    /** Running seconds used by the trial (metered by the engine). */
-    trialUsedS: integer('trial_used_s').notNull().default(0),
-    trialUsedMs: integer('trial_used_ms').notNull().default(0),
-    /** An unconverted trial browser is deleted and purged at this time (7 days after it last slept). */
-    trialReclaimAt: ts('trial_reclaim_at'),
     /** Machine tier (contracts TIERS): basic | premium. Set at creation, never changes (trigger). */
     tier: text('tier').notNull().default('basic'),
   },
@@ -696,8 +687,6 @@ export const billingAccounts = sqliteTable('billing_accounts', {
   lowNotifiedAt: ts('low_notified_at'),
   /** The most urgent funded-time warning (24, 6 or 1 hours) sent while credit keeps falling. */
   runwayWarnedHours: integer('runway_warned_hours'),
-  /** When the user started their one free trial. */
-  trialUsedAt: ts('trial_used_at'),
   updatedAt: ts('updated_at').notNull(),
 });
 
@@ -743,7 +732,7 @@ export const balanceTransactions = sqliteTable(
     userId: text('user_id')
       .notNull()
       .references(() => user.id),
-    kind: text('kind').notNull(), // topup | refund | dispute | adjustment
+    kind: text('kind').notNull(), // topup | refund | dispute | adjustment | promotion | signup
     amountMicros: integer('amount_micros').notNull(),
     reference: text('reference').notNull().unique(),
     productId: text('product_id'),
@@ -780,7 +769,7 @@ export const usageRecords = sqliteTable(
     quantity: real('quantity').notNull(),
     amountMicros: integer('amount_micros').notNull(),
     costMicros: integer('cost_micros').notNull(),
-    /** Amount actually debited; pilot and trial usage is never revenue. */
+    /** Amount actually debited; pilot usage is never revenue. */
     chargedMicros: integer('charged_micros').notNull().default(0),
     updatedAt: ts('updated_at').notNull(),
   },

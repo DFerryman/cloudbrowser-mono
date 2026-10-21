@@ -1,5 +1,5 @@
-import { MICROS_PER_USD, TRIAL, type BrowserTier, type Entitlements } from '@cloudbrowser/contracts';
-import { awaitingRefresh, awsInventory, billingRequired, blocksRegion, convertTrialStatements, launchHealthFor, openProviderIssue, prepaidBalance, reservationQuote, reservationWrite, pricingSettings, schema, userCaps as sharedUserCaps, type Db } from '@cloudbrowser/db';
+import { MICROS_PER_USD, type BrowserTier, type Entitlements } from '@cloudbrowser/contracts';
+import { awaitingRefresh, awsInventory, billingRequired, blocksRegion, launchHealthFor, openProviderIssue, prepaidBalance, reservationQuote, reservationWrite, pricingSettings, schema, userCaps as sharedUserCaps, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 import { storageLimits } from './pricing.js';
 import { problem } from './problem.js';
@@ -41,39 +41,12 @@ export async function entitlementsFor(db: Db, userId: string): Promise<Entitleme
 
 export const billingAccount = prepaidBalance;
 
-/** Payment disputes block new resources and wakes, including free trial resources and pilot use. */
+/** Payment disputes block new resources and wakes, including pilot use. */
 export async function requireUnfrozen(db: Db, userId: string) {
   const account = await billingAccount(db, userId);
   if (account.frozenAt) throw problem(403, 'account_frozen', 'Your account is on hold because of a payment dispute. Contact support.');
   return account;
 }
-
-/** An unconverted free trial browser (page 6). */
-export const isTrial = (row: { trialState: string | null }) => row.trialState === 'active' || row.trialState === 'ended';
-
-/**
- * Paying turns the user's trial browser into a normal one, with the same data and IP: from then on
- * it is charged like any other browser and is no longer reclaimed after 7 days.
- */
-export async function convertTrials(db: Db, userId: string, now: Date) {
-  const funded = (await billingRequired(db)) ? sql`EXISTS (SELECT 1 FROM browser_reservations
-    WHERE instance_id = browser_instances.id AND retention_started_at IS NULL AND reserved_micros >= required_micros)` : sql`1`;
-  const [, converted] = await db.batch(convertTrialStatements(db, userId, now, funded));
-  return converted;
-}
-
-/** Claims the user's one free trial; false if it was used before. */
-export async function claimTrial(db: Db, userId: string, now: Date): Promise<boolean> {
-  await db.insert(billingAccounts).values({ userId, balanceMicros: 0, updatedAt: now }).onConflictDoNothing();
-  const claimed = await db
-    .update(billingAccounts)
-    .set({ trialUsedAt: now, updatedAt: now })
-    .where(and(eq(billingAccounts.userId, userId), sql`${billingAccounts.trialUsedAt} IS NULL`))
-    .returning({ id: billingAccounts.userId });
-  return claimed.length > 0;
-}
-
-export const trialSecondsLeft = (row: { trialSeconds: number; trialUsedS: number; trialUsedMs?: number }) => Math.ceil(Math.max(0, row.trialSeconds * 1000 - Math.max(row.trialUsedMs ?? 0, row.trialUsedS * 1000)) / 1000);
 
 const usd = (micros: number) => `$${(micros / MICROS_PER_USD).toFixed(2)}`;
 
@@ -183,11 +156,9 @@ async function checkRegionRoom(db: Db, regionId: string, tier: BrowserTier = 'ba
  * Bounded before created (page 10, rule 5): plan, region and global caps, provider quota headroom,
  * and the circuit breaker are all checked before a create is admitted. Spend never limits it.
  */
-export async function admitCreate(db: Db, userId: string, regionId: string, now: Date, opts: { trial?: boolean; tier?: BrowserTier } = {}) {
+export async function admitCreate(db: Db, userId: string, regionId: string, now: Date, opts: { tier?: BrowserTier } = {}) {
   await requireUnfrozen(db, userId);
   const tier = opts.tier ?? 'basic';
-  // The free trial is a Basic browser; Premium is offered where the operator turned it on.
-  if (tier === 'premium' && opts.trial) throw problem(400, 'validation_failed', 'The free trial runs on a Basic browser.');
   const [freeze] = await db.select().from(controlFlags).where(eq(controlFlags.key, 'creation_freeze'));
   if (freeze?.value === 'true') throw problem(503, 'creation_frozen', 'New browsers are temporarily unavailable.');
 
@@ -200,8 +171,7 @@ export async function admitCreate(db: Db, userId: string, regionId: string, now:
   if (u.browsers >= (c.get('instances') ?? 0)) {
     throw problem(403, 'plan_limit', `Your account allows ${c.get('instances') ?? 0} browsers.`, { limit: 'instances' });
   }
-  // The free trial needs no credit (page 6).
-  if (!opts.trial) {
+  if (await billingRequired(db)) {
     const quote = await reservationQuote(db, regionId, { storageGb: (await storageLimits(db, userId)).defaultGb, backupsEnabled: false });
     if (!quote) throw problem(503, 'price_unavailable', 'Prices for this region are unavailable.');
     await admitSpend(db, userId, 'create a browser', quote.requiredMicros);
@@ -228,14 +198,7 @@ export async function admitStart(db: Db, userId: string, instanceId: string, reg
     .from(browserInstances)
     .where(eq(browserInstances.id, instanceId));
   if (inst?.suspendedAt) throw problem(403, 'suspended', 'This browser is suspended. Contact support.');
-  if (inst && isTrial(inst) && inst.trialState === 'active' && trialSecondsLeft(inst) > 0) {
-    // Free trial minutes left: waking is free.
-  } else if (inst && isTrial(inst)) {
-    await admitInstanceSpend(db, userId, inst, 'continue this browser after the free trial');
-    await convertTrials(db, userId, new Date());
-  } else if (inst) {
-    await admitInstanceSpend(db, userId, inst, 'wake a browser');
-  }
+  if (inst) await admitInstanceSpend(db, userId, inst, 'start this browser');
 
   const others = and(ne(browserInstances.id, instanceId), inArray(browserInstances.status, RUNNING_STATUSES));
   const regionCaps = await capsFor(db, [`region:${regionId}`]);

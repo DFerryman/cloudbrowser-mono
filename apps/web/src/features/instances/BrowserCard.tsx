@@ -10,7 +10,6 @@ import { CreateProgress } from './CreateProgress.js';
 import { DeleteBrowserDialog } from './DeleteBrowser.js';
 import { useLifecycle, useUpdateInstance } from './hooks.js';
 import { shownStatus, STATUS_TONE, statusKey } from './status.js';
-import { TrialBadge } from './Trial.js';
 import { useBilling } from '../billing/hooks.js';
 import { canSpend, canUseBrowser } from '../billing/access.js';
 import { BalanceRequired } from '../billing/BalanceRequired.js';
@@ -214,7 +213,6 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
         </div>
         <StatusBadge pill className="shrink-0" tone={STATUS_TONE[a.status]} label={t(statusKey(a.status))} />
       </div>
-      <TrialBadge className="mt-3" trial={i.trial} />
       <div className="mt-4 flex min-h-10 items-center border-y border-border py-2">
         <RegionIpChip
           className="text-[13px]"

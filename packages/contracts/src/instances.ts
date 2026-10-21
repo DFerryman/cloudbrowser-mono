@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { RegionId } from './regions.js';
 import { OperationSummary } from './operations.js';
-import { TrialState } from './billing.js';
 import { BrowserTier } from './tiers.js';
 
 /**
@@ -27,7 +26,7 @@ export type InstanceStatus = z.infer<typeof InstanceStatus>;
 export const DesiredState = z.enum(['running', 'stopped', 'deleted']);
 export type DesiredState = z.infer<typeof DesiredState>;
 
-/** Zero disables inactivity sleep; billing and trial limits still apply. */
+/** Zero disables inactivity sleep; billing limits still apply. */
 export const NEVER_SLEEP_TIMEOUT_S = 0;
 export const IDLE_TIMEOUT_OPTIONS_S = [300, 600, 900, 1800, 3600, NEVER_SLEEP_TIMEOUT_S] as const;
 export const DEFAULT_IDLE_TIMEOUT_S = 600;
@@ -111,15 +110,6 @@ export const Instance = z.object({
   stopReason: StopReason.nullable(),
   /** Set while credit has run out: the browser is permanently deleted at this time unless credit is added. */
   deletesAt: z.string().nullable(),
-  /** Set for the free trial browser: free until converted by adding credit (see TRIAL). */
-  trial: z
-    .object({
-      state: TrialState,
-      secondsLeft: z.number().int(),
-      /** A trial browser is deleted at this time unless the user adds credit first. */
-      reclaimAt: z.string().nullable(),
-    })
-    .nullable(),
 });
 export type Instance = z.infer<typeof Instance>;
 
@@ -130,10 +120,10 @@ export type Instance = z.infer<typeof Instance>;
 export const NeverSleepQuote = z.object({
   allowed: z.boolean(),
   /**
-   * Why not: `disabled` by the operator, a free `trial` browser, `no_topup` on the account yet,
+   * Why not: `disabled` by the operator, `no_topup` on the account yet,
    * `insufficient_credit` for the first 24 hours, or `price_unavailable`.
    */
-  reason: z.enum(['disabled', 'trial', 'no_topup', 'insufficient_credit', 'price_unavailable']).nullable(),
+  reason: z.enum(['disabled', 'no_topup', 'insufficient_credit', 'price_unavailable']).nullable(),
   regionId: RegionId,
   priceVersion: z.string().nullable(),
   /** This browser running continuously for 24 hours in its region. */
@@ -155,15 +145,13 @@ export const PriceVersion = z.string().min(1).max(200);
 export const CreateInstanceBody = z.object({
   name: InstanceName,
   regionId: RegionId,
-  /** Basic unless given. Premium needs the operator's `premium` switch and is never a free trial. */
+  /** Basic unless given. Premium needs the operator's `premium` switch. */
   tier: BrowserTier.optional(),
   screen: ScreenSize.optional(),
   /** The version of the chosen tier's prices (RegionPricing, or its `premium`). */
   priceVersion: PriceVersion,
   /** Data volume size shown in the quote; must still match the default size when confirmed. */
   storageGb: z.number().int().min(1).max(16_384),
-  /** Use the one free trial (TRIAL): only in its region, once per user. */
-  trial: z.boolean().optional(),
 });
 export type CreateInstanceBody = z.infer<typeof CreateInstanceBody>;
 
@@ -194,7 +182,7 @@ export const InstanceStorage = z.object({
   reportedAt: z.string().nullable(),
   resizable: z.boolean(),
   /** Why it cannot grow now: `state` (not running or sleeping), `cooldown` (four attempts per rolling 24 hours), `agent` (browser created before storage could grow), `max`. */
-  blockedReason: z.enum(['state', 'cooldown', 'agent', 'max', 'busy', 'trial']).nullable(),
+  blockedReason: z.enum(['state', 'cooldown', 'agent', 'max', 'busy']).nullable(),
   nextResizeAt: z.string().nullable(),
 });
 export type InstanceStorage = z.infer<typeof InstanceStorage>;

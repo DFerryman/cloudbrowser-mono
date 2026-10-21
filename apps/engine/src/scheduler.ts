@@ -41,12 +41,11 @@ export async function requestStop(deps: EngineDeps, inst: { id: string; userId: 
   const now = deps.now();
   const row = operationRow({ instanceId: inst.id, userId: null, kind: 'stop', params: { reason }, now });
   // Recheck the reason with the stop admission: inventory or billing reads can race a wake,
-  // top-up or trial conversion. Aborting the batch also prevents a stray unfinished operation.
+  // top-up. Aborting the batch also prevents a stray unfinished operation.
   const reasonStillApplies = reason === 'intent_reconcile' ? sql`${browserInstances.desiredState} = 'stopped'`
     : reason === 'idle' ? sql`${browserInstances.idleTimeoutS} <> ${NEVER_SLEEP_TIMEOUT_S}`
-    : reason === 'trial' ? sql`${browserInstances.trialState} = 'ended'`
     : reason === 'frozen' ? sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${inst.userId} AND ${billingAccounts.frozenAt} IS NOT NULL)`
-    : reason === 'balance' ? sql`(${browserInstances.trialState} IS NULL OR ${browserInstances.trialState} = 'converted') AND (
+    : reason === 'balance' ? sql`(
       NOT EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${inst.userId} AND ${billingAccounts.balanceMicros} - ${reservedTotalSql(inst.userId)} > 0)
       OR NOT EXISTS (SELECT 1 FROM ${browserReservations} WHERE ${browserReservations.instanceId} = ${inst.id} AND ${browserReservations.retentionStartedAt} IS NULL AND ${browserReservations.reservedMicros} >= ${browserReservations.requiredMicros}))`
     : sql`1`;

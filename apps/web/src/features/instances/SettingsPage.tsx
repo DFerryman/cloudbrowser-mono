@@ -45,9 +45,8 @@ export function SettingsPage() {
   const maxIdle = me.data?.entitlements.idleTimeoutMaxS ?? 3600;
   const [neverSleepOpen, setNeverSleepOpen] = useState(false);
   const neverSleep = i.idleTimeoutS === NEVER_SLEEP_TIMEOUT_S;
-  // Offered by the operator and never to a free trial browser; the dialog checks credit and price.
+  // Offered by the operator; the dialog checks credit and price.
   const neverSleepOffered = (me.data?.entitlements.neverSleep ?? false) || neverSleep;
-  const trial = i.trial !== null && i.trial.state !== 'converted';
   const check = i.lastIpCheck;
   const tier = i.tier ?? 'basic';
 
@@ -119,12 +118,12 @@ export function SettingsPage() {
                 }}
               >
                 {IDLE_TIMEOUT_OPTIONS_S.filter((s) => s !== NEVER_SLEEP_TIMEOUT_S || neverSleepOffered).map((s) => (
-                  <option key={s} value={s} disabled={s === NEVER_SLEEP_TIMEOUT_S ? trial && !neverSleep : s > maxIdle}>
+                  <option key={s} value={s} disabled={s !== NEVER_SLEEP_TIMEOUT_S && s > maxIdle}>
                     {s === NEVER_SLEEP_TIMEOUT_S ? t('settings.neverSleep') : t('settings.minutes', { n: s / 60 })}
                   </option>
                 ))}
               </Select>
-              <Hint className="mt-1.5">{neverSleep ? t('settings.neverSleepOn') : trial && neverSleepOffered ? t('settings.neverSleepTrial') : t('settings.autoSleepHint')}</Hint>
+              <Hint className="mt-1.5">{neverSleep ? t('settings.neverSleepOn') : t('settings.autoSleepHint')}</Hint>
               {/* Longer choices are greyed out by the operator's limit; say so rather than leave them unexplained. */}
               {maxIdle < Math.max(...IDLE_TIMEOUT_OPTIONS_S) ? <Hint className="mt-1">{t('settings.autoSleepMax', { n: maxIdle / 60 })}</Hint> : null}
               <NeverSleepDialog instance={i} open={neverSleepOpen} onClose={() => setNeverSleepOpen(false)} />

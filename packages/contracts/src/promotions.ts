@@ -33,7 +33,7 @@ export const PromotionCriterion = z.enum([
   'regions_used',
   /** `target` storage upgrades that finished (a browser's data volume grown). */
   'storage_resized',
-  /** `target` US dollars of usage actually charged to the balance (trial usage is never charged). */
+  /** `target` US dollars of usage actually charged to the balance. */
   'paid_usage_usd',
   /** `target` separate paid top-ups (a refunded or disputed one does not count). */
   'topups_count',

@@ -18,7 +18,6 @@ export function UsagePage() {
   const usage = useInstanceUsage(i.id, month);
   const u = usage.data;
   const items = UsageItem.options.filter((item) => item !== 'snapshot' || u?.byDay.some((day) => day.byItem.snapshot !== 0));
-  const trial = !!i.trial && i.trial.state !== 'converted';
   const m = (v: number) => money(v, locale);
   const pricing = usePricing();
   const price = pricing.data?.find((p) => p.regionId === i.regionId);
@@ -45,8 +44,7 @@ export function UsagePage() {
           <Eyebrow as="h2">{t('usage.ratesTitle')}</Eyebrow>
           {!u ? (
             <Skeleton className="mt-3 h-20" />
-          ) : trial ? (
-            <p className="mt-2 text-sm font-medium text-running">{t('usage.trialFree')}</p>
+
           ) : u.now.hourMicros === 0 && u.now.alwaysOnMonthMicros === 0 ? (
             <p className="mt-2 text-sm text-muted">{t('usage.nowNothing')}</p>
           ) : (

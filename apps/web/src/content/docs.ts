@@ -23,7 +23,6 @@ const en: Article[] = [
       { p: 'When the IP check passes, the browser opens automatically.' },
       { h: 'Open, sleep and wake' },
       { p: 'Choose Open on a browser card to see it live. When you leave it idle, it goes to sleep after the time set in its settings. Sleeping keeps your data and IP; waking takes about a minute.' },
-      { note: 'Your first browser can be free: see Free trial.' },
     ],
   },
   {
@@ -50,7 +49,7 @@ const en: Article[] = [
       { p: 'Every few minutes, the browser checks from inside Chrome which address websites see. If the address is ever different, we pause its network at once so that no other IP is used, and the browser shows that it is checking. You can run a check yourself from Settings → Verify IP while it runs.' },
       { h: 'Sleep and auto-sleep', id: 'sleep' },
       { p: 'An idle browser goes to sleep after the time in Settings → Auto-sleep (10 minutes by default; shorter saves money). A changed setting counts from the moment you save it. Before it sleeps, the live view shows a countdown with Stay awake. Its computer is stopped while it sleeps; the IP and storage are kept, and are still charged.' },
-      { p: 'Never sleep keeps a paid browser running, and charged, while nobody uses it. It is available after your first top-up, when your available credit covers 24 hours of everything your browsers spend with this one always on; free trial browsers always auto-sleep. Before you turn it on, Settings shows what 24 hours of continuous running costs in the browser’s region: compute, IP and storage. A Never sleep browser still stops when your available credit runs out, or when an administrator stops it or a security check pauses it, and it never restarts by itself: you open it again when you choose.' },
+      { p: 'Never sleep keeps a paid browser running, and charged, while nobody uses it. It is available after your first top-up, when your available credit covers 24 hours of everything your browsers spend with this one always on. Before you turn it on, Settings shows what 24 hours of continuous running costs in the browser’s region: compute, IP and storage. A Never sleep browser still stops when your available credit runs out, or when an administrator stops it or a security check pauses it, and it never restarts by itself: you open it again when you choose.' },
       { h: 'Deleting a browser', id: 'delete' },
       { p: 'Deleting is permanent. Access closes immediately, its data and sign-ins are destroyed and its resources released. Charges stop when deletion starts. Encrypted profile archives become unreadable before they are removed.' },
       { h: 'Status messages', id: 'statuses' },
@@ -141,20 +140,6 @@ const en: Article[] = [
     ],
   },
   {
-    slug: 'trial',
-    title: 'Free trial',
-    summary: 'One free browser to try, no credit needed.',
-    blocks: [
-      { p: 'Every new account can create one browser for free, once, in Sydney: 30 minutes of running time (the current length is shown on Pricing and when you create it) with a 2 GB data volume and a 5-minute auto-sleep. No credit is needed.' },
-      { ul: [
-        'It goes to sleep when its free running time is used.',
-        'It is kept until a fixed deadline of up to seven days, shown on the browser, then deleted. Stopping and starting it does not extend the deadline.',
-        'Add enough credit before then to keep it: it becomes a normal browser with the same data and IP, charged like any other from then on.',
-      ] },
-      { p: 'A new IP and more storage become available once the trial browser is converted.' },
-    ],
-  },
-  {
     slug: 'security',
     title: 'Account security',
     summary: 'Creating an account, email codes, passkeys, two-step verification and signing out.',
@@ -219,7 +204,6 @@ const zh: Article[] = [
       { p: 'IP 检查通过后，浏览器会自动打开。' },
       { h: '打开、休眠与唤醒', id: 'open' },
       { p: '在浏览器卡片上选择“打开”即可查看实时画面。空闲超过设置中的时间后，浏览器会自动休眠。休眠会保留数据和 IP，唤醒约需一分钟。' },
-      { note: '你的第一个浏览器可以免费试用：参见“免费试用”。' },
     ],
   },
   {
@@ -246,7 +230,7 @@ const zh: Article[] = [
       { p: '浏览器每隔几分钟会在 Chrome 内检查网站看到的地址。一旦地址不一致，我们会立即暂停其网络，确保不会使用其他 IP，浏览器会显示正在检查。浏览器运行时，你也可以在“设置 → 验证 IP”中手动检查。' },
       { h: '休眠与自动休眠', id: 'sleep' },
       { p: '空闲浏览器会在“设置 → 自动休眠”设定的时间后休眠（默认 10 分钟，时间越短越省钱）。修改设置后从保存时开始重新计时。休眠前，实时画面会显示倒计时和“保持唤醒”按钮。休眠时计算机停止运行，IP 和存储仍保留并继续计费。' },
-      { p: '永不休眠会在无人使用时保持付费浏览器运行并计费。首次充值后，且可用余额足够你所有浏览器（此浏览器始终运行）24 小时的花费时即可开启；免费试用浏览器始终会自动休眠。开启前，设置页会显示该浏览器所在地区持续运行 24 小时的费用：计算、IP 和存储。永不休眠的浏览器在可用余额用完、被管理员停止或因安全检查暂停时仍会停止，并且不会自动重新启动，需要你再次打开。' },
+      { p: '永不休眠会在无人使用时保持付费浏览器运行并计费。首次充值后，且可用余额足够你所有浏览器（此浏览器始终运行）24 小时的花费时即可开启。开启前，设置页会显示该浏览器所在地区持续运行 24 小时的费用：计算、IP 和存储。永不休眠的浏览器在可用余额用完、被管理员停止或因安全检查暂停时仍会停止，并且不会自动重新启动，需要你再次打开。' },
       { h: '删除浏览器', id: 'delete' },
       { p: '删除是永久性的。访问会立即关闭，数据和登录状态被销毁，资源被释放。删除开始时即停止计费。加密的配置归档在移除前就已无法读取。' },
       { h: '状态说明', id: 'statuses' },
@@ -334,20 +318,6 @@ const zh: Article[] = [
       { p: '侧边栏和账单页会显示按你所有浏览器的总花费，可用余额还能使用多久。当剩余时间低于约 24、6 和 1 小时时，我们会各发送一次邮件，低于 24 小时时应用内也会提醒。' },
       { h: '退款与争议', id: 'refunds' },
       { p: '余额不予退款，重复或错误扣款以及法律赋予退款权利的情况除外，详见退款政策。退款或支付争议会从余额中扣除相应金额；争议处理期间账户会被暂停。' },
-    ],
-  },
-  {
-    slug: 'trial',
-    title: '免费试用',
-    summary: '一个免费浏览器，无需充值即可试用。',
-    blocks: [
-      { p: '每个新账户都可以在悉尼免费创建一次浏览器：30 分钟运行时间（当前时长以定价页和创建时显示为准）、2 GB 数据盘、5 分钟自动休眠，无需充值。' },
-      { ul: [
-        '免费运行时间用完后会自动休眠。',
-        '它会保留到浏览器上显示的固定截止日期（最多七天），然后删除。停止和启动不会延长截止日期。',
-        '在此之前充值足够的余额即可保留：它会变成普通浏览器，保留相同的数据和 IP，之后与其他浏览器同样计费。',
-      ] },
-      { p: '试用浏览器转为付费后，才可申请新 IP 和增加存储。' },
     ],
   },
   {

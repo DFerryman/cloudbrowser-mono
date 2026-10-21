@@ -1,4 +1,3 @@
-import { TRIAL } from '@cloudbrowser/contracts';
 import { and, eq, inArray } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import * as schema from './schema.js';
@@ -18,11 +17,10 @@ export async function userCaps(db: Db, userId: string): Promise<Map<string, numb
   return out;
 }
 
-/** The free trial's running time in minutes (operator cap user:default / trial_minutes). */
-export async function trialMinutes(db: Db): Promise<number> {
-  const [row] = await db.select().from(schema.caps).where(and(eq(schema.caps.scope, 'user:default'), eq(schema.caps.metric, 'trial_minutes')));
-  const minutes = row?.limit ?? TRIAL.runningSeconds / 60;
-  return Math.min(TRIAL.maxMinutes, Math.max(1, minutes));
+/** Signup credit is global, stored in cents to avoid fractional-dollar rounding. */
+export async function signupCreditMicros(db: Db): Promise<number> {
+  const [row] = await db.select().from(schema.caps).where(and(eq(schema.caps.scope, 'user:default'), eq(schema.caps.metric, 'signup_credit_cents')));
+  return Math.max(0, row?.limit ?? 200) * 10_000;
 }
 
 /**

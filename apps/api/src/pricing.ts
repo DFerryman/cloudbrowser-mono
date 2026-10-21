@@ -107,8 +107,8 @@ export async function allRegionPricing(db: Db, userId: string | null): Promise<R
 }
 
 /** What one browser costs per hour right now (running or not) and per month while it is kept. */
-export function currentBurn(p: RegionPrice | null, inst: { status: string; storageGb: number; backupsEnabled: boolean; trialState?: string | null }) {
-  if (!p || ['active', 'ended'].includes(inst.trialState ?? '') || ['creating', 'failed', 'deleting', 'purged'].includes(inst.status)) return { hourMicros: 0, runningHourMicros: p?.rates.compute ?? 0, alwaysOnMonthMicros: 0 };
+export function currentBurn(p: RegionPrice | null, inst: { status: string; storageGb: number; backupsEnabled: boolean }) {
+  if (!p || ['creating', 'failed', 'deleting', 'purged'].includes(inst.status)) return { hourMicros: 0, runningHourMicros: p?.rates.compute ?? 0, alwaysOnMonthMicros: 0 };
   const e = browserEstimate(p.rates, { storageGb: inst.storageGb, rootVolumeGb: p.sheet.rootVolumeGb, backups: false });
   return { hourMicros: e.alwaysOnHour + (inst.status === 'running' ? e.runningHour : 0), runningHourMicros: e.runningHour, alwaysOnMonthMicros: e.alwaysOnMonth };
 }

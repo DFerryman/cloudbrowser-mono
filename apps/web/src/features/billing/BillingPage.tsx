@@ -84,7 +84,6 @@ function BalanceCard({ state }: { state: BillingState }) {
   const checkout = useCheckout();
   const portal = usePortal();
   const hours = fundedHours(state);
-  const trialRegion = useRegionInfo(state.trial.regionId);
   const m = (v: number) => money(v, locale);
   const alert = state.frozen
     ? t('billing.frozen')
@@ -111,7 +110,7 @@ function BalanceCard({ state }: { state: BillingState }) {
       <dl className="mt-6 grid grid-cols-2 border-t border-border text-sm">
         <div className="border-r border-border py-3 pr-3">
           <dt className="text-xs text-subtle">{t('billing.availableBalance')}</dt>
-          <dd className={cn('mt-0.5 text-base font-semibold tabular-nums', state.availableMicros <= 0 && state.mode === 'prepaid' && !state.trial.eligible && 'text-error')}>{m(state.availableMicros)}</dd>
+          <dd className={cn('mt-0.5 text-base font-semibold tabular-nums', state.availableMicros <= 0 && state.mode === 'prepaid' && 'text-error')}>{m(state.availableMicros)}</dd>
         </div>
         <div className="py-3 pl-4">
           <dt className="text-xs text-subtle">{t('billing.reservedBalance')}</dt>
@@ -149,18 +148,6 @@ function BalanceCard({ state }: { state: BillingState }) {
         </p>
       ) : null}
       {state.retained.length ? <RetainedBrowsers state={state} /> : null}
-      {state.trial.eligible ? (
-        <div className="mt-4 flex gap-3 border-l-2 border-fg bg-surface px-3 py-2.5 text-sm">
-          <Gift className="mt-0.5 size-4 shrink-0" aria-hidden />
-          <div>
-            <p>{t('trial.billingCta', { minutes: state.trial.minutes, region: trialRegion.name })}</p>
-            <Link to="/browsers/new" className="mt-1 inline-block font-medium text-accent hover:underline">
-              {t('trial.start')}
-            </Link>
-          </div>
-        </div>
-      ) : null}
-
       <div className="mt-auto space-y-1 border-t border-border pt-4 text-sm">
         <p>{state.burnHourMicros > 0 ? t('billing.burnShort', { amount: m(state.burnHourMicros) }) : t('billing.burnNone')}</p>
         {hours !== null ? (

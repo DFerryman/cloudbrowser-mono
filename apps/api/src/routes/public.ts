@@ -2,8 +2,8 @@
  * Signed-out data for the public site (`/api/public/*`): the price list and the service status.
  * GET only, no session, the same answer for every visitor, cacheable for a minute. Nothing about a single user or browser is exposed.
  */
-import { DATA_KEPT_DAYS, TRIAL, costRates, tierSheet, type ComponentStatus, type PublicPricing, type PublicStatus } from '@cloudbrowser/contracts';
-import { priceSheets, pricingSettings, schema, trialMinutes, userCaps } from '@cloudbrowser/db';
+import { DATA_KEPT_DAYS, costRates, tierSheet, type ComponentStatus, type PublicPricing, type PublicStatus } from '@cloudbrowser/contracts';
+import { priceSheets, pricingSettings, schema, signupCreditMicros, userCaps } from '@cloudbrowser/db';
 import { desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { regionViews } from '../availability.js';
@@ -51,7 +51,7 @@ publicRoute.get('/pricing', async (c) => {
     premiumOffered: (await userCaps(db, 'default')).get('premium') === 1,
     minBalanceMicros: settings.minBalanceMicros,
     retentionDays: DATA_KEPT_DAYS,
-    trial: { regionId: TRIAL.regionId, minutes: await trialMinutes(db), storageGb: TRIAL.storageGb, keptDays: TRIAL.keptDays },
+    signupCreditMicros: await signupCreditMicros(db),
   };
   return c.json(out);
 });

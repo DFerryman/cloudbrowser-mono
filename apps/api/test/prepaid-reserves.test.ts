@@ -90,16 +90,6 @@ describe('seven-day prepaid resource deposits', () => {
     expect((await meterUsage(at(start + 60_000), { minIntervalMs: 4 * 60_000 })).stopped).toBe(1);
   });
 
-  it('still ends a trial between settlement ticks', async () => {
-    await credit(10_000_000);
-    const id = await browser();
-    const start = Date.now();
-    await meterUsage(at(start));
-    t.d1.sqlite.prepare("UPDATE browser_instances SET trial_state='active',trial_used_ms=540000,trial_used_s=540 WHERE id=?").run(id);
-    expect((await meterUsage(at(start + 60_000), { minIntervalMs: 4 * 60_000 })).stopped).toBe(1);
-    expect(one('SELECT trial_state AS state FROM browser_instances WHERE id=?', id).state).toBe('ended');
-  });
-
   it('holds a new browser deposit inside the total balance without charging it as usage', async () => {
     await credit(10_000_000);
     expect(await state()).toMatchObject({ balanceMicros: 10_000_000, reservedMicros: 0, availableMicros: 10_000_000 });
