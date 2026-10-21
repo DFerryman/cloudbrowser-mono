@@ -36,13 +36,18 @@ COPY neko.yaml /etc/neko/neko.yaml
 COPY neko-premium.yaml /etc/neko/neko-premium.yaml
 # Chrome draws no faster than the desktop's refresh rate, and the viewer picks a desktop size that
 # fits the window. neko's X server has 60 Hz modes for 1920x1080, 1280x720 and the VESA sizes;
-# add common laptop sizes so Premium keeps 60 fps there too (GTF timings, like neko's own lines).
-# Basic is unaffected: these sizes already have 30 or 25 Hz modes, and its viewer stays at or below 30.
+# add common laptop sizes (GTF timings, like neko's own lines) and 2560x1440, so Premium keeps
+# 60 fps in every window size the viewer uses. 2560x1440 has short blanking to stay under the
+# dummy driver's 300 MHz pixel clock (GTF needs 312), yet not the CVT reduced-blanking shape
+# that X refuses without a monitor that declares it. Measured on 4 vCPUs at 2560x1440: 59 fps
+# while scrolling with 78% of the VM busy, 57 fps playing 1080p60 video with 86% busy (c7i's
+# faster cores leave more room). Basic is unaffected: these sizes already have 30 or 25 Hz modes,
+# and its viewer stays at or below 30.
 RUN sed -i \
-      -e '/Modeline "1920x1080_60.00"/a\  Modeline "1600x900_60.00" 119.00 1600 1696 1864 2128 900 901 904 932 -HSync +Vsync\n  Modeline "1368x768_60.00" 85.86 1368 1440 1584 1800 768 769 772 795 -HSync +Vsync' \
-      -e 's/Modes "1920x1080_60.00"/Modes "1920x1080_60.00" "1600x900_60.00" "1368x768_60.00"/' \
+      -e '/Modeline "1920x1080_60.00"/a\  Modeline "2560x1440_60.00" 243.12 2560 2608 2648 2736 1440 1443 1448 1481 -HSync +Vsync\n  Modeline "1600x900_60.00" 119.00 1600 1696 1864 2128 900 901 904 932 -HSync +Vsync\n  Modeline "1368x768_60.00" 85.86 1368 1440 1584 1800 768 769 772 795 -HSync +Vsync' \
+      -e 's/Modes "1920x1080_60.00"/Modes "1920x1080_60.00" "2560x1440_60.00" "1600x900_60.00" "1368x768_60.00"/' \
       /etc/neko/xorg.conf \
- && test "$(grep -c '1600x900_60.00\|1368x768_60.00' /etc/neko/xorg.conf)" = 3
+ && test "$(grep -c '2560x1440_60.00\|1600x900_60.00\|1368x768_60.00' /etc/neko/xorg.conf)" = 4
 
 # Supervisor needs root to manage its pid/socket and drop privileges for its programs.
 # neko and Chrome run as the unprivileged `neko` user in their supervisor configurations.

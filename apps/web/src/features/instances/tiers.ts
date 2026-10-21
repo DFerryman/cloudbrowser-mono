@@ -12,14 +12,17 @@ export function pricingForTier(p: RegionPricing, tier: BrowserTier): RegionPrici
     : { ...p, available: false, rates: null, machine: null, version: null };
 }
 
-/** Whether a region can take a new browser of this tier, in the shape the region list reads. */
+/**
+ * Whether a region can take a new browser of this tier, and how many more it has room for, in the
+ * shape the region list reads. Premium has its own stock: it needs more of the account's vCPUs.
+ */
 export function regionForTier(r: Region, tier: BrowserTier): Region {
   if (tier === 'basic') return r;
   const premium = r.premium ?? null;
-  // Basic's stock count would mislead: Premium needs more of the account's vCPUs.
   const { inventory: _basicStock, ...rest } = r;
   return {
     ...rest,
+    ...(premium?.inventory ? { inventory: premium.inventory } : {}),
     acceptingNew: !!premium && premium.availability !== 'unavailable',
     availability: premium?.availability ?? 'unavailable',
     availabilityReason: premium?.availabilityReason ?? null,

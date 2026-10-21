@@ -4,7 +4,7 @@
  * switches, the inventory AWS quotas still allow, and how recent launches there went
  * (a capacity shortage, or a provider failure such as an encryption key the account may not use).
  */
-import { AWS_REGION_FACTS, awsLatencyProbeUrl, estimateRttMs, type Region } from '@cloudbrowser/contracts';
+import { AWS_REGION_FACTS, awsLatencyProbeUrl, estimateRttMs, type Region, type RegionInventory } from '@cloudbrowser/contracts';
 import { awsInventory, blocksRegion, launchHealthByRegion, launchVerifiedAt, openProviderIssue, priceSheets, recentCapacityAt, schema, type Db, type LaunchHealthRow } from '@cloudbrowser/db';
 import { asc } from 'drizzle-orm';
 import { regionAcceptingNew } from './limits.js';
@@ -27,6 +27,16 @@ export function availabilityOf(input: {
   if (shortage > success) return { availability: 'limited', availabilityReason: 'capacity' };
   if (input.stock === 1) return { availability: 'limited', availabilityReason: 'low_stock' };
   return { availability: 'available', availabilityReason: null };
+}
+
+/** A region's inventory as the API shows it, for `available` browsers of one tier. */
+function inventoryView(inventory: { checked_at: number | null; availability: string }, available: number): RegionInventory {
+  return {
+    available,
+    checkedAt: inventory.checked_at ? new Date(inventory.checked_at).toISOString() : null,
+    status: inventory.availability === 'ready' ? 'ready' : 'unavailable',
+    constraint: inventory.availability === 'ready' ? 'quota' : 'sync_unavailable',
+  };
 }
 
 /** Regions a user can see: offered ones, and any AWS region a browser may already live in. */
@@ -58,13 +68,16 @@ export async function regionViews(db: Db, from: { lat: number; lon: number } | n
     // Premium where the region prices a Premium machine and, under AWS inventory, offers one.
     const premiumOffered = !!sheets.get(r.id)?.sheet.premium && (!inventory || !!inventory.premium_offered);
     const premiumStock = inventory ? inventory.availableByTier.premium : null;
-    const premium = premiumOffered ? availabilityOf({
-      enabled: r.enabled,
-      acceptingNew: r.enabled && (premiumStock !== null ? premiumStock > 0 : await regionAcceptingNew(db, r.id, 'premium')),
-      stock: premiumStock,
-      health: rows,
-      now,
-    }) : null;
+    const premium = premiumOffered ? {
+      ...availabilityOf({
+        enabled: r.enabled,
+        acceptingNew: r.enabled && (premiumStock !== null ? premiumStock > 0 : await regionAcceptingNew(db, r.id, 'premium')),
+        stock: premiumStock,
+        health: rows,
+        now,
+      }),
+      ...(inventory && premiumStock !== null ? { inventory: inventoryView(inventory, premiumStock) } : {}),
+    } : null;
     return {
       id: r.id,
       name: r.name,
@@ -73,12 +86,7 @@ export async function regionViews(db: Db, from: { lat: number; lon: number } | n
       timezone: r.timezone,
       enabled: r.enabled,
       acceptingNew: availability !== 'unavailable',
-      ...(inventory ? { inventory: {
-        available: inventory.available,
-        checkedAt: inventory.checked_at ? new Date(inventory.checked_at).toISOString() : null,
-        status: inventory.availability === 'ready' ? 'ready' as const : 'unavailable' as const,
-        constraint: inventory.availability === 'ready' ? 'quota' : 'sync_unavailable',
-      } } : {}),
+      ...(inventory ? { inventory: inventoryView(inventory, inventory.available) } : {}),
       probeUrl: r.probeUrl ?? (r.executor === 'aws-ec2' ? awsLatencyProbeUrl(r.providerRegion) : null),
       area: facts?.area ?? null,
       availability,

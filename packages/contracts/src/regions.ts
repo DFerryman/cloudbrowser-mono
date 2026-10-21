@@ -13,6 +13,10 @@ export const REGION_INFO: Record<RegionId, { country: 'AU' | 'JP' | 'US'; city: 
   usw1: { country: 'US', city: 'West', timezone: 'America/Los_Angeles' },
 };
 
+/** What the provider's quotas still allow here, in browsers of one tier. */
+export const RegionInventory = z.object({ available: z.number().int().nonnegative(), checkedAt: z.string().nullable(), status: z.enum(['ready', 'syncing', 'unavailable']), constraint: z.string().nullable() });
+export type RegionInventory = z.infer<typeof RegionInventory>;
+
 export const Region = z.object({
   id: RegionId,
   name: z.string(),
@@ -22,7 +26,8 @@ export const Region = z.object({
   enabled: z.boolean(),
   /** False when the region cap or provider quota leaves no room for a new browser. */
   acceptingNew: z.boolean(),
-  inventory: z.object({ available: z.number().int().nonnegative(), checkedAt: z.string().nullable(), status: z.enum(['ready', 'syncing', 'unavailable']), constraint: z.string().nullable() }).optional(),
+  /** Basic browsers the inventory still allows; absent where the region has no inventory. */
+  inventory: RegionInventory.optional(),
   /** URL the client fetches to measure latency from its own network; null when not configured. */
   probeUrl: z.string().nullable(),
   /** Continent group for a long list; null when the region is not in the facts table. */
@@ -43,12 +48,14 @@ export const Region = z.object({
   /** Round trip estimated from the caller's approximate location, before the client measures it. */
   estimatedRttMs: z.number().int().nonnegative().nullable(),
   /**
-   * Whether a new Premium browser can be created here, as `availability` says for Basic. Null
-   * where Premium is not offered at all (no Premium machine or price in the region).
+   * Whether a new Premium browser can be created here, and how many more the inventory allows,
+   * as `availability` and `inventory` say for Basic. Null where Premium is not offered at all
+   * (no Premium machine or price in the region).
    */
   premium: z.object({
     availability: z.enum(['available', 'limited', 'unavailable']),
     availabilityReason: z.enum(['low_stock', 'capacity', 'provider_issue', 'blocked', 'no_stock', 'closed']).nullable(),
+    inventory: RegionInventory.optional(),
   }).nullable().optional(),
 });
 export type Region = z.infer<typeof Region>;

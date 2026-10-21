@@ -71,7 +71,7 @@ export const zhCN: Messages = {
   'create.machine': '机器',
   'create.machine.hint': '{vcpu} vCPU · {memory} GB 内存 · 最高 {fps} 帧/秒。',
   'create.machine.premiumHint': '滚动和视频更流畅，最接近本地浏览器。',
-  'create.machine.premiumNote': '高级版在不超过 2048×1152 的窗口中以每秒 60 帧显示（更大的窗口为 30 帧），运行费率更高。浏览器创建后机器不可更改。',
+  'create.machine.premiumNote': '高级版在任何窗口尺寸下都以每秒 60 帧显示，往返延迟较高时也是如此；运行费率更高。浏览器创建后机器不可更改。',
   'create.region.noPremium': '此地区不提供高级版',
   'tier.basic': '基础版',
   'tier.premium': '高级版',

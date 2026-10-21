@@ -22,9 +22,42 @@ export interface TierSpec {
   fps: { full: number; high: number; medium: number; low: number };
   /** The highest desktop refresh rate the viewer asks for: Chrome draws no faster than the desktop. */
   maxRefreshRate: number;
+  /**
+   * How the round trip to the browser limits the picture. A long path alone is no reason for
+   * fewer frames: a lower frame rate does not bring the picture sooner (it adds the wait for the
+   * next frame), and what does call for one (lost packets, freezes, frames not arriving) is
+   * measured directly at every latency.
+   * - `caps`: above `aboveMs` (median of the last readings) the picture goes no higher than
+   *   `quality`, until the round trip is back below `belowMs`.
+   * - `rising`: delay growing past the path's best round trip of the last minute means more is
+   *   being sent than the path carries (a queue is building), once it has grown by more than
+   *   `minMs` and by more than `factor` times that best round trip. Null ignores it.
+   */
+  latency: {
+    caps: readonly { quality: 'high' | 'medium'; aboveMs: number; belowMs: number }[];
+    rising: { minMs: number; factor: number } | null;
+  };
+  /**
+   * How much stutter the picture tolerates before stepping down: the share of the time the
+   * picture stood frozen. A lost packet is resent within one round trip, so on a long path one
+   * loss is one short freeze; counting freezes would step down for every one of them, the
+   * longer the path, the sooner. Null steps down on any freeze.
+   */
+  freezeShare: number | null;
 }
 
 export const TIERS: Record<BrowserTier, TierSpec> = {
-  basic: { vcpu: 2, memoryGb: 4, fps: { full: 25, high: 20, medium: 15, low: 10 }, maxRefreshRate: 30 },
-  premium: { vcpu: 4, memoryGb: 8, fps: { full: 60, high: 30, medium: 20, low: 10 }, maxRefreshRate: 60 },
+  basic: {
+    vcpu: 2, memoryGb: 4, fps: { full: 25, high: 20, medium: 15, low: 10 }, maxRefreshRate: 30,
+    latency: { caps: [{ quality: 'high', aboveMs: 180, belowMs: 150 }, { quality: 'medium', aboveMs: 320, belowMs: 290 }], rising: { minMs: 300, factor: 0 } },
+    freezeShare: null,
+  },
+  // Frame rate is independent of the path's length: 60 fps at any round trip while frames keep
+  // arriving. A queue still counts, judged against the path (a long path jitters more), and so
+  // does stutter, once the picture stands frozen more than a tenth of the time.
+  premium: {
+    vcpu: 4, memoryGb: 8, fps: { full: 60, high: 30, medium: 20, low: 10 }, maxRefreshRate: 60,
+    latency: { caps: [], rising: { minMs: 300, factor: 1 } },
+    freezeShare: 0.1,
+  },
 };

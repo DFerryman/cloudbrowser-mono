@@ -19,12 +19,51 @@ function run(c: QualityController, from: number, seconds: number, sample: (at: n
 describe('picture quality controller', () => {
   it('judges a Premium stream against its own frame rates', () => {
     // 25 fps is a healthy Basic stream but less than half of Premium's 60.
-    const premium = new QualityController('full', 0, 'full', TIERS.premium.fps);
+    const premium = new QualityController('full', 0, 'full', TIERS.premium);
     expect(run(premium, 10_000, 6, (at) => good(at, 25))).toEqual([[14, 'high']]);
     // At high (30 fps) the same 25 fps is healthy, and 58 fps at full is too.
     expect(run(premium, 16_000, 10, (at) => good(at, 25))).toEqual([]);
-    const healthy = new QualityController('full', 0, 'full', TIERS.premium.fps);
+    const healthy = new QualityController('full', 0, 'full', TIERS.premium);
     expect(run(healthy, 0, 120, (at) => good(at, 58))).toEqual([]);
+  });
+
+  it('keeps Premium at 60 fps at any steady round trip, and steps down only when the picture suffers', () => {
+    for (const ms of [120, 350, 650, 900]) {
+      const c = new QualityController('full', 0, 'full', TIERS.premium);
+      expect(run(c, 0, 120, (at) => ({ ...good(at, 60), rttMs: ms }))).toEqual([]);
+      expect(c.quality).toBe('full');
+      // Lost packets and freezes still lower it, at any round trip.
+      expect(run(c, 120_000, 6, (at) => ({ ...bad(at), rttMs: ms }))).toEqual([[124, 'high']]);
+    }
+    // Basic keeps its round-trip caps.
+    expect(run(new QualityController('full', 0), 0, 20, (at) => ({ ...good(at), rttMs: 350 }))).toEqual([[4, 'medium']]);
+  });
+
+  it('lowers Premium when a queue builds, judged against the path: a long path jitters more', () => {
+    const at = (ms: number) => (t: number): QualitySample => ({ ...good(t, 60), rttMs: ms });
+    const short = new QualityController('full', 0, 'full', TIERS.premium);
+    expect(run(short, 0, 20, at(100))).toEqual([]);
+    expect(run(short, 20_000, 20, at(350))).toEqual([]); // 250 ms more: jitter, not a queue
+    expect(run(short, 40_000, 6, at(450))).toEqual([[44, 'high']]); // 350 ms more for about 6 s
+    const long = new QualityController('full', 0, 'full', TIERS.premium);
+    expect(run(long, 0, 20, at(400))).toEqual([]);
+    expect(run(long, 20_000, 20, at(750))).toEqual([]); // 350 ms more on a 400 ms path
+    expect(run(long, 40_000, 6, at(850))).toEqual([[44, 'high']]); // more than doubled
+  });
+
+  it('lets Premium ride out short freezes, and steps down once the picture stands frozen a tenth of the time', () => {
+    // A long path with a little loss: every resend is a short freeze, 3% of the time frozen.
+    const hiccups = (at: number): QualitySample => ({ ...good(at, 58), rttMs: 450, lossRate: 0.01, freezes: 1, frozenShare: 0.03 });
+    const premium = new QualityController('full', 0, 'full', TIERS.premium);
+    expect(run(premium, 0, 120, hiccups)).toEqual([]);
+    // A fifth of the time frozen is stutter anyone sees.
+    expect(run(premium, 120_000, 6, (at) => ({ ...hiccups(at), frozenShare: 0.2 }))).toEqual([[124, 'high']]);
+    // Where the browser does not report frozen time, a freeze counts as before.
+    const unknown = new QualityController('full', 0, 'full', TIERS.premium);
+    expect(run(unknown, 0, 10, (at) => ({ ...hiccups(at), frozenShare: null }))).toEqual([[8, 'high']]);
+    // Basic steps down on any freeze.
+    const basic = new QualityController('full', 0, 'full', TIERS.basic);
+    expect(run(basic, 0, 10, (at) => ({ ...hiccups(at), fps: 25, rttMs: 40 }))).toEqual([[8, 'high']]);
   });
 
   it('stays at the sharpest level on a healthy connection', () => {

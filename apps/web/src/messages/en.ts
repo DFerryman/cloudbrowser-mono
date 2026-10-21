@@ -69,7 +69,7 @@ export const en = {
   'create.machine': 'Machine',
   'create.machine.hint': '{vcpu} vCPU · {memory} GB memory · up to {fps} fps.',
   'create.machine.premiumHint': 'Smooth scrolling and video, closest to a local browser.',
-  'create.machine.premiumNote': 'Premium shows 60 frames per second in windows up to 2048×1152 (larger ones run at 30) and has a higher running rate. A browser keeps its machine for life.',
+  'create.machine.premiumNote': 'Premium shows 60 frames per second at every window size, also on long round trips, and has a higher running rate. A browser keeps its machine for life.',
   'create.region.noPremium': 'Premium not offered here',
   'tier.basic': 'Basic',
   'tier.premium': 'Premium',

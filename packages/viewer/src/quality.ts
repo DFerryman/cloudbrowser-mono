@@ -17,6 +17,8 @@ export interface QualitySample {
   lossRate: number;
   /** Video freezes since the previous reading. */
   freezes: number;
+  /** Share of the time since the previous reading the picture stood frozen, 0–1; null when unknown. */
+  frozenShare?: number | null;
   rttMs: number | null;
   /**
    * Width of the decoded picture over the remote desktop's width (1 = full size); null when
@@ -27,10 +29,12 @@ export interface QualitySample {
 }
 
 /**
- * neko encodes at a constant rate whatever is on screen; each tier's browser image has its own
- * rate per level (TIERS[tier].fps: neko.yaml for Basic, neko-premium.yaml for Premium).
+ * What the controller needs from the browser's tier: neko encodes at a constant rate whatever is
+ * on screen, each tier's image at its own rate per level (TIERS[tier].fps: neko.yaml for Basic,
+ * neko-premium.yaml for Premium), and each tier lets the round trip and stutter limit the picture
+ * its own way (TIERS[tier].latency, TIERS[tier].freezeShare).
  */
-export type LevelFps = TierSpec['fps'];
+export type StreamProfile = Pick<TierSpec, 'fps' | 'latency' | 'freezeShare'>;
 /** A switch restarts the stream at a keyframe; readings right after it say little. */
 const SETTLE_MS = 4_000;
 /** Consecutive bad readings (about 6 s) before stepping down: brief hiccups keep the picture. */
@@ -41,27 +45,19 @@ const PROBATION_MS = 20_000;
 const MAX_UPGRADE_WAIT_MS = 120_000;
 const LOSS_LIMIT = 0.06;
 const FPS_SHARE = 0.5;
-/** Queueing on a saturated link shows as round trips well above the best recent one. */
-const RTT_RISE_MS = 300;
 /**
  * The best round trip is taken over the last minute of readings, so a path that simply got
  * longer (another network, another relay) becomes the new normal instead of looking congested.
  */
 const RTT_WINDOW = 30;
 /**
- * A long round trip caps the picture even while nothing is lost: smaller frames reach the
- * screen sooner, and fewer packets go missing that would take a whole round trip to resend.
- * Every level is full size (images/browser/neko.yaml), so a cap costs frame rate, not sharpness.
- * The bands are wide so that ordinary paths keep the full frame rate. The cap stops at medium;
- * only a struggling connection gets low.
+ * A long round trip can cap the picture even while nothing is lost (TIERS[tier].latency.caps;
+ * Premium has none). Every level is full size (images/browser/neko.yaml), so a cap costs frame
+ * rate, not sharpness. A cap lifts only once the round trip is back below its lower `belowMs`, so
+ * a path near the threshold does not flap. Caps stop above low; only a struggling connection gets
+ * low. The path's round trip is the median of the last readings (about 10 s): one spike is not a
+ * long path.
  */
-const LATENCY_CAPS: readonly { aboveMs: number; quality: VideoQuality }[] = [
-  { aboveMs: 180, quality: 'high' },
-  { aboveMs: 320, quality: 'medium' },
-];
-/** A cap lifts only once the round trip is this far below its threshold, so a path near one does not flap. */
-const LATENCY_HYSTERESIS_MS = 30;
-/** The path's round trip is the median of the last readings (about 10 s): one spike is not a long path. */
 const LATENCY_READINGS = 5;
 const LATENCY_MIN_READINGS = 3;
 /**
@@ -77,9 +73,9 @@ const ILLEGIBLE_READINGS = 2;
  * Chooses the live view's picture level from what the viewer receives. neko 3.0.8's own
  * estimator compares its bandwidth estimate in bits with the stream rate in bytes, so it only
  * steps down once bandwidth falls to about an eighth of the stream; the viewer decides instead.
- * A good connection keeps the sharpest level at full frame rate. A long round trip lowers the
- * sharpest level allowed to keep the view smooth (LATENCY_CAPS). Below that, it steps down after a
- * few seconds of dropped frames, loss, freezes or growing delay, and probes one level up again
+ * A good connection keeps the sharpest level at full frame rate. On Basic a long round trip
+ * lowers the sharpest level allowed (TIERS[tier].latency.caps). Below that, it steps down after a
+ * few seconds of dropped frames, loss, stutter or growing delay, and probes one level up again
  * after a quiet period, never above the preferred level or the path's cap. It never goes below
  * the lowest level whose picture keeps text readable (MIN_LEGIBLE_SCALE): a clear picture at a
  * lower frame rate is worth more than a smooth one nobody can read.
@@ -99,7 +95,7 @@ export class QualityController {
   private floor = VIDEO_QUALITIES.length - 1;
   private illegible = 0;
 
-  constructor(maxQuality: VideoQuality, now: number, current: VideoQuality = maxQuality, private readonly fps: LevelFps = TIERS.basic.fps) {
+  constructor(maxQuality: VideoQuality, now: number, current: VideoQuality = maxQuality, private readonly profile: StreamProfile = TIERS.basic) {
     this.max = VIDEO_QUALITIES.indexOf(maxQuality);
     this.level = Math.max(this.max, VIDEO_QUALITIES.indexOf(current));
     this.settleUntil = now + SETTLE_MS;
@@ -138,9 +134,9 @@ export class QualityController {
       this.rtts = [];
       return this.move(ceiling, s.at);
     }
-    const expected = this.fps[this.quality];
-    const struggling = s.stalled || s.lossRate > LOSS_LIMIT || s.freezes > 0 || (s.fps !== null && s.fps < expected * FPS_SHARE)
-      || (s.rttMs !== null && bestRtt !== null && s.rttMs > bestRtt + RTT_RISE_MS);
+    const expected = this.profile.fps[this.quality];
+    const struggling = s.stalled || s.lossRate > LOSS_LIMIT || this.stuttering(s) || (s.fps !== null && s.fps < expected * FPS_SHARE)
+      || this.queueBuilding(s.rttMs, bestRtt);
     if (struggling) {
       this.goodSince = null;
       if (++this.bad < BAD_READINGS || this.level >= Math.max(this.max, this.floor)) return null;
@@ -160,6 +156,18 @@ export class QualityController {
     return null;
   }
 
+  /** Freezes, or with TIERS[tier].freezeShare, more of the time frozen than that (by the count where the time is unknown). */
+  private stuttering(s: QualitySample) {
+    const share = this.profile.freezeShare;
+    return share !== null && s.frozenShare != null ? s.frozenShare > share : s.freezes > 0;
+  }
+
+  /** Queueing on a saturated link shows as round trips well above the best recent one (TIERS[tier].latency.rising). */
+  private queueBuilding(rttMs: number | null, bestRtt: number | null) {
+    const rising = this.profile.latency.rising;
+    return !!rising && rttMs !== null && bestRtt !== null && rttMs > bestRtt + Math.max(rising.minMs, bestRtt * rising.factor);
+  }
+
   /** A step down this soon after a step up means it was too much: wait twice as long next time. */
   private stepUpFailed(at: number) {
     if (this.lastUpgradeAt !== null && at - this.lastUpgradeAt < PROBATION_MS) this.upgradeWait = Math.min(this.upgradeWait * 2, MAX_UPGRADE_WAIT_MS);
@@ -171,9 +179,9 @@ export class QualityController {
     if (recent.length < LATENCY_MIN_READINGS) return;
     const typical = [...recent].sort((a, b) => a - b)[Math.floor(recent.length / 2)]!;
     let cap = 0;
-    for (const { aboveMs, quality } of LATENCY_CAPS) {
+    for (const { aboveMs, belowMs, quality } of this.profile.latency.caps) {
       const level = VIDEO_QUALITIES.indexOf(quality);
-      const threshold = level <= this.latencyCap ? aboveMs - LATENCY_HYSTERESIS_MS : aboveMs;
+      const threshold = level <= this.latencyCap ? belowMs : aboveMs;
       if (typical > threshold) cap = Math.max(cap, level);
     }
     this.latencyCap = cap;

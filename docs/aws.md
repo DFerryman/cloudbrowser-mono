@@ -49,14 +49,30 @@ host at 2.8 GHz (slower per core than `c7i`), with Chrome scrolling a dense page
 | H.264 (x264 superfast) at 60 fps | 59.5 fps | 2.2 vCPU |
 | H.264 at 60 fps with a 1080p60 video playing in Chrome | 59.6 fps | 2.3 vCPU |
 | H.264 at 60 fps limited to 2 CPUs | 59.4 fps | 2.0 (no headroom left) |
+| H.264 at 60 fps, 2560×1440 desktop, scrolling | 59.2 fps | 3.1 vCPU |
+| H.264 at 60 fps, 2560×1440 desktop, 1080p60 video playing | 57.4 fps | 3.4 vCPU |
 
 VP8 cannot encode 1080p60 in real time on four vCPUs, so Premium streams H.264 (every browser the
 viewer supports decodes it in WebRTC; Firefox through its OpenH264 plugin). Four vCPUs leave about
 40% headroom for heavier pages; two would have none. Premium encodes at constant quality with a
 4.5 Mbit/s cap, so it sends only what changes: about 0.6 Mbit/s on a still page and 1.7–1.9
-Mbit/s while scrolling, less than Basic's constant 2 Mbit/s. Pages are still drawn on the CPU,
+Mbit/s while scrolling, less than Basic's constant 2 Mbit/s. The image adds a 2560×1440 60 Hz
+mode, so a large window keeps 60 fps too; it is the heaviest case (above) and still fits four
+vCPUs, with less to spare than at 1080p (`c7i`'s faster cores leave more). Pages are still drawn on the CPU,
 so WebGL-heavy sites and 3D games remain slower than on a local computer; a GPU tier (`g4dn`,
 `g6`) would need NVIDIA drivers, an NVENC pipeline and a G-instance vCPU quota (zero by default).
+
+**Latency does not lower Premium's frame rate.** A lower frame rate does not bring the picture
+sooner: each frame is encoded and sent as soon as it is drawn, and fewer frames only add the wait
+for the next one. What does call for fewer frames is a link that cannot carry the stream, and the
+viewer measures that directly at every round trip. So Premium (`TIERS.premium` in
+`packages/contracts/src/tiers.ts`, applied by `packages/viewer/src/quality.ts`) has no round-trip
+caps; it steps down only for lost packets (over 6%), frames not arriving (under half the level's
+rate), stutter (the picture frozen more than 10% of the time; WebRTC's frozen time, not the count
+of freezes, because on a long path every resent packet is a short freeze), or a queue building
+(round trip above the path's best of the last minute by more than 300 ms and by more than that
+best round trip itself, so a long path's jitter is not mistaken for one). Basic keeps its
+round-trip caps (20 fps above about 180 ms, 15 above about 320 ms) and steps down on any freeze.
 
 **Turning Premium on in an existing deployment.** Premium is off (`premium` cap 0) until all of
 this is done, so nothing below affects Basic browsers:
@@ -67,7 +83,7 @@ this is done, so nothing below affects Basic browsers:
    new default). AWS Provider deployments: add the three types wherever the
    `nevazu-provider-runtime` role's policy (or an SCP) lists instance types.
 2. Publish the browser and agent images built from this commit (GitHub Actions → Images): the
-   browser image carries `neko-premium.yaml` and the 60 Hz modes, the agent image the VM script
+   browser image carries `neko-premium.yaml` and the 60 Hz modes (up to 2560×1440), the agent image the VM script
    that selects it. A VM takes images at first boot, so this reaches new browsers only.
 3. Apply migration `0029_browser_tiers` and deploy every Worker (`pnpm db:migrate:remote`,
    `pnpm deploy`). Within five minutes the reconciler lists which zones offer the Premium types

@@ -72,7 +72,7 @@ async function fixture({ trial = false, failed = false, noPrice = false, width =
       };
       else if (url.pathname === '/api/v1/regions') body = [{ id: 'syd1', name: 'Sydney', country: 'AU', city: 'Sydney', timezone: 'Australia/Sydney', enabled: true, acceptingNew: state.stockAvailable, probeUrl: null,
         area: 'asia_pacific', availability: state.stockAvailable ? 'available' : 'unavailable', availabilityReason: state.stockAvailable ? null : 'no_stock', estimatedRttMs: null,
-        premium: premium ? { availability: 'available', availabilityReason: null } : null,
+        premium: premium ? { availability: 'available', availabilityReason: null, inventory: { available: 2, checkedAt: new Date().toISOString(), status: 'ready', constraint: 'quota' } } : null,
         ...(!state.stockAvailable ? { inventory: { available: 0, checkedAt: new Date().toISOString(), status: 'ready', constraint: 'quota_and_budget' } } : {}) }];
       else if (url.pathname === '/api/v1/pricing') {
         state.priceReads++;
@@ -275,10 +275,13 @@ try {
     premium.state.extraRegion = true;
     await premium.page.goto(`${origin}/browsers/new`);
     await premium.page.getByText('2 vCPU · 4 GB memory · up to 25 fps.', { exact: true }).waitFor();
+    await premium.page.getByText('4 available', { exact: true }).waitFor(); // Frankfurt's Basic stock
     await premium.page.getByText('Premium', { exact: true }).click();
-    // Premium's running price, and a region without Premium cannot be chosen.
+    // Premium's running price, its own stock, and a region without Premium cannot be chosen.
     await premium.page.getByText('$0.2196/h', { exact: true }).first().waitFor();
+    await premium.page.getByText('2 available', { exact: true }).waitFor();
     await premium.page.getByText('Premium not offered here', { exact: true }).waitFor();
+    assert.equal(await premium.page.getByText('4 available', { exact: true }).count(), 0);
     if (process.env.SHOT_DIR) await premium.page.screenshot({ path: `${process.env.SHOT_DIR}/create-premium.png`, fullPage: true });
     await premium.page.getByRole('button', { name: 'Create browser', exact: true }).click();
     await premium.page.waitForURL('**/browsers');

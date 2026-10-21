@@ -14,8 +14,9 @@
 # 1.9 Mbit/s while scrolling, with text as sharp as the screen. Basic's VP8 sends about 2 Mbit/s
 # either way.
 #
-# The desktop runs at 60 Hz (Basic's at 30 Hz caps Chrome at 30 fps), and every level's frame
-# rate divides 60 evenly, so motion stays even at every level.
+# The desktop runs at 60 Hz (Basic's at 30 Hz caps Chrome at 30 fps) at every size up to
+# 2560x1440 (the Dockerfile adds that mode; it measured 59 fps while scrolling on four vCPUs).
+# Every level's frame rate divides 60 evenly, so motion stays even at every level.
 desktop:
   screen: "1920x1080@60"
 capture:

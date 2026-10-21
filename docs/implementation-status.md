@@ -77,13 +77,15 @@ Cloudflare deployment.
   the price.
 - **Machine tiers**: a browser is Basic (2 vCPU / 4 GB, `c7i-flex.large` → `c6i.large` →
   `c5.large`, VP8 up to 25 fps) or Premium (4 vCPU / 8 GB, `c7i.xlarge` → `c6i.xlarge` →
-  `c5.xlarge`, H.264 up to 60 fps on a 60 Hz desktop), chosen at creation and immutable (trigger).
+  `c5.xlarge`, H.264 up to 60 fps on a 60 Hz desktop up to 2560×1440), chosen at creation and immutable (trigger).
   The VM's first boot passes `BROWSER_TIER`; the browser image selects `neko-premium.yaml` with
   `NEKO_CONFIG`. Premium is priced from the same AWS price list (`ProviderPriceSheet.premium`,
   its own price version), metered at its machine's price, and counted in a shared vCPU inventory
   (migration 0029). The operator switch `premium` (user:default or user:<id>, off by default)
   offers it; the free trial is always Basic. The viewer asks for up to 60 Hz and judges frame drops
-  against the tier's rates. Measurements and the rollout steps are in `docs/aws.md`.
+  against the tier's rates; a long round trip alone never lowers Premium (no latency caps; it
+  steps down for loss, missing frames, more than 10% of the time frozen, or a building queue).
+  The region list shows each tier's own stock. Measurements and the rollout steps are in `docs/aws.md`.
 - **Storage** (page 6): new browsers get a 10 GB data volume (cap `storage_gb`); users can grow it
   up to `storage_max_gb` (100 GB) from the Storage tab, which shows used and total space and the
   monthly cost before confirming. The volume grows online (`ModifyVolume`) and agent 0.2.0 grows

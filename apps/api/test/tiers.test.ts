@@ -37,6 +37,20 @@ describe('premium browsers', () => {
     expect(regions.find((r) => r.id === 'syd1')?.premium).toBeNull();
   });
 
+  it('shows Premium stock beside Basic stock: each counts the vCPUs its machine holds', async () => {
+    const now = Date.now();
+    // 12 vCPUs of room: six Basic browsers (2 each) or three Premium (4 each).
+    t.d1.sqlite.exec(`UPDATE regions SET executor = 'aws-ec2' WHERE id = 'tyo1';
+      UPDATE provider_prices SET executor = 'aws-ec2' WHERE region_id = 'tyo1';
+      INSERT INTO aws_provider_regions (region_id, provider_region, opt_in_status, status, capacity, vcpu_capacity, basic_vcpus, premium_vcpus, premium_offered, checked_at)
+        VALUES ('tyo1', 'ap-northeast-1', 'opt-in-not-required', 'ready', 10, 12, 2, 4, 1, ${now});`);
+    const tokyo = () => t.call('GET', '/api/v1/regions').then((r) => (r.body as { id: string; inventory: { available: number }; premium: { availability: string; inventory: { available: number; status: string } } }[]).find((x) => x.id === 'tyo1')!);
+    expect(await tokyo()).toMatchObject({ inventory: { available: 6 }, premium: { availability: 'available', inventory: { available: 3, status: 'ready' } } });
+    // The last Premium slot reads as low stock, as Basic's does.
+    t.d1.sqlite.exec(`UPDATE aws_provider_regions SET vcpu_capacity = 4 WHERE region_id = 'tyo1'`);
+    expect(await tokyo()).toMatchObject({ inventory: { available: 2 }, premium: { availability: 'limited', availabilityReason: 'low_stock', inventory: { available: 1 } } });
+  });
+
   it('is off until the operator offers it', async () => {
     expect((await t.call('GET', '/api/v1/me')).body.entitlements.premium).toBe(false);
     const refused = await create({ tier: 'premium', priceVersion: (await pricing()).premium!.version }, 'p1');
