@@ -129,16 +129,18 @@ export type SignInMethod = 'passkey' | 'code' | 'register';
  * Existing accounts use a passkey or email code. An unknown address is directed to sign-up
  * without sending mail or creating a registration token.
  */
-export async function startSignIn(auth: ReturnType<typeof createAuth>, db: Db, email: string, headers: Headers): Promise<SignInMethod> {
+export async function checkSignIn(db: Db, email: string): Promise<SignInMethod> {
   const account = await findAccount(db, email);
-  if (account) {
-    const [passkeys] = await db.select({ n: count() }).from(schema.passkey).where(eq(schema.passkey.userId, account.id));
-    if (passkeys && passkeys.n > 0) return 'passkey';
-    await auth.api.sendVerificationOTP({ body: { email, type: 'sign-in' }, headers });
-  } else {
-    return 'register';
-  }
-  return 'code';
+  if (!account) return 'register';
+  const [passkeys] = await db.select({ n: count() }).from(schema.passkey).where(eq(schema.passkey.userId, account.id));
+  return passkeys && passkeys.n > 0 ? 'passkey' : 'code';
+}
+
+/** Legacy combined entry point, still protected by Turnstile for older web clients. */
+export async function startSignIn(auth: ReturnType<typeof createAuth>, db: Db, email: string, headers: Headers): Promise<SignInMethod> {
+  const method = await checkSignIn(db, email);
+  if (method === 'code') await auth.api.sendVerificationOTP({ body: { email, type: 'sign-in' }, headers });
+  return method;
 }
 
 /** New addresses get a registration link; existing accounts continue by email code. */

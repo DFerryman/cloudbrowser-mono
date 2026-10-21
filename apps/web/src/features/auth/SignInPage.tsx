@@ -70,11 +70,18 @@ export function SignInPage() {
     if (busy) return;
     setRegistrationRequired(false);
     void run(async () => {
-      const res = await api<{ method: 'passkey' | 'code' | 'register' }>('POST', '/api/auth/sign-in/start', { body: { email: address }, headers: await turnstile.headers() }).finally(turnstile.reset);
+      const res = await api<{ method: 'passkey' | 'code' | 'register' }>('POST', '/api/auth/sign-in/check', { body: { email: address } });
       setCode('');
       if (res.method === 'register') {
         setRegistrationRequired(true);
         return;
+      }
+      if (res.method === 'code') {
+        try {
+          await api('POST', '/api/auth/email-otp/send-verification-otp', { body: { email: address, type: 'sign-in' }, headers: await turnstile.headers() });
+        } finally {
+          turnstile.finish();
+        }
       }
       setStep(res.method === 'passkey' ? 'passkey' : 'code');
     }, (err) => sendError(t, err));
@@ -82,7 +89,11 @@ export function SignInPage() {
 
   const sendCode = () =>
     void run(async () => {
-      await api('POST', '/api/auth/email-otp/send-verification-otp', { body: { email: address, type: 'sign-in' }, headers: await turnstile.headers() }).finally(turnstile.reset);
+      try {
+        await api('POST', '/api/auth/email-otp/send-verification-otp', { body: { email: address, type: 'sign-in' }, headers: await turnstile.headers() });
+      } finally {
+        turnstile.finish();
+      }
       setCode('');
       setStep('code');
     }, (err) => sendError(t, err));
@@ -185,8 +196,7 @@ export function SignInPage() {
           )}
         </>
       )}
-      {/* Outside the steps, so the widget lives as long as the page. */}
-      {step !== 'second-factor' ? <div className="mt-6 flex justify-center">{turnstile.widget}</div> : null}
+      {turnstile.active ? <div className="mt-6 w-full">{turnstile.widget}</div> : null}
       {turnstile.checking ? <p role="status" className="mt-4 text-sm text-muted">{t('auth.captchaChecking')}</p> : null}
       {turnstile.failed && step !== 'second-factor' ? (
         <p role="alert" className="mt-4 text-sm text-error">

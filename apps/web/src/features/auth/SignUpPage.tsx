@@ -48,7 +48,7 @@ export function SignUpPage() {
     } catch (err) {
       setError(sendError(t, err));
     } finally {
-      turnstile.reset();
+      turnstile.finish();
       setBusy(false);
     }
   };
@@ -91,7 +91,7 @@ export function SignUpPage() {
           </form>
         </>
       )}
-      <div className="mt-6 flex justify-center">{turnstile.widget}</div>
+      {turnstile.active ? <div className="mt-6 w-full">{turnstile.widget}</div> : null}
       {turnstile.checking ? <p role="status" className="mt-4 text-sm text-muted">{t('auth.captchaChecking')}</p> : null}
       {turnstile.failed ? (
         <p role="alert" className="mt-4 text-sm text-error">

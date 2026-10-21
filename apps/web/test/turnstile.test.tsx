@@ -44,39 +44,53 @@ beforeEach(() => {
  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
 });
 afterEach(async () => { await act(async () => rendered?.unmount()); vi.useRealTimers(); vi.unstubAllGlobals(); });
-async function mount() { await act(async () => { rendered = create(React.createElement(Harness), { createNodeMock: () => ({}) }); }); }
-test('one click waits for the challenge, then continues with its token without resetting it early', async () => {
+async function mount() { await act(async () => { rendered = create(React.createElement(Harness), { createNodeMock: () => ({ clientWidth: 360 }) }); }); }
+test('mounts no challenge until an email is requested, then removes it without resetting', async () => {
  await mount();
+ expect(ts.render).not.toHaveBeenCalled();
+ expect(latest.active).toBe(false);
  let request: Promise<any>;
  await act(async () => { request = latest.headers(); });
  expect(latest.checking).toBe(true);
- expect(ts.reset).not.toHaveBeenCalled();
+ expect(callbacks.appearance).toBe('interaction-only');
+ expect(callbacks.size).toBe('flexible');
  await act(async () => callbacks.callback('verified-token'));
  expect(await request!).toEqual({ 'cf-turnstile-response': 'verified-token' });
+ await act(async () => latest.finish());
+ expect(ts.remove).toHaveBeenCalledWith('widget-id');
  expect(ts.reset).not.toHaveBeenCalled();
- await act(async () => latest.reset());
- expect(ts.reset).toHaveBeenCalledWith('widget-id');
+ expect(latest.active).toBe(false);
 });
-test('refreshes cached disabled settings on submit and mounts a challenge without reloading', async () => {
+
+test('refreshes cached disabled settings before sending an email without reloading', async () => {
  state.cached = null;
  await mount();
- expect(ts.render).not.toHaveBeenCalled();
  let request: Promise<any>;
  await act(async () => { request = latest.headers(); });
  expect(ts.render).toHaveBeenCalledOnce();
  await act(async () => callbacks.callback('new-token'));
  expect(await request!).toEqual({ 'cf-turnstile-response': 'new-token' });
+ await act(async () => latest.finish());
 });
-test('an expired token waits for a new challenge instead of sending a missing token', async () => {
+
+test('does not run background checks after finishing; the next email gets a fresh challenge', async () => {
+ vi.useFakeTimers();
  await mount();
- await act(async () => callbacks.callback('expired-token'));
- await act(async () => callbacks['expired-callback']());
- let request: Promise<any>;
- await act(async () => { request = latest.headers(); });
- expect(latest.checking).toBe(true);
- await act(async () => callbacks.callback('fresh-token'));
- expect(await request!).toEqual({ 'cf-turnstile-response': 'fresh-token' });
+ let first: Promise<any>;
+ await act(async () => { first = latest.headers(); });
+ await act(async () => callbacks.callback('first-token'));
+ expect(await first!).toEqual({ 'cf-turnstile-response': 'first-token' });
+ await act(async () => latest.finish());
+ await act(async () => { vi.advanceTimersByTime(300_000); });
+ expect(ts.render).toHaveBeenCalledOnce();
+ let second: Promise<any>;
+ await act(async () => { second = latest.headers(); });
+ expect(ts.render).toHaveBeenCalledTimes(2);
+ await act(async () => callbacks.callback('second-token'));
+ expect(await second!).toEqual({ 'cf-turnstile-response': 'second-token' });
+ await act(async () => latest.finish());
 });
+
 test('failed challenges automatically remount and let the waiting click continue', async () => {
  vi.useFakeTimers();
  await mount();
@@ -88,31 +102,37 @@ test('failed challenges automatically remount and let the waiting click continue
  expect(ts.render).toHaveBeenCalledTimes(2);
  await act(async () => callbacks.callback('retried-token'));
  expect(await request!).toEqual({ 'cf-turnstile-response': 'retried-token' });
+ await act(async () => latest.finish());
 });
-test('allows requests without a widget when the latest server settings disable Turnstile', async () => {
+
+test('allows email requests without a widget when the latest settings disable Turnstile', async () => {
  state.cached = state.fresh = null;
  await mount();
  let value;
  await act(async () => { value = await latest.headers(); });
  expect(value).toEqual({});
+ expect(ts.render).not.toHaveBeenCalled();
 });
 
-test('keeps Email me a code instead clickable and sends the code after one click and verification', async () => {
+test('passkey selection needs no challenge; Email me a code instead checks once and removes it', async () => {
  vi.mocked(api).mockResolvedValueOnce({ method: 'passkey' }).mockResolvedValueOnce({});
- await act(async () => { rendered = create(React.createElement(SignInPage), { createNodeMock: () => ({}) }); });
- expect(rendered.root.findAllByType('button').find((b: any) => b.props.children === 'auth.continue').props.disabled).toBe(false);
+ await act(async () => { rendered = create(React.createElement(SignInPage), { createNodeMock: () => ({ clientWidth: 360 }) }); });
  await act(async () => { void rendered.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
- await act(async () => callbacks.callback('first-token'));
- const emailCode = () => rendered.root.findAllByType('button').find((b: any) => b.props.children === 'auth.passkey.emailCode');
- expect(emailCode().props.disabled).toBe(false);
- await act(async () => emailCode().props.onClick());
+ expect(vi.mocked(api)).toHaveBeenCalledWith('POST', '/api/auth/sign-in/check', { body: { email: '' } });
+ expect(ts.render).not.toHaveBeenCalled();
+ const emailCode = rendered.root.findAllByType('button').find((b: any) => b.props.children === 'auth.passkey.emailCode');
+ expect(emailCode.props.disabled).toBe(false);
+ await act(async () => emailCode.props.onClick());
+ expect(ts.render).toHaveBeenCalledOnce();
  expect(vi.mocked(api)).toHaveBeenCalledTimes(1);
- await act(async () => callbacks.callback('second-token'));
- expect(vi.mocked(api)).toHaveBeenLastCalledWith('POST', '/api/auth/email-otp/send-verification-otp', expect.objectContaining({ headers: { 'cf-turnstile-response': 'second-token' } }));
+ await act(async () => callbacks.callback('code-token'));
+ expect(vi.mocked(api)).toHaveBeenLastCalledWith('POST', '/api/auth/email-otp/send-verification-otp', expect.objectContaining({ headers: { 'cf-turnstile-response': 'code-token' } }));
  expect(rendered.root.findAllByType('input').some((input: any) => input.props.id === 'code')).toBe(true);
+ expect(ts.remove).toHaveBeenCalledWith('widget-id');
+ expect(ts.reset).not.toHaveBeenCalled();
 });
 
-test('automatically recovers a failed initial script download without refreshing', async () => {
+test('automatically recovers a failed script download during an email request', async () => {
  vi.useFakeTimers();
  (window as any).turnstile = undefined;
  let loads = 0;
@@ -121,42 +141,68 @@ test('automatically recovers a failed initial script download without refreshing
   else { (window as any).turnstile = ts; script.onload(); }
  }} });
  await mount();
+ expect(loads).toBe(0);
+ let request: Promise<any>;
+ await act(async () => { request = latest.headers(); });
  expect(latest.failed).toBe(true);
  await act(async () => { vi.advanceTimersByTime(8_000); });
  expect(loads).toBe(2);
- expect(ts.render).toHaveBeenCalledOnce();
  await act(async () => callbacks.callback('recovered-token'));
- let value;
- await act(async () => { value = await latest.headers(); });
- expect(value).toEqual({ 'cf-turnstile-response': 'recovered-token' });
+ expect(await request!).toEqual({ 'cf-turnstile-response': 'recovered-token' });
+ await act(async () => latest.finish());
 });
 
-test('an existing email on sign-up continues directly to sign-in code entry', async () => {
+test('an existing email on sign-up continues to code entry and removes its challenge', async () => {
  vi.mocked(api).mockResolvedValueOnce({ method: 'code' });
- await act(async () => { rendered = create(React.createElement(SignUpPage), { createNodeMock: () => ({}) }); });
+ await act(async () => { rendered = create(React.createElement(SignUpPage), { createNodeMock: () => ({ clientWidth: 360 }) }); });
+ expect(ts.render).not.toHaveBeenCalled();
  await act(async () => rendered.root.findByType('input').props.onChange({ target: { value: 'Pilot@Example.com' } }));
  await act(async () => { void rendered.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
  await act(async () => callbacks.callback('signup-token'));
- expect(vi.mocked(api)).toHaveBeenCalledWith('POST', '/api/auth/sign-up/start', expect.objectContaining({ body: { email: 'pilot@example.com' } }));
  expect(state.navigate).toHaveBeenCalledWith('/sign-in?email=pilot%40example.com', { replace: true, state: { emailCodeSentFor: 'pilot@example.com' } });
+ expect(ts.remove).toHaveBeenCalledWith('widget-id');
+ expect(ts.reset).not.toHaveBeenCalled();
 });
 
-test('the redirected sign-in starts at code entry without sending another email', async () => {
+test('registration email success has no persistent challenge or reset', async () => {
+ vi.mocked(api).mockResolvedValueOnce({ method: 'registration' });
+ await act(async () => { rendered = create(React.createElement(SignUpPage), { createNodeMock: () => ({ clientWidth: 360 }) }); });
+ await act(async () => { void rendered.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
+ await act(async () => callbacks.callback('registration-token'));
+ expect(rendered.root.findAllByProps({ role: 'status' }).length).toBe(1);
+ expect(ts.remove).toHaveBeenCalledWith('widget-id');
+ expect(ts.reset).not.toHaveBeenCalled();
+});
+
+test('redirected code entry mounts no widget and sends no extra email', async () => {
  state.search = 'email=pilot%40example.com';
  state.location = { emailCodeSentFor: 'pilot@example.com' };
- await act(async () => { rendered = create(React.createElement(SignInPage), { createNodeMock: () => ({}) }); });
+ await act(async () => { rendered = create(React.createElement(SignInPage), { createNodeMock: () => ({ clientWidth: 360 }) }); });
  expect(rendered.root.findAllByType('input').some((input: any) => input.props.id === 'code')).toBe(true);
  expect(vi.mocked(api)).not.toHaveBeenCalled();
+ expect(ts.render).not.toHaveBeenCalled();
 });
 
-test('unknown sign-in emails show a prefilled registration link instead of a code step', async () => {
+test('unknown emails show registration without running any challenge or sending email', async () => {
  vi.mocked(api).mockResolvedValueOnce({ method: 'register' });
- await act(async () => { rendered = create(React.createElement(SignInPage), { createNodeMock: () => ({}) }); });
+ await act(async () => { rendered = create(React.createElement(SignInPage), { createNodeMock: () => ({ clientWidth: 360 }) }); });
  await act(async () => rendered.root.findByType('input').props.onChange({ target: { value: 'Fresh@Example.com' } }));
  await act(async () => { void rendered.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
- await act(async () => callbacks.callback('verified-token'));
  expect(vi.mocked(api)).toHaveBeenCalledTimes(1);
- expect(rendered.root.findAllByType('input').some((input: any) => input.props.id === 'code')).toBe(false);
- expect(rendered.root.findAllByType('p').some((p: any) => p.props.role === 'alert' && p.props.children.includes('auth.notRegistered'))).toBe(true);
+ expect(ts.render).not.toHaveBeenCalled();
  expect(rendered.root.findAllByType('a').some((a: any) => a.props.href === '/sign-up?email=fresh%40example.com')).toBe(true);
+});
+
+test('email-code sign-in verifies only the mail request, then code and TOTP have no widget', async () => {
+ vi.mocked(api).mockResolvedValueOnce({ method: 'code' }).mockResolvedValueOnce({}).mockResolvedValueOnce({ twoFactorRedirect: true });
+ await act(async () => { rendered = create(React.createElement(SignInPage), { createNodeMock: () => ({ clientWidth: 360 }) }); });
+ await act(async () => { void rendered.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
+ expect(vi.mocked(api)).toHaveBeenCalledTimes(1);
+ await act(async () => callbacks.callback('email-token'));
+ expect(ts.remove).toHaveBeenCalledWith('widget-id');
+ await act(async () => rendered.root.findByType('input').props.onChange({ target: { value: '123456' } }));
+ await act(async () => { void rendered.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
+ expect(rendered.root.findAllByType('input').some((input: any) => input.props.id === 'second-factor')).toBe(true);
+ expect(ts.render).toHaveBeenCalledOnce();
+ expect(ts.reset).not.toHaveBeenCalled();
 });

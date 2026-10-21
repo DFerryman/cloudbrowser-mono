@@ -57,6 +57,13 @@ const limitSignIn: MiddlewareHandler<AppEnv> = async (c, next) => {
     const { success } = await limiter.limit({ key: `2fa-ip:${c.req.header('cf-connecting-ip') ?? 'unknown'}` });
     if (!success) return c.json(tooMany, 429);
   }
+  // Method lookups send no email and use a separate budget from protected mail requests.
+  if (limiter && c.req.method === 'POST' && c.req.path === '/api/auth/sign-in/check') {
+    const ip = c.req.header('cf-connecting-ip') ?? 'unknown';
+    const email = String(((await c.req.raw.clone().json().catch(() => ({}))) as { email?: unknown }).email ?? '').trim().toLowerCase();
+    const checks = [limiter.limit({ key: `lookup-ip:${ip}` }), ...(email ? [limiter.limit({ key: `lookup-email:${email}` })] : [])];
+    if ((await Promise.all(checks)).some((r) => !r.success)) return c.json(tooMany, 429);
+  }
   if (limiter && c.req.method === 'POST' && (SENDS_EMAIL.test(c.req.path) || c.req.path.endsWith('/sign-in/email-otp'))) {
     const ip = c.req.header('cf-connecting-ip') ?? 'unknown';
     const email = String(((await c.req.raw.clone().json().catch(() => ({}))) as { email?: unknown }).email ?? '')

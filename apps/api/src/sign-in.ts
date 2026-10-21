@@ -3,6 +3,7 @@
  * /api/auth next to Better Auth's endpoints:
  *
  * - GET  /sign-in/options     what the sign-in and sign-up forms need (the Turnstile site key)
+ * - POST /sign-in/check       checks the address and method without sending mail
  * - POST /sign-in/start       first sign-in step: passkey or email code for this address
  * - POST /sign-up/start       registration link for a new address, email code for an existing one
  * - POST /sign-up/complete    finishes sign-up with the token from a registration link
@@ -12,7 +13,7 @@
  */
 import { Hono, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
-import { startSignIn, startSignUp } from './auth.js';
+import { checkSignIn, startSignIn, startSignUp } from './auth.js';
 import type { AppEnv, Env } from './env.js';
 
 /** Better Auth endpoints (and ours) that send an email. */
@@ -66,6 +67,12 @@ signInRoute.post('/sign-up/start', sameOrigin, async (c) => {
   if (!body.success) return c.json({ code: 'INVALID_EMAIL', message: 'Enter a valid email address.' }, 400);
   const method = await startSignUp(c.get('auth'), c.get('db'), body.data.email.trim().toLowerCase(), c.req.raw.headers);
   return c.json({ method });
+});
+
+signInRoute.post('/sign-in/check', sameOrigin, async (c) => {
+  const body = z.object({ email: z.email() }).safeParse(await c.req.json().catch(() => null));
+  if (!body.success) return c.json({ code: 'INVALID_EMAIL', message: 'Enter a valid email address.' }, 400);
+  return c.json({ method: await checkSignIn(c.get('db'), body.data.email.trim().toLowerCase()) });
 });
 
 signInRoute.post('/sign-in/start', sameOrigin, async (c) => {

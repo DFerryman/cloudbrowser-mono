@@ -161,6 +161,7 @@ const en: Article[] = [
     blocks: [
       { h: 'Creating an account', id: 'sign-up' },
       { p: 'All you need is an email address. Choose Create account, enter your email, and open the link we send you within 30 minutes. The link works once. If your email already has an account, we send a sign-in code instead and take you to sign-in.' },
+      { p: 'A security check may appear when you request an email. It completes in the background where possible and closes after sending. Checking your email address, using a passkey, entering an email code and two-step verification do not require another check.' },
       { h: 'Email codes', id: 'email' },
       { p: 'You sign in with a one-time code sent to your email. There is no password to leak or reuse. Email codes always work, even after you add a passkey. If your email has no account yet, sign-in asks you to register without sending an email.' },
       { h: 'Two-step verification', id: 'two-step' },
@@ -356,6 +357,7 @@ const zh: Article[] = [
     blocks: [
       { h: '创建账户', id: 'sign-up' },
       { p: '只需一个邮箱。点击“创建账户”，输入邮箱，并在 30 分钟内打开我们发送的链接即可。链接仅可使用一次。如果邮箱已注册，我们会改发登录验证码，并带你进入登录页面。' },
+      { p: '请求发送邮件时可能需要完成人机验证，通常在后台完成，发送后即收起。检查邮箱是否注册、使用通行密钥、输入邮件验证码及两步验证时，不会重复要求人机验证。' },
       { h: '邮箱验证码', id: 'email' },
       { p: '你通过发送到邮箱的一次性验证码登录，没有可能泄露或重复使用的密码。即使添加了通行密钥，邮箱验证码也始终可用。未注册的邮箱会在登录时收到注册提示，不会发送邮件。' },
       { h: '两步验证', id: 'two-step' },

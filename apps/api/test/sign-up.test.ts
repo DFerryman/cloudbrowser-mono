@@ -141,10 +141,38 @@ describe('sign-in', () => {
 describe('Cloudflare Turnstile', () => {
   beforeEach(() => {
     Object.assign(t.env, { TURNSTILE_SITE_KEY: 'site', TURNSTILE_SECRET_KEY: 'secret' });
-    vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
       const { response } = JSON.parse(String(init.body)) as { response: string };
       return Response.json({ success: response === 'good', hostname: 'app.test' });
-    });
+    }));
+  });
+
+  it('checks unknown, email-code and passkey addresses without Turnstile or sending mail', async () => {
+    expect((await post('/sign-in/check', { email: 'nobody@example.com' })).body).toEqual({ method: 'register' });
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    await post('/sign-up/start', { email: 'pilot@example.com' }, { 'cf-turnstile-response': 'good' });
+    const [mail] = await sentTo('pilot@example.com');
+    await post('/sign-up/complete', { token: registrationToken(mail!.text) });
+    await signOut();
+    const beforeMail = t.emails.length;
+    vi.mocked(fetch).mockClear();
+    expect((await post('/sign-in/check', { email: 'PILOT@example.com' })).body).toEqual({ method: 'code' });
+    addPasskey('pilot@example.com');
+    expect((await post('/sign-in/check', { email: 'pilot@example.com' })).body).toEqual({ method: 'passkey' });
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    await t.settle();
+    expect(t.emails.length).toBe(beforeMail);
+    expect((await post('/sign-in/check', { email: 'bad' })).status).toBe(400);
+    expect((await post('/sign-in/check', { email: 'pilot@example.com' }, { origin: 'https://evil.test' })).status).toBe(403);
+  });
+
+  it('rate limits method lookups separately from email delivery', async () => {
+    const limit = vi.fn(async ({ key }: { key: string }) => ({ success: !key.startsWith('lookup-') }));
+    Object.assign(t.env, { AUTH_LIMITER: { limit } });
+    expect((await post('/sign-in/check', { email: 'nobody@example.com' })).status).toBe(429);
+    expect(limit.mock.calls.some(([arg]) => arg.key.startsWith('lookup-ip:'))).toBe(true);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expect(await sentTo('nobody@example.com')).toHaveLength(0);
   });
 
   it('publishes the site key and guards every request that sends an email', async () => {
