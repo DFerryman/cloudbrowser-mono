@@ -53,12 +53,13 @@ pnpm db:migrate:local
 
 pnpm --filter @cloudbrowser/web build                     # the api Worker serves apps/web/dist
 cd apps/api && pnpm exec wrangler dev -c wrangler.jsonc -c ../engine/wrangler.jsonc \
-  --persist-to ../../.wrangler/state
+  --persist-to ../../.wrangler/state --local-upstream localhost:8787
 ```
 
-Open http://localhost:8787 for the public site, or http://localhost:8787/sign-in to sign in with any email (sign-up is open unless the operator turns on the `invite_only` switch). `wrangler dev` simulates Email
-Service sends (the message is printed in the log) and, with `ENVIRONMENT=development`, the 6-digit
-code is also logged. Queues, the Durable Object and the rate limiters all run locally. For frontend work with hot reload,
+Open http://localhost:8787 for the public site, http://localhost:8787/sign-up to create an account with any email (sign-up is open unless the operator turns on the `invite_only` switch), then /sign-in. `wrangler dev` simulates Email
+Service sends (the message is printed in the log) and, with `ENVIRONMENT=development`, registration
+links and 6-digit codes are also logged. (`--local-upstream` keeps `wrangler dev` from rewriting the Origin header
+to the production domain in `routes`, which sign-in would refuse.) Queues, the Durable Object and the rate limiters all run locally. For frontend work with hot reload,
 also run `pnpm --filter @cloudbrowser/web dev` (Vite on :5173 proxies `/api` to :8787).
 
 Snapshots: user snapshot controls and automatic daily snapshots have been removed. Internal

@@ -130,7 +130,10 @@ Cloudflare deployment.
 - **Reconciler** (`apps/reconciler`): ledger vs provider by tag, adoption, orphan and missing
   findings, circuit breaker, quota and spend snapshots feeding the spend guard.
 - **API** (`apps/api`): the page 2 API surface except downloads — Better Auth
-  email codes sent with Cloudflare Email Service (invite-only), Workers Rate Limiting on sign-in and
+  email-only accounts with Cloudflare Email Service: sign-up by single-use registration link, sign-in
+  by email code or passkey (email codes always work; two-step verification follows them), optional
+  Cloudflare Turnstile on every request that sends an email, the operator's invite-only switch,
+  Workers Rate Limiting on sign-in and
   writes, the IP echo endpoint, Idempotency-Key on lifecycle calls, admission checks (plan, region,
   global caps, quota headroom, spend guard, creation freeze), viewer sessions with take-over and
   idle heartbeats, IP verify and SSE with `Last-Event-ID` resume (new-IP requests were removed;
@@ -160,8 +163,8 @@ Cloudflare deployment.
   and whether each offered region takes new browsers), `/terms`, `/privacy`, `/refunds`,
   `/contact` and a 404 page, all in English and Chinese. The public endpoints are GET-only, carry
   nothing per user and may be cached for a minute. The theme (system, light or dark) is applied
-  before first paint by `public/theme-init.js`. Registration stays invite-only; sign-in links the
-  policies and an invitation request, confirms sign-out, and skips the form when already signed in.
+  before first paint by `public/theme-init.js`. Sign-up (`/sign-up`) and sign-in link the
+  policies, sign-in confirms sign-out, and both skip the form when already signed in.
 - **Pagination**: admin lists, credit history and viewer sessions accept `limit` and `offset`
   (defaults unchanged); clients ask for one row more than they show to know whether a next page
   exists. Browsers (12), usage by browser and by day (10), daily charges (10), credit history (10),

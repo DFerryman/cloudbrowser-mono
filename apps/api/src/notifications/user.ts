@@ -5,6 +5,7 @@
  * | Email                         | When                                              | How often at most                                      |
  * |-------------------------------|---------------------------------------------------|--------------------------------------------------------|
  * | Sign-in code                  | The user asks for one                             | Rate limited per IP and address (AUTH_LIMITER)         |
+ * | Registration link / already registered | Sign-up, or sign-in for an address with no account | Rate limited per IP and address (AUTH_LIMITER)  |
  * | Credit lasts < 24 / 6 / 1 h   | Funded time at current spending crosses each mark | Once per mark while credit keeps falling; re-armed 25% above it |
  * | Low balance                   | Available credit drops below the console's threshold | Once per dip, and no sooner than LOW_BALANCE_COOLDOWN_MS after the last one; skipped when a funded-time warning already went out |
  * | Credit ran out / browsers will be deleted | Usable credit is gone            | Three in total: when it happens, after 3 days, 1 day before deletion |
@@ -55,6 +56,35 @@ export async function sendSignInCode(env: Env, to: string, code: string) {
     subject: `Your Nevazu sign-in code: ${code}`,
     text: `Your sign-in code is ${code}\n\nIt expires in 5 minutes. If you did not ask for it, ignore this email.\n\n你的登录验证码是 ${code}，5 分钟内有效。如果不是你本人操作，请忽略此邮件。`,
     html: `<p>Your sign-in code is</p><p style="font-size:24px;font-weight:600;letter-spacing:4px;font-family:monospace">${code}</p><p>It expires in 5 minutes. If you did not ask for it, ignore this email.</p><hr><p>你的登录验证码是 <b>${code}</b>，5 分钟内有效。如果不是你本人操作，请忽略此邮件。</p>`,
+  });
+}
+
+/**
+ * Registration links (sign-up page, or a sign-in attempt for an address with no account). The link
+ * opens the app's confirmation page, which completes sign-up on a click: mail scanners that fetch
+ * links in advance cannot use up the single-use token.
+ */
+export async function sendRegistrationLink(env: Env, to: string, url: string, fromSignIn: boolean) {
+  if (env.ENVIRONMENT === 'development') console.log(`[dev] registration link for ${to}: ${url}`);
+  if (!env.EMAIL && env.ENVIRONMENT === 'development') return;
+  const lead = fromSignIn ? 'Someone tried to sign in to Nevazu with this address, but it has no account yet. To create one, open this link:' : 'To finish creating your Nevazu account, open this link:';
+  const leadZh = fromSignIn ? '有人使用此邮箱登录 Nevazu，但该邮箱尚未注册。如需创建账户，请打开以下链接：' : '请打开以下链接，完成 Nevazu 账户注册：';
+  await sendTo(env, to, {
+    subject: 'Create your Nevazu account',
+    text: `${lead}\n\n${url}\n\nThe link works once and expires in 30 minutes. If you did not ask for it, ignore this email.\n\n${leadZh}\n${url}\n链接仅可使用一次，30 分钟内有效。如果不是你本人操作，请忽略此邮件。`,
+    html: `<p>${lead}</p><p><a href="${url}" style="font-weight:600">Create my account</a></p><p>The link works once and expires in 30 minutes. If you did not ask for it, ignore this email.</p><hr><p>${leadZh}</p><p><a href="${url}">创建我的账户</a></p><p>链接仅可使用一次，30 分钟内有效。如果不是你本人操作，请忽略此邮件。</p>`,
+  });
+}
+
+/** A sign-up request for an address that already has an account: point to sign-in, sign nobody in. */
+export async function sendAlreadyRegistered(env: Env, to: string) {
+  const url = `${env.APP_URL}/sign-in`;
+  if (env.ENVIRONMENT === 'development') console.log(`[dev] ${to} already has an account`);
+  if (!env.EMAIL && env.ENVIRONMENT === 'development') return;
+  await sendTo(env, to, {
+    subject: 'You already have a Nevazu account',
+    text: `Someone asked to create a Nevazu account with this address, but it already has one. Sign in instead: ${url}\n\nIf it was not you, ignore this email; nothing has changed.\n\n有人尝试用此邮箱注册 Nevazu，但该邮箱已有账户。请直接登录：${url}\n如果不是你本人操作，请忽略此邮件，账户没有任何变化。`,
+    html: `<p>Someone asked to create a Nevazu account with this address, but it already has one. <a href="${url}">Sign in instead</a>.</p><p>If it was not you, ignore this email; nothing has changed.</p><hr><p>有人尝试用此邮箱注册 Nevazu，但该邮箱已有账户。请直接<a href="${url}">登录</a>。如果不是你本人操作，请忽略此邮件，账户没有任何变化。</p>`,
   });
 }
 

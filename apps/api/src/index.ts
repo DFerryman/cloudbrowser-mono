@@ -16,6 +16,7 @@ import type { AppEnv, Env } from './env.js';
 import { internalApi } from './internal.js';
 import { adminSweep, deliverAlerts } from './notifications/admin.js';
 import { rewardNotices } from './notifications/user.js';
+import { requireTurnstile, SENDS_EMAIL, signInRoute, tooMany } from './sign-in.js';
 import { problem, ProblemError } from './problem.js';
 import { promotionSweep } from './promotions.js';
 import { adminRoute } from './routes/admin.js';
@@ -54,22 +55,25 @@ const limitSignIn: MiddlewareHandler<AppEnv> = async (c, next) => {
   // cap and its account lock after repeated wrong codes.
   if (limiter && c.req.method === 'POST' && /\/two-factor\/[a-z-]+$/.test(c.req.path)) {
     const { success } = await limiter.limit({ key: `2fa-ip:${c.req.header('cf-connecting-ip') ?? 'unknown'}` });
-    if (!success) return c.json({ code: 'TOO_MANY_REQUESTS', message: 'Too many attempts. Try again in a minute.' }, 429);
+    if (!success) return c.json(tooMany, 429);
   }
-  if (limiter && c.req.method === 'POST' && /\/(email-otp\/send-verification-otp|sign-in\/email-otp)$/.test(c.req.path)) {
+  if (limiter && c.req.method === 'POST' && (SENDS_EMAIL.test(c.req.path) || c.req.path.endsWith('/sign-in/email-otp'))) {
     const ip = c.req.header('cf-connecting-ip') ?? 'unknown';
     const email = String(((await c.req.raw.clone().json().catch(() => ({}))) as { email?: unknown }).email ?? '')
       .trim()
       .toLowerCase();
     const checks = [limiter.limit({ key: `ip:${ip}` }), ...(email ? [limiter.limit({ key: `email:${email}` })] : [])];
     if ((await Promise.all(checks)).some((r) => !r.success)) {
-      return c.json({ code: 'TOO_MANY_REQUESTS', message: 'Too many attempts. Try again in a minute.' }, 429);
+      return c.json(tooMany, 429);
     }
   }
   await next();
 };
 
-app.on(['GET', 'POST'], '/api/auth/*', limitSignIn, (c) => c.get('auth').handler(c.req.raw));
+// Turnstile first: requests without a valid token do not use up an address's rate-limit budget.
+app.use('/api/auth/*', requireTurnstile, limitSignIn);
+app.route('/api/auth', signInRoute);
+app.on(['GET', 'POST'], '/api/auth/*', (c) => c.get('auth').handler(c.req.raw));
 
 /**
  * IP echo for the agent's in-Chrome IP check (page 3): hosted on Cloudflare, outside the browser

@@ -12,8 +12,13 @@ import { APIError, createAuthMiddleware, getSessionFromCtx } from 'better-auth/a
 import { symmetricDecrypt } from 'better-auth/crypto';
 import { twoFactor } from 'better-auth/plugins';
 
-/** Sign-in endpoints whose new session waits for the second factor. Email codes are ours. */
-const FIRST_FACTOR_PATHS = new Set(['/sign-in/email-otp', '/sign-in/email', '/sign-in/username', '/sign-in/phone-number']);
+/**
+ * Sign-in endpoints whose new session waits for the second factor. Email codes are ours; so are
+ * registration links, which only ever go to addresses without an account, but a second link from
+ * the same sign-up could be opened after the new account turned two-step verification on.
+ * Passkey sign-ins are exempt: they require user verification (auth.ts), two factors in one.
+ */
+const FIRST_FACTOR_PATHS = new Set(['/sign-in/email-otp', '/magic-link/verify', '/sign-in/email', '/sign-in/username', '/sign-in/phone-number']);
 const TOTP = { digits: 6, period: 30 } as const;
 /** The plugin's own account lock for failed codes: 10 in a row lock it for 15 minutes. */
 const MAX_FAILED_CODES = 10;

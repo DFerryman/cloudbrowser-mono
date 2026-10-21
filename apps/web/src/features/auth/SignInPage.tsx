@@ -1,36 +1,45 @@
-import { Button, Card, Input, Label } from '@cloudbrowser/ui';
-import { ArrowLeft, CheckCircle2, ShieldCheck } from 'lucide-react';
+import { Button, Input, Label } from '@cloudbrowser/ui';
+import { startAuthentication, type PublicKeyCredentialRequestOptionsJSON } from '@simplewebauthn/browser';
+import { ArrowLeft, CheckCircle2, Fingerprint, ShieldCheck } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
-import { Logo } from '../../app/AppShell.js';
-import { LanguageButton, ThemeButton } from '../../app/Preferences.js';
 import { api, ApiError } from '../../lib/api.js';
 import { useI18n } from '../../lib/i18n.js';
 import { queryClient } from '../../lib/query.js';
-import { rich } from '../../lib/rich.js';
 import { useSignedIn } from '../../site/hooks.js';
+import { AuthLayout, safeNext } from './AuthLayout.js';
+import { useTurnstile } from './turnstile.js';
 
-type Step = 'email' | 'code' | 'second-factor';
+type Step = 'email' | 'passkey' | 'code' | 'second-factor';
 
-/** Only same-site paths, so a crafted link cannot send a fresh session elsewhere. */
-const safeNext = (next: string | null) => (next && next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\') ? next : '/browsers');
+/** The message for a failed request that sends an email (rate limit, Turnstile, anything else). */
+export function sendError(t: ReturnType<typeof useI18n>['t'], err: unknown) {
+  if (err instanceof ApiError && err.status === 429) return t('auth.tooMany');
+  if (err instanceof ApiError && err.code === 'CAPTCHA_FAILED') return t('auth.captchaFailed');
+  return t('error.internal');
+}
 
 /**
- * Email one-time code sign-in (page 1, "Auth"); a new address creates an account. Google is unavailable from mainland
- * China. With two-factor sign-in on, the email code is followed by a code from an authenticator
- * app (or a one-time backup code) before a session exists: the second factor guards the whole
- * account at its one entrance, rather than single pages or actions later on.
+ * Email-only sign-in (page 1, "Auth"). The address comes first: an account with a passkey is
+ * offered the passkey, any other gets a 6-digit email code (an address with no account gets a
+ * registration link instead, and the page says so without telling which happened). An email code
+ * is always available, passkey or not. With two-factor sign-in on, the email code is followed by a
+ * code from an authenticator app (or a one-time backup code) before a session exists; a passkey
+ * already proves two factors. New accounts are made on the sign-up page. Google is unavailable
+ * from mainland China.
  */
 export function SignInPage() {
   const { t } = useI18n();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const signedIn = useSignedIn();
-  const [email, setEmail] = useState('');
+  const turnstile = useTurnstile();
+  const [email, setEmail] = useState(params.get('email') ?? '');
   const [code, setCode] = useState('');
   const [step, setStep] = useState<Step>('email');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const address = email.trim().toLowerCase();
 
   const enter = () => {
     queryClient.clear();
@@ -42,34 +51,54 @@ export function SignInPage() {
   }, [signedIn, step, navigate, params]);
   const signedOut = params.has('signedOut') && step === 'email' && !error;
 
-  const sendCode = async (e: FormEvent) => {
-    e.preventDefault();
+  const run = async (work: () => Promise<void>, onError: (err: unknown) => string | null) => {
     setBusy(true);
     setError(null);
     try {
-      await api('POST', '/api/auth/email-otp/send-verification-otp', { body: { email: email.trim().toLowerCase(), type: 'sign-in' } });
-      setCode('');
-      setStep('code');
+      await work();
     } catch (err) {
-      setError(err instanceof ApiError && err.status === 429 ? t('auth.tooMany') : t('error.internal'));
+      setError(onError(err));
     } finally {
       setBusy(false);
     }
   };
 
-  const signIn = async (e: FormEvent) => {
+  const start = (e: FormEvent) => {
     e.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await api<{ twoFactorRedirect?: boolean }>('POST', '/api/auth/sign-in/email-otp', { body: { email: email.trim().toLowerCase(), otp: code.trim() } });
+    void run(async () => {
+      const res = await api<{ method: 'passkey' | 'code' }>('POST', '/api/auth/sign-in/start', { body: { email: address }, headers: turnstile.headers() });
+      setCode('');
+      setStep(res.method === 'passkey' ? 'passkey' : 'code');
+    }, (err) => sendError(t, err));
+  };
+
+  const sendCode = () =>
+    void run(async () => {
+      await api('POST', '/api/auth/email-otp/send-verification-otp', { body: { email: address, type: 'sign-in' }, headers: turnstile.headers() });
+      setCode('');
+      setStep('code');
+    }, (err) => sendError(t, err));
+
+  const usePasskey = () =>
+    void run(async () => {
+      const optionsJSON = await api<PublicKeyCredentialRequestOptionsJSON>('GET', '/api/auth/passkey/generate-authenticate-options');
+      const response = await startAuthentication({ optionsJSON });
+      await api('POST', '/api/auth/passkey/verify-authentication', { body: { response } });
+      enter();
+    }, (err) => {
+      // The user closed the browser's passkey dialog: let them choose again, no message needed.
+      if (err instanceof Error && err.name === 'NotAllowedError') return null;
+      if (err instanceof ApiError && err.code === 'USER_VERIFICATION_REQUIRED') return t('auth.passkey.verifyRequired');
+      return err instanceof ApiError && err.status === 429 ? t('auth.tooMany') : t('auth.passkey.failed');
+    });
+
+  const signIn = (e: FormEvent) => {
+    e.preventDefault();
+    void run(async () => {
+      const res = await api<{ twoFactorRedirect?: boolean }>('POST', '/api/auth/sign-in/email-otp', { body: { email: address, otp: code.trim() } });
       if (res?.twoFactorRedirect) setStep('second-factor');
       else enter();
-    } catch (err) {
-      setError(err instanceof ApiError && err.status === 429 ? t('auth.tooMany') : t('auth.invalidCode'));
-    } finally {
-      setBusy(false);
-    }
+    }, (err) => (err instanceof ApiError && err.status === 429 ? t('auth.tooMany') : t('auth.invalidCode')));
   };
 
   const restart = (message: string | null = null) => {
@@ -78,72 +107,89 @@ export function SignInPage() {
     setError(message);
   };
 
+  const otherEmail = (
+    <button type="button" className="w-full text-center text-sm text-muted hover:text-fg" onClick={() => restart()}>
+      {t('auth.useOtherEmail')}
+    </button>
+  );
+  const waiting = busy || !turnstile.ready;
+
   return (
-    <div className="grid min-h-dvh place-items-center bg-surface px-4 py-8">
-      <div className="w-full max-w-sm">
-        <div className="mb-6 flex items-center justify-between">
-          <Link to="/" aria-label={t('auth.backHome')}>
-            <Logo />
+    <AuthLayout
+      notice={signedOut ? (
+        <p role="status" className="mb-3 flex items-center gap-2 border-l-2 border-running bg-bg px-3 py-2.5 text-sm">
+          <CheckCircle2 className="size-4 shrink-0 text-running" aria-hidden /> {t('auth.signedOut')}
+        </p>
+      ) : null}
+      footer={step === 'email' ? (
+        <>
+          {t('auth.noAccount')}{' '}
+          <Link to={`/sign-up${address ? `?email=${encodeURIComponent(address)}` : ''}`} className="font-medium text-accent underline-offset-4 hover:underline">
+            {t('auth.createAccount')}
           </Link>
-          <div className="flex items-center gap-1">
-            <LanguageButton />
-            <ThemeButton />
+        </>
+      ) : null}
+    >
+      {step === 'second-factor' ? (
+        <SecondFactor onSignedIn={enter} onRestart={restart} restartMessage={t('auth.2fa.restart')} />
+      ) : step === 'passkey' ? (
+        <div>
+          <span className="mb-5 grid size-10 place-items-center border border-border bg-surface" aria-hidden>
+            <Fingerprint className="size-5" />
+          </span>
+          <h1 className="text-2xl font-semibold tracking-tight">{t('auth.passkey.title')}</h1>
+          <p className="mt-2 text-sm leading-relaxed text-muted">{t('auth.passkey.body', { email: address })}</p>
+          <div className="mt-8 space-y-3">
+            <Button type="button" variant="primary" size="lg" className="w-full justify-center" disabled={busy} onClick={usePasskey} autoFocus>
+              <Fingerprint /> {t('auth.passkey.use')}
+            </Button>
+            <Button type="button" variant="secondary" size="lg" className="w-full justify-center" disabled={waiting} onClick={sendCode}>
+              {t('auth.passkey.emailCode')}
+            </Button>
+            {otherEmail}
           </div>
         </div>
-        {signedOut ? (
-          <p role="status" className="mb-3 flex items-center gap-2 border-l-2 border-running bg-bg px-3 py-2.5 text-sm">
-            <CheckCircle2 className="size-4 shrink-0 text-running" aria-hidden /> {t('auth.signedOut')}
-          </p>
-        ) : null}
-        <Card className="p-8 shadow-pop sm:p-10">
-          {step === 'second-factor' ? (
-            <SecondFactor onSignedIn={enter} onRestart={restart} />
+      ) : (
+        <>
+          <h1 className="text-2xl font-semibold tracking-tight">{t('auth.title')}</h1>
+          <p className="mt-2 text-sm leading-relaxed text-muted">{step === 'email' ? t('auth.subtitle') : t('auth.codeSent', { email: address })}</p>
+          {step === 'email' ? (
+            <form onSubmit={start} className="mt-8 space-y-4">
+              <div>
+                <Label htmlFor="email">{t('auth.email')}</Label>
+                <Input id="email" type="email" autoComplete="email" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)} />
+              </div>
+              <Button type="submit" variant="primary" size="lg" className="w-full justify-center" disabled={waiting}>
+                {t('auth.continue')}
+              </Button>
+            </form>
           ) : (
-            <>
-              <h1 className="text-2xl font-semibold tracking-tight">{t('auth.title')}</h1>
-              <p className="mt-2 text-sm leading-relaxed text-muted">{step === 'email' ? t('auth.subtitle') : t('auth.codeSent', { email })}</p>
-              {step === 'email' ? (
-                <form onSubmit={sendCode} className="mt-8 space-y-4">
-                  <div>
-                    <Label htmlFor="email">{t('auth.email')}</Label>
-                    <Input id="email" type="email" autoComplete="email" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)} />
-                  </div>
-                  <Button type="submit" variant="primary" size="lg" className="w-full justify-center" disabled={busy}>
-                    {t('auth.sendCode')}
-                  </Button>
-                </form>
-              ) : (
-                <form onSubmit={signIn} className="mt-8 space-y-4">
-                  <div>
-                    <Label htmlFor="code">{t('auth.code')}</Label>
-                    <CodeInput id="code" value={code} onChange={setCode} />
-                  </div>
-                  <Button type="submit" variant="primary" size="lg" className="w-full justify-center" disabled={busy || code.length !== 6}>
-                    {t('auth.signIn')}
-                  </Button>
-                  <button type="button" className="w-full text-center text-sm text-muted hover:text-fg" onClick={() => restart()}>
-                    {t('auth.useOtherEmail')}
-                  </button>
-                </form>
-              )}
-            </>
+            <form onSubmit={signIn} className="mt-8 space-y-4">
+              <div>
+                <Label htmlFor="code">{t('auth.code')}</Label>
+                <CodeInput id="code" value={code} onChange={setCode} />
+              </div>
+              <Button type="submit" variant="primary" size="lg" className="w-full justify-center" disabled={busy || code.length !== 6}>
+                {t('auth.signIn')}
+              </Button>
+              {otherEmail}
+            </form>
           )}
-          {error && step !== 'second-factor' ? (
-            <p role="alert" className="mt-4 text-sm text-error">
-              {error}
-            </p>
-          ) : null}
-        </Card>
-        <div className="mt-4 space-y-2 px-1 text-center text-xs leading-relaxed text-subtle">
-          <p>
-            {rich(t('auth.agree'), {
-              terms: <Link to="/terms" className="underline hover:text-fg">{t('footer.terms')}</Link>,
-              privacy: <Link to="/privacy" className="underline hover:text-fg">{t('footer.privacy')}</Link>,
-            })}
-          </p>
-        </div>
-      </div>
-    </div>
+        </>
+      )}
+      {/* Outside the steps, so the widget lives as long as the page. */}
+      {step !== 'second-factor' ? <div className="mt-4">{turnstile.widget}</div> : null}
+      {turnstile.failed && step !== 'second-factor' ? (
+        <p role="alert" className="mt-4 text-sm text-error">
+          {t('auth.captchaFailed')}
+        </p>
+      ) : null}
+      {error && step !== 'second-factor' ? (
+        <p role="alert" className="mt-4 text-sm text-error">
+          {error}
+        </p>
+      ) : null}
+    </AuthLayout>
   );
 }
 
@@ -166,7 +212,7 @@ export function CodeInput({ id, value, onChange, autoFocus = true }: { id: strin
 }
 
 /** The second step: a code from the authenticator app, or a backup code if the phone is not at hand. */
-function SecondFactor({ onSignedIn, onRestart }: { onSignedIn: () => void; onRestart: (message?: string | null) => void }) {
+export function SecondFactor({ onSignedIn, onRestart, restartMessage }: { onSignedIn: () => void; onRestart: (message?: string | null) => void; restartMessage: string }) {
   const { t } = useI18n();
   const [backup, setBackup] = useState(false);
   const [code, setCode] = useState('');
@@ -184,8 +230,8 @@ function SecondFactor({ onSignedIn, onRestart }: { onSignedIn: () => void; onRes
       onSignedIn();
     } catch (err) {
       const e = err instanceof ApiError ? err : null;
-      // An expired challenge (10 minutes) or five wrong codes: start again from the email code.
-      if (e?.code === 'INVALID_TWO_FACTOR_COOKIE' || e?.code === 'TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE') onRestart(t('auth.2fa.restart'));
+      // An expired challenge (10 minutes) or five wrong codes: start again from the first factor.
+      if (e?.code === 'INVALID_TWO_FACTOR_COOKIE' || e?.code === 'TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE') onRestart(restartMessage);
       else if (e?.code === 'ACCOUNT_TEMPORARILY_LOCKED') setError(t('auth.2fa.locked'));
       else if (e?.status === 429) setError(t('auth.tooMany'));
       else setError(t(backup ? 'auth.2fa.invalidBackup' : 'auth.2fa.invalid'));

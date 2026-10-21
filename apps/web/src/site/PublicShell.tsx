@@ -49,9 +49,14 @@ export function PublicShell() {
                 {t('nav.dashboard')}
               </Button>
             ) : (
-              <Button variant="primary" size="sm" onClick={() => navigate('/sign-in')}>
-                {t('nav.signIn')}
-              </Button>
+              <>
+                <Button variant="ghost" size="sm" className="hidden sm:inline-flex" onClick={() => navigate('/sign-in')}>
+                  {t('nav.signIn')}
+                </Button>
+                <Button variant="primary" size="sm" onClick={() => navigate('/sign-up')}>
+                  {t('nav.signUp')}
+                </Button>
+              </>
             )}
             <div className="md:hidden">
               <Menu
@@ -67,6 +72,7 @@ export function PublicShell() {
                   </MenuItem>
                 ))}
                 <MenuItem onSelect={() => navigate('/contact')}>{t('footer.contact')}</MenuItem>
+                {signedIn ? null : <MenuItem onSelect={() => navigate('/sign-in')}>{t('nav.signIn')}</MenuItem>}
               </Menu>
             </div>
           </div>

@@ -96,12 +96,24 @@ export function setup(opts: { prices?: boolean } = {}) {
   return { d1, call, settle, emails, env, engineEnv, ctx, cookie: getCookie, setCookie };
 }
 
+/**
+ * Signs in the way the sign-in page does: the first step emails a code to an account, or a
+ * registration link to a new address, which then creates the account. Null when nothing was sent.
+ */
 export async function signIn(t: ReturnType<typeof setup>, email: string) {
-  await t.call('POST', '/api/auth/email-otp/send-verification-otp', { email, type: 'sign-in' });
+  const before = t.emails.length;
+  await t.call('POST', '/api/auth/sign-in/start', { email });
   await t.settle();
-  const sent = t.emails.filter((m) => m.to === email).pop();
+  const sent = t.emails.slice(before).filter((m) => m.to === email).pop();
   if (!sent) return null;
+  const token = registrationToken(sent.text);
+  if (token) return t.call('POST', '/api/auth/sign-up/complete', { token });
   const otp = sent.text.match(/(\d{6})/)![1];
   return t.call('POST', '/api/auth/sign-in/email-otp', { email, otp });
 }
 
+/** The token in a registration email, if it is one. */
+export function registrationToken(text: string) {
+  const m = text.match(/\/sign-up\/complete\?token=([^\s]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}

@@ -22,6 +22,10 @@ export interface Env {
   BETTER_AUTH_SECRET: string;
   /** "development" also logs sign-in codes to the console (wrangler dev only simulates email). */
   ENVIRONMENT?: string;
+  /** Cloudflare Turnstile on the sign-in and sign-up forms. Both set: required; unset: off. */
+  TURNSTILE_SITE_KEY?: string;
+  /** Turnstile widget secret. Secret. */
+  TURNSTILE_SECRET_KEY?: string;
   /** Sender on a domain onboarded to Cloudflare Email Service, e.g. no-reply@example.com. */
   EMAIL_FROM?: string;
   /** Public WebSocket URL of the session gateway, e.g. wss://connect.example.com. */

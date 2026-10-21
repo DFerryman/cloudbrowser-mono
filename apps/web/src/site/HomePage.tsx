@@ -31,7 +31,7 @@ export function HomePage() {
   const regions = (pricing.data?.regions ?? []).filter((r) => r.acceptingNew);
   const areas = REGION_AREAS.map((area) => [area, regions.filter((r) => r.area === area).map((r) => regionPlace(r, locale)).sort()] as const).filter(([, list]) => list.length);
   const signedIn = useSignedIn();
-  const go = () => navigate(signedIn ? '/browsers' : '/sign-in');
+  const go = () => navigate(signedIn ? '/browsers' : '/sign-up');
 
   return (
     <>

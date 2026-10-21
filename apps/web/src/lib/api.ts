@@ -12,14 +12,14 @@ export class ApiError extends Error {
   }
 }
 
-type Options = { body?: unknown; idempotent?: boolean; idempotencyKey?: string; signal?: AbortSignal };
+type Options = { body?: unknown; idempotent?: boolean; idempotencyKey?: string; signal?: AbortSignal; headers?: Record<string, string> };
 
 /**
  * All data comes from /api/v1 on the same origin; the session cookie is HttpOnly. Lifecycle
  * actions send an Idempotency-Key so a retried click never creates a second operation.
  */
 export async function api<T>(method: string, path: string, opts: Options = {}): Promise<T> {
-  const headers: Record<string, string> = { accept: 'application/json' };
+  const headers: Record<string, string> = { accept: 'application/json', ...opts.headers };
   if (opts.body !== undefined) headers['content-type'] = 'application/json';
   if (opts.idempotencyKey !== undefined) headers['idempotency-key'] = opts.idempotencyKey;
   else if (opts.idempotent) headers['idempotency-key'] = crypto.randomUUID();

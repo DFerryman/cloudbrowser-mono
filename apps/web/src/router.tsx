@@ -5,6 +5,7 @@ import { AccountPage } from './features/account/AccountPage.js';
 import { BillingPage } from './features/billing/BillingPage.js';
 import { BillingSuccessPage } from './features/billing/BillingSuccessPage.js';
 import { SignInPage } from './features/auth/SignInPage.js';
+import { SignUpCompletePage, SignUpPage } from './features/auth/SignUpPage.js';
 import { BrowsersPage } from './features/instances/BrowsersPage.js';
 import { useMe } from './features/instances/hooks.js';
 import { isUnauthenticated } from './lib/api.js';
@@ -19,7 +20,7 @@ import { StatusPage } from './site/StatusPage.js';
 
 /**
  * Routes from page 1, "Information architecture": the public site (home, pricing, docs, status,
- * policies) for everyone, sign-in, and the app behind it.
+ * policies) for everyone, sign-in and sign-up, and the app behind it.
  */
 export const router = createBrowserRouter(isAdminHost() ? [
   { path: '/admin/*', element: <AdminRedirect /> },
@@ -42,7 +43,9 @@ export const router = createBrowserRouter(isAdminHost() ? [
     ],
   },
   { path: '/sign-in', element: <SignInPage /> },
-  { path: '/sign-up', element: <Navigate to="/sign-in" replace /> },
+  { path: '/sign-up', element: <SignUpPage /> },
+  { path: '/sign-up/complete', element: <SignUpCompletePage /> },
+  { path: '/register', element: <Navigate to="/sign-up" replace /> },
   { path: '/admin/*', element: <AdminRedirect /> },
   // The session view has its own dark full-screen layout, still behind the auth check.
   // The viewer is loaded on demand (page 1, "Performance and quality").

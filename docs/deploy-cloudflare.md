@@ -55,7 +55,7 @@ Copy the D1 `database_id` into **all five** configs (each has the placeholder
 `00000000-0000-0000-0000-000000000000`): `apps/api/wrangler.jsonc`, `apps/engine/wrangler.jsonc`,
 `apps/engine/wrangler.reaper.jsonc`, `apps/reconciler/wrangler.jsonc`, `apps/gateway/wrangler.jsonc`.
 
-## 2. Email Service (sign-in codes)
+## 2. Email Service (sign-in codes and registration links)
 
 Dashboard → **Email Service** → **Email Sending** → onboard your domain (e.g. `example.com`). It
 adds the SPF/DKIM/DMARC records to your Cloudflare DNS. Until a domain is onboarded, the binding can
@@ -70,12 +70,14 @@ only send to verified destination addresses in your account, which is enough for
 | `APP_URL` | Your public origin, e.g. `https://app.example.com`. It is the auth base URL and the only trusted origin. |
 | `ENVIRONMENT` | `production` (`development` also prints sign-in codes to the log). |
 | `EMAIL_FROM` | A sender on the onboarded domain, e.g. `no-reply@example.com`. |
+| `TURNSTILE_SITE_KEY` | Optional. Site key of a Cloudflare Turnstile widget for your hostname (Dashboard → Turnstile → Add widget, mode *Managed*). With the secret below, every sign-in and sign-up request that sends an email needs a Turnstile token. Unset: no Turnstile. |
 
 Secrets and keys:
 
 ```bash
 cd apps/api
 openssl rand -base64 48 | pnpm exec wrangler secret put BETTER_AUTH_SECRET
+pnpm exec wrangler secret put TURNSTILE_SECRET_KEY          # optional: the Turnstile widget's secret
 node ../../scripts/gen-viewer-keys.mjs        # prints an Ed25519 key pair for viewer tokens
 pnpm exec wrangler secret put VIEWER_TOKEN_PRIVATE_KEY      # paste the private JWK
 cd ../engine
@@ -115,8 +117,9 @@ expired archives and needs no token.
 
 Optional:
 - `ratelimits` in `apps/api/wrangler.jsonc`: `namespace_id` values `1001`/`1002` must be unique in
-  your account (change them if you already use those). Limits: 5 sign-in requests per minute per IP
-  and per email; 60 API writes per minute per user.
+  your account (change them if you already use those). Limits: 5 sign-in and sign-up requests per
+  minute per IP and per email (requests without a valid Turnstile token are refused before they
+  count); 60 API writes per minute per user.
 - `ENV_NAME` (`prod`/`staging`) in the engine, reaper and reconciler configs: the `cb:env` tag on
   provider resources, same value in all three.
 

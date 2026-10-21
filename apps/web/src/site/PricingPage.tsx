@@ -112,7 +112,7 @@ export function PricingPage() {
                 </p>
               </div>
             </div>
-            <Button variant="primary" onClick={() => navigate(signedIn ? '/browsers/new' : '/sign-in')}>
+            <Button variant="primary" onClick={() => navigate(signedIn ? '/browsers/new' : '/sign-up')}>
               {signedIn ? t('trial.start') : t('nav.signIn')}
             </Button>
           </Card>
