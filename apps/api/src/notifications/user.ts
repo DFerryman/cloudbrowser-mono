@@ -20,6 +20,7 @@ import { accountRunway, pricingSettings, schema, type Db } from '@cloudbrowser/d
 import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import type { Env } from '../env.js';
 import { retentionState } from '../billing/retention.js';
+import { renderEmail } from './template.js';
 import { cooledDown, sendTo, sendToUser, setState, type Message } from './send.js';
 
 const { billingAccounts, auditLog, regions, userNotices, promotionCompletions, promotionTasks } = schema;
@@ -36,10 +37,13 @@ export const REWARD_BATCH_MS = 10 * 60_000;
 
 const usd = (micros: number) => `$${(micros / MICROS_PER_USD).toFixed(2)}`;
 const utc = (d: Date) => `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
-function duration(hours: number, zh = false) {
-  if (hours < 1) return zh ? `${Math.max(1, Math.round(hours * 60))} 分钟` : `${Math.max(1, Math.round(hours * 60))} minutes`;
+function duration(hours: number) {
+  if (hours < 1) {
+    const minutes = Math.max(1, Math.round(hours * 60));
+    return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  }
   const n = Math.floor(hours);
-  return zh ? `${n} 小时` : `${n} hour${n === 1 ? '' : 's'}`;
+  return `${n} hour${n === 1 ? '' : 's'}`;
 }
 const available = sql`${billingAccounts.balanceMicros} - coalesce((SELECT sum(reserved_micros) FROM browser_reservations WHERE user_id = ${billingAccounts.userId}),0)`;
 
@@ -52,11 +56,15 @@ const available = sql`${billingAccounts.balanceMicros} - coalesce((SELECT sum(re
 export async function sendSignInCode(env: Env, to: string, code: string) {
   if (env.ENVIRONMENT === 'development') console.log(`[dev] sign-in code for ${to}: ${code}`);
   if (!env.EMAIL && env.ENVIRONMENT === 'development') return;
-  await sendTo(env, to, {
+  await sendTo(env, to, renderEmail(env.APP_URL, {
     subject: `Your Nevazu sign-in code: ${code}`,
-    text: `Your sign-in code is ${code}\n\nIt expires in 5 minutes. If you did not ask for it, ignore this email.\n\n你的登录验证码是 ${code}，5 分钟内有效。如果不是你本人操作，请忽略此邮件。`,
-    html: `<p>Your sign-in code is</p><p style="font-size:24px;font-weight:600;letter-spacing:4px;font-family:monospace">${code}</p><p>It expires in 5 minutes. If you did not ask for it, ignore this email.</p><hr><p>你的登录验证码是 <b>${code}</b>，5 分钟内有效。如果不是你本人操作，请忽略此邮件。</p>`,
-  });
+    category: 'Account security',
+    title: 'Your sign-in code.',
+    preview: 'Your one-time code is ready. It expires in 5 minutes.',
+    paragraphs: ['Enter this code on the sign-in page to continue to your account.'],
+    code,
+    note: 'If you did not request this code, you can safely ignore this email. Never share your code with anyone, including Nevazu support.',
+  }));
 }
 
 /**
@@ -67,13 +75,17 @@ export async function sendSignInCode(env: Env, to: string, code: string) {
 export async function sendRegistrationLink(env: Env, to: string, url: string, fromSignIn: boolean) {
   if (env.ENVIRONMENT === 'development') console.log(`[dev] registration link for ${to}: ${url}`);
   if (!env.EMAIL && env.ENVIRONMENT === 'development') return;
-  const lead = fromSignIn ? 'Someone tried to sign in to Nevazu with this address, but it has no account yet. To create one, open this link:' : 'To finish creating your Nevazu account, open this link:';
-  const leadZh = fromSignIn ? '有人使用此邮箱登录 Nevazu，但该邮箱尚未注册。如需创建账户，请打开以下链接：' : '请打开以下链接，完成 Nevazu 账户注册：';
-  await sendTo(env, to, {
+  await sendTo(env, to, renderEmail(env.APP_URL, {
     subject: 'Create your Nevazu account',
-    text: `${lead}\n\n${url}\n\nThe link works once and expires in 30 minutes. If you did not ask for it, ignore this email.\n\n${leadZh}\n${url}\n链接仅可使用一次，30 分钟内有效。如果不是你本人操作，请忽略此邮件。`,
-    html: `<p>${lead}</p><p><a href="${url}" style="font-weight:600">Create my account</a></p><p>The link works once and expires in 30 minutes. If you did not ask for it, ignore this email.</p><hr><p>${leadZh}</p><p><a href="${url}">创建我的账户</a></p><p>链接仅可使用一次，30 分钟内有效。如果不是你本人操作，请忽略此邮件。</p>`,
-  });
+    category: 'Welcome to Nevazu',
+    title: 'Your next browser starts here.',
+    preview: 'Confirm your email to finish creating your Nevazu account.',
+    paragraphs: [fromSignIn
+      ? 'This email address is not linked to a Nevazu account yet. Create one to get started with your own browser in the cloud.'
+      : 'You are one step away. Confirm your email to create your Nevazu account and make room for your browser in the cloud.'],
+    action: { label: 'Create my account', url },
+    note: 'This link works once and expires in 30 minutes. If you did not request an account, you can safely ignore this email.',
+  }));
 }
 
 /** A sign-up request for an address that already has an account: point to sign-in, sign nobody in. */
@@ -81,11 +93,15 @@ export async function sendAlreadyRegistered(env: Env, to: string) {
   const url = `${env.APP_URL}/sign-in`;
   if (env.ENVIRONMENT === 'development') console.log(`[dev] ${to} already has an account`);
   if (!env.EMAIL && env.ENVIRONMENT === 'development') return;
-  await sendTo(env, to, {
+  await sendTo(env, to, renderEmail(env.APP_URL, {
     subject: 'You already have a Nevazu account',
-    text: `Someone asked to create a Nevazu account with this address, but it already has one. Sign in instead: ${url}\n\nIf it was not you, ignore this email; nothing has changed.\n\n有人尝试用此邮箱注册 Nevazu，但该邮箱已有账户。请直接登录：${url}\n如果不是你本人操作，请忽略此邮件，账户没有任何变化。`,
-    html: `<p>Someone asked to create a Nevazu account with this address, but it already has one. <a href="${url}">Sign in instead</a>.</p><p>If it was not you, ignore this email; nothing has changed.</p><hr><p>有人尝试用此邮箱注册 Nevazu，但该邮箱已有账户。请直接<a href="${url}">登录</a>。如果不是你本人操作，请忽略此邮件，账户没有任何变化。</p>`,
-  });
+    category: 'Your account',
+    title: 'Welcome back.',
+    preview: 'You already have an account. Sign in to pick up where you left off.',
+    paragraphs: ['A Nevazu account already exists for this email address. Sign in with your passkey or request a one-time email code.'],
+    action: { label: 'Go to sign in', url },
+    note: 'If you did not request this email, you can safely ignore it. Nothing has changed on your account.',
+  }));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -170,33 +186,42 @@ export async function retentionNotices(env: Env, db: Db, now: Date): Promise<num
   return sent;
 }
 
-function runwayMessage(due: number, hours: number, runway: { availableMicros: number; burnHourMicros: number; fundedUntil: Date | null }, url: string): Message {
-  const until = runway.fundedUntil ? ` (until ${utc(runway.fundedUntil)})` : '';
-  const untilZh = runway.fundedUntil ? `（至 ${utc(runway.fundedUntil)}）` : '';
-  return {
+export function runwayMessage(due: number, hours: number, runway: { availableMicros: number; burnHourMicros: number; fundedUntil: Date | null }, url: string): Message {
+  return renderEmail(url, {
     subject: due === 1 ? 'Your Nevazu credit runs out within an hour' : `Your Nevazu credit lasts less than ${due} hours`,
-    text:
-      `At your current spending of ${usd(runway.burnHourMicros)} per hour across your browsers, your available credit of ${usd(runway.availableMicros)} lasts about ${duration(hours)}${until}. ` +
-      `When it runs out, every paid browser stops at once, including browsers set to Never sleep. They are kept for ${DATA_KEPT_DAYS} days and then deleted unless you add credit. Add credit: ${url}\n\n` +
-      `按你所有浏览器目前每小时 ${usd(runway.burnHourMicros)} 的花费，可用余额 ${usd(runway.availableMicros)} 约可使用 ${duration(hours, true)}${untilZh}。` +
-      `余额用完时，所有付费浏览器会立即停止（包括设为“永不休眠”的浏览器），保留 ${DATA_KEPT_DAYS} 天后若仍未充值将被删除。充值：${url}`,
-  };
+    category: 'Balance reminder',
+    title: 'Keep your browsers running.',
+    preview: `About ${duration(hours)} of credit remains at your current spending.`,
+    paragraphs: ['Your available credit is running low. Add credit to keep your paid browsers running without interruption.'],
+    details: [
+      { label: 'Available credit', value: usd(runway.availableMicros) },
+      { label: 'Combined spending', value: `${usd(runway.burnHourMicros)} per hour` },
+      { label: 'Estimated time remaining', value: `About ${duration(hours)}` },
+      ...(runway.fundedUntil ? [{ label: 'Estimated credit exhaustion', value: utc(runway.fundedUntil) }] : []),
+    ],
+    afterDetails: [`When credit runs out, every paid browser stops, including those set to Never sleep. Your browsers are kept for ${DATA_KEPT_DAYS} days and then permanently deleted unless you add enough credit.`],
+    action: { label: 'Add credit', url },
+    note: 'Estimates reflect current spending and may change as you start or stop browsers.',
+  });
 }
 
-function lowBalanceMessage(url: string): Message {
-  return {
+export function lowBalanceMessage(url: string): Message {
+  return renderEmail(url, {
     subject: 'Your Nevazu balance is low',
-    text:
-      `Your prepaid balance is running low. When available credit is used up, browser access stops immediately. Your held deposit then pays fixed IP and disk costs for seven days. Add credit: ${url}\n\n` +
-      `你的预付余额即将用完。可用余额不足时立即停止使用，已预留余额仅支付接下来七天的 IP 和磁盘保留费。充值：${url}`,
-  };
+    category: 'Balance reminder',
+    title: 'Time for a top-up.',
+    preview: 'Add credit before your available balance runs out.',
+    paragraphs: ['Your prepaid balance is running low. Add credit now so your browsers are ready when you need them.',
+      `When available credit is used up, browser access stops immediately. Your held deposit then pays fixed IP and disk costs for ${DATA_KEPT_DAYS} days. Add enough credit before the retention period ends to avoid permanent deletion.`],
+    action: { label: 'Add credit', url },
+  });
 }
 
 /** Names every kept browser and its deletion time, and the exact top-up that keeps all of them. */
-async function retentionMessage(db: Db, r: Awaited<ReturnType<typeof retentionState>>, stage: 'd0' | 'd3' | 'final', url: string): Promise<Message> {
+export async function retentionMessage(db: Db, r: Awaited<ReturnType<typeof retentionState>>, stage: 'd0' | 'd3' | 'final', url: string): Promise<Message> {
   const ids = [...new Set(r.retained.map((b) => b.regionId))];
   const names = new Map((await db.select({ id: regions.id, name: regions.name }).from(regions).where(inArray(regions.id, ids))).map((x) => [x.id, x.name]));
-  const lines = r.retained.map((b) => `• ${b.name} (${names.get(b.regionId) ?? b.regionId}): ${utc(b.deletesAt)}`).join('\n');
+  const details = r.retained.map((b) => ({ label: `${b.name} (${names.get(b.regionId) ?? b.regionId})`, value: utc(b.deletesAt) }));
   const deleteOn = utc(r.retained[0]!.deletesAt);
   const need = usd(r.restoreNeededMicros ?? 0);
   const intro = {
@@ -204,21 +229,20 @@ async function retentionMessage(db: Db, r: Awaited<ReturnType<typeof retentionSt
     d3: 'Your browsers are still stopped because your credit ran out. Unless you add credit, they will be permanently deleted at these times:',
     final: 'This is the last reminder. Unless you add credit, these browsers and their data will be permanently deleted within 24 hours, and their IP addresses released:',
   }[stage];
-  const introZh = {
-    d0: '你的可用余额已用完，付费浏览器已停止。它们的数据和 IP 会保留到下列时间，之后将被永久删除：',
-    d3: '由于余额用完，你的浏览器仍处于停止状态。若不充值，它们将在下列时间被永久删除：',
-    final: '最后提醒：若不充值，以下浏览器及其数据将在 24 小时内被永久删除，IP 地址将被释放：',
-  }[stage];
-  return {
+  return renderEmail(url, {
     subject: { d0: 'Your Nevazu credit ran out: your browsers have stopped', d3: `Your Nevazu browsers will be deleted from ${deleteOn}`, final: 'Final reminder: your Nevazu browsers will be deleted within 24 hours' }[stage],
-    text:
-      `${intro}\n${lines}\n\n` +
-      `To keep them, add at least ${need}. Your balance must cover each kept browser's ${DATA_KEPT_DAYS}-day IP and disk deposit (${usd(r.depositsMicros)} in total) plus the ${usd(r.minBalanceMicros)} minimum balance; a smaller top-up is added to your balance but does not stop the deletion. ` +
-      `After that, your browsers stay asleep until you open each one: none restarts by itself, so running charges begin again only when you choose. Add credit: ${url}\n\n` +
-      `${introZh}\n${lines}\n\n` +
-      `如需保留，请至少充值 ${need}。余额需覆盖每个保留浏览器 ${DATA_KEPT_DAYS} 天的 IP 和磁盘预留（共 ${usd(r.depositsMicros)}）以及 ${usd(r.minBalanceMicros)} 最低余额；金额不足时会计入余额，但不会停止删除。` +
-      `充值后浏览器仍保持休眠，需要你逐个打开才会恢复，不会自动启动，因此只有在你选择时才会重新开始运行计费。充值：${url}`,
-  };
+    category: stage === 'final' ? 'Final retention reminder' : 'Browser retention',
+    title: stage === 'd0' ? 'Your browsers are on pause.' : stage === 'd3' ? 'Keep what you have built.' : 'Keep your browsers before time runs out.',
+    preview: `Add at least ${need} to keep all retained browsers. Deletion begins ${deleteOn}.`,
+    paragraphs: [intro],
+    details,
+    afterDetails: [
+      `To keep them, add at least ${need}. Your balance must cover each kept browser's ${DATA_KEPT_DAYS}-day IP and disk deposit (${usd(r.depositsMicros)} in total) plus the ${usd(r.minBalanceMicros)} minimum balance. A smaller top-up is added to your balance but does not stop the deletion.`,
+      'After you add enough credit, your browsers stay asleep until you open each one. None restarts by itself; running charges begin again only when you choose.',
+    ],
+    action: { label: 'Add credit and keep my browsers', url },
+    note: 'All deletion times are shown in UTC. Permanently deleted browser data cannot be recovered.',
+  });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -235,30 +259,36 @@ export async function sendUserNotices(env: Env, db: Db, now: Date): Promise<numb
   return pending.length;
 }
 
-function noticeMessage(kind: string, data: Record<string, unknown>, url: string): Message | null {
+export function noticeMessage(kind: string, data: Record<string, unknown>, url: string): Message | null {
   const name = typeof data.name === 'string' ? data.name : 'your browser';
   if (kind === 'network_paused') {
-    return {
+    return renderEmail(url, {
       subject: `Network paused on your Nevazu browser "${name}"`,
-      text:
-        `The security check could not confirm that "${name}" uses only its dedicated IP address, so its network was paused to make sure no other address is used. ` +
-        `It stays paused until you open the browser and choose Check again; it does not resume by itself. Contact support if this persists: ${url}\n\n` +
-        `安全检查未能确认“${name}”只使用其专属 IP，为确保不会使用其他地址，其网络已暂停。网络会一直暂停，直到你打开浏览器并选择“重新检查”，不会自动恢复。如持续出现请联系支持：${url}`,
-    };
+      category: 'Browser security',
+      title: 'Network paused to protect your IP.',
+      preview: 'Open your browser and choose Check again to review its network status.',
+      paragraphs: [`The security check could not confirm that "${name}" uses only its dedicated IP address. Its network was paused to make sure no other address is used.`,
+        'The network stays paused until you open the browser and choose Check again. It does not resume by itself. If the issue continues, contact support.'],
+      details: [{ label: 'Browser', value: name }, { label: 'Network', value: 'Paused' }],
+      action: { label: 'Review browser', url },
+    });
   }
   if (kind !== 'stopped') return null;
   const why = {
-    operator: [`An administrator stopped "${name}".`, `管理员停止了“${name}”。`],
-    suspended: [`"${name}" was suspended by an administrator and has stopped. It cannot start until the suspension is lifted; contact support if you did not expect this.`, `“${name}”已被管理员暂停使用并停止，解除暂停前无法启动。如有疑问请联系支持。`],
-    frozen: [`Your account is on hold because of a payment dispute, so "${name}" has stopped. Nothing can run until support resolves the hold.`, `由于付款争议，你的账户已被冻结，“${name}”已停止。在支持处理完成前无法运行。`],
+    operator: `An administrator stopped "${name}". You can open it to resume when you are ready.`,
+    suspended: `"${name}" was suspended by an administrator and has stopped. It cannot start until the suspension is lifted. Contact support if you did not expect this.`,
+    frozen: `Your account is on hold because of a payment dispute, so "${name}" has stopped. Nothing can run until support resolves the hold.`,
   }[data.reason as 'operator' | 'suspended' | 'frozen'];
   if (!why) return null;
-  return {
+  return renderEmail(url, {
     subject: `Your Nevazu browser "${name}" was stopped`,
-    text:
-      `${why[0]} It will not restart by itself, even if it was set to Never sleep; open it to resume when you are ready. Its data and IP address are kept. ${url}\n\n` +
-      `${why[1]}浏览器不会自动重新启动（即使设为“永不休眠”）；准备好后请打开它以恢复。数据和 IP 均会保留。${url}`,
-  };
+    category: 'Browser update',
+    title: data.reason === 'operator' ? 'Your browser has stopped.' : 'Your browser needs attention.',
+    preview: 'Review the details and next steps for your browser.',
+    paragraphs: [why, 'It will not restart by itself, even if it was set to Never sleep. Its data and IP address are kept.'],
+    details: [{ label: 'Browser', value: name }, { label: 'Status', value: 'Stopped' }],
+    action: { label: 'Review browser', url },
+  });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -305,17 +335,16 @@ async function userExists(db: Db, userId: string) {
   return !!u;
 }
 
-function rewardMessage(rows: { rewardMicros: number; title: { en: string; 'zh-CN': string } | null; taskId: string }[], balanceMicros: number | null, url: string): Message {
+export function rewardMessage(rows: { rewardMicros: number; title: { en: string; 'zh-CN': string } | null; taskId: string }[], balanceMicros: number | null, url: string): Message {
   const total = rows.reduce((a, r) => a + r.rewardMicros, 0);
-  const lines = (zh: boolean) => rows.map((r) => `• ${(zh ? r.title?.['zh-CN'] : r.title?.en) ?? r.taskId}: ${usd(r.rewardMicros)}`).join('\n');
-  const balance = balanceMicros === null ? '' : ` Your balance is now ${usd(balanceMicros)}.`;
-  const balanceZh = balanceMicros === null ? '' : `当前余额 ${usd(balanceMicros)}。`;
-  return {
+  return renderEmail(url, {
     subject: rows.length === 1 ? `You earned ${usd(total)} in Nevazu credit` : `You earned ${usd(total)} in Nevazu credit from ${rows.length} rewards`,
-    text:
-      `Thanks for trying Nevazu. We added ${usd(total)} to your balance for:\n${lines(false)}\n\n` +
-      `It is spent like any other credit.${balance} ${url}\n\n` +
-      `感谢使用 Nevazu。我们已向你的余额添加 ${usd(total)}，奖励来自：\n${lines(true)}\n\n` +
-      `奖励金额与普通余额一样使用。${balanceZh}${url}`,
-  };
+    category: 'Rewards',
+    title: 'A little credit. More possibilities.',
+    preview: `${usd(total)} in reward credit has been added to your balance.`,
+    paragraphs: [`Thanks for exploring Nevazu. We added ${usd(total)} to your balance for completing ${rows.length === 1 ? 'this task' : 'these tasks'}:`],
+    details: rows.map((r) => ({ label: r.title?.en ?? r.taskId, value: usd(r.rewardMicros) })),
+    afterDetails: [`Reward credit is spent like any other credit.${balanceMicros === null ? '' : ` Your balance is now ${usd(balanceMicros)}.`}`],
+    action: { label: 'View my balance', url },
+  });
 }

@@ -148,7 +148,7 @@ describe('funded time', () => {
 
     expect(await sweep()).toMatchObject({ runway: 1, lowBalance: 0 });
     expect(t.emails.at(-1)!.subject).toBe('Your Nevazu credit lasts less than 24 hours');
-    expect(t.emails.at(-1)!.text).toMatch(/including browsers set to Never sleep/);
+    expect(t.emails.at(-1)!.text).toMatch(/including those set to Never sleep/);
     expect(await sweep()).toMatchObject({ runway: 0, lowBalance: 0 });
 
     await fundFor(5);
@@ -222,7 +222,7 @@ describe('notices the engine queues', () => {
       ('ip:i1:1', ?, 'network_paused', 'i1', '{"name":"Work"}', ?)`).run(userId, at, userId, at + 1);
     expect((await sweep()).userNotices).toBe(2);
     expect(t.emails.slice(-2).map((e) => e.subject)).toEqual(['Your Nevazu browser "Work" was stopped', 'Network paused on your Nevazu browser "Work"']);
-    expect(t.emails.at(-2)!.text).toMatch(/An administrator stopped "Work"\. It will not restart by itself, even if it was set to Never sleep/);
+    expect(t.emails.at(-2)!.text).toMatch(/An administrator stopped "Work"\.[\s\S]*It will not restart by itself, even if it was set to Never sleep/);
     expect(t.emails.at(-1)!.text).toMatch(/does not resume by itself/);
     expect((await sweep()).userNotices).toBe(0);
   });

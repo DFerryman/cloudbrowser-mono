@@ -261,9 +261,9 @@ describe('prepaid balance', () => {
     expect((await sweep(1)).notices).toBe(0);
     const notice = t.emails.at(-1)!;
     expect(notice.subject).toMatch(/credit ran out/);
-    expect(notice.text).toContain(`• w (Tokyo): ${deletesAt.toISOString().slice(0, 16).replace('T', ' ')} UTC`);
+    expect(notice.text).toContain(`w (Tokyo): ${deletesAt.toISOString().slice(0, 16).replace('T', ' ')} UTC`);
     expect(notice.text).toMatch(/add at least \$\d+\.\d\d/);
-    expect(notice.text).toMatch(/none restarts by itself/);
+    expect(notice.text).toMatch(/None restarts by itself/);
     // Three days on, then a final reminder within a day of deletion; each once.
     expect((await sweep(3)).notices).toBe(1);
     expect((await sweep(4)).notices).toBe(0);

@@ -56,7 +56,8 @@ describe('user notifications', () => {
     expect(rewardEmails()).toHaveLength(1);
     expect(rewardEmails()[0]).toMatchObject({ to: 'user@example.com', subject: 'You earned $2.00 in Nevazu credit from 2 rewards' });
     expect(rewardEmails()[0]!.text).toContain('Open a browser: $1.00');
-    expect(rewardEmails()[0]!.text).toContain('Turn on 2FA（中文）');
+    expect(rewardEmails()[0]!.text).toContain('Turn on 2FA: $1.00');
+    expect(rewardEmails()[0]!.text).not.toMatch(/[\u3400-\u9fff]/);
     expect(rewardEmails()[0]!.text).toContain('balance is now $7.00');
 
     // A later reward waits for the cooldown, then gets its own email; nothing is sent twice.

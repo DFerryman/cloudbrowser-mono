@@ -6,10 +6,11 @@ The code is in `apps/api/src/notifications`:
 | File | What |
 |---|---|
 | `send.ts` | Sending (`sendTo`, `sendToUser`) and `notification_state`, the key/value table that remembers what was last said so nothing repeats |
+| `template.ts` | Shared English HTML layout and matching plain-text fallback; escapes all dynamic content |
 | `user.ts` | **User-facing**: emails about the user's own account |
 | `admin.ts` | **Administrator**: operator alerts and their delivery |
 
-Everything except sign-in codes runs from the api Worker's 5-minute cron (`scheduled` in
+Authentication emails are sent on request. Everything else runs from the api Worker's 5-minute cron (`scheduled` in
 `apps/api/src/index.ts`): billing sweep → promotions → reward emails → admin watchers → alert delivery.
 
 ## 1. User-facing notifications
@@ -20,7 +21,9 @@ deleted, a browser stopped by someone else) is never held back; it is already ra
 
 | Email | Trigger | Repeat rule |
 |---|---|---|
-| Sign-in code | User requests it | Rate limited (5/min per IP and address) |
+| Sign-in code | User requests it (including sign-up with an existing address) | Rate limited (5/min per IP and address) |
+| Registration link | New address requests sign-up | Single-use link, expires in 30 minutes; same authentication rate limits |
+| Already registered | Legacy registration-link request for an existing account | Points to sign-in; does not sign the recipient in |
 | Credit lasts < 24 h / 6 h / 1 h | Funded time at current spending crosses each mark | Once per mark while credit falls; re-armed only at 1.25× the mark |
 | Low balance | Available credit drops below the console's low-balance threshold | Once per dip; skipped if a funded-time warning already went out; **at most once per 3 days** (`LOW_BALANCE_COOLDOWN_MS`) |
 | Credit ran out / deletion reminders | Usable credit is gone | Exactly three: at the time, after 3 days, 1 day before deletion |
@@ -29,6 +32,25 @@ deleted, a browser stopped by someone else) is never held back; it is already ra
 
 Rewards credited before this release are marked as already notified by migration `0028`, so the
 deploy does not email past rewards.
+
+### Email presentation
+
+All user-facing emails use English copy, regardless of the web app's language setting. Browser
+names remain as entered by the user; rewards use their English task titles. Every send includes
+both HTML and a complete plain-text alternative generated from the same content.
+
+The shared layout follows the web design: neutral surfaces, square cards, hairline borders,
+strong headings and a solid black primary action. Sign-in codes have a large monospace block;
+financial amounts, browser names and UTC deletion deadlines have their own detail rows. Emails
+include a preview line, support/privacy links and a copyable URL below each action button.
+Authentication expiry and safety notes remain explicit.
+
+The layout uses presentation tables, inline CSS, system fonts and a responsive mobile inset.
+The hosted brand mark is optional decoration: the wordmark and all useful content remain readable
+with remote images blocked. There are no scripts, forms, embedded web fonts or tracking pixels.
+All dynamic text and link attributes are escaped, and action URLs must use HTTP or HTTPS.
+`test/email-content.test.ts` covers all user-email variants, English copy, HTML escaping, links,
+codes, amounts, deadlines and text fallbacks. Tests capture messages locally and do not send mail.
 
 ## 2. Administrator notifications
 
