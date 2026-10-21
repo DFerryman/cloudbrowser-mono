@@ -27,6 +27,8 @@
     "ENVIRONMENT": "production",
     // Must be on a domain onboarded to Cloudflare Email Service (Email Sending).
     "EMAIL_FROM": "no-reply@auth.nevazu.com",
+    // Cloudflare Turnstile on sign-in and sign-up (secret: TURNSTILE_SECRET_KEY).
+    "TURNSTILE_SITE_KEY": "0x4AAAAAAFe-qsMj-V1PL5xE",
     // Public URL of the session gateway Worker (apps/gateway), e.g. wss://connect.example.com.
     "GATEWAY_URL": "wss://connect.nevazu.com",
     // Prepaid top-ups with Creem (page 6). Off until the API base, the top-up product ids and the
