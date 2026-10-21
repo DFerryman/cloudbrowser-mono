@@ -2,6 +2,7 @@ import { Button, cn } from '@cloudbrowser/ui';
 import { Languages, LogOut, Shield } from 'lucide-react';
 import { NavLink, Navigate, Route, Routes } from 'react-router';
 import { ApiError } from '../../lib/api.js';
+import { BrandIcon } from '../../app/BrandIcon.js';
 import { AlertsPage, AuditPage, FindingsPage, OperationsPage, UsersPage } from './Lists.js';
 import { BrowserDetailPage, BrowsersPage } from './Browsers.js';
 import { LimitsPage } from './Limits.js';
@@ -84,7 +85,7 @@ function Console({ session }: { session: AdminSession }) {
     <div className="flex min-h-dvh flex-col md:flex-row">
       <aside className="border-b border-border bg-surface p-3 md:sticky md:top-0 md:h-dvh md:w-52 md:shrink-0 md:border-r md:border-b-0">
         <a href={APP_URL} className="flex w-fit items-center gap-2 px-2 py-2 text-sm font-semibold">
-          <Shield className="size-4" aria-hidden /> {t('shell.title')}
+          <BrandIcon className="size-7" /> {t('shell.title')}
         </a>
         <nav className="mt-2 flex gap-1 overflow-x-auto md:flex-col">
           {NAV.map(([to, label]) => (

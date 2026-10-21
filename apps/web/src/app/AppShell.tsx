@@ -13,19 +13,13 @@ import { useLiveEvents } from '../lib/events.js';
 import { useI18n } from '../lib/i18n.js';
 import { queryClient } from '../lib/query.js';
 import { ThemeItems } from './Preferences.js';
+import { BrandIcon } from './BrandIcon.js';
 
 export function Logo({ compact }: { compact?: boolean }) {
   const { t } = useI18n();
   return (
     <span className="flex items-center gap-2.5 text-[15px] font-semibold tracking-tight">
-      <img
-        src="/nevazu-logo.png"
-        alt=""
-        aria-hidden="true"
-        width={32}
-        height={16}
-        className={cn('h-auto w-8 shrink-0 object-contain', compact && 'w-6 lg:w-8')}
-      />
+      <BrandIcon className={cn(compact && 'size-6 lg:size-8')} />
       <span className={cn(compact && 'hidden lg:inline')}>{t('app.name')}</span>
     </span>
   );
@@ -162,7 +156,7 @@ export function AppShell() {
         {!collapsed ? <ResizeHandle {...sidebar.handleProps} edge="right" dragging={sidebar.dragging} label={t('nav.resize')} /> : null}
         <div className={cn('flex items-center gap-2 py-2', collapsed ? 'justify-center' : 'px-1.5')}>
           <Link to="/" aria-label={t('nav.home')} className="inline-flex min-w-0">
-            {collapsed ? <img src="/nevazu-logo.png" alt="" width={28} height={14} className="h-auto w-7" /> : <Logo />}
+            {collapsed ? <BrandIcon className="size-7" /> : <Logo />}
           </Link>
           {wide && !collapsed ? (
             <button type="button" onClick={() => setCollapsed(true)} className="ml-auto grid size-7 place-items-center text-subtle transition-colors hover:bg-surface-2 hover:text-fg" aria-label={t('nav.collapse')} title={t('nav.collapse')}>
