@@ -915,8 +915,8 @@ export const notificationState = sqliteTable('notification_state', {
 });
 
 /**
- * Alerts for operators (page 7, page 10): any Worker inserts a row; the api's cron sends new ones
- * to the alert email and chat webhook, and the console lists them until acknowledged.
+ * Alerts for operators (page 7, page 10): any Worker inserts a row; the api's cron emails critical
+ * alerts and sends all severities to the chat webhook. The console lists them until acknowledged.
  */
 export const alerts = sqliteTable(
   'alerts',

@@ -1,5 +1,5 @@
 import { createDb } from '@cloudbrowser/db';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { billingSweep } from '../src/billing/sweep.js';
 import { alertRecipients, deliverAlerts, inventoryAlerts, promotionBudgetAlerts, userMilestoneAlerts } from '../src/notifications/admin.js';
 import { LOW_BALANCE_COOLDOWN_MS, REWARD_BATCH_MS, REWARD_COOLDOWN_MS, rewardNotices } from '../src/notifications/user.js';
@@ -17,6 +17,8 @@ beforeEach(async () => {
   await signIn(t, 'user@example.com');
   userId = (t.d1.sqlite.prepare('SELECT id FROM user').get() as { id: string }).id;
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 describe('user notifications', () => {
   it('emails a low balance once per dip, and no more than once per cooldown when it hovers around the threshold', async () => {
@@ -115,12 +117,62 @@ describe('admin notifications', () => {
     expect(alertTitles()).toEqual(['Promotion "Try it" reached its limit of 1 completions and is no longer offered']);
   });
 
-  it('emails alerts to the admin allowlist when no alert address is set', async () => {
+  it('emails critical alerts to the admin allowlist when no alert address is set', async () => {
     Object.assign(t.env, { ALERT_EMAILS: '', ADMIN_EMAIL_ALLOWLIST: 'ops@example.com, owner@example.com' });
     expect(alertRecipients(t.env as never)).toEqual(['ops@example.com', 'owner@example.com']);
     await userMilestoneAlerts(db(), new Date()); // 1 user: no milestone yet
-    t.d1.sqlite.exec(`INSERT INTO alerts (source, severity, title, created_at) VALUES ('api', 'warning', 'Something', ${Date.now()})`);
+    t.d1.sqlite.exec(`INSERT INTO alerts (source, severity, title, created_at) VALUES ('api', 'critical', 'Something', ${Date.now()})`);
     expect(await deliverAlerts(t.env as never, db())).toBe(1);
-    expect(t.emails.slice(-2).map((m) => [m.to, m.subject])).toEqual([['ops@example.com', 'Nevazu: Something'], ['owner@example.com', 'Nevazu: Something']]);
+    expect(t.emails.slice(-2).map((m) => [m.to, m.subject])).toEqual([['ops@example.com', '[CRITICAL] Nevazu: Something'], ['owner@example.com', '[CRITICAL] Nevazu: Something']]);
+  });
+
+  it.each(['info', 'warning'])('processes %s alerts without email or a webhook and keeps them open in the console', async (severity) => {
+    t.emails.length = 0;
+    const now = new Date();
+    t.d1.sqlite.prepare('INSERT INTO alerts (source, severity, title, created_at) VALUES (?, ?, ?, ?)')
+      .run('api', severity, 'Routine update', now.getTime());
+    expect(await deliverAlerts(t.env as never, db(), now)).toBe(1);
+    expect(t.emails).toHaveLength(0);
+    expect(t.d1.sqlite.prepare('SELECT sent_at, acknowledged_at FROM alerts').get())
+      .toEqual({ sent_at: now.getTime(), acknowledged_at: null });
+    expect(await deliverAlerts(t.env as never, db())).toBe(0);
+  });
+
+  it('emails only critical alerts from a mixed batch while the webhook receives all severities', async () => {
+    t.emails.length = 0;
+    Object.assign(t.env, { ALERT_EMAILS: 'product@example.com', ALERT_WEBHOOK_URL: 'https://chat.example.test/alerts', ADMIN_URL: 'https://admin.example.test' });
+    const webhook = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }));
+    const now = new Date();
+    for (const [severity, title] of [['info', 'Routine update'], ['warning', 'Inventory low'], ['critical', 'Launch failed'], ['critical', 'Purge failed']]) {
+      t.d1.sqlite.prepare('INSERT INTO alerts (source, severity, title, created_at) VALUES (?, ?, ?, ?)')
+        .run('api', severity, title, now.getTime());
+    }
+    expect(await deliverAlerts(t.env as never, db(), now)).toBe(4);
+    expect(t.emails).toEqual([expect.objectContaining({
+      to: 'product@example.com',
+      subject: '[CRITICAL] Nevazu: 2 new alerts',
+      text: '[CRITICAL] api: Launch failed\n[CRITICAL] api: Purge failed\n\nhttps://admin.example.test/alerts',
+    })]);
+    expect(webhook).toHaveBeenCalledTimes(1);
+    expect(webhook).toHaveBeenCalledWith('https://chat.example.test/alerts', expect.objectContaining({
+      body: JSON.stringify({ text: '[INFO] api: Routine update\n[WARNING] api: Inventory low\n[CRITICAL] api: Launch failed\n[CRITICAL] api: Purge failed\nhttps://admin.example.test/alerts' }),
+    }));
+    expect(t.d1.sqlite.prepare('SELECT count(*) AS n FROM alerts WHERE sent_at IS NULL').get()).toEqual({ n: 0 });
+    expect(t.d1.sqlite.prepare('SELECT count(*) AS n FROM alerts WHERE acknowledged_at IS NULL').get()).toEqual({ n: 4 });
+    expect(await deliverAlerts(t.env as never, db())).toBe(0);
+    expect(t.emails).toHaveLength(1);
+    expect(webhook).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries failed critical email delivery on the next sweep', async () => {
+    t.emails.length = 0;
+    const send = vi.spyOn(t.env.EMAIL, 'send').mockRejectedValueOnce(new Error('Email unavailable'));
+    t.d1.sqlite.exec(`INSERT INTO alerts (source, severity, title, created_at) VALUES ('api', 'critical', 'Launch failed', ${Date.now()})`);
+    expect(await deliverAlerts(t.env as never, db())).toBe(0);
+    expect(t.d1.sqlite.prepare('SELECT sent_at FROM alerts').get()).toEqual({ sent_at: null });
+    expect(await deliverAlerts(t.env as never, db())).toBe(1);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(t.emails).toHaveLength(1);
+    expect(await deliverAlerts(t.env as never, db())).toBe(0);
   });
 });

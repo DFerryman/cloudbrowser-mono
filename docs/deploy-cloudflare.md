@@ -293,7 +293,8 @@ pnpm exec wrangler secret put ALERT_WEBHOOK_URL    # Slack-compatible incoming w
 ```
 
 and `ALERT_EMAILS` in `apps/api/wrangler.jsonc` (comma-separated; Email Service must be able to
-send to them).
+send to them; defaults to `ADMIN_EMAIL_ALLOWLIST` when empty). Only `critical` alerts are emailed.
+`info` and `warning` alerts remain in the console and go to the webhook if configured.
 
 ## 3d. Real browsers on AWS
 

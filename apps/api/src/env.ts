@@ -50,7 +50,7 @@ export interface Env {
   ACCESS_AUD?: string;
   /** Authorized operator emails; defaults to the deployment owner's address. */
   ADMIN_EMAIL_ALLOWLIST?: string;
-  /** Where operator alerts go: comma-separated emails (default: ADMIN_EMAIL_ALLOWLIST) and a Slack-compatible webhook URL. */
+  /** Critical-only operator email recipients (default: ADMIN_EMAIL_ALLOWLIST); webhook receives all severities. */
   ALERT_EMAILS?: string;
   ALERT_WEBHOOK_URL?: string;
   /** Wraps per-browser archive keys (base64, 32 bytes); same value as the engine's. Secret. */

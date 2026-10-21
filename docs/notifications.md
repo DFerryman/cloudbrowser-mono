@@ -33,9 +33,12 @@ deploy does not email past rewards.
 ## 2. Administrator notifications
 
 Every administrator notification is an operator alert (`raiseAlert` in `@cloudbrowser/db`): listed
-in the console under Alerts until acknowledged, and sent once by `deliverAlerts` (batched per sweep)
-to `ALERT_EMAILS` and the `ALERT_WEBHOOK_URL` chat webhook. **When `ALERT_EMAILS` is empty, alerts go
-to `ADMIN_EMAIL_ALLOWLIST`** (previously they went nowhere by email).
+in the console under Alerts until acknowledged. `deliverAlerts` batches new alerts per sweep:
+**only `critical` alerts are emailed** to `ALERT_EMAILS`; `info` and `warning` alerts are excluded
+from both email subjects and bodies, including mixed batches. All severities still go to the
+`ALERT_WEBHOOK_URL` chat webhook if configured. **When `ALERT_EMAILS` is empty, critical alerts go
+to `ADMIN_EMAIL_ALLOWLIST`.** Processed alerts are marked with `sent_at`, including info/warning
+alerts skipped by email when no webhook is configured, so they do not stay queued or repeat.
 
 | Alert | Raised by | Repeat rule |
 |---|---|---|

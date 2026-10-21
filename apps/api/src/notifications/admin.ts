@@ -1,8 +1,8 @@
 /**
  * Administrator notifications: everything operators are told about the platform. All of them are
  * operator alerts (`raiseAlert`, `@cloudbrowser/db`): they are listed in the console until
- * acknowledged, and `deliverAlerts` sends each new one once to ALERT_EMAILS (default: the admin
- * allowlist) and the chat webhook, batched per 5-minute sweep.
+ * acknowledged. `deliverAlerts` sends critical alerts to ALERT_EMAILS (default: the admin
+ * allowlist), and all severities to the chat webhook, batched per 5-minute sweep.
  *
  * Raised by other Workers: circuit breaker and drift (reconciler), projected spend at 80% / 100% of
  * the budget (reconciler), missing prices (engine), failed launches and purges (engine), Creem
@@ -30,15 +30,14 @@ export function alertRecipients(env: Env) {
   return list.split(',').map((e) => e.trim()).filter(Boolean);
 }
 
-/** Delivers new operator alerts. Each alert is sent once; the console keeps listing it until acknowledged. */
+/** Processes new alerts once: critical-only email, all severities to chat; all remain in the console until acknowledged. */
 export async function deliverAlerts(env: Env, db: Db, now = new Date()): Promise<number> {
   const pending = await db.select().from(alerts).where(isNull(alerts.sentAt)).orderBy(asc(alerts.createdAt)).limit(50);
   if (!pending.length) return 0;
   const lines = pending.map((a) => `[${a.severity.toUpperCase()}] ${a.source}: ${a.title}`);
   const link = env.ADMIN_URL ? new URL('/alerts', env.ADMIN_URL).href : `${env.APP_URL}/admin/alerts`;
   const emails = alertRecipients(env);
-  const critical = pending.some((a) => a.severity === 'critical');
-  const worst = critical ? '[CRITICAL] ' : pending.some((a) => a.severity === 'warning') ? '' : '[info] ';
+  const emailAlerts = pending.filter((a) => a.severity === 'critical');
   try {
     if (env.ALERT_WEBHOOK_URL) {
       // Slack-compatible incoming webhook payload (also accepted by Mattermost, Discord's /slack, Feishu bots).
@@ -49,11 +48,11 @@ export async function deliverAlerts(env: Env, db: Db, now = new Date()): Promise
       });
       if (!res.ok) throw new Error(`alert webhook HTTP ${res.status}`);
     }
-    if (emails.length && env.EMAIL) {
+    if (emailAlerts.length && emails.length && env.EMAIL) {
       for (const to of emails) {
         await sendTo(env, to, {
-          subject: `${worst}Nevazu: ${pending.length === 1 ? pending[0]!.title : `${pending.length} new alerts`}`,
-          text: `${lines.join('\n')}\n\n${link}`,
+          subject: `[CRITICAL] Nevazu: ${emailAlerts.length === 1 ? emailAlerts[0]!.title : `${emailAlerts.length} new alerts`}`,
+          text: `${emailAlerts.map((a) => `[${a.severity.toUpperCase()}] ${a.source}: ${a.title}`).join('\n')}\n\n${link}`,
         }, 'Nevazu alerts');
       }
     }
@@ -61,6 +60,7 @@ export async function deliverAlerts(env: Env, db: Db, now = new Date()): Promise
     console.error('alert delivery failed; retrying next sweep', e);
     return 0;
   }
+  // Also finish info/warning alerts when no webhook is configured, so they do not stay queued forever.
   await db.update(alerts).set({ sentAt: now }).where(inArray(alerts.id, pending.map((a) => a.id)));
   return pending.length;
 }

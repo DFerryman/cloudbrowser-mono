@@ -73,7 +73,7 @@ const M = {
   'switches.inviteOnlyHelp': ['开：只有 invites 表中的邮箱能收到登录码和注册。关：任何邮箱都可以注册（默认）。', 'On: only addresses in the invites table receive sign-in codes and can sign up. Off: anyone can sign up (the default).'],
   'switches.lastChange': ['上次修改：{reason} · {when}', 'Last change: {reason} · {when}'],
 
-  'alerts.note': ['新告警每 5 分钟发送到告警邮箱和聊天 Webhook。处理后请确认。', 'New alerts are sent to the alert emails and the chat webhook every 5 minutes. Acknowledge once handled.'],
+  'alerts.note': ['每 5 分钟处理新告警：仅 critical（严重）级别发送邮件，所有级别均保留在此处并发送到聊天 Webhook（如已配置）。处理后请确认。', 'New alerts are processed every 5 minutes: only critical alerts are emailed; all severities remain here and go to the chat webhook if configured. Acknowledge once handled.'],
   'alerts.empty': ['没有未处理的告警。', 'No open alerts.'],
   'alerts.ack': ['确认', 'Acknowledge'],
   'alerts.acked': ['已确认 {when}', 'ack {when}'],
