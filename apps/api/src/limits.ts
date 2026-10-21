@@ -146,6 +146,10 @@ async function checkRegionRoom(db: Db, regionId: string, tier: BrowserTier = 'ba
   }
   const inventory = (await awsInventory(db)).get(regionId);
   if (inventory) {
+    // Not a shortage: we have no recent enough view of the region's quota.
+    if (inventory.availability !== 'ready') {
+      throw problem(409, 'region_unavailable', 'This region is being checked for room right now. Try again in a few minutes or choose another region.', { limit: 'refreshing' });
+    }
     if (inventory.availableByTier[tier] < 1) {
       throw problem(409, 'region_unavailable', tier === 'premium'
         ? 'AWS has no room for another Premium browser in this region right now. Choose Basic or another region.'

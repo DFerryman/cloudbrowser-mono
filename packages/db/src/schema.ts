@@ -629,7 +629,10 @@ export const awsProviderState = sqliteTable('aws_provider_state', {
   id: integer('id').primaryKey(), accountId: text('account_id'), managementAccountId: text('management_account_id'), organizationId: text('organization_id'),
   connection: json<Record<string, unknown>>('connection'), billing: json<Record<string, unknown>>('billing'),
   billingAt: ts('billing_at'), catalogAt: ts('catalog_at'), lastError: text('last_error'), lastErrorAt: ts('last_error_at'),
+  /** Guards the account-level work (billing); regions have their own leases. */
   syncLeaseUntil: ts('sync_lease_until').notNull(),
+  /** The last synchronization run's summary, for diagnostics. */
+  lastRun: json<Record<string, unknown>>('last_run'),
 });
 export const awsProviderRegions = sqliteTable('aws_provider_regions', {
   regionId: text('region_id').primaryKey().references(() => regions.id), providerRegion: text('provider_region').notNull().unique(),
@@ -640,6 +643,10 @@ export const awsProviderRegions = sqliteTable('aws_provider_regions', {
   vcpuCapacity: integer('vcpu_capacity'),
   basicVcpus: integer('basic_vcpus').notNull().default(2), premiumVcpus: integer('premium_vcpus').notNull().default(4),
   premiumOffered: integer('premium_offered', { mode: 'boolean' }).notNull().default(false),
+  /** `checkedAt` is when this region's quota and usage reads began, not when the run started. */
+  syncLeaseUntil: ts('sync_lease_until'), lastErrorAt: ts('last_error_at'),
+  /** Consecutive failed refreshes; a failure keeps the last snapshot until it expires. */
+  syncFailures: integer('sync_failures').notNull().default(0), syncMs: integer('sync_ms'),
 });
 
 /**

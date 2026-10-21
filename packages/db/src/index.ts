@@ -19,7 +19,7 @@ export function eventRow(userId: string, type: string, data: Record<string, unkn
 export { newArchiveKey, wrapArchiveKey, unwrapArchiveKey } from './archive-keys.js';
 export { userCaps, trialMinutes, billingRequired, usageMonth, usageDay } from './caps.js';
 export { pricingSettings, priceSheets, type StoredSheet } from './pricing.js';
-export { awsInventory } from './aws-provider.js';
+export { awsInventory, INVENTORY_MAX_AGE_MS, type AwsInventory, type InventoryUnavailableReason } from './aws-provider.js';
 export { raiseAlert, type AlertSeverity } from './alerts.js';
 
 export { accountRunway, convertTrialStatements, prepaidBalance, prepaidAccess, reservationQuote, reservationWrite, reservedTotalSql, settleRunningStatements, type AccountRunway, type ReservationQuote, type PrepaidAccessReason } from './prepaid.js';

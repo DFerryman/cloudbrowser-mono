@@ -53,15 +53,16 @@ export default {
   },
   async queue(batch: MessageBatch<{force:boolean}>,env: Env) {
     for (const msg of batch.messages) {
-      try { const result=await syncAwsProvider(env, msg.body.force); if ('busy' in result) msg.retry({delaySeconds:60}); else msg.ack(); }
-      catch { msg.retry({delaySeconds:300}); }
+      // Regions another run is refreshing, or this one had no time for, are left to the next cron.
+      try { await syncAwsProvider(env, { force: msg.body.force, trigger: 'queue' }); msg.ack(); }
+      catch (e) { console.error(JSON.stringify({ event: 'aws_sync.queue_retry', attempts: msg.attempts, error: (e as Error).message })); msg.retry({delaySeconds:300}); }
     }
   },
   async scheduled(controller, env) {
     const deps = makeDeps(env);
     if (env.AWS_ACCESS_KEY_ID) {
-      try { await syncAwsProvider(env); }
-      catch { console.error('AWS provider sync failed; details recorded in provider state'); }
+      try { await syncAwsProvider(env, { trigger: 'cron', scheduledTime: controller.scheduledTime }); }
+      catch (e) { console.error(JSON.stringify({ event: 'aws_sync.cron_failed', error: (e as Error).message })); }
     }
     // Each step is independent: a failure in one (logged) never skips the next.
     try { console.log('reconcile', JSON.stringify(await reconcileLedger(deps))); }

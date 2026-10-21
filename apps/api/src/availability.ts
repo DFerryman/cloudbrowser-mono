@@ -15,13 +15,15 @@ export function availabilityOf(input: {
   acceptingNew: boolean;
   /** Browsers the inventory still allows; null when the region has no inventory. */
   stock: number | null;
+  /** The inventory snapshot is stale or failed to refresh: room unknown, not used up. */
+  refreshing?: boolean;
   health: LaunchHealthRow[];
   now: Date;
 }): Pick<Region, 'availability' | 'availabilityReason'> {
   if (!input.enabled) return { availability: 'unavailable', availabilityReason: 'closed' };
   const issue = openProviderIssue(input.health, input.now);
   if (issue) return { availability: 'unavailable', availabilityReason: blocksRegion(issue) ? 'blocked' : 'provider_issue' };
-  if (!input.acceptingNew) return { availability: 'unavailable', availabilityReason: input.stock === 0 ? 'no_stock' : 'closed' };
+  if (!input.acceptingNew) return { availability: 'unavailable', availabilityReason: input.refreshing ? 'refreshing' : input.stock === 0 ? 'no_stock' : 'closed' };
   const shortage = Math.max(0, ...input.health.map((r) => recentCapacityAt(r, input.now)));
   const success = Math.max(0, ...input.health.map((r) => r.lastSuccessAt?.getTime() ?? 0));
   if (shortage > success) return { availability: 'limited', availabilityReason: 'capacity' };
@@ -64,7 +66,8 @@ export async function regionViews(db: Db, from: { lat: number; lon: number } | n
     const acceptingNewBase = r.enabled && (stock !== null ? stock > 0 : await regionAcceptingNew(db, r.id));
     const facts = r.executor === 'aws-ec2' ? AWS_REGION_FACTS[r.providerRegion] : undefined;
     const rows = health.get(r.id) ?? [];
-    const { availability, availabilityReason } = availabilityOf({ enabled: r.enabled, acceptingNew: acceptingNewBase, stock, health: rows, now });
+    const refreshing = !!inventory && inventory.availability !== 'ready' && inventory.reason !== 'disabled';
+    const { availability, availabilityReason } = availabilityOf({ enabled: r.enabled, acceptingNew: acceptingNewBase, stock, refreshing, health: rows, now });
     // Premium where the region prices a Premium machine and, under AWS inventory, offers one.
     const premiumOffered = !!sheets.get(r.id)?.sheet.premium && (!inventory || !!inventory.premium_offered);
     const premiumStock = inventory ? inventory.availableByTier.premium : null;
@@ -73,6 +76,7 @@ export async function regionViews(db: Db, from: { lat: number; lon: number } | n
         enabled: r.enabled,
         acceptingNew: r.enabled && (premiumStock !== null ? premiumStock > 0 : await regionAcceptingNew(db, r.id, 'premium')),
         stock: premiumStock,
+        refreshing,
         health: rows,
         now,
       }),

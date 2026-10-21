@@ -39,7 +39,7 @@ export const Region = z.object({
    * fixes it; `provider_issue`: a provider failure that is retried after a pause.
    */
   availability: z.enum(['available', 'limited', 'unavailable']),
-  availabilityReason: z.enum(['low_stock', 'capacity', 'provider_issue', 'blocked', 'no_stock', 'closed']).nullable(),
+  availabilityReason: z.enum(['low_stock', 'capacity', 'provider_issue', 'blocked', 'no_stock', 'refreshing', 'closed']).nullable(),
   /**
    * When a browser last launched here: null for a region where none has yet (configuration
    * checks passed, but no VM has proved it).
@@ -54,7 +54,7 @@ export const Region = z.object({
    */
   premium: z.object({
     availability: z.enum(['available', 'limited', 'unavailable']),
-    availabilityReason: z.enum(['low_stock', 'capacity', 'provider_issue', 'blocked', 'no_stock', 'closed']).nullable(),
+    availabilityReason: z.enum(['low_stock', 'capacity', 'provider_issue', 'blocked', 'no_stock', 'refreshing', 'closed']).nullable(),
     inventory: RegionInventory.optional(),
   }).nullable().optional(),
 });

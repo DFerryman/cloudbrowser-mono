@@ -19,8 +19,19 @@ and errors. Changes to inventory policy require a reason and are audited.
 | Organization / linked accounts / gross cost | Organizations and Cost Explorer | Every 6 hours or manual refresh |
 | Credits | Billing GetCredits, using the management role | Every 6 hours or manual refresh |
 
-Workers use a bounded, request-scoped client pool. Synchronizations take a D1 lease; manual
-refreshes run through `cloudbrowser-aws-provider` rather than an HTTP request's background lifetime.
+Workers use a bounded, request-scoped client pool. Each region is claimed with its own D1 lease
+(`aws_provider_regions.sync_lease_until`), so runs may overlap without reading a region twice and a
+slow region never makes later runs skip the others; billing alone takes the account lease
+(`aws_provider_state.sync_lease_until`). Every 5-minute run refreshes regions whose snapshot is over
+4 minutes old, oldest first, six at a time, and starts none after 3 minutes, leaving the rest to the
+next run. A region's `checked_at` is when its quota and usage reads began, not when the run started.
+A failed read keeps the last snapshot (`last_error`, `last_error_at`, `sync_failures` record it) until
+it expires; only an answer that the region cannot host browsers (no network, no supported machine)
+withdraws it at once. Each run logs JSON lines (`aws_sync.start` with the cron's start delay,
+`aws_sync.region_failed`, `aws_sync.billing_skipped`, `aws_sync.done` with refreshed, failed, taken
+and deferred regions and the oldest snapshot's age) and stores its summary in
+`aws_provider_state.last_run`. Manual refreshes run through `cloudbrowser-aws-provider` rather than
+an HTTP request's background lifetime.
 The API reaches the private reconciler through a service binding. There is no public sync URL.
 
 Region and price data are not a local fixed list. The three compatible machine types, Ubuntu
@@ -53,7 +64,14 @@ but the second transaction sees the first browser and is refused: nothing of it 
 deposit, operation or idempotency record), the API answers `409 region_unavailable` with
 `limit: no_stock`, and the create dialog refreshes the region list.
 
-Quota observations expire after 20 minutes. New purchases stop after 48 hours without a good
+Quota observations expire after 20 minutes. `aws_region_inventory.reason` says why a region is
+unavailable: `stale` (snapshot expired), `sync_failed`, `pending` (never refreshed), `prices` or
+`disabled`; NULL when ready. Only a ready region with `quota_available` 0 is out of AWS quota. The
+create API answers a stale or failing region with `limit: refreshing`, and the region picker shows it
+as `refreshing`, not `no_stock`. Operator alerts (api cron) keep the kinds apart (out of AWS quota,
+refresh behind, refresh failing with its error, prices missing), report a problem only after it has
+lasted 10 minutes, put every region with the same problem in one alert (critical when the refresh is
+behind or failing in every AWS region), and announce a recovery once it has held 10 minutes. New purchases stop after 48 hours without a good
 price refresh; existing usage retains the last known price. Failed creates hold inventory until
 the reaper confirms provider cleanup; retained/deleting browsers hold it until purge. Each browser
 still obeys the per-user browser limit and prepaid requirements.

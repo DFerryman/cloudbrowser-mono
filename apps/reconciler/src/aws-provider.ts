@@ -13,26 +13,54 @@ const usdMicros = (usd: unknown) => {
 };
 const errorText = (e: unknown) => (e instanceof Error ? e.message : 'AWS synchronization failed').slice(0, 500);
 
-/** Each synchronization owns its clients, session cache and lease; never shares request data globally. */
-export async function syncAwsProvider(env: Env, force = false) {
+/** A region observed more recently than this is not read again; the cron runs every 5 minutes. */
+export const REGION_REFRESH_MS = 4 * 60_000;
+/** Longer than a region's 120-second read deadline and its writes; released as soon as it finishes. */
+const REGION_LEASE_MS = 5 * 60_000;
+/** Guards billing, the only account-level work two runs must not repeat. */
+const ACCOUNT_LEASE_MS = 5 * 60_000;
+/**
+ * A run starts no region after this, so it ends before the next cron instead of holding regions
+ * past it. Regions it did not reach are the oldest the next run refreshes first.
+ */
+export const RUN_BUDGET_MS = 3 * 60_000;
+const CONCURRENCY = 6;
+
+/** AWS answered, and the region cannot host browsers: unlike a failed read, the snapshot is withdrawn. */
+export class RegionUnusable extends Error {}
+
+type Log = (event: string, fields: Record<string, unknown>) => void;
+
+/**
+ * Each synchronization owns its clients and session cache; never shares request data globally.
+ * Runs may overlap: each region is claimed by one run at a time, so a slow region or a slow run
+ * no longer makes the next runs skip every other region.
+ */
+export async function syncAwsProvider(env: Env, opts: { force?: boolean; trigger?: string; scheduledTime?: number; budgetMs?: number } = {}) {
   if (!env.AWS_ACCESS_KEY_ID || !env.AWS_SECRET_ACCESS_KEY) throw new Error('AWS reader credentials are not configured');
+  const force = !!opts.force;
   const db = createDb(env.DB);
   const now = new Date();
-  const [claimed] = await db.update(state).set({ syncLeaseUntil: new Date(now.getTime() + 14 * 60_000) })
-    .where(and(eq(state.id,1), sql`${state.syncLeaseUntil}<${now.getTime()}`)).returning();
-  if (!claimed) return { busy: true };
+  const runId = crypto.randomUUID().slice(0, 8);
+  // One JSON line per event, so a gap in refreshes can be reconstructed from the Worker's logs.
+  const log: Log = (event, fields) => console.log(JSON.stringify({ event: `aws_sync.${event}`, runId, ...fields }));
+  // How late a cron started: a scheduling delay would otherwise look like a slow refresh.
+  const lagMs = opts.scheduledTime ? now.getTime()-opts.scheduledTime : null;
+  log('start', { trigger: opts.trigger ?? 'manual', force, lagMs });
   const base: AwsCredentials = { accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY };
   const memberCredentials = env.AWS_ROLE_ARN ? assumeRoleCredentials(base, { arn: env.AWS_ROLE_ARN, externalId: env.AWS_ROLE_EXTERNAL_ID }) : async () => base;
   const managementCredentials = env.AWS_MANAGEMENT_ROLE_ARN ? assumeRoleCredentials(base, { arn: env.AWS_MANAGEMENT_ROLE_ARN, externalId: env.AWS_MANAGEMENT_EXTERNAL_ID }) : null;
   const api = new AwsApi(memberCredentials);
   const ec2 = new Ec2Client({ ...base, credentials: memberCredentials });
   try {
+    const [current] = await db.select().from(state).where(eq(state.id,1));
+    if (!current) throw new Error('AWS provider state is missing');
     const identity = await api.call<XmlNode>('sts','us-east-1','GetCallerIdentity',{}, { queryVersion:'2011-06-15' });
     const accountId = xmlText(identity,'GetCallerIdentityResult','Account');
     if (!accountId) throw new Error('AWS caller identity is unavailable');
     const session = await memberCredentials();
     await db.update(state).set({ accountId, connection: {
-      ...claimed.connection,
+      ...current.connection,
       runtimeAuthorization: env.AWS_ROLE_ARN ? 'sts-assume-role' : 'access-key', automaticSessionRefresh: !!env.AWS_ROLE_ARN,
       sessionExpiresAt: session.expiration ? new Date(session.expiration).toISOString() : null,
       managementAuthorization: managementCredentials ? 'sts-assume-role' : 'not-configured',
@@ -40,68 +68,146 @@ export async function syncAwsProvider(env: Env, force = false) {
     } }).where(eq(state.id,1));
 
     // Refresh billing separately: a Cost Explorer delay must not hide regional quota observations.
-    if (managementCredentials && (force || !claimed.billingAt || now.getTime()-claimed.billingAt.getTime() >= 6*3_600_000)) {
-      try { await syncBilling(db, new AwsApi(managementCredentials), accountId, now); }
-      catch (e) {
-        await db.update(state).set({ lastError: errorText(e), lastErrorAt: now }).where(eq(state.id,1));
+    if (managementCredentials && (force || !current.billingAt || now.getTime()-current.billingAt.getTime() >= 6*3_600_000)) {
+      const [lease] = await db.update(state).set({ syncLeaseUntil: new Date(Date.now() + ACCOUNT_LEASE_MS) })
+        .where(and(eq(state.id,1), sql`${state.syncLeaseUntil}<${Date.now()}`)).returning({ id: state.id });
+      if (!lease) log('billing_skipped', { reason: 'another run holds the account lease', leaseUntil: current.syncLeaseUntil.toISOString() });
+      else {
+        const began = Date.now();
+        try { await syncBilling(db, new AwsApi(managementCredentials), accountId, now); log('billing', { ok: true, ms: Date.now()-began }); }
+        catch (e) {
+          await db.update(state).set({ lastError: errorText(e), lastErrorAt: new Date() }).where(eq(state.id,1));
+          log('billing', { ok: false, ms: Date.now()-began, error: errorText(e) });
+        } finally {
+          await db.update(state).set({ syncLeaseUntil: new Date(0) }).where(eq(state.id,1));
+        }
       }
     }
 
     const result = await ec2.call('ap-southeast-2','DescribeRegions',{ AllRegions:true }, Date.now()+30_000,false);
     const discovered = xmlItems(result,'regionInfo').map((r)=>({ code:xmlText(r,'regionName')!, optIn:xmlText(r,'optInStatus') ?? 'unknown' })).filter((r)=>!!r.code);
-    const existing = new Map((await db.select().from(regions).where(eq(regions.executor,'aws-ec2'))).map((r)=>[r.providerRegion,r]));
-    const known = new Map((await db.select().from(catalog)).map((r)=>[r.providerRegion,r]));
-    const errors: { region:string; error:string }[] = [];
-    // Bounded concurrency respects API throttles and Worker connection limits.
-    const pending = [...discovered];
-    await Promise.all(Array.from({length:3},async()=>{
-      for (let r=pending.shift(); r; r=pending.shift()) {
-        const previous = existing.get(r.code);
-        const regionId = previous?.id ?? r.code;
-        let name = previous?.name ?? r.code;
-        let country = previous?.country ?? ''; 
-        try {
-          if (!known.has(r.code) || force || !claimed.catalogAt || now.getTime()-claimed.catalogAt.getTime()>86_400_000) {
-            const metadata = await api.call<{Parameters?:{Name:string;Value:string}[]}>('ssm','ap-southeast-2','AmazonSSM.GetParameters',{Names:[`/aws/service/global-infrastructure/regions/${r.code}/longName`,`/aws/service/global-infrastructure/regions/${r.code}/geolocationCountry`]});
-            name = metadata.Parameters?.find((p)=>p.Name.endsWith('/longName'))?.Value || name;
-            country = metadata.Parameters?.find((p)=>p.Name.endsWith('/geolocationCountry'))?.Value || country;
-          }
-          // Where the region's servers are: the browser's timezone and its IP's country and city.
-          // SSM has no city or timezone, and reports Hong Kong as CN where IP geolocation says HK.
-          const facts = AWS_REGION_FACTS[r.code];
-          const place = facts ? { country: facts.country, city: facts.city, timezone: facts.timezone } : { country, city: name, timezone: 'UTC' };
-          // Publish discovery and its readiness marker atomically. Pricing must not see a new
-          // region before it can tell that network discovery is still in progress.
-          await db.batch([
-            db.insert(regions).values({id:regionId,name,...place,enabled:true,executor:'aws-ec2',providerRegion:r.code})
-              .onConflictDoUpdate({target:regions.id,set:facts ? {name,...place} : {name,country}}),
-            db.insert(catalog).values({regionId,providerRegion:r.code,optInStatus:r.optIn,status:'syncing',capacity:0})
-              .onConflictDoUpdate({target:catalog.regionId,set:{optInStatus:r.optIn}}),
-          ]);
-          if (!['opt-in-not-required','opted-in'].includes(r.optIn)) {
-            await db.update(catalog).set({status:'not-enabled',capacity:0,checkedAt:now,lastError:'AWS region is not enabled for this account'}).where(eq(catalog.regionId,regionId));
-            continue;
-          }
-          await syncRegion(db, env, ec2, memberCredentials, r.code, regionId, now, force);
-        } catch (e) {
-          const error = errorText(e); errors.push({region:r.code,error});
-          await db.update(catalog).set({status:'unavailable',lastError:error,capacity:0}).where(eq(catalog.regionId,regionId));
-        }
-      }
-    }));
+    const catalogDue = force || !current.catalogAt || now.getTime()-current.catalogAt.getTime()>86_400_000;
+    const outcome = await refreshRegions(db, discovered, {
+      force, catalogDue, budgetMs: opts.budgetMs ?? RUN_BUDGET_MS, log,
+      metadata: async (code) => {
+        const metadata = await api.call<{Parameters?:{Name:string;Value:string}[]}>('ssm','ap-southeast-2','AmazonSSM.GetParameters',{Names:[`/aws/service/global-infrastructure/regions/${code}/longName`,`/aws/service/global-infrastructure/regions/${code}/geolocationCountry`]});
+        return { name: metadata.Parameters?.find((p)=>p.Name.endsWith('/longName'))?.Value, country: metadata.Parameters?.find((p)=>p.Name.endsWith('/geolocationCountry'))?.Value };
+      },
+      observe: (code, regionId) => syncRegion(db, env, ec2, memberCredentials, code, regionId, force),
+    });
     // API removals or account opt-out must withdraw old inventory too.
-    for (const old of known.values()) if (!discovered.some((r)=>r.code===old.providerRegion)) await db.update(catalog).set({status:'not-supported',capacity:0,lastError:'No longer returned by AWS DescribeRegions'}).where(eq(catalog.regionId,old.regionId));
-    await db.update(state).set({catalogAt:now}).where(eq(state.id,1));
-    return {regions:discovered.length,errors};
+    const known = await db.select().from(catalog);
+    for (const old of known) if (!discovered.some((r)=>r.code===old.providerRegion)) await db.update(catalog).set({status:'not-supported',capacity:0,lastError:'No longer returned by AWS DescribeRegions'}).where(eq(catalog.regionId,old.regionId));
+    // The catalog is refreshed once every region was reached; otherwise the next run finishes it.
+    if (catalogDue && !outcome.deferred.length) await db.update(state).set({catalogAt:now}).where(eq(state.id,1));
+    const [oldest] = await db.all<{ checked_at: number | null }>(sql`SELECT MIN(a.checked_at) AS checked_at FROM aws_provider_regions a JOIN regions r ON r.id=a.region_id WHERE r.enabled=1 AND a.status='ready'`);
+    const summary = {
+      runId, trigger: opts.trigger ?? 'manual', force, lagMs, startedAt: now.toISOString(), finishedAt: new Date().toISOString(), ms: Date.now()-now.getTime(),
+      regions: discovered.length, refreshed: outcome.refreshed.length, fresh: outcome.fresh, failed: outcome.failed, taken: outcome.taken, deferred: outcome.deferred,
+      slowest: outcome.refreshed.sort((a,b)=>b.ms-a.ms).slice(0,3),
+      oldestReadyAgeMs: oldest?.checked_at ? Date.now()-oldest.checked_at : null,
+    };
+    await db.update(state).set({ lastRun: summary }).where(eq(state.id,1));
+    log('done', summary);
+    return summary;
   } catch (e) {
-    await db.update(state).set({lastError:errorText(e),lastErrorAt:now}).where(eq(state.id,1));
+    await db.update(state).set({lastError:errorText(e),lastErrorAt:new Date()}).where(eq(state.id,1));
+    log('failed', { ms: Date.now()-now.getTime(), error: errorText(e) });
     throw e;
-  } finally {
-    await db.update(state).set({syncLeaseUntil:new Date(0)}).where(eq(state.id,1));
   }
 }
 
-async function syncRegion(db: Db, env: Env, ec2: Ec2Client, credentials: () => Promise<AwsCredentials>, code: string, regionId: string, now: Date, force: boolean) {
+/**
+ * Refreshes the regions AWS returned, oldest snapshot first, `CONCURRENCY` at a time. A region is
+ * skipped while its snapshot is fresh or another run holds it, and none is started once the
+ * budget is spent. A failed read keeps the last snapshot, which expires on its own (20 minutes):
+ * one throttled call no longer withdraws a region at once.
+ */
+export async function refreshRegions(db: Db, discovered: { code: string; optIn: string }[], deps: {
+  force: boolean; catalogDue: boolean; budgetMs: number; log: Log;
+  /** Region names from SSM; read for new regions and the daily catalog refresh only. */
+  metadata: (code: string) => Promise<{ name?: string; country?: string }>;
+  /** Reads one region's quotas and usage and writes its snapshot. */
+  observe: (code: string, regionId: string) => Promise<void>;
+  clock?: () => number;
+}) {
+  const clock = deps.clock ?? Date.now;
+  const started = clock();
+  const existing = new Map((await db.select().from(regions).where(eq(regions.executor,'aws-ec2'))).map((r)=>[r.providerRegion,r]));
+  const known = new Map((await db.select().from(catalog)).map((r)=>[r.providerRegion,r]));
+  const out = { refreshed: [] as { region: string; ms: number }[], failed: [] as { region: string; error: string; failures: number; unusable: boolean }[], fresh: 0, taken: [] as string[], deferred: [] as string[] };
+  // Oldest first: when AWS is slow and the budget runs out, the regions closest to expiring were refreshed.
+  const pending = [...discovered].sort((a,b)=>(known.get(a.code)?.checkedAt?.getTime() ?? 0)-(known.get(b.code)?.checkedAt?.getTime() ?? 0));
+  const refreshAfter = () => clock()-REGION_REFRESH_MS;
+  await Promise.all(Array.from({length:CONCURRENCY},async()=>{
+    for (let r=pending.shift(); r; r=pending.shift()) {
+      const row = known.get(r.code);
+      const previous = existing.get(r.code);
+      const regionId = previous?.id ?? row?.regionId ?? r.code;
+      // A forced refresh, a new region, a changed opt-in and the daily catalog refresh read it even when fresh.
+      const due = deps.force || !row || row.optInStatus!==r.optIn || deps.catalogDue;
+      if (!due && row.checkedAt && row.checkedAt.getTime() >= refreshAfter()) { out.fresh++; continue; }
+      if (clock()-started >= deps.budgetMs) { out.deferred.push(r.code); continue; }
+      const began = clock();
+      let claimed = false;
+      try {
+        let name = previous?.name ?? r.code;
+        let country = previous?.country ?? '';
+        if (!row || deps.catalogDue) {
+          const metadata = await deps.metadata(r.code);
+          name = metadata.name || name;
+          country = metadata.country || country;
+        }
+        // Where the region's servers are: the browser's timezone and its IP's country and city.
+        // SSM has no city or timezone, and reports Hong Kong as CN where IP geolocation says HK.
+        const facts = AWS_REGION_FACTS[r.code];
+        const place = facts ? { country: facts.country, city: facts.city, timezone: facts.timezone } : { country, city: name, timezone: 'UTC' };
+        // Publish discovery and its readiness marker atomically. Pricing must not see a new
+        // region before it can tell that network discovery is still in progress.
+        await db.batch([
+          db.insert(regions).values({id:regionId,name,...place,enabled:true,executor:'aws-ec2',providerRegion:r.code})
+            .onConflictDoUpdate({target:regions.id,set:facts ? {name,...place} : {name,country}}),
+          db.insert(catalog).values({regionId,providerRegion:r.code,optInStatus:r.optIn,status:'syncing',capacity:0})
+            .onConflictDoUpdate({target:catalog.regionId,set:{optInStatus:r.optIn}}),
+        ]);
+        // Claimed by one run at a time, and not again if another run refreshed it meanwhile.
+        const [lease] = await db.update(catalog).set({ syncLeaseUntil: new Date(clock()+REGION_LEASE_MS) })
+          .where(and(eq(catalog.regionId,regionId),
+            sql`(${catalog.syncLeaseUntil} IS NULL OR ${catalog.syncLeaseUntil}<${clock()})`,
+            ...(due ? [] : [sql`(${catalog.checkedAt} IS NULL OR ${catalog.checkedAt}<${refreshAfter()})`])))
+          .returning({ regionId: catalog.regionId });
+        if (!lease) { out.taken.push(r.code); continue; }
+        claimed = true;
+        if (!['opt-in-not-required','opted-in'].includes(r.optIn)) {
+          await db.update(catalog).set({status:'not-enabled',capacity:0,checkedAt:new Date(clock()),lastError:'AWS region is not enabled for this account',lastErrorAt:null,syncFailures:0}).where(eq(catalog.regionId,regionId));
+          continue;
+        }
+        await deps.observe(r.code, regionId);
+        out.refreshed.push({ region: r.code, ms: clock()-began });
+      } catch (e) {
+        const error = errorText(e);
+        const unusable = e instanceof RegionUnusable;
+        try {
+          const [failed] = await db.update(catalog).set(unusable
+            ? { status:'unavailable', capacity:0, lastError:error, lastErrorAt:new Date(clock()), syncFailures:sql`${catalog.syncFailures}+1` }
+            : { lastError:error, lastErrorAt:new Date(clock()), syncFailures:sql`${catalog.syncFailures}+1` })
+            .where(eq(catalog.regionId,regionId)).returning({ failures: catalog.syncFailures, checkedAt: catalog.checkedAt });
+          out.failed.push({ region: r.code, error, failures: failed?.failures ?? 1, unusable });
+          deps.log('region_failed', { region: r.code, ms: clock()-began, error, unusable, consecutiveFailures: failed?.failures ?? 1,
+            snapshotAgeMs: failed?.checkedAt ? clock()-failed.checkedAt.getTime() : null });
+        } catch (write) {
+          deps.log('region_failed', { region: r.code, ms: clock()-began, error, unusable, recordError: errorText(write) });
+        }
+      } finally {
+        if (claimed) await db.update(catalog).set({ syncLeaseUntil: null }).where(eq(catalog.regionId,regionId)).catch((e)=>deps.log('lease_release_failed',{region:r.code,error:errorText(e)}));
+      }
+    }
+  }));
+  return out;
+}
+
+async function syncRegion(db: Db, env: Env, ec2: Ec2Client, credentials: () => Promise<AwsCredentials>, code: string, regionId: string, force: boolean) {
+  const began = Date.now();
   // Capture local intents before provider reads. A later create is then deducted by the SQL view.
   const held=await db.all<{id:string}>(sql`SELECT id FROM aws_browser_commitments WHERE region_id=${regionId}`);
   const heldIds=new Set(held.map((r)=>r.id));
@@ -128,14 +234,14 @@ async function syncRegion(db: Db, env: Env, ec2: Ec2Client, credentials: () => P
     ]);
     if (groups[0] && subnets.length) config={subnets:Object.fromEntries(subnets.filter((s)=>xmlText(s,'state')==='available' && Number(xmlText(s,'availableIpAddressCount'))>0).map((s)=>[xmlText(s,'availabilityZone')!,xmlText(s,'subnetId')!])),securityGroupId:xmlText(groups[0],'groupId')!};
   }
-  if (!config || !Object.keys(config.subnets).length) throw new Error('Regional browser network is not provisioned');
+  if (!config || !Object.keys(config.subnets).length) throw new RegionUnusable('Regional browser network is not provisioned');
   const tiers=DEFAULT_TIER_INSTANCE_TYPES;
   const offerings=await all('DescribeInstanceTypeOfferings','instanceTypeOfferingSet',{
     LocationType:'availability-zone','Filter.1.Name':'instance-type',...Object.fromEntries([...tiers.basic,...tiers.premium].map((t,i)=>[`Filter.1.Value.${i+1}`,t])),
   });
   const offeredIn=(types:string[])=>types.filter((type)=>offerings.some((o)=>xmlText(o,'instanceType')===type && xmlText(o,'location')! in config!.subnets));
   const offered=offeredIn(tiers.basic);
-  if (!offered.length) throw new Error('No supported browser machine is offered in the configured availability zones');
+  if (!offered.length) throw new RegionUnusable('No supported browser machine is offered in the configured availability zones');
   // Premium is optional: a region without its machines keeps taking Basic browsers.
   const premiumOffered=offeredIn(tiers.premium);
   // Per zone, so a launch never asks a zone for a type it does not offer (EC2: Unsupported).
@@ -143,6 +249,9 @@ async function syncRegion(db: Db, env: Env, ec2: Ec2Client, credentials: () => P
   config={...config,instanceTypes:offered,zoneInstanceTypes:byZone(offered),premium:{instanceTypes:premiumOffered,zoneInstanceTypes:byZone(premiumOffered)}};
   const executor=new AwsExecutor({accessKeyId:env.AWS_ACCESS_KEY_ID!,secretAccessKey:env.AWS_SECRET_ACCESS_KEY!,credentials,mode:'readonly',regions:{[code]:config},appUrl:'',agentImage:'',browserImage:''});
   const ctx={operationId:'aws-provider-sync',step:'provider-sync',token:'provider-sync',tags:{'cb:managed':'true' as const,'cb:env':env.ENV_NAME ?? 'prod','cb:instance':'provider-sync','cb:op':'provider-sync','cb:gen':'0'},deadline};
+  // What the snapshot describes: AWS as of these reads, not the run's start. Taken before the first
+  // read so its age is never understated.
+  const observedAt=new Date();
   const quotas:{metric:string;limit:number;used:number}[]=await executor.quotas(ctx,code);
   const [volumes,enis,subnets,machines,addresses,reservations]=await Promise.all([
     all('DescribeVolumes','volumeSet'), all('DescribeNetworkInterfaces','networkInterfaceSet'),
@@ -157,10 +266,10 @@ async function syncRegion(db: Db, env: Env, ec2: Ec2Client, credentials: () => P
   const [price]=await db.select().from(providerPrices).where(eq(providerPrices.regionId,regionId));
   const configurationKey=executor.pricingConfigKey(code);
   let sheet=price?.sheet as import('@cloudbrowser/contracts').ProviderPriceSheet|null;
-  if (force || !price?.fetchedAt || now.getTime()-price.fetchedAt.getTime()>12*3_600_000 || configurationKey!==price.configurationKey) {
+  if (force || !price?.fetchedAt || Date.now()-price.fetchedAt.getTime()>12*3_600_000 || configurationKey!==price.configurationKey) {
     const historical=await db.all<{instance_type:string}>(sql`SELECT DISTINCT instance_type FROM placements WHERE provider_region=${code} AND executor='aws-ec2' AND status IN ('current','building') AND instance_type IS NOT NULL`);
     sheet=await executor.prices(ctx,code,historical.map((p)=>p.instance_type));
-    const values={executor:'aws-ec2',providerRegion:code,sheet,configurationKey,fetchedAt:now,lastError:null,lastErrorAt:null};
+    const values={executor:'aws-ec2',providerRegion:code,sheet,configurationKey,fetchedAt:new Date(),lastError:null,lastErrorAt:null};
     await db.insert(providerPrices).values({regionId,...values}).onConflictDoUpdate({target:providerPrices.regionId,set:values});
   }
   if (!sheet) throw new Error('AWS prices are unavailable');
@@ -182,7 +291,7 @@ async function syncRegion(db: Db, env: Env, ec2: Ec2Client, credentials: () => P
   const vcpuCapacity=Math.floor(remaining('vcpus')+managedCpu);
   if (!Number.isFinite(capacity) || !Number.isFinite(vcpuCapacity)) throw new Error('AWS returned an incomplete quota usage observation');
   await db.update(catalog).set({config:config as unknown as Record<string,unknown>,quotas,capacity:Math.max(0,capacity),vcpuCapacity:Math.max(0,vcpuCapacity),
-    basicVcpus:vcpu,premiumVcpus:premiumVcpu,premiumOffered:premiumOffered.length>0 && !!sheet.premium,checkedAt:now,status:'ready',lastError:null}).where(eq(catalog.regionId,regionId));
+    basicVcpus:vcpu,premiumVcpus:premiumVcpu,premiumOffered:premiumOffered.length>0 && !!sheet.premium,checkedAt:observedAt,status:'ready',lastError:null,lastErrorAt:null,syncFailures:0,syncMs:Date.now()-began}).where(eq(catalog.regionId,regionId));
 }
 
 async function syncBilling(db: Db, api: AwsApi, accountId: string, now: Date) {

@@ -1,7 +1,7 @@
 import { createDb } from '@cloudbrowser/db';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { billingSweep } from '../src/billing/sweep.js';
-import { alertRecipients, deliverAlerts, inventoryAlerts, promotionBudgetAlerts, userMilestoneAlerts } from '../src/notifications/admin.js';
+import { INVENTORY_ALERT_GRACE_MS, alertRecipients, deliverAlerts, inventoryAlerts, promotionBudgetAlerts, userMilestoneAlerts } from '../src/notifications/admin.js';
 import { LOW_BALANCE_COOLDOWN_MS, REWARD_BATCH_MS, REWARD_COOLDOWN_MS, rewardNotices } from '../src/notifications/user.js';
 import { setup, signIn } from './helpers.js';
 
@@ -70,24 +70,83 @@ describe('user notifications', () => {
 });
 
 describe('admin notifications', () => {
-  it('alerts once when a region runs out of inventory, and once when it is back', async () => {
+  const awsRegion = (id: string, now: number, capacity = 1) => t.d1.sqlite.exec(`
+    INSERT INTO aws_provider_regions (region_id,provider_region,opt_in_status,status,capacity,checked_at) SELECT id,provider_region,'opted-in','ready',${capacity},${now} FROM regions WHERE id='${id}';
+    INSERT OR REPLACE INTO provider_prices (region_id,executor,provider_region,sheet,fetched_at) SELECT id,executor,provider_region,'{"vmHour":0.1,"ipHour":0.005,"volumeGbMonth":0.08,"rootVolumeGb":16}',${now} FROM regions WHERE id='${id}';`);
+  const alertRows = () => t.d1.sqlite.prepare('SELECT severity, title, detail FROM alerts ORDER BY id').all() as { severity: string; title: string; detail: string }[];
+
+  it('alerts once when a region runs out of AWS quota for 10 minutes, and once when it is back', async () => {
     const now = Date.now();
-    t.d1.sqlite.exec(`
-      INSERT INTO aws_provider_regions (region_id,provider_region,opt_in_status,status,capacity,checked_at) SELECT id,provider_region,'opted-in','ready',1,${now} FROM regions WHERE id='tyo1';
-      INSERT OR REPLACE INTO provider_prices (region_id,executor,provider_region,sheet,fetched_at) SELECT id,executor,provider_region,'{"vmHour":0.1,"ipHour":0.005,"volumeGbMonth":0.08,"rootVolumeGb":16}',${now} FROM regions WHERE id='tyo1';`);
+    awsRegion('tyo1', now + 3_600_000); // fresh throughout the test
     expect(await inventoryAlerts(db(), new Date(now))).toBe(0);
     t.d1.sqlite.exec(`UPDATE aws_provider_regions SET capacity=0 WHERE region_id='tyo1'`);
-    expect(await inventoryAlerts(db(), new Date(now))).toBe(1);
+    expect(await inventoryAlerts(db(), new Date(now))).toBe(0);
     expect(await inventoryAlerts(db(), new Date(now + 300_000))).toBe(0);
+    expect(await inventoryAlerts(db(), new Date(now + INVENTORY_ALERT_GRACE_MS))).toBe(1);
     // Acknowledging it does not make it repeat while the region is still empty.
     t.d1.sqlite.exec(`UPDATE alerts SET acknowledged_at = ${now}`);
-    expect(await inventoryAlerts(db(), new Date(now + 600_000))).toBe(0);
+    expect(await inventoryAlerts(db(), new Date(now + 900_000))).toBe(0);
     t.d1.sqlite.exec(`UPDATE aws_provider_regions SET capacity=2 WHERE region_id='tyo1'`);
-    expect(await inventoryAlerts(db(), new Date(now + 900_000))).toBe(1);
+    expect(await inventoryAlerts(db(), new Date(now + 1_200_000))).toBe(0);
+    // A slot taken and freed again while recovering raises nothing new.
+    t.d1.sqlite.exec(`UPDATE aws_provider_regions SET capacity=0 WHERE region_id='tyo1'`);
+    expect(await inventoryAlerts(db(), new Date(now + 1_500_000))).toBe(0);
+    t.d1.sqlite.exec(`UPDATE aws_provider_regions SET capacity=2 WHERE region_id='tyo1'`);
+    expect(await inventoryAlerts(db(), new Date(now + 1_800_000))).toBe(0);
+    expect(await inventoryAlerts(db(), new Date(now + 1_800_000 + INVENTORY_ALERT_GRACE_MS))).toBe(1);
     expect(alertTitles()).toEqual([
-      'Region Tokyo (tyo1) has no inventory left: every slot the AWS quota allows is in use; new browsers cannot be created there',
+      'Region Tokyo (tyo1) is out of AWS quota: every slot it allows is in use; new browsers cannot be created there',
       'Region Tokyo (tyo1) has inventory again (2 available)',
     ]);
+  });
+
+  it('stays quiet when a snapshot is briefly stale, as on the morning the refresh fell 20 minutes behind', async () => {
+    const now = Date.now();
+    // Calgary: checked 20 minutes 14 seconds ago, 5 browsers of quota left, refreshed 10 minutes later.
+    awsRegion('tyo1', now - 1_214_000, 5);
+    expect(await inventoryAlerts(db(), new Date(now))).toBe(0);
+    expect(await inventoryAlerts(db(), new Date(now + 300_000))).toBe(0);
+    t.d1.sqlite.exec(`UPDATE aws_provider_regions SET checked_at=${now + 500_000} WHERE region_id='tyo1'`);
+    expect(await inventoryAlerts(db(), new Date(now + 600_000))).toBe(0);
+    expect(alertTitles()).toEqual([]);
+    expect(t.d1.sqlite.prepare(`SELECT count(*) AS n FROM notification_state WHERE key LIKE 'admin:inventory:%'`).get()).toEqual({ n: 0 });
+  });
+
+  it('reports a sustained refresh outage once for all regions, as stale rather than out of quota', async () => {
+    const now = Date.now();
+    const ids = (t.d1.sqlite.prepare(`SELECT id FROM regions WHERE enabled = 1`).all() as { id: string }[]).map((r) => r.id);
+    for (const id of ids) awsRegion(id, now - 1_300_000, 5);
+    expect(await inventoryAlerts(db(), new Date(now))).toBe(0);
+    expect(await inventoryAlerts(db(), new Date(now + INVENTORY_ALERT_GRACE_MS))).toBe(1);
+    expect(await inventoryAlerts(db(), new Date(now + 2 * INVENTORY_ALERT_GRACE_MS))).toBe(0);
+    const [alert] = alertRows();
+    expect(alert!.title).toMatch(new RegExp(`^AWS inventory refresh is behind in ${ids.length > 1 ? `${ids.length} regions` : 'region'}.*snapshot \\d+ min old, AWS quota itself is not exhausted`));
+    expect(alert!.title).not.toMatch(/no inventory left|out of AWS quota/);
+    if (ids.length > 1) expect(alert!.severity).toBe('critical');
+    expect(JSON.parse(alert!.detail).regions[0]).toMatchObject({ reason: 'stale', quotaAvailable: 5 });
+    // Refreshes resume: one recovery for all of them, once it has held.
+    t.d1.sqlite.exec(`UPDATE aws_provider_regions SET checked_at=${now + 3_600_000}`);
+    expect(await inventoryAlerts(db(), new Date(now + 3 * INVENTORY_ALERT_GRACE_MS))).toBe(0);
+    expect(await inventoryAlerts(db(), new Date(now + 4 * INVENTORY_ALERT_GRACE_MS))).toBe(1);
+    expect(alertRows()).toHaveLength(2);
+  });
+
+  it('names the refresh error when a region keeps failing to refresh', async () => {
+    const now = Date.now();
+    awsRegion('tyo1', now - 1_300_000, 5);
+    t.d1.sqlite.exec(`UPDATE aws_provider_regions SET last_error='DescribeVolumes: deadline passed', sync_failures=4 WHERE region_id='tyo1'`);
+    await inventoryAlerts(db(), new Date(now));
+    expect(await inventoryAlerts(db(), new Date(now + INVENTORY_ALERT_GRACE_MS))).toBe(1);
+    expect(alertTitles()).toEqual(['AWS inventory refresh is failing in region Tokyo (tyo1): DescribeVolumes: deadline passed; new browsers are paused there']);
+  });
+
+  it('takes over a shortage alerted before the alert kinds existed', async () => {
+    const now = Date.now();
+    awsRegion('tyo1', now + 3_600_000, 3);
+    t.d1.sqlite.exec(`INSERT INTO notification_state (key, value, updated_at) VALUES ('admin:inventory_empty:tyo1', '${now - 3_600_000}', ${now})`);
+    expect(await inventoryAlerts(db(), new Date(now))).toBe(0);
+    expect(await inventoryAlerts(db(), new Date(now + INVENTORY_ALERT_GRACE_MS))).toBe(1);
+    expect(alertTitles()).toEqual(['Region Tokyo (tyo1) has inventory again (3 available)']);
   });
 
   it('alerts once per user milestone', async () => {

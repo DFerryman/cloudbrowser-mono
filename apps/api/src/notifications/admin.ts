@@ -10,17 +10,17 @@
  *
  * | Alert                         | When                                           | How often                         |
  * |-------------------------------|------------------------------------------------|-----------------------------------|
- * | Region out of inventory       | An enabled region's available inventory < 1    | Once per shortage; "restocked" once when it recovers |
+ * | Region inventory unavailable  | An enabled region cannot take browsers for 10+ min: AWS quota used up, snapshot stale, refresh failing, or prices missing | Once per problem, one alert per kind for all regions; one recovery alert once it has held 10 min |
  * | User milestone                | Total users pass 10, 20, 50, 100, 500, …       | Once per milestone, ever          |
  * | Promotion budget used up      | A task reached its maximum completions         | Once per budget (raised again if the budget changes) |
  */
-import { awsInventory, raiseAlert, schema, type Db } from '@cloudbrowser/db';
+import { awsInventory, raiseAlert, schema, type AwsInventory, type Db } from '@cloudbrowser/db';
 import { asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Env } from '../env.js';
 import { clearState, getState, sendTo, setState } from './send.js';
 import { DEFAULT_ADMIN_EMAIL } from '../admin/access.js';
 
-const { alerts, regions, promotionTasks } = schema;
+const { alerts, regions, promotionTasks, awsProviderState } = schema;
 
 export const USER_MILESTONES = [10, 20, 50, 100, 500, 1_000, 2_000, 5_000, 10_000];
 
@@ -69,33 +69,114 @@ export async function acknowledgeAlert(db: Db, id: number, by: string, now = new
   await db.update(alerts).set({ acknowledgedAt: now, acknowledgedBy: by }).where(eq(alerts.id, id));
 }
 
+/** A region problem must last this long before it is reported, and a recovery before it is announced. */
+export const INVENTORY_ALERT_GRACE_MS = 10 * 60_000;
+
 /**
- * Enabled regions with AWS inventory: alerts once when available inventory drops below 1 (new
- * browsers cannot be created there), and once when it is back.
+ * Why an enabled AWS region cannot take new browsers. Only `quota` means AWS has no room: the
+ * others are about our own knowledge of the region, and say so.
+ */
+export type InventoryProblem = 'quota' | 'stale' | 'sync_failed' | 'prices';
+type InventoryState = { kind: InventoryProblem | null; since: number; alerted: InventoryProblem | null };
+
+export function inventoryProblem(inv: Pick<AwsInventory, 'availability' | 'reason' | 'last_error'> & { available: number }): InventoryProblem | null {
+  if (inv.availability === 'ready') return inv.available < 1 ? 'quota' : null;
+  switch (inv.reason) {
+    case 'prices': return 'prices';
+    case 'sync_failed': return 'sync_failed';
+    // Expired while refreshes kept failing: the failure is the news, not the age.
+    case 'stale': return inv.last_error ? 'sync_failed' : 'stale';
+    case 'pending': return 'stale';
+    default: return null;
+  }
+}
+
+const minutes = (ms: number) => `${Math.max(1, Math.round(ms / 60_000))} min`;
+const listed = (items: string[], max = 8) => items.length > max ? `${items.slice(0, max).join(', ')} and ${items.length - max} more` : items.join(', ');
+
+/**
+ * Enabled regions with AWS inventory. A problem is reported once it has lasted
+ * `INVENTORY_ALERT_GRACE_MS`, so a refresh that runs a little late raises nothing; regions with
+ * the same problem share one alert, so one refresh outage is one alert, not one per region. A
+ * recovery is announced once it has held as long, and only for problems that were reported.
  */
 export async function inventoryAlerts(db: Db, now: Date): Promise<number> {
-  const [inventory, rows] = await Promise.all([awsInventory(db), db.select().from(regions).where(eq(regions.enabled, true))]);
-  let raised = 0;
+  const [inventory, rows, [provider]] = await Promise.all([
+    awsInventory(db), db.select().from(regions).where(eq(regions.enabled, true)), db.select().from(awsProviderState).where(eq(awsProviderState.id, 1)),
+  ]);
+  const t = now.getTime();
+  const confirmed = new Map<InventoryProblem, { region: typeof rows[number]; inv: NonNullable<ReturnType<typeof inventory.get>> }[]>();
+  const recovered: { region: typeof rows[number]; available: number; since: number }[] = [];
+  let monitored = 0;
   for (const region of rows) {
     const inv = inventory.get(region.id);
     if (!inv || ['not-enabled', 'not-supported'].includes(inv.status)) continue;
-    const key = `admin:inventory_empty:${region.id}`;
-    const empty = await getState(db, key);
-    if (inv.available < 1 && !empty) {
-      const why = inv.availability === 'ready' ? 'every slot the AWS quota allows is in use' : 'its inventory or prices could not be refreshed';
-      await raiseAlert(db, {
-        source: 'api',
-        severity: 'warning',
-        title: `Region ${region.name} (${region.id}) has no inventory left: ${why}; new browsers cannot be created there`,
-        detail: { regionId: region.id, availability: inv.availability, status: inv.status, quotaAvailable: inv.quota_available, checkedAt: inv.checked_at },
-      }, now);
-      await setState(db, key, now.getTime(), now);
-      raised++;
-    } else if (inv.available >= 1 && empty) {
-      await raiseAlert(db, { source: 'api', severity: 'info', title: `Region ${region.name} (${region.id}) has inventory again (${inv.available} available)`, detail: { regionId: region.id, available: inv.available, emptySince: Number(empty) } }, now);
-      await clearState(db, key);
-      raised++;
+    monitored++;
+    const key = `admin:inventory:${region.id}`;
+    const legacyKey = `admin:inventory_empty:${region.id}`;
+    const raw = await getState(db, key);
+    let state: InventoryState | null = raw ? JSON.parse(raw) as InventoryState : null;
+    // Before 0031 only an alerted shortage was kept; it was reported as having no inventory.
+    const legacy = state ? null : await getState(db, legacyKey);
+    if (legacy) { state = { kind: 'quota', since: Number(legacy), alerted: 'quota' }; await clearState(db, legacyKey); }
+    const kind = inventoryProblem(inv);
+    if (kind) {
+      if (state?.kind !== kind) state = { kind, since: t, alerted: state?.alerted ?? null };
+      if (state.alerted !== kind && t - state.since >= INVENTORY_ALERT_GRACE_MS) {
+        confirmed.set(kind, [...confirmed.get(kind) ?? [], { region, inv }]);
+        state.alerted = kind;
+      }
+      await setState(db, key, JSON.stringify(state), now);
+    } else if (state) {
+      if (!state.alerted) { await clearState(db, key); continue; } // Never reported: nothing to take back.
+      if (state.kind !== null) state = { kind: null, since: t, alerted: state.alerted };
+      if (t - state.since >= INVENTORY_ALERT_GRACE_MS) {
+        recovered.push({ region, available: inv.available, since: state.since });
+        await clearState(db, key);
+      } else await setState(db, key, JSON.stringify(state), now);
     }
+  }
+
+  const name = (r: { name: string; id: string }) => `${r.name} (${r.id})`;
+  const lastRun = provider?.lastRun ?? null;
+  let raised = 0;
+  for (const [kind, hit] of confirmed) {
+    const names = hit.map(({ region }) => name(region));
+    const one = hit.length === 1 ? names[0]! : null;
+    const ages = hit.map(({ inv }) => inv.checked_at ? t - inv.checked_at : null).filter((a): a is number => a !== null);
+    const oldest = ages.length ? Math.max(...ages) : null;
+    const errors = [...new Set(hit.map(({ inv }) => inv.last_error).filter((e): e is string => !!e))];
+    const title = {
+      quota: one
+        ? `Region ${one} is out of AWS quota: every slot it allows is in use; new browsers cannot be created there`
+        : `${hit.length} regions are out of AWS quota: ${listed(names)}; new browsers cannot be created there`,
+      stale: `AWS inventory refresh is behind in ${one ? `region ${one}` : `${hit.length} regions (${listed(names)})`}: ${oldest !== null ? `snapshot ${minutes(oldest)} old` : 'never refreshed'}, AWS quota itself is not exhausted; new browsers are paused there until the reconciler refreshes it`,
+      sync_failed: `AWS inventory refresh is failing in ${one ? `region ${one}` : `${hit.length} regions (${listed(names)})`}: ${listed(errors, 2) || 'unknown error'}; new browsers are paused there`,
+      prices: `Prices are missing or out of date in ${one ? `region ${one}` : `${hit.length} regions (${listed(names)})`}; new browsers are paused there`,
+    }[kind];
+    // Every AWS region unusable for a reason of ours means the refresh itself is down.
+    const outage = kind !== 'quota' && hit.length === monitored && monitored > 1;
+    await raiseAlert(db, {
+      source: 'api',
+      severity: outage ? 'critical' : 'warning',
+      title,
+      detail: {
+        kind,
+        regions: hit.map(({ region, inv }) => ({
+          regionId: region.id, availability: inv.availability, reason: inv.reason, status: inv.status, quotaAvailable: inv.quota_available,
+          checkedAt: inv.checked_at, snapshotAgeMs: inv.checked_at ? t - inv.checked_at : null, lastError: inv.last_error, lastErrorAt: inv.last_error_at, syncFailures: inv.sync_failures,
+        })),
+        ...(kind === 'quota' ? {} : { lastRun }),
+      },
+    }, now);
+    raised++;
+  }
+  if (recovered.length) {
+    const title = recovered.length === 1
+      ? `Region ${name(recovered[0]!.region)} has inventory again (${recovered[0]!.available} available)`
+      : `${recovered.length} regions have inventory again: ${listed(recovered.map((r) => `${name(r.region)}: ${r.available}`))}`;
+    await raiseAlert(db, { source: 'api', severity: 'info', title, detail: { regions: recovered.map((r) => ({ regionId: r.region.id, available: r.available, recoveredSince: r.since })) } }, now);
+    raised++;
   }
   return raised;
 }

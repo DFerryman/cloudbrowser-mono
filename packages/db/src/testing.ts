@@ -27,10 +27,16 @@ class Stmt {
     return this.db.prepare(this.sql);
   }
   async all() {
+    return this.allSync();
+  }
+  allSync() {
     const results = this.prepared().all(...(this.params as never[]));
     return { results, success: true, meta: {} };
   }
   async run() {
+    return this.runSync();
+  }
+  runSync() {
     const r = this.prepared().run(...(this.params as never[]));
     return { results: [], success: true, meta: { changes: Number(r.changes), last_row_id: Number(r.lastInsertRowid) } };
   }
@@ -67,10 +73,11 @@ export function createTestD1(): D1Database & { sqlite: DatabaseSync } {
     async batch(stmts: Stmt[]) {
       db.exec('BEGIN');
       try {
+        // Without yielding, as D1 runs a batch: atomically, never interleaved with another one.
         const out = [];
         for (const s of stmts) {
           const isRead = /^\s*(select|with)\b/i.test(s.sql) || /\breturning\b/i.test(s.sql);
-          out.push(isRead ? await s.all() : await s.run());
+          out.push(isRead ? s.allSync() : s.runSync());
         }
         db.exec('COMMIT');
         return out;

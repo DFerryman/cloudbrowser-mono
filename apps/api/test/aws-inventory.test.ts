@@ -120,6 +120,39 @@ it('gives the last slot to exactly one of two people creating at the same moment
 it('ends with a clean schema: the view has only the current columns and users have no running cap',()=>{
   const {d1}=setup();
   const columns=(d1.sqlite.prepare('PRAGMA table_info(aws_region_inventory)').all() as {name:string}[]).map((c)=>c.name);
-  expect(columns).toEqual(['region_id','checked_at','status','availability','premium_offered','quota_available','premium_available']);
+  expect(columns).toEqual(['region_id','checked_at','status','availability','reason','premium_offered','last_error','last_error_at','sync_failures','quota_available','premium_available']);
   expect(d1.sqlite.prepare("SELECT COUNT(*) n FROM caps WHERE metric='running' AND scope LIKE 'user:%'").get()).toEqual({n:0});
+});
+
+it('says why a region is unavailable: an expired snapshot or a failing refresh is not an empty quota',async()=>{
+  const {d1,db,add,now}=setup();
+  d1.sqlite.exec("UPDATE aws_provider_regions SET capacity=5 WHERE region_id='syd1'");
+  const syd=async()=>(await awsInventory(db)).get('syd1')!;
+  expect(await syd()).toMatchObject({availability:'ready',reason:null,quota_available:5,available:5});
+  // 20 minutes and 14 seconds old, with 5 browsers of quota left: stale, quota untouched.
+  d1.sqlite.exec(`UPDATE aws_provider_regions SET checked_at=${now-1_214_000} WHERE region_id='syd1'`);
+  expect(await syd()).toMatchObject({availability:'unavailable',reason:'stale',quota_available:5,available:0});
+  expect(()=>add('blocked')).toThrow('aws_inventory_unavailable');
+  d1.sqlite.exec(`UPDATE aws_provider_regions SET last_error='DescribeVolumes: deadline passed',sync_failures=3 WHERE region_id='syd1'`);
+  expect(await syd()).toMatchObject({reason:'stale',last_error:'DescribeVolumes: deadline passed',sync_failures:3});
+  d1.sqlite.exec(`UPDATE aws_provider_regions SET status='unavailable',checked_at=${now} WHERE region_id='syd1'`);
+  expect((await syd()).reason).toBe('sync_failed');
+  d1.sqlite.exec(`UPDATE aws_provider_regions SET status='syncing',last_error=NULL WHERE region_id='syd1'`);
+  expect((await syd()).reason).toBe('pending');
+  d1.sqlite.exec(`UPDATE aws_provider_regions SET status='ready'; UPDATE provider_prices SET fetched_at=${now-3*86_400_000} WHERE region_id='syd1'`);
+  expect((await syd()).reason).toBe('prices');
+  d1.sqlite.exec("UPDATE regions SET enabled=0 WHERE id='syd1'");
+  expect((await syd()).reason).toBe('disabled');
+});
+
+it('tells users a region is being checked, not full, while its snapshot is stale',async()=>{
+  const t=appSetup();
+  const now=Date.now();
+  t.d1.sqlite.exec(`UPDATE regions SET executor='aws-ec2' WHERE id='tyo1';
+    UPDATE provider_prices SET executor='aws-ec2' WHERE region_id='tyo1';
+    INSERT INTO aws_provider_regions (region_id,provider_region,opt_in_status,status,capacity,checked_at) VALUES ('tyo1','ap-northeast-1','opt-in-not-required','ready',5,${now-1_214_000});
+    INSERT INTO invites (email) VALUES ('a@example.com');`);
+  await signIn(t,'a@example.com');
+  const region=(await t.call('GET','/api/v1/regions')).body.find((r:{id:string})=>r.id==='tyo1');
+  expect(region).toMatchObject({acceptingNew:false,availability:'unavailable',availabilityReason:'refreshing',inventory:{status:'unavailable',constraint:'sync_unavailable'}});
 });

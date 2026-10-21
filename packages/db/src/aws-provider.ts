@@ -2,7 +2,14 @@ import type { BrowserTier } from '@cloudbrowser/contracts';
 import { sql } from 'drizzle-orm';
 import type { Db } from './index.js';
 
-export type AwsInventory = { region_id: string; checked_at: number | null; status: string; quota_available: number; premium_available: number; premium_offered: number; availability: string };
+/** Why a region's inventory is unavailable: not the same as an empty quota (`quota_available` 0). */
+export type InventoryUnavailableReason = 'disabled' | 'pending' | 'sync_failed' | 'stale' | 'prices';
+export type AwsInventory = {
+  region_id: string; checked_at: number | null; status: string; quota_available: number; premium_available: number; premium_offered: number; availability: string;
+  reason: InventoryUnavailableReason | null; last_error: string | null; last_error_at: number | null; sync_failures: number;
+};
+/** A snapshot older than this is not used (aws_region_inventory, migration 0031). */
+export const INVENTORY_MAX_AGE_MS = 20 * 60_000;
 /**
  * Browsers AWS can still allocate per region and tier: quota room minus browsers holding a slot.
  * The same SQL view is checked by the create trigger, inside the create's own transaction.
