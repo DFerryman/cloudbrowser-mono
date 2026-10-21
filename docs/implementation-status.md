@@ -277,12 +277,19 @@ Cloudflare deployment.
   in-app link for the Start button, how completion is decided (`browser_used_minutes`: one
   browser's live view open, capped at the last heartbeat + 1 minute; `browser_running_minutes`,
   `total_running_minutes`, `live_view_minutes`, `browsers_created`, `topup_usd` net of
-  refunds, `two_factor_enabled`, `passkeys_added`) and its target, the reward, a start and end time,
-  a budget (max. accounts), and an optional paid-top-up requirement against throwaway accounts.
+  refunds, `two_factor_enabled`, `passkeys_added`, `active_days` (≥ 5 live-view minutes on a UTC
+  day), `regions_used`, `storage_resized`, `paid_usage_usd`, `topups_count`) and its target, the
+  reward (at most $10), a start and end time, a budget (max. accounts), and an optional
+  paid-top-up requirement against throwaway accounts. Rewards from top-up tasks are capped per
+  account at 50% of its net paid top-ups (`PROMOTION_TOPUP_SHARE_PERCENT`); a reward past the cap
+  waits, and the page tells the user how much more credit unlocks it.
   The api records each completion once (`promotion_completions`) and credits the reward as a
   `promotion` balance transaction (reference `promotion:<task>:<user>`), when the user opens the page
   and from the 5-minute cron. Seeded task: one browser used (live view open) for 20 minutes in total
-  from launch earns $5, for up to 1,000 accounts.
+  from launch earns $5, for up to 1,000 accounts. Migration 0030 adds 13 more ($1–$10, 15–100
+  accounts each, all but two-step verification behind a top-up): two-step verification, $10
+  top-up, passkey, 3/7/20 active days, 2 hours in one browser, two regions, storage upgrade,
+  10 hours of browsing (until 2027), $15 and $40 of paid usage, three top-ups.
 - **Images** (`images/`): browser and agent containers are built and published to GHCR. The
   pre-built Packer golden VM image remains planned.
 - **Web** (`apps/web`, `packages/ui`): design tokens from page 1, app shell, sign-in (with the

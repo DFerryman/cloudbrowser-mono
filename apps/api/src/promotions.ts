@@ -5,8 +5,11 @@
  * unique reference, so a retried request or sweep never pays twice.
  *
  * Completion is checked when the user opens Promotions and by the api's 5-minute cron.
+ *
+ * Rewards of tasks that need a top-up are capped per account at PROMOTION_TOPUP_SHARE_PERCENT of
+ * its paid top-ups, so credit from promotions can never carry an account that does not pay.
  */
-import { PromotionCriterion, type PromotionTask } from '@cloudbrowser/contracts';
+import { PROMOTION_ACTIVE_DAY_MINUTES, PROMOTION_TOPUP_SHARE_PERCENT, PromotionCriterion, type PromotionTask } from '@cloudbrowser/contracts';
 import { schema, usageDay, type Db } from '@cloudbrowser/db';
 import { and, asc, eq, isNull, sql, type SQL } from 'drizzle-orm';
 import { applyBalance, notifyHub } from './billing/ledger.js';
@@ -35,7 +38,8 @@ const minutes = (hours: SQL) => sql`CAST(round(${hours} * 60, 3) AS INTEGER)`;
  * closed without saying so is only given `ended_at` when the browser later sleeps (up to its idle
  * timeout later), so the end is capped at the last heartbeat + 1 minute.
  */
-const viewedMinutes = sql`CAST(round(sum(max(0, min(coalesce(ended_at, last_seen_at + ${HEARTBEAT_SLACK_MS}), last_seen_at + ${HEARTBEAT_SLACK_MS}) - started_at)) / 60000.0, 3) AS INTEGER)`;
+const viewedMs = sql`sum(max(0, min(coalesce(ended_at, last_seen_at + ${HEARTBEAT_SLACK_MS}), last_seen_at + ${HEARTBEAT_SLACK_MS}) - started_at))`;
+const viewedMinutes = sql`CAST(round(${viewedMs} / 60000.0, 3) AS INTEGER)`;
 
 /**
  * One row per user `(user_id, value)` with the task's progress in its criterion's unit. `users`
@@ -70,11 +74,39 @@ function progressSql(task: TaskRow, users: (column: SQL) => SQL): SQL {
       return sql`SELECT id AS user_id, two_factor_enabled AS value FROM "user" WHERE two_factor_enabled = 1 AND ${users(sql`id`)}`;
     case 'passkeys_added':
       return sql`SELECT user_id, count(*) AS value FROM passkey WHERE ${users(sql`user_id`)} GROUP BY user_id`;
+    case 'active_days':
+      return sql`SELECT user_id, count(*) AS value FROM (SELECT user_id FROM viewer_sessions
+        WHERE started_at >= ${from} AND ${users(sql`user_id`)} GROUP BY user_id, date(started_at / 1000, 'unixepoch')
+        HAVING ${viewedMs} >= ${PROMOTION_ACTIVE_DAY_MINUTES * 60_000}) GROUP BY user_id`;
+    case 'regions_used':
+      return sql`SELECT user_id, count(DISTINCT region_id) AS value FROM browser_instances
+        WHERE status <> 'failed' AND created_at >= ${from} AND ${users(sql`user_id`)} GROUP BY user_id`;
+    case 'storage_resized':
+      return sql`SELECT user_id, count(*) AS value FROM operations
+        WHERE kind = 'resize_volume' AND status = 'succeeded' AND user_id IS NOT NULL AND created_at >= ${from} AND ${users(sql`user_id`)} GROUP BY user_id`;
+    case 'paid_usage_usd':
+      return sql`SELECT user_id, CAST(sum(charged_micros) / 1000000 AS INTEGER) AS value FROM usage_records
+        WHERE day >= ${day} AND ${users(sql`user_id`)} GROUP BY user_id`;
+    case 'topups_count':
+      return sql`SELECT user_id, count(*) AS value FROM balance_transactions AS t
+        WHERE kind = 'topup' AND applied_at IS NOT NULL AND created_at >= ${from} AND ${users(sql`user_id`)}
+          AND NOT EXISTS (SELECT 1 FROM balance_transactions r WHERE r.order_id = t.order_id AND r.kind IN ('refund', 'dispute'))
+        GROUP BY user_id`;
   }
 }
 
 const hasTopup = (userId: SQL) =>
   sql`EXISTS (SELECT 1 FROM balance_transactions WHERE user_id = ${userId} AND kind = 'topup' AND applied_at IS NOT NULL)`;
+
+/** Paid top-ups, net of refunds and disputes, in micros. */
+const paidMicros = (userId: SQL) =>
+  sql`(SELECT coalesce(sum(amount_micros), 0) FROM balance_transactions WHERE user_id = ${userId} AND kind IN ('topup', 'refund', 'dispute') AND applied_at IS NOT NULL)`;
+/** Rewards already earned from tasks that need a top-up, in micros. */
+const toppedRewardMicros = (userId: SQL) =>
+  sql`(SELECT coalesce(sum(c.reward_micros), 0) FROM promotion_completions c JOIN promotion_tasks t ON t.id = c.task_id WHERE c.user_id = ${userId} AND t.requires_topup = 1)`;
+/** A top-up task's reward fits under the account's cap (PROMOTION_TOPUP_SHARE_PERCENT of its top-ups). */
+const withinShare = (userId: SQL, rewardMicros: SQL) =>
+  sql`(${toppedRewardMicros(userId)} + ${rewardMicros}) * 100 <= ${paidMicros(userId)} * ${PROMOTION_TOPUP_SHARE_PERCENT}`;
 
 /** Open for new completions: on, started, not ended and with budget left (budget checked on insert). */
 const isOpen = (task: TaskRow, now: Date) =>
@@ -89,7 +121,7 @@ async function recordCompletion(db: Db, task: TaskRow, userId: string, progress:
     SELECT id, ${userId}, ${progress}, reward_micros, ${now.getTime()}, NULL FROM promotion_tasks
     WHERE id = ${task.id} AND enabled = 1 AND (starts_at IS NULL OR starts_at <= ${now.getTime()}) AND (ends_at IS NULL OR ends_at > ${now.getTime()})
       AND (max_completions IS NULL OR (SELECT count(*) FROM promotion_completions WHERE task_id = ${task.id}) < max_completions)
-      AND (requires_topup = 0 OR ${hasTopup(sql`${userId}`)})
+      AND (requires_topup = 0 OR (${hasTopup(sql`${userId}`)} AND ${withinShare(sql`${userId}`, sql`reward_micros`)}))
     ON CONFLICT DO NOTHING RETURNING task_id`);
   return rows.length > 0;
 }
@@ -131,16 +163,23 @@ const taskMap = async (db: Db) => new Map((await db.select().from(promotionTasks
 export async function userPromotions(env: Env | null, db: Db, userId: string, now = new Date()): Promise<PromotionTask[]> {
   const tasks = await taskMap(db);
   const completions = new Map((await db.select().from(promotionCompletions).where(eq(promotionCompletions.userId, userId))).map((c) => [c.taskId, c]));
-  const [{ topped } = { topped: 0 }] = await db.all<{ topped: number }>(sql`SELECT ${hasTopup(sql`${userId}`)} AS topped`);
+  const [account = { topped: 0, paid: 0, earned: 0 }] = await db.all<{ topped: number; paid: number; earned: number }>(
+    sql`SELECT ${hasTopup(sql`${userId}`)} AS topped, ${paidMicros(sql`${userId}`)} AS paid, ${toppedRewardMicros(sql`${userId}`)} AS earned`);
+  const { topped, paid } = account;
+  let earned = Number(account.earned);
+  /** More top-up needed before a top-up task's reward fits under the cap (0: it fits). */
+  const toUnlock = (rewardMicros: number) =>
+    Math.max(0, Math.ceil(((earned + rewardMicros) * 100) / PROMOTION_TOPUP_SHARE_PERCENT) - Number(paid));
   const progress = new Map<string, number>();
   for (const task of tasks.values()) {
     if (completions.has(task.id) || !isOpen(task, now)) continue;
     const [row] = await db.all<{ value: number }>(progressSql(task, (col) => sql`${col} = ${userId}`));
     const value = Number(row?.value ?? 0);
     progress.set(task.id, value);
-    if (value >= task.target && (!task.requiresTopup || topped) && (await recordCompletion(db, task, userId, value, now))) {
+    if (value >= task.target && (!task.requiresTopup || (topped && !toUnlock(task.rewardMicros))) && (await recordCompletion(db, task, userId, value, now))) {
       const [done] = await db.select().from(promotionCompletions).where(and(eq(promotionCompletions.taskId, task.id), eq(promotionCompletions.userId, userId)));
       if (done) completions.set(task.id, done);
+      if (done && task.requiresTopup) earned += done.rewardMicros;
     }
   }
   const uncredited = [...completions.values()].filter((c) => !c.creditedAt);
@@ -166,6 +205,7 @@ export async function userPromotions(env: Env | null, db: Db, userId: string, no
         rewardMicros: done ? done.rewardMicros : t.rewardMicros,
         status: done ? 'completed' : 'pending',
         needsTopup: !done && t.requiresTopup && !topped,
+        topupToUnlockMicros: !done && t.requiresTopup && topped ? toUnlock(t.rewardMicros) : 0,
         completedAt: done ? done.completedAt.toISOString() : null,
         endsAt: t.endsAt ? t.endsAt.toISOString() : null,
       } satisfies PromotionTask;
@@ -185,13 +225,15 @@ export async function promotionSweep(env: Env | null, db: Db, now = new Date()) 
     const recent = now.getTime() - RECENT_USAGE_MS;
     const users = task.criterion === 'browser_running_minutes' || task.criterion === 'total_running_minutes'
       ? (col: SQL) => sql`${col} IN (SELECT DISTINCT user_id FROM usage_records WHERE item = 'compute' AND updated_at >= ${recent})`
-      : task.criterion === 'browser_used_minutes' || task.criterion === 'live_view_minutes'
+      : task.criterion === 'paid_usage_usd'
+        ? (col: SQL) => sql`${col} IN (SELECT DISTINCT user_id FROM usage_records WHERE updated_at >= ${recent})`
+      : task.criterion === 'browser_used_minutes' || task.criterion === 'live_view_minutes' || task.criterion === 'active_days'
         ? (col: SQL) => sql`${col} IN (SELECT DISTINCT user_id FROM viewer_sessions WHERE last_seen_at >= ${recent} OR ended_at >= ${recent})`
         : () => sql`1`;
     const candidates = await db.all<{ user_id: string; value: number }>(sql`SELECT p.user_id, p.value FROM (${progressSql(task, users)}) AS p
       WHERE p.value >= ${task.target}
         AND NOT EXISTS (SELECT 1 FROM promotion_completions c WHERE c.task_id = ${task.id} AND c.user_id = p.user_id)
-        AND (${task.requiresTopup ? 0 : 1} = 1 OR ${hasTopup(sql`p.user_id`)})
+        AND (${task.requiresTopup ? 0 : 1} = 1 OR (${hasTopup(sql`p.user_id`)} AND ${withinShare(sql`p.user_id`, sql`${task.rewardMicros}`)}))
         AND EXISTS (SELECT 1 FROM "user" u WHERE u.id = p.user_id)
       LIMIT ${SWEEP_LIMIT}`);
     for (const c of candidates) {

@@ -100,9 +100,12 @@ function PendingTask({ task }: { task: PromotionTask }) {
           </div>
         </div>
         {task.needsTopup ? <p className="mt-3 text-xs text-starting">{t('promotions.needsTopup')}</p> : null}
+        {task.topupToUnlockMicros > 0 ? (
+          <p className="mt-3 text-xs text-starting">{t('promotions.topupToUnlock', { amount: money(task.topupToUnlockMicros, locale) })}</p>
+        ) : null}
         {task.endsAt ? <p className="mt-2 text-xs text-subtle">{t('promotions.endsAt', { date: new Date(task.endsAt).toLocaleString(locale) })}</p> : null}
       </div>
-      {task.needsTopup ? (
+      {task.needsTopup || (task.topupToUnlockMicros > 0 && task.progress >= task.target) ? (
         <Link to="/billing#top-up" className="shrink-0">
           <Button>{t('nav.addCredit')}</Button>
         </Link>
@@ -128,6 +131,14 @@ function progressLabel(t: Translate, task: PromotionTask) {
       return t('promotions.progress.usd', vars);
     case 'passkeys':
       return t('promotions.progress.passkeys', vars);
+    case 'days':
+      return t('promotions.progress.days', vars);
+    case 'regions':
+      return t('promotions.progress.regions', vars);
+    case 'times':
+      return t('promotions.progress.times', vars);
+    case 'topups':
+      return t('promotions.progress.topups', vars);
     case 'step':
       return t(task.progress >= task.target ? 'promotions.progress.done' : 'promotions.progress.notYet');
   }

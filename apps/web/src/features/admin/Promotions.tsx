@@ -1,4 +1,4 @@
-import { PROMOTION_UNIT, PromotionCriterion, type PromotionTaskInput } from '@cloudbrowser/contracts';
+import { PROMOTION_MAX_REWARD_MICROS, PROMOTION_UNIT, PromotionCriterion, type PromotionTaskInput } from '@cloudbrowser/contracts';
 import { Button, Dialog, Input, Label, Select, useToast } from '@cloudbrowser/ui';
 import { Plus } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
@@ -26,6 +26,10 @@ const UNIT_KEY: Record<(typeof PROMOTION_UNIT)[keyof typeof PROMOTION_UNIT], Adm
   usd: 'promo.unit.usd',
   step: 'promo.unit.step',
   passkeys: 'promo.unit.passkeys',
+  days: 'promo.unit.days',
+  regions: 'promo.unit.regions',
+  times: 'promo.unit.times',
+  topups: 'promo.unit.topups',
 };
 
 const EMPTY: PromotionTaskInput = {
@@ -36,7 +40,7 @@ const EMPTY: PromotionTaskInput = {
   target: 20,
   rewardMicros: 5_000_000,
   enabled: false,
-  requiresTopup: false,
+  requiresTopup: true,
   sortOrder: 0,
   startsAt: null,
   endsAt: null,
@@ -204,7 +208,7 @@ function EditDialog({ id: initialId, isNew, draft: initial, onClose }: { id: str
             <Input id="promo-target" type="number" min={1} step={1} disabled={draft.criterion === 'two_factor_enabled'} value={draft.target} onChange={(e) => set('target', Math.max(1, Math.round(Number(e.target.value))))} />
           ))}
           {field('promo-reward', t('promo.reward'), (
-            <Input id="promo-reward" type="number" min={0} step="0.01" value={draft.rewardMicros / 1_000_000} onChange={(e) => set('rewardMicros', Math.max(0, Math.round(Number(e.target.value) * 1_000_000)))} />
+            <Input id="promo-reward" type="number" min={0} max={PROMOTION_MAX_REWARD_MICROS / 1_000_000} step="0.01" value={draft.rewardMicros / 1_000_000} onChange={(e) => set('rewardMicros', Math.min(PROMOTION_MAX_REWARD_MICROS, Math.max(0, Math.round(Number(e.target.value) * 1_000_000))))} />
           ), t('promo.rewardHelp'))}
           {field('promo-action', t('promo.action'), (
             <Input id="promo-action" value={draft.actionUrl ?? ''} placeholder="/browsers/new" onChange={(e) => set('actionUrl', e.target.value.trim() || null)} />
