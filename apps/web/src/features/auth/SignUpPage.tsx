@@ -35,14 +35,16 @@ export function SignUpPage() {
 
   const send = async (e: FormEvent) => {
     e.preventDefault();
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      await api('POST', '/api/auth/sign-in/magic-link', { body: { email: address }, headers: turnstile.headers() });
+      await api('POST', '/api/auth/sign-in/magic-link', { body: { email: address }, headers: await turnstile.headers() });
       setSent(true);
     } catch (err) {
       setError(sendError(t, err));
     } finally {
+      turnstile.reset();
       setBusy(false);
     }
   };
@@ -79,16 +81,18 @@ export function SignUpPage() {
               <Label htmlFor="email">{t('auth.email')}</Label>
               <Input id="email" type="email" autoComplete="email" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)} />
             </div>
-            <Button type="submit" variant="primary" size="lg" className="w-full justify-center" disabled={busy || !turnstile.ready}>
+            <Button type="submit" variant="primary" size="lg" className="w-full justify-center" disabled={busy}>
               {t('signup.send')}
             </Button>
           </form>
         </>
       )}
       <div className="mt-4">{turnstile.widget}</div>
+      {turnstile.checking ? <p role="status" className="mt-4 text-sm text-muted">{t('auth.captchaChecking')}</p> : null}
       {turnstile.failed ? (
         <p role="alert" className="mt-4 text-sm text-error">
-          {t('auth.captchaFailed')}
+          {t('auth.captchaFailed')}{' '}
+          <button type="button" className="underline underline-offset-4" onClick={turnstile.retry}>{t('browsers.tryAgain')}</button>
         </p>
       ) : null}
       {error ? (

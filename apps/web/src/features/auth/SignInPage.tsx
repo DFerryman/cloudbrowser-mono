@@ -65,8 +65,9 @@ export function SignInPage() {
 
   const start = (e: FormEvent) => {
     e.preventDefault();
+    if (busy) return;
     void run(async () => {
-      const res = await api<{ method: 'passkey' | 'code' }>('POST', '/api/auth/sign-in/start', { body: { email: address }, headers: turnstile.headers() });
+      const res = await api<{ method: 'passkey' | 'code' }>('POST', '/api/auth/sign-in/start', { body: { email: address }, headers: await turnstile.headers() }).finally(turnstile.reset);
       setCode('');
       setStep(res.method === 'passkey' ? 'passkey' : 'code');
     }, (err) => sendError(t, err));
@@ -74,7 +75,7 @@ export function SignInPage() {
 
   const sendCode = () =>
     void run(async () => {
-      await api('POST', '/api/auth/email-otp/send-verification-otp', { body: { email: address, type: 'sign-in' }, headers: turnstile.headers() });
+      await api('POST', '/api/auth/email-otp/send-verification-otp', { body: { email: address, type: 'sign-in' }, headers: await turnstile.headers() }).finally(turnstile.reset);
       setCode('');
       setStep('code');
     }, (err) => sendError(t, err));
@@ -112,7 +113,7 @@ export function SignInPage() {
       {t('auth.useOtherEmail')}
     </button>
   );
-  const waiting = busy || !turnstile.ready;
+  const waiting = busy;
 
   return (
     <AuthLayout
@@ -179,9 +180,11 @@ export function SignInPage() {
       )}
       {/* Outside the steps, so the widget lives as long as the page. */}
       {step !== 'second-factor' ? <div className="mt-4">{turnstile.widget}</div> : null}
+      {turnstile.checking ? <p role="status" className="mt-4 text-sm text-muted">{t('auth.captchaChecking')}</p> : null}
       {turnstile.failed && step !== 'second-factor' ? (
         <p role="alert" className="mt-4 text-sm text-error">
-          {t('auth.captchaFailed')}
+          {t('auth.captchaFailed')}{' '}
+          <button type="button" className="underline underline-offset-4" onClick={turnstile.retry}>{t('browsers.tryAgain')}</button>
         </p>
       ) : null}
       {error && step !== 'second-factor' ? (
