@@ -150,6 +150,7 @@ class FakePC {
   remote: any;
   closed = false;
   candidates: any[] = [];
+  getStats?: () => Promise<Map<string, unknown>>;
   constructor(readonly config: RTCConfiguration) {
     FakePC.last = this;
   }
@@ -190,7 +191,7 @@ describe('RemoteBrowser', () => {
 
   function setup(
     iceServers: { urls: string[]; username?: string; credential?: string }[] = [],
-    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'onInputError' | 'video' | 'onVideo'> = {},
+    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'onInputError' | 'video' | 'onVideo' | 'tier'> = {},
   ) {
     FakeWS.all = [];
     const getConnectInfo = vi.fn(async () => ({ gatewayUrl: 'wss://gw/v1/stream/i1', token: `tok${getConnectInfo.mock.calls.length}`, iceServers }));
@@ -874,6 +875,30 @@ describe('RemoteBrowser', () => {
     b.setVideoPreference({ quality: 'medium', auto: false });
     expect(ws.neko('signal/video')).toHaveLength(1);
     b.disconnect();
+  });
+
+  it('steps down when packets arrive but no frame decodes, and not when frames go unreported', async () => {
+    vi.useFakeTimers();
+    for (const framesDecoded of [0, undefined]) {
+      const { b } = setup([], { video: { quality: 'full', auto: true }, tier: 'premium' });
+      await b.connect();
+      const ws = FakeWS.all[0]!;
+      ws.push({ t: 'agent_online' });
+      ws.push({ t: 'neko', data: { event: 'system/init', payload: { webrtc: { videos: ['full', 'high', 'medium', 'low'] } } } });
+      ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp', video: { id: 'full' } } } });
+      await vi.advanceTimersByTimeAsync(0);
+      // The decoder waits for a keyframe: packets keep coming, frames do not (no framesPerSecond either).
+      let received = 0;
+      FakePC.last.getStats = async () => {
+        received += 500;
+        return new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', packetsReceived: received, packetsLost: 0, bytesReceived: received * 1200, framesDecoded }]]);
+      };
+      FakePC.last.connect();
+      await vi.advanceTimersByTimeAsync(10_000);
+      // Another level starts with a keyframe; a browser that reports no frame counts is left alone.
+      expect(ws.neko('signal/video')).toEqual(framesDecoded === 0 ? [{ selector: { id: 'high', type: 'exact' }, auto: false }] : []);
+      b.disconnect();
+    }
   });
 
   it('streams the one video of an older browser image, without picture levels', async () => {

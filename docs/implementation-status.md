@@ -85,7 +85,11 @@ Cloudflare deployment.
   offers it; the free trial is always Basic. The viewer asks for up to 60 Hz and judges frame drops
   against the tier's rates; a long round trip alone never lowers Premium (no latency caps; it
   steps down for loss, missing frames, more than 10% of the time frozen, or a building queue).
-  The region list shows each tier's own stock. Measurements and the rollout steps are in `docs/aws.md`.
+  Premium's ladder gives up bitrate before frame rate (60 fps at 4.5 and 2.5 Mbit/s, then 30 and
+  20 fps); frames are at most 100 ms of the cap and keyframes come only on request, from a neko
+  rebuilt with `images/browser/neko/keyframes-and-resends.patch` (keyframe on RTCP PLI, a budget
+  for resends), which holds 60 fps through a 3.5 Mbit/s bottleneck where the first release fell to
+  10 fps. The region list shows each tier's own stock. Measurements and the rollout steps are in `docs/aws.md`.
 - **Storage** (page 6): new browsers get a 10 GB data volume (cap `storage_gb`); users can grow it
   up to `storage_max_gb` (100 GB) from the Storage tab, which shows used and total space and the
   monthly cost before confirming. The volume grows online (`ModifyVolume`) and agent 0.2.0 grows

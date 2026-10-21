@@ -39,6 +39,12 @@ export type StreamProfile = Pick<TierSpec, 'fps' | 'latency' | 'freezeShare'>;
 const SETTLE_MS = 4_000;
 /** Consecutive bad readings (about 6 s) before stepping down: brief hiccups keep the picture. */
 const BAD_READINGS = 3;
+/**
+ * Readings before stepping down when no frame arrives at all or a fifth of the packets are lost:
+ * the picture is frozen or falling apart, and waiting longer only keeps it so.
+ */
+const SEVERE_READINGS = 2;
+const SEVERE_LOSS = 0.2;
 const UPGRADE_AFTER_MS = 12_000;
 /** A step up that turns bad this soon was too much: wait twice as long before the next one. */
 const PROBATION_MS = 20_000;
@@ -75,8 +81,9 @@ const ILLEGIBLE_READINGS = 2;
  * steps down once bandwidth falls to about an eighth of the stream; the viewer decides instead.
  * A good connection keeps the sharpest level at full frame rate. On Basic a long round trip
  * lowers the sharpest level allowed (TIERS[tier].latency.caps). Below that, it steps down after a
- * few seconds of dropped frames, loss, stutter or growing delay, and probes one level up again
- * after a quiet period, never above the preferred level or the path's cap. It never goes below
+ * few seconds of dropped frames, loss, stutter or growing delay (sooner when nothing decodes at
+ * all), and probes one level up again after a quiet period, never above the preferred level or
+ * the path's cap; a probe the path cannot carry is undone at its first bad reading. It never goes below
  * the lowest level whose picture keeps text readable (MIN_LEGIBLE_SCALE): a clear picture at a
  * lower frame rate is worth more than a smooth one nobody can read.
  */
@@ -135,11 +142,16 @@ export class QualityController {
       return this.move(ceiling, s.at);
     }
     const expected = this.profile.fps[this.quality];
-    const struggling = s.stalled || s.lossRate > LOSS_LIMIT || this.stuttering(s) || (s.fps !== null && s.fps < expected * FPS_SHARE)
+    const severe = s.stalled || s.fps === 0 || s.lossRate > SEVERE_LOSS;
+    const struggling = severe || s.lossRate > LOSS_LIMIT || this.stuttering(s) || (s.fps !== null && s.fps < expected * FPS_SHARE)
       || this.queueBuilding(s.rttMs, bestRtt);
     if (struggling) {
       this.goodSince = null;
-      if (++this.bad < BAD_READINGS || this.level >= Math.max(this.max, this.floor)) return null;
+      // A step up still on probation goes back at the first bad reading: it was too much, and
+      // every reading spent above what the path carries is a stalled picture.
+      const onProbation = this.lastUpgradeAt !== null && s.at - this.lastUpgradeAt < PROBATION_MS;
+      const needed = onProbation ? 1 : severe ? SEVERE_READINGS : BAD_READINGS;
+      if (++this.bad < needed || this.level >= Math.max(this.max, this.floor)) return null;
       this.stepUpFailed(s.at);
       return this.move(this.level + 1, s.at);
     }

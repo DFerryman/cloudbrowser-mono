@@ -3,6 +3,30 @@
 # signed with cosign in CI and the agent checks the signature before running one.
 # neko 3.2.0 fixes WebRTC timestamp drift and stale frames piling up; the agent's protocol
 # (login, system/init, signal/*, control/*, screen/*, signal/video) is unchanged from 3.0.8.
+
+# neko's server, rebuilt from the same release with neko/*.patch (measured in neko-premium.yaml):
+# - neko 3.2.0 ignores a viewer's keyframe request (RTCP PLI/FIR), so a frame lost beyond what
+#   retransmission repairs froze the picture until the encoder's next periodic keyframe (with
+#   Premium's on-demand keyframes, for good); patched, the next frame is a keyframe.
+# - It resent every packet a viewer reported lost, all at once, which on a busy path overflowed
+#   it again and collapsed the stream into retransmissions; patched, resends have a budget.
+# Built as neko's own server/Dockerfile does (Go 1.25 on Debian trixie, the base image's OS);
+# NEKO_BUILD_IMAGE is an argument only so a local build can add a proxy's CA certificate.
+ARG NEKO_BUILD_IMAGE=golang:1.25-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73
+FROM ${NEKO_BUILD_IMAGE} AS neko
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libx11-dev libxrandr-dev libxtst-dev libgtk-3-dev libxcvt-dev \
+      libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+ && rm -rf /var/lib/apt/lists/*
+# v3.2.0 (the tag the base image is built from), fetched by commit so a moved tag cannot change it.
+ARG NEKO_COMMIT=92420ca8e4709c1ac49961c4bf5d3cc786d44f0d
+WORKDIR /src
+RUN git init -q . && git remote add origin https://github.com/m1k1o/neko.git \
+ && git fetch -q --depth 1 origin "$NEKO_COMMIT" && git checkout -q FETCH_HEAD
+COPY neko/ /patches/
+RUN git apply /patches/*.patch && cd server && ./build core && go test ./internal/webrtc/ && ./bin/neko --version >/dev/null
+
 FROM ghcr.io/m1k1o/neko/google-chrome:3.2.0@sha256:0609ca9ec35a2745a189b3b4934ea609f71feb12a1a67c33df65f556599c7a7f
 
 USER root
@@ -31,6 +55,7 @@ COPY policies.json /etc/opt/chrome/policies/managed/cloudbrowser.json
 # Chrome launch flags: profile on the data volume, stable cookie encryption, bounded cache,
 # DevTools on the loopback interface for the agent only.
 COPY google-chrome.conf /etc/neko/supervisord/google-chrome.conf
+COPY --from=neko /src/server/bin/neko /usr/bin/neko
 COPY neko.yaml /etc/neko/neko.yaml
 # Premium browsers stream at 60 fps (the VM sets NEKO_CONFIG to this file; Basic keeps neko.yaml).
 COPY neko-premium.yaml /etc/neko/neko-premium.yaml
@@ -39,10 +64,11 @@ COPY neko-premium.yaml /etc/neko/neko-premium.yaml
 # add common laptop sizes (GTF timings, like neko's own lines) and 2560x1440, so Premium keeps
 # 60 fps in every window size the viewer uses. 2560x1440 has short blanking to stay under the
 # dummy driver's 300 MHz pixel clock (GTF needs 312), yet not the CVT reduced-blanking shape
-# that X refuses without a monitor that declares it. Measured on 4 vCPUs at 2560x1440: 59 fps
-# while scrolling with 78% of the VM busy, 57 fps playing 1080p60 video with 86% busy (c7i's
-# faster cores leave more room). Basic is unaffected: these sizes already have 30 or 25 Hz modes,
-# and its viewer stays at or below 30.
+# that X refuses without a monitor that declares it. 2560x1440 is the heaviest size: neko's own
+# frame counter showed about 40 fps while scrolling a dense page on a 4 vCPU host at 2.8 GHz that
+# also ran the viewer (Chrome's software compositor, the X server and the screen capture share
+# the CPUs; c7i's faster cores leave more room). Basic is unaffected: these sizes already have 30
+# or 25 Hz modes, and its viewer stays at or below 30.
 RUN sed -i \
       -e '/Modeline "1920x1080_60.00"/a\  Modeline "2560x1440_60.00" 243.12 2560 2608 2648 2736 1440 1443 1448 1481 -HSync +Vsync\n  Modeline "1600x900_60.00" 119.00 1600 1696 1864 2128 900 901 904 932 -HSync +Vsync\n  Modeline "1368x768_60.00" 85.86 1368 1440 1584 1800 768 769 772 795 -HSync +Vsync' \
       -e 's/Modes "1920x1080_60.00"/Modes "1920x1080_60.00" "2560x1440_60.00" "1600x900_60.00" "1368x768_60.00"/' \

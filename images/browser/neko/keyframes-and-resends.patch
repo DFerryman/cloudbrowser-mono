@@ -1,0 +1,301 @@
+diff --git a/server/internal/capture/streamsink.go b/server/internal/capture/streamsink.go
+index 86e8795..a0fbd32 100644
+--- a/server/internal/capture/streamsink.go
++++ b/server/internal/capture/streamsink.go
+@@ -50,6 +50,11 @@ type StreamSinkManagerCtx struct {
+ 	listenersKf       map[*streamSubscription]types.SampleConsumer // keyframe lobby
+ 	listenersSnapshot atomic.Value                                 // read without listenersMu
+ 
++	// Keyframes requested by viewers (RequestKeyframe), at most one per keyframeRequestInterval.
++	keyframeMu        sync.Mutex
++	lastKeyframeAt    time.Time
++	keyframeScheduled bool
++
+ 	// Protects bitrate accounting, reads, and resets.
+ 	bitrateMu sync.Mutex
+ 	bitrate   uint64
+@@ -505,6 +510,51 @@ func (manager *StreamSinkManagerCtx) updateListenersSnapshotLocked() {
+ 	manager.listenersSnapshot.Store(listeners)
+ }
+ 
++// keyframeRequestInterval bounds keyframes sent on request: a viewer repeats its request while it
++// waits, and several viewers may ask at once. A request within the interval is answered when it ends.
++const keyframeRequestInterval = 300 * time.Millisecond
++
++// RequestKeyframe makes the encoder's next frame a keyframe (a viewer lost a frame it cannot do without).
++func (manager *StreamSinkManagerCtx) RequestKeyframe() {
++	if !manager.codec.IsVideo() {
++		return
++	}
++
++	manager.keyframeMu.Lock()
++	defer manager.keyframeMu.Unlock()
++
++	if manager.keyframeScheduled {
++		return
++	}
++
++	wait := keyframeRequestInterval - time.Since(manager.lastKeyframeAt)
++	if wait <= 0 {
++		manager.emitRequestedKeyframeLocked()
++		return
++	}
++
++	manager.keyframeScheduled = true
++	time.AfterFunc(wait, func() {
++		manager.keyframeMu.Lock()
++		defer manager.keyframeMu.Unlock()
++
++		manager.keyframeScheduled = false
++		manager.emitRequestedKeyframeLocked()
++	})
++}
++
++func (manager *StreamSinkManagerCtx) emitRequestedKeyframeLocked() {
++	manager.lastKeyframeAt = time.Now()
++
++	manager.pipelineMu.Lock()
++	defer manager.pipelineMu.Unlock()
++
++	if manager.pipeline != nil {
++		manager.logger.Debug().Msg("keyframe requested by a viewer")
++		manager.pipeline.EmitVideoKeyframe()
++	}
++}
++
+ func (manager *StreamSinkManagerCtx) destroyPipeline() {
+ 	manager.pipelineMu.Lock()
+ 	defer manager.pipelineMu.Unlock()
+diff --git a/server/internal/webrtc/manager.go b/server/internal/webrtc/manager.go
+index 1a0c71e..a5e1343 100644
+--- a/server/internal/webrtc/manager.go
++++ b/server/internal/webrtc/manager.go
+@@ -225,6 +225,9 @@ func (manager *WebRTCManagerCtx) newPeerConnection(logger zerolog.Logger, codecs
+ 	// create interceptor registry
+ 	registry := &interceptor.Registry{}
+ 
++	// bound resends (retransmit.go); first, so that it sits below the NACK responder
++	registry.Add(retransmitLimiterFactory{})
++
+ 	// create bandwidth estimator
+ 	estimatorChan := make(chan cc.BandwidthEstimator, 1)
+ 	if manager.config.Estimator.Enabled {
+diff --git a/server/internal/webrtc/retransmit.go b/server/internal/webrtc/retransmit.go
+new file mode 100644
+index 0000000..49bdbf9
+--- /dev/null
++++ b/server/internal/webrtc/retransmit.go
+@@ -0,0 +1,105 @@
++package webrtc
++
++import (
++	"sync"
++	"time"
++
++	"github.com/pion/interceptor"
++	"github.com/pion/rtp"
++)
++
++// Resends answering a viewer's NACK may use this share of the stream's own rate over the last
++// second, and at least retransmitMinRate (a still page sends little, yet a loss must be repaired),
++// with retransmitBurst bytes back to back.
++//
++// pion's NACK responder resends every packet a viewer asks for, at once. On a link that has just
++// dropped a burst, the resends (a NACK can list hundreds of packets) overflow it again, are asked
++// for again a round trip later, and the link collapses into retransmissions: measured through a
++// 2.5 Mbit/s bottleneck, no frame was decoded for 20 s. Within the budget a loss is repaired as
++// before; beyond it a resend is skipped, and the viewer asks again or, once the frame is too old,
++// asks for a keyframe instead.
++const (
++	retransmitShare   = 0.5
++	retransmitMinRate = 300_000 / 8 // bytes per second
++	retransmitBurst   = 12_000      // bytes, about ten packets
++	rateWindow        = 500 * time.Millisecond
++)
++
++type retransmitLimiterFactory struct{}
++
++func (retransmitLimiterFactory) NewInterceptor(_ string) (interceptor.Interceptor, error) {
++	return &retransmitLimiter{}, nil
++}
++
++// retransmitLimiter must be registered before the NACK responder: interceptors bound earlier sit
++// closer to the network, so the responder's resends pass through it.
++type retransmitLimiter struct {
++	interceptor.NoOp
++}
++
++func (*retransmitLimiter) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
++	budget := &retransmitBudget{ssrc: info.SSRC}
++
++	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, attributes interceptor.Attributes) (int, error) {
++		size := header.MarshalSize() + len(payload)
++		if !budget.allow(header, size, time.Now()) {
++			return size, nil
++		}
++		return writer.Write(header, payload, attributes)
++	})
++}
++
++type retransmitBudget struct {
++	mu   sync.Mutex
++	ssrc uint32
++
++	// newest sequence number sent: a packet not newer than it is a resend
++	started bool
++	highest uint16
++
++	// bytes of new packets in the current and the previous window
++	windowStart   time.Time
++	windowBytes   int
++	previousBytes int
++
++	tokens     float64
++	lastRefill time.Time
++}
++
++func (b *retransmitBudget) allow(header *rtp.Header, size int, now time.Time) bool {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++
++	if elapsed := now.Sub(b.windowStart); elapsed >= rateWindow {
++		if elapsed >= 2*rateWindow {
++			b.previousBytes = 0
++		} else {
++			b.previousBytes = b.windowBytes
++		}
++		b.windowBytes = 0
++		b.windowStart = now
++	}
++
++	// a resend is either an RTX packet (another SSRC) or a sequence number already sent
++	if header.SSRC == b.ssrc && (!b.started || int16(header.SequenceNumber-b.highest) > 0) {
++		b.started = true
++		b.highest = header.SequenceNumber
++		b.windowBytes += size
++		return true
++	}
++
++	rate := float64(b.previousBytes+b.windowBytes) / (rateWindow + now.Sub(b.windowStart)).Seconds()
++	rate = max(retransmitShare*rate, retransmitMinRate)
++	if b.lastRefill.IsZero() {
++		b.tokens = retransmitBurst
++	} else {
++		b.tokens = min(retransmitBurst, b.tokens+rate*now.Sub(b.lastRefill).Seconds())
++	}
++	b.lastRefill = now
++
++	if b.tokens < float64(size) {
++		return false
++	}
++	b.tokens -= float64(size)
++	return true
++}
+diff --git a/server/internal/webrtc/retransmit_test.go b/server/internal/webrtc/retransmit_test.go
+new file mode 100644
+index 0000000..1fff068
+--- /dev/null
++++ b/server/internal/webrtc/retransmit_test.go
+@@ -0,0 +1,59 @@
++package webrtc
++
++import (
++	"testing"
++	"time"
++
++	"github.com/pion/rtp"
++)
++
++func TestRetransmitBudget(t *testing.T) {
++	b := &retransmitBudget{ssrc: 1}
++	now := time.Unix(0, 0)
++	packet := func(seq uint16) *rtp.Header { return &rtp.Header{SSRC: 1, SequenceNumber: seq} }
++
++	// one second of new packets at 2 Mbit/s: always sent
++	for seq := uint16(0); seq < 200; seq++ {
++		now = now.Add(5 * time.Millisecond)
++		if !b.allow(packet(seq), 1250, now) {
++			t.Fatalf("new packet %d was not sent", seq)
++		}
++	}
++
++	// a NACK for 100 packets at once: the burst allowance, about ten packets, is resent
++	resent := 0
++	for seq := uint16(50); seq < 150; seq++ {
++		if b.allow(packet(seq), 1250, now) {
++			resent++
++		}
++	}
++	if resent < 8 || resent > 10 {
++		t.Fatalf("resent %d of 100 packets at once, want about ten", resent)
++	}
++
++	// half the stream's rate (1 Mbit/s = 125 kB/s) refills it: 100 ms allows another ten
++	now = now.Add(100 * time.Millisecond)
++	resent = 0
++	for seq := uint16(50); seq < 150; seq++ {
++		if b.allow(packet(seq), 1250, now) {
++			resent++
++		}
++	}
++	if resent < 9 || resent > 11 {
++		t.Fatalf("resent %d after 100 ms, want about ten", resent)
++	}
++
++	// new packets are never held back by resends, across the sequence number wrap too
++	b.highest = 65530
++	for seq := uint16(65531); seq != 5; seq++ {
++		if !b.allow(packet(seq), 1250, now) {
++			t.Fatalf("new packet %d was not sent", seq)
++		}
++	}
++
++	// RTX packets (another SSRC) count as resends
++	b.tokens = 0
++	if b.allow(&rtp.Header{SSRC: 2, SequenceNumber: 9}, 1250, now) {
++		t.Fatal("an RTX packet beyond the budget was sent")
++	}
++}
+diff --git a/server/internal/webrtc/track.go b/server/internal/webrtc/track.go
+index 39b6bca..3ef6868 100644
+--- a/server/internal/webrtc/track.go
++++ b/server/internal/webrtc/track.go
+@@ -87,12 +87,38 @@ func (t *Track) rtcpReader(sender *webrtc.RTPSender) {
+ 			continue
+ 		}
+ 
++		// The viewer asks for a keyframe when it cannot decode (a frame lost beyond what
++		// retransmission repairs): answer at once instead of leaving the picture frozen until
++		// the encoder's next periodic keyframe.
++		for _, p := range packets {
++			switch p.(type) {
++			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
++				t.requestKeyframe()
++			}
++		}
++
+ 		if t.rtcpCh != nil {
+ 			t.rtcpCh <- packets
+ 		}
+ 	}
+ }
+ 
++// KeyframeRequester is a stream that can encode its next frame as a keyframe.
++type KeyframeRequester interface {
++	RequestKeyframe()
++}
++
++func (t *Track) requestKeyframe() {
++	t.streamMu.Lock()
++	stream := t.stream
++	paused := t.paused
++	t.streamMu.Unlock()
++
++	if requester, ok := stream.(KeyframeRequester); ok && !paused {
++		requester.RequestKeyframe()
++	}
++}
++
+ // --- sample  ---
+ 
+ func (t *Track) sampleReader() {

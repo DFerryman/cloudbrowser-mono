@@ -54,9 +54,10 @@ export const TIERS: Record<BrowserTier, TierSpec> = {
   },
   // Frame rate is independent of the path's length: 60 fps at any round trip while frames keep
   // arriving. A queue still counts, judged against the path (a long path jitters more), and so
-  // does stutter, once the picture stands frozen more than a tenth of the time.
+  // does stutter, once the picture stands frozen more than a tenth of the time. The ladder gives
+  // up bitrate before frame rate: high is still 60 fps, under a lower bitrate cap.
   premium: {
-    vcpu: 4, memoryGb: 8, fps: { full: 60, high: 30, medium: 20, low: 10 }, maxRefreshRate: 60,
+    vcpu: 4, memoryGb: 8, fps: { full: 60, high: 60, medium: 30, low: 20 }, maxRefreshRate: 60,
     latency: { caps: [], rising: { minMs: 300, factor: 1 } },
     freezeShare: 0.1,
   },

@@ -799,8 +799,11 @@ export class RemoteBrowser {
     const lost = Math.max(0, counters.lost - before.lost);
     const received = Math.max(0, counters.received - before.received);
     const seconds = (at - before.at) / 1000;
-    // Some browsers omit framesPerSecond; decoded frames over the interval say the same.
-    const decodedFps = seconds > 0 && counters.frames > 0 ? (counters.frames - before.frames) / seconds : null;
+    // Some browsers omit framesPerSecond; decoded frames over the interval say the same. While
+    // packets arrive but no frame decodes (the decoder waits for a keyframe), framesPerSecond is
+    // missing too: that is 0 fps, not an unknown rate.
+    const decodedFps = seconds > 0 && Number.isFinite(counters.frames) && Number.isFinite(before.frames)
+      ? (counters.frames - before.frames) / seconds : null;
     const frozen = counters.frozenSeconds - before.frozenSeconds;
     const next = this.qualityController.observe({
       at,

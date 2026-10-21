@@ -18,13 +18,21 @@ function run(c: QualityController, from: number, seconds: number, sample: (at: n
 
 describe('picture quality controller', () => {
   it('judges a Premium stream against its own frame rates', () => {
-    // 25 fps is a healthy Basic stream but less than half of Premium's 60.
+    // 25 fps is a healthy Basic stream but less than half of Premium's 60, at full and at high.
     const premium = new QualityController('full', 0, 'full', TIERS.premium);
     expect(run(premium, 10_000, 6, (at) => good(at, 25))).toEqual([[14, 'high']]);
-    // At high (30 fps) the same 25 fps is healthy, and 58 fps at full is too.
-    expect(run(premium, 16_000, 10, (at) => good(at, 25))).toEqual([]);
+    expect(run(premium, 16_000, 8, (at) => good(at, 25))).toEqual([[22, 'medium']]);
+    // At medium (30 fps) the same 25 fps is healthy, and 58 fps at full is too. After a quiet
+    // spell it tries high again and, still getting 25 fps there, returns at the first reading.
+    expect(run(premium, 24_000, 20, (at) => good(at, 25))).toEqual([[38, 'high'], [42, 'medium']]);
     const healthy = new QualityController('full', 0, 'full', TIERS.premium);
     expect(run(healthy, 0, 120, (at) => good(at, 58))).toEqual([]);
+  });
+
+  it('gives up bitrate before frame rate on Premium: high still streams 60 fps', () => {
+    expect(TIERS.premium.fps).toEqual({ full: 60, high: 60, medium: 30, low: 20 });
+    const c = new QualityController('full', 0, 'high', TIERS.premium);
+    expect(run(c, 0, 60, (at) => good(at, 60)).map(([, q]) => q)).toEqual(['full']);
   });
 
   it('keeps Premium at 60 fps at any steady round trip, and steps down only when the picture suffers', () => {
@@ -105,7 +113,27 @@ describe('picture quality controller', () => {
   it('treats a missing frame rate as unknown, but no packets at all as trouble', () => {
     const c = new QualityController('full', 0);
     expect(run(c, 10_000, 60, (at) => good(at, null))).toEqual([]);
-    expect(run(c, 70_000, 8, (at) => ({ ...good(at, null), stalled: true }))).toEqual([[74, 'high']]);
+    // Nothing arriving at all is severe: two readings, not three.
+    expect(run(c, 70_000, 8, (at) => ({ ...good(at, null), stalled: true }))).toEqual([[72, 'high']]);
+  });
+
+  it('steps down after two readings when no frame is decoded or a fifth of the packets are lost', () => {
+    const frozen = new QualityController('full', 0, 'full', TIERS.premium);
+    expect(run(frozen, 10_000, 6, (at) => ({ ...good(at, 0), lossRate: 0.03 }))).toEqual([[12, 'high']]);
+    const lossy = new QualityController('full', 0);
+    expect(run(lossy, 10_000, 6, (at) => ({ ...good(at), lossRate: 0.25 }))).toEqual([[12, 'high']]);
+  });
+
+  it('goes back at the first bad reading when a step up turns out too much', () => {
+    const c = new QualityController('full', 0, 'high', TIERS.premium);
+    expect(run(c, 10_000, 14, (at) => good(at, 60))).toEqual([[22, 'full']]);
+    // Settled 4 s after the switch, the first bad reading undoes it.
+    expect(run(c, 24_000, 4, (at) => ({ ...good(at, 60), lossRate: 0.1 }))).toEqual([[26, 'high']]);
+    // Later trouble, past the probation, needs the usual three readings.
+    const later = new QualityController('full', 0, 'high', TIERS.premium);
+    run(later, 10_000, 14, (at) => good(at, 60));
+    expect(run(later, 24_000, 30, (at) => good(at, 60))).toEqual([]);
+    expect(run(later, 54_000, 6, (at) => ({ ...good(at, 60), lossRate: 0.1 }))).toEqual([[58, 'high']]);
   });
 
   it('keeps full quality on ordinary paths and caps only clearly long ones', () => {
@@ -152,9 +180,11 @@ describe('picture quality controller', () => {
     expect(run(current, 10_000, 40, (at) => ({ ...bad(at), scale: 1 })).map(([, q]) => q)).toEqual(['high', 'medium', 'low']);
   });
 
-  it('runs low at 10 fps on purpose', () => {
+  it('runs low at its own frame rate on purpose: 10 fps on Basic, 20 on Premium', () => {
     const low = new QualityController('low', 0);
     expect(run(low, 10_000, 30, (at) => good(at, 10))).toEqual([]);
+    const premium = new QualityController('low', 0, 'low', TIERS.premium);
+    expect(run(premium, 10_000, 30, (at) => good(at, 20))).toEqual([]);
   });
 
   it('returns one level at a time after a quiet period, never above the preferred level', () => {

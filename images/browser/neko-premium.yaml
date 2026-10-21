@@ -9,14 +9,31 @@
 # under 1080p60 video playback. Every browser the viewer supports decodes H.264 in WebRTC.
 #
 # Constant quality with a bitrate cap (pass=qual): a frame costs what changed in it, up to the
-# cap. A plain bitrate target spent about 2.9 Mbit/s on a page that did not move (its keyframes
-# came out nearly lossless); quality 23 under the cap measured 0.6 Mbit/s on a still page and
-# 1.9 Mbit/s while scrolling, with text as sharp as the screen. Basic's VP8 sends about 2 Mbit/s
-# either way.
+# cap. Quality 23 under the cap measured about 0.1 Mbit/s on a still page and 2.2-3 Mbit/s while
+# scrolling a dense page, with text as sharp as the screen.
+#
+# The ladder gives up bitrate before frame rate: full and high both stream 60 fps (high under a
+# 2.5 Mbit/s cap: a little softer while the page moves, as sharp once it stops), then 30 and 20.
+# Smooth motion is what Premium is for, and every level's frame rate divides 60 evenly.
+#
+# Bursts, not the average rate, are what a long path drops. Measured through a 3.5 Mbit/s
+# bottleneck with a 100 ms queue (a path Basic's constant 2 Mbit/s fits), the previous settings
+# froze the picture for a second or more at every keyframe, and the viewer stepped down to 10 fps
+# within a minute and a half:
+# - vbv-buf-capacity 100 (ms of the cap): one frame is never more than about 56 kB at full, 31 kB
+#   at high. At 600 a keyframe could be 337 kB, all of it handed to the network at once.
+# - No periodic keyframes (key-int-max: 5 minutes, a safety net only). The browser image's neko
+#   sends a keyframe when a viewer asks for one (RTCP PLI, neko/keyframes-and-resends.patch): a new
+#   viewer and every level change start with one, and so does recovery from a frame lost beyond
+#   repair. A keyframe every 2 s was a burst every 2 s.
+# - neko resends lost packets within a budget (the same patch): an unbounded resend of hundreds
+#   of packets at once overflowed the path again and collapsed it.
+# With these (and the viewer's quicker adaptation), the same path held 60 fps throughout: mean
+# 58.8 fps, nothing frozen in 2.5 minutes. docs/aws.md has the other paths measured.
 #
 # The desktop runs at 60 Hz (Basic's at 30 Hz caps Chrome at 30 fps) at every size up to
-# 2560x1440 (the Dockerfile adds that mode; it measured 59 fps while scrolling on four vCPUs).
-# Every level's frame rate divides 60 evenly, so motion stays even at every level.
+# 2560x1440 (the Dockerfile adds the modes). 1080p holds 60 fps with about 2.4 vCPUs busy while
+# scrolling; 2560x1440 reaches about 40 fps (see the Dockerfile).
 desktop:
   screen: "1920x1080@60"
 capture:
@@ -32,42 +49,39 @@ capture:
         gst_params: &h264
           pass: qual                 # constant quality (CRF) at `quantizer` ...
           quantizer: "23"
-          bitrate: "4500"            # ... never above this many kbit/s (1080p60 video measured 4.5)
-          vbv-buf-capacity: "600"    # ms: short bursts, so a scene change does not queue up the link
-          # A keyframe every 2 s. neko sends one at once to a new viewer and on every level
-          # change, and lost packets are resent, so this only bounds recovery from what resends miss.
-          key-int-max: "120"
+          bitrate: "4500"            # ... never above this many kbit/s (1080p60 video measured 4.3)
+          vbv-buf-capacity: "100"    # ms of the cap: no frame bigger than a tenth of a second's worth
+          key-int-max: "18000"       # 5 minutes: keyframes come when a viewer needs one (see above)
           threads: "4"
           byte-stream: "true"
           tune: zerolatency          # no lookahead or B-frames: each frame leaves as it is encoded
           speed-preset: superfast
         gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
       high:
-        fps: 30
+        fps: 60
         gst_prefix: "! video/x-raw,format=I420"
         gst_encoder: x264enc
         gst_params:
           <<: *h264
           bitrate: "2500"
-          key-int-max: "60"
         gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
       medium:
+        fps: 30
+        gst_prefix: "! video/x-raw,format=I420"
+        gst_encoder: x264enc
+        gst_params:
+          <<: *h264
+          bitrate: "1500"
+          key-int-max: "9000"
+        gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
+      low:
         fps: 20
         gst_prefix: "! video/x-raw,format=I420"
         gst_encoder: x264enc
         gst_params:
           <<: *h264
-          bitrate: "1600"
-          key-int-max: "40"
-        gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
-      low:
-        fps: 10
-        gst_prefix: "! video/x-raw,format=I420"
-        gst_encoder: x264enc
-        gst_params:
-          <<: *h264
           bitrate: "900"
-          key-int-max: "20"
+          key-int-max: "6000"
         gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
 server:
   bind: "127.0.0.1:8080"   # reached only by the agent on the same VM
