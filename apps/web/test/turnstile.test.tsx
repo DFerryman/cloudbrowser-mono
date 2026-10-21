@@ -24,7 +24,7 @@ vi.mock('@tanstack/react-query', async () => {
 vi.mock('../src/lib/api.js', async (original) => ({ ...await original(), api: vi.fn() }));
 vi.mock('../src/lib/query.js', () => ({ queryClient: { clear: vi.fn() } }));
 vi.mock('../src/site/hooks.js', () => ({ useSignedIn: () => false }));
-vi.mock('react-router', () => ({ useNavigate: () => state.navigate, useLocation: () => ({ state: state.location }), useSearchParams: () => [new URLSearchParams(state.search)], Link: ({ children }: any) => children }));
+vi.mock('react-router', () => ({ useNavigate: () => state.navigate, useLocation: () => ({ state: state.location }), useSearchParams: () => [new URLSearchParams(state.search)], Link: ({ children, to }: any) => React.createElement('a', { href: to }, children) }));
 vi.mock('../src/features/auth/AuthLayout.js', () => ({ AuthLayout: ({ children }: any) => children, safeNext: () => '/browsers' }));
 vi.mock('@cloudbrowser/ui', () => ({ Button: (props: any) => React.createElement('button', props), Input: (props: any) => React.createElement('input', props), Label: (props: any) => React.createElement('label', props) }));
 let latest: ReturnType<typeof useTurnstile>;
@@ -147,4 +147,16 @@ test('the redirected sign-in starts at code entry without sending another email'
  await act(async () => { rendered = create(React.createElement(SignInPage), { createNodeMock: () => ({}) }); });
  expect(rendered.root.findAllByType('input').some((input: any) => input.props.id === 'code')).toBe(true);
  expect(vi.mocked(api)).not.toHaveBeenCalled();
+});
+
+test('unknown sign-in emails show a prefilled registration link instead of a code step', async () => {
+ vi.mocked(api).mockResolvedValueOnce({ method: 'register' });
+ await act(async () => { rendered = create(React.createElement(SignInPage), { createNodeMock: () => ({}) }); });
+ await act(async () => rendered.root.findByType('input').props.onChange({ target: { value: 'Fresh@Example.com' } }));
+ await act(async () => { void rendered.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
+ await act(async () => callbacks.callback('verified-token'));
+ expect(vi.mocked(api)).toHaveBeenCalledTimes(1);
+ expect(rendered.root.findAllByType('input').some((input: any) => input.props.id === 'code')).toBe(false);
+ expect(rendered.root.findAllByType('p').some((p: any) => p.props.role === 'alert' && p.props.children.includes('auth.notRegistered'))).toBe(true);
+ expect(rendered.root.findAllByType('a').some((a: any) => a.props.href === '/sign-up?email=fresh%40example.com')).toBe(true);
 });

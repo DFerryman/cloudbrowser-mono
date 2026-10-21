@@ -21,8 +21,8 @@ export function sendError(t: ReturnType<typeof useI18n>['t'], err: unknown) {
 
 /**
  * Email-only sign-in (page 1, "Auth"). The address comes first: an account with a passkey is
- * offered the passkey, any other gets a 6-digit email code (an address with no account gets a
- * registration link instead, and the page says so without telling which happened). An email code
+ * offered the passkey, any other account gets a 6-digit email code. An address with no account
+ * is prompted to register, without sending an email. An email code
  * is always available, passkey or not. With two-factor sign-in on, the email code is followed by a
  * code from an authenticator app (or a one-time backup code) before a session exists; a passkey
  * already proves two factors. New accounts are made on the sign-up page. Google is unavailable
@@ -40,6 +40,7 @@ export function SignInPage() {
   const [step, setStep] = useState<Step>(() => location.state?.emailCodeSentFor === email.trim().toLowerCase() ? 'code' : 'email');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [registrationRequired, setRegistrationRequired] = useState(false);
   const address = email.trim().toLowerCase();
 
   const enter = () => {
@@ -67,9 +68,14 @@ export function SignInPage() {
   const start = (e: FormEvent) => {
     e.preventDefault();
     if (busy) return;
+    setRegistrationRequired(false);
     void run(async () => {
-      const res = await api<{ method: 'passkey' | 'code' }>('POST', '/api/auth/sign-in/start', { body: { email: address }, headers: await turnstile.headers() }).finally(turnstile.reset);
+      const res = await api<{ method: 'passkey' | 'code' | 'register' }>('POST', '/api/auth/sign-in/start', { body: { email: address }, headers: await turnstile.headers() }).finally(turnstile.reset);
       setCode('');
+      if (res.method === 'register') {
+        setRegistrationRequired(true);
+        return;
+      }
       setStep(res.method === 'passkey' ? 'passkey' : 'code');
     }, (err) => sendError(t, err));
   };
@@ -159,7 +165,7 @@ export function SignInPage() {
             <form onSubmit={start} className="mt-8 space-y-4">
               <div>
                 <Label htmlFor="email">{t('auth.email')}</Label>
-                <Input id="email" type="email" autoComplete="email" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)} />
+                <Input id="email" type="email" autoComplete="email" required autoFocus value={email} onChange={(e) => { setEmail(e.target.value); setRegistrationRequired(false); }} />
               </div>
               <Button type="submit" variant="primary" size="lg" className="w-full justify-center" disabled={waiting}>
                 {t('auth.continue')}
@@ -186,6 +192,12 @@ export function SignInPage() {
         <p role="alert" className="mt-4 text-sm text-error">
           {t('auth.captchaFailed')}{' '}
           <button type="button" className="underline underline-offset-4" onClick={turnstile.retry}>{t('browsers.tryAgain')}</button>
+        </p>
+      ) : null}
+      {registrationRequired && step === 'email' ? (
+        <p role="alert" className="mt-4 text-sm text-muted">
+          {t('auth.notRegistered')}{' '}
+          <Link to={`/sign-up?email=${encodeURIComponent(address)}`} className="font-medium text-accent underline underline-offset-4">{t('auth.createAccount')}</Link>
         </p>
       ) : null}
       {error && step !== 'second-factor' ? (

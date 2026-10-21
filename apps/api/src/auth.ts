@@ -123,13 +123,11 @@ async function findAccount(db: Db, email: string) {
   return row ?? null;
 }
 
-export type SignInMethod = 'passkey' | 'code';
+export type SignInMethod = 'passkey' | 'code' | 'register';
 
 /**
- * The sign-in page's first step. An account with a passkey is offered the passkey (an email code
- * is one click away). Otherwise the email code is sent now; an address without an account gets a
- * registration link instead, and the answer is the same as for an account, so the form does not
- * tell who has one. Only "has a passkey" is visible, which the passkey prompt shows anyway.
+ * Existing accounts use a passkey or email code. An unknown address is directed to sign-up
+ * without sending mail or creating a registration token.
  */
 export async function startSignIn(auth: ReturnType<typeof createAuth>, db: Db, email: string, headers: Headers): Promise<SignInMethod> {
   const account = await findAccount(db, email);
@@ -138,7 +136,7 @@ export async function startSignIn(auth: ReturnType<typeof createAuth>, db: Db, e
     if (passkeys && passkeys.n > 0) return 'passkey';
     await auth.api.sendVerificationOTP({ body: { email, type: 'sign-in' }, headers });
   } else {
-    await auth.api.signInMagicLink({ body: { email, metadata: { from: 'sign-in' } }, headers });
+    return 'register';
   }
   return 'code';
 }

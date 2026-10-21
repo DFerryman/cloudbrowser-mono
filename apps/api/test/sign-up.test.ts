@@ -103,12 +103,11 @@ describe('sign-in', () => {
     expect(users()).toBe(0);
   });
 
-  it('answers an unknown address like an account without a passkey, and emails it a registration link', async () => {
+  it('directs an unknown sign-in address to registration without sending any email', async () => {
     const res = await post('/sign-in/start', { email: 'fresh@example.com' });
-    expect(res.body).toEqual({ method: 'code' });
-    const [mail] = await sentTo('fresh@example.com');
-    expect(mail?.text).toContain('has no account yet');
-    expect(registrationToken(mail!.text)).toBeTruthy();
+    expect(res.body).toEqual({ method: 'register' });
+    expect(await sentTo('fresh@example.com')).toHaveLength(0);
+    expect(users()).toBe(0);
   });
 
   it('emails a code to an account without a passkey', async () => {
@@ -160,6 +159,6 @@ describe('Cloudflare Turnstile', () => {
       expect((await post(path, body, { 'cf-turnstile-response': 'bad' })).status).toBe(403);
       expect((await post(path, body, { 'cf-turnstile-response': 'good' })).status).toBe(200);
     }
-    expect(await sentTo('a@example.com')).toHaveLength(3);
+    expect(await sentTo('a@example.com')).toHaveLength(2);
   });
 });

@@ -97,12 +97,12 @@ export function setup(opts: { prices?: boolean } = {}) {
 }
 
 /**
- * Signs in the way the sign-in page does: the first step emails a code to an account, or a
- * registration link to a new address, which then creates the account. Null when nothing was sent.
+ * Creates the test account through sign-up when needed, or signs an existing one in by email
+ * code. Uses the sign-up entry point, which handles both cases. Null when nothing was sent.
  */
 export async function signIn(t: ReturnType<typeof setup>, email: string) {
   const before = t.emails.length;
-  await t.call('POST', '/api/auth/sign-in/start', { email });
+  await t.call('POST', '/api/auth/sign-up/start', { email });
   await t.settle();
   const sent = t.emails.slice(before).filter((m) => m.to === email).pop();
   if (!sent) return null;
