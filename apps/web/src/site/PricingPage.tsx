@@ -138,7 +138,7 @@ function TierSwitch({ value, onChange }: { value: BrowserTier; onChange: (tier: 
           className={cn('h-10 px-4 text-sm font-medium transition-colors', value === tier ? 'bg-fg text-bg' : 'text-muted hover:text-fg')}
           onClick={() => onChange(tier)}
         >
-          {t(`tier.${tier}`)} <span className={cn('font-normal', value === tier ? 'text-bg/70' : 'text-subtle')}>· {t('pricing.fps', { fps: TIERS[tier].fps.full })}</span>
+          {t(`tier.${tier}`)} <span className={cn('font-normal', value === tier ? 'text-bg/70' : 'text-subtle')}>· {t('pricing.spec', { vcpu: TIERS[tier].vcpu, memory: TIERS[tier].memoryGb })}</span>
         </button>
       ))}
     </div>
@@ -169,7 +169,7 @@ function RegionCard({ region, tier }: { region: RegionPrice; tier: BrowserTier }
         ))}
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-surface px-6 py-3 font-mono text-xs text-muted md:px-8">
-        <span>{region.machine ? `${t('pricing.machine', { vcpu: region.machine.vcpu, memory: region.machine.memoryGb, gb: region.defaultStorageGb + region.rootVolumeGb })} · ${t('pricing.fps', { fps: TIERS[tier].fps.full })}` : null}</span>
+        <span>{region.machine ? `${t('pricing.machine', { vcpu: region.machine.vcpu, memory: region.machine.memoryGb, gb: region.defaultStorageGb + region.rootVolumeGb })} · ${t('pricing.spec', { vcpu: TIERS[tier].vcpu, memory: TIERS[tier].memoryGb })}` : null}</span>
         {!region.acceptingNew ? <span className="font-medium text-starting">{t('pricing.notAccepting')}</span> : null}
       </div>
     </Card>

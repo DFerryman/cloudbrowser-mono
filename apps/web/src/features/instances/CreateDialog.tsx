@@ -172,10 +172,10 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
             <div className="grid gap-2 sm:grid-cols-2" role="radiogroup">
               <Choice name="machine" checked={machine === 'basic'} onChange={() => setTier('basic')} icon={<Monitor className="size-4" />}
                 title={t('tier.basic')}
-                hint={t('create.machine.hint', { vcpu: TIERS.basic.vcpu, memory: TIERS.basic.memoryGb, fps: TIERS.basic.fps.full })} />
+                hint={t('create.machine.hint', { vcpu: TIERS.basic.vcpu, memory: TIERS.basic.memoryGb })} />
               <Choice name="machine" checked={machine === 'premium'} onChange={() => setTier('premium')} icon={<Gauge className="size-4" />}
                 title={t('tier.premium')}
-                hint={`${t('create.machine.hint', { vcpu: TIERS.premium.vcpu, memory: TIERS.premium.memoryGb, fps: TIERS.premium.fps.full })} ${t('create.machine.premiumHint')}`} />
+                hint={`${t('create.machine.hint', { vcpu: TIERS.premium.vcpu, memory: TIERS.premium.memoryGb })} ${t('create.machine.premiumHint')}`} />
             </div>
             {machine === 'premium' ? <Hint className="mt-2">{t('create.machine.premiumNote')} <DocsLink to="browsers#premium" /></Hint> : null}
           </fieldset>

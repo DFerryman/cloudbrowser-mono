@@ -1,10 +1,8 @@
 # Images
 
 - `browser/`: neko v3 + Google Chrome container (managed policies, CJK fonts, launch flags, neko
-  config). `neko.yaml` is the Basic live view (VP8, up to 25 fps on a 30 Hz desktop);
-  `neko-premium.yaml` is Premium's (H.264, up to 60 fps on a 60 Hz desktop), chosen by the VM with
-  `NEKO_CONFIG` when its first boot says `BROWSER_TIER=premium`. The build adds 60 Hz desktop modes
-  for 1600×900, 1368×768 and 2560×1440, and rebuilds neko's server from the same release with
+  config). `neko.yaml` is the live view of every browser, Basic and Premium alike (H.264, up to
+  30 fps on a 30 Hz desktop). The build rebuilds neko's server from the same release with
   `browser/neko/*.patch` (a keyframe whenever a viewer asks for one, and a budget for resending
   lost packets; see the Dockerfile). Build: `docker build -t cloudbrowser-browser images/browser`
   (the neko stage fetches its source from GitHub and Go modules from the Go proxy).

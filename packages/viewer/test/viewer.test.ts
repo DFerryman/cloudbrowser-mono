@@ -191,7 +191,7 @@ describe('RemoteBrowser', () => {
 
   function setup(
     iceServers: { urls: string[]; username?: string; credential?: string }[] = [],
-    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'onInputError' | 'video' | 'onVideo' | 'tier'> = {},
+    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'onInputError' | 'video' | 'onVideo'> = {},
   ) {
     FakeWS.all = [];
     const getConnectInfo = vi.fn(async () => ({ gatewayUrl: 'wss://gw/v1/stream/i1', token: `tok${getConnectInfo.mock.calls.length}`, iceServers }));
@@ -880,7 +880,7 @@ describe('RemoteBrowser', () => {
   it('steps down when packets arrive but no frame decodes, and not when frames go unreported', async () => {
     vi.useFakeTimers();
     for (const framesDecoded of [0, undefined]) {
-      const { b } = setup([], { video: { quality: 'full', auto: true }, tier: 'premium' });
+      const { b } = setup([], { video: { quality: 'full', auto: true } });
       await b.connect();
       const ws = FakeWS.all[0]!;
       ws.push({ t: 'agent_online' });

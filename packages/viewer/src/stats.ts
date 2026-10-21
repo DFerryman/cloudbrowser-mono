@@ -43,8 +43,6 @@ export async function readStats(pc: RTCPeerConnection, previous: { bytes: number
     lost,
     received,
     freezes: Number(video?.freezeCount ?? 0),
-    // Seconds the picture stood frozen so far; NaN when the browser does not report it.
-    frozenSeconds: Number(video?.totalFreezesDuration ?? Number.NaN),
     // Frames decoded so far; NaN when the browser does not report it.
     frames: Number(video?.framesDecoded ?? Number.NaN),
   };

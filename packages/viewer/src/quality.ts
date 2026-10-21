@@ -1,4 +1,4 @@
-import { TIERS, VIDEO_QUALITIES, type TierSpec, type VideoQuality } from '@cloudbrowser/contracts';
+import { STREAM, VIDEO_QUALITIES, type StreamSpec, type VideoQuality } from '@cloudbrowser/contracts';
 
 /** The sharpest level to use, and whether to adapt below it (the web app uses the default: full, adapting). */
 export interface VideoPreference {
@@ -17,8 +17,8 @@ export interface QualitySample {
   lossRate: number;
   /** Video freezes since the previous reading. */
   freezes: number;
-  /** Share of the time since the previous reading the picture stood frozen, 0–1; null when unknown. */
-  frozenShare?: number | null;
+  /** Video received since the previous reading, in kbit/s; null when unknown. */
+  kbps?: number | null;
   rttMs: number | null;
   /**
    * Width of the decoded picture over the remote desktop's width (1 = full size); null when
@@ -29,12 +29,11 @@ export interface QualitySample {
 }
 
 /**
- * What the controller needs from the browser's tier: neko encodes at a constant rate whatever is
- * on screen, each tier's image at its own rate per level (TIERS[tier].fps: neko.yaml for Basic,
- * neko-premium.yaml for Premium), and each tier lets the round trip and stutter limit the picture
- * its own way (TIERS[tier].latency, TIERS[tier].freezeShare).
+ * What the controller needs from the stream: neko encodes at a constant rate whatever is on
+ * screen, at its own rate per level (STREAM.fps, images/browser/neko.yaml), and the round trip
+ * limits the picture (STREAM.latency).
  */
-export type StreamProfile = Pick<TierSpec, 'fps' | 'latency' | 'freezeShare'>;
+export type StreamProfile = StreamSpec;
 /** A switch restarts the stream at a keyframe; readings right after it say little. */
 const SETTLE_MS = 4_000;
 /** Consecutive bad readings (about 6 s) before stepping down: brief hiccups keep the picture. */
@@ -45,6 +44,12 @@ const BAD_READINGS = 3;
  */
 const SEVERE_READINGS = 2;
 const SEVERE_LOSS = 0.2;
+/**
+ * Every level streams at a constant bitrate (STREAM.kbps). While packets are lost or a queue
+ * builds, what arrives is about what the path carries, so a step down goes straight to the
+ * sharpest level that fits in this share of it, rather than one level per few seconds.
+ */
+const FIT_SHARE = 0.9;
 const UPGRADE_AFTER_MS = 12_000;
 /** A step up that turns bad this soon was too much: wait twice as long before the next one. */
 const PROBATION_MS = 20_000;
@@ -57,8 +62,7 @@ const FPS_SHARE = 0.5;
  */
 const RTT_WINDOW = 30;
 /**
- * A long round trip can cap the picture even while nothing is lost (TIERS[tier].latency.caps;
- * Premium has none). Every level is full size (images/browser/neko.yaml), so a cap costs frame
+ * A long round trip can cap the picture even while nothing is lost (STREAM.latency.caps). Every level is full size (images/browser/neko.yaml), so a cap costs frame
  * rate, not sharpness. A cap lifts only once the round trip is back below its lower `belowMs`, so
  * a path near the threshold does not flap. Caps stop above low; only a struggling connection gets
  * low. The path's round trip is the median of the last readings (about 10 s): one spike is not a
@@ -80,7 +84,7 @@ const ILLEGIBLE_READINGS = 2;
  * estimator compares its bandwidth estimate in bits with the stream rate in bytes, so it only
  * steps down once bandwidth falls to about an eighth of the stream; the viewer decides instead.
  * A good connection keeps the sharpest level at full frame rate. On Basic a long round trip
- * lowers the sharpest level allowed (TIERS[tier].latency.caps). Below that, it steps down after a
+ * lowers the sharpest level allowed (STREAM.latency.caps). Below that, it steps down after a
  * few seconds of dropped frames, loss, stutter or growing delay (sooner when nothing decodes at
  * all), and probes one level up again after a quiet period, never above the preferred level or
  * the path's cap; a probe the path cannot carry is undone at its first bad reading. It never goes below
@@ -101,8 +105,10 @@ export class QualityController {
   /** Index of the lowest level allowed: a level whose picture proved too small to read is ruled out. */
   private floor = VIDEO_QUALITIES.length - 1;
   private illegible = 0;
+  /** The least the path carried while congested in the current run of bad readings, kbit/s. */
+  private carried: number | null = null;
 
-  constructor(maxQuality: VideoQuality, now: number, current: VideoQuality = maxQuality, private readonly profile: StreamProfile = TIERS.basic) {
+  constructor(maxQuality: VideoQuality, now: number, current: VideoQuality = maxQuality, private readonly profile: StreamProfile = STREAM) {
     this.max = VIDEO_QUALITIES.indexOf(maxQuality);
     this.level = Math.max(this.max, VIDEO_QUALITIES.indexOf(current));
     this.settleUntil = now + SETTLE_MS;
@@ -116,6 +122,7 @@ export class QualityController {
   restart(now: number) {
     this.rtts = [];
     this.bad = 0;
+    this.carried = null;
     this.goodSince = null;
     this.settleUntil = now + SETTLE_MS;
   }
@@ -143,19 +150,23 @@ export class QualityController {
     }
     const expected = this.profile.fps[this.quality];
     const severe = s.stalled || s.fps === 0 || s.lossRate > SEVERE_LOSS;
-    const struggling = severe || s.lossRate > LOSS_LIMIT || this.stuttering(s) || (s.fps !== null && s.fps < expected * FPS_SHARE)
+    const struggling = severe || s.lossRate > LOSS_LIMIT || s.freezes > 0 || (s.fps !== null && s.fps < expected * FPS_SHARE)
       || this.queueBuilding(s.rttMs, bestRtt);
     if (struggling) {
       this.goodSince = null;
+      const congested = s.lossRate > LOSS_LIMIT || this.queueBuilding(s.rttMs, bestRtt);
+      if (congested && s.kbps != null && s.kbps > 0) this.carried = Math.min(this.carried ?? Infinity, s.kbps);
       // A step up still on probation goes back at the first bad reading: it was too much, and
       // every reading spent above what the path carries is a stalled picture.
       const onProbation = this.lastUpgradeAt !== null && s.at - this.lastUpgradeAt < PROBATION_MS;
       const needed = onProbation ? 1 : severe ? SEVERE_READINGS : BAD_READINGS;
-      if (++this.bad < needed || this.level >= Math.max(this.max, this.floor)) return null;
+      const lowest = Math.max(this.max, this.floor);
+      if (++this.bad < needed || this.level >= lowest) return null;
       this.stepUpFailed(s.at);
-      return this.move(this.level + 1, s.at);
+      return this.move(Math.min(lowest, this.fitting(this.carried)), s.at);
     }
     this.bad = 0;
+    this.carried = null;
     this.goodSince ??= s.at;
     if (this.lastUpgradeAt !== null && s.at - this.lastUpgradeAt >= PROBATION_MS) {
       this.lastUpgradeAt = null;
@@ -168,13 +179,15 @@ export class QualityController {
     return null;
   }
 
-  /** Freezes, or with TIERS[tier].freezeShare, more of the time frozen than that (by the count where the time is unknown). */
-  private stuttering(s: QualitySample) {
-    const share = this.profile.freezeShare;
-    return share !== null && s.frozenShare != null ? s.frozenShare > share : s.freezes > 0;
+  /** One level down, or further: the sharpest level whose bitrate fits what the path carried. */
+  private fitting(carriedKbps: number | null) {
+    let next = this.level + 1;
+    if (carriedKbps === null) return next;
+    while (next < VIDEO_QUALITIES.length - 1 && this.profile.kbps[VIDEO_QUALITIES[next]!] > carriedKbps * FIT_SHARE) next++;
+    return next;
   }
 
-  /** Queueing on a saturated link shows as round trips well above the best recent one (TIERS[tier].latency.rising). */
+  /** Queueing on a saturated link shows as round trips well above the best recent one (STREAM.latency.rising). */
   private queueBuilding(rttMs: number | null, bestRtt: number | null) {
     const rising = this.profile.latency.rising;
     return !!rising && rttMs !== null && bestRtt !== null && rttMs > bestRtt + Math.max(rising.minMs, bestRtt * rising.factor);
@@ -202,6 +215,7 @@ export class QualityController {
   private move(level: number, now: number): VideoQuality {
     this.level = level;
     this.bad = 0;
+    this.carried = null;
     this.goodSince = null;
     this.settleUntil = now + SETTLE_MS;
     return this.quality;

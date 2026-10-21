@@ -76,20 +76,16 @@ Cloudflare deployment.
   stopped while the browser sleeps. The machine size comes from the price list and is shown with
   the price.
 - **Machine tiers**: a browser is Basic (2 vCPU / 4 GB, `c7i-flex.large` → `c6i.large` →
-  `c5.large`, VP8 up to 25 fps) or Premium (4 vCPU / 8 GB, `c7i.xlarge` → `c6i.xlarge` →
-  `c5.xlarge`, H.264 up to 60 fps on a 60 Hz desktop up to 2560×1440), chosen at creation and immutable (trigger).
-  The VM's first boot passes `BROWSER_TIER`; the browser image selects `neko-premium.yaml` with
-  `NEKO_CONFIG`. Premium is priced from the same AWS price list (`ProviderPriceSheet.premium`,
-  its own price version), metered at its machine's price, and counted in a shared vCPU inventory
+  `c5.large`) or Premium (4 vCPU / 8 GB, `c7i.xlarge` → `c6i.xlarge` → `c5.xlarge`), chosen at
+  creation and immutable (trigger). The tiers differ only in the machine: every browser streams
+  the same live view (`images/browser/neko.yaml`, H.264 up to 30 fps, `STREAM` in the contracts)
+  with the same adaptation. Premium is priced from the same AWS price list (`ProviderPriceSheet.premium`, its
+  own price version), metered at its machine's price, and counted in a shared vCPU inventory
   (migration 0029). The operator switch `premium` (user:default or user:<id>, off by default)
-  offers it; the free trial is always Basic. The viewer asks for up to 60 Hz and judges frame drops
-  against the tier's rates; a long round trip alone never lowers Premium (no latency caps; it
-  steps down for loss, missing frames, more than 10% of the time frozen, or a building queue).
-  Premium's ladder gives up bitrate before frame rate (60 fps at 4.5 and 2.5 Mbit/s, then 30 and
-  20 fps); frames are at most 100 ms of the cap and keyframes come only on request, from a neko
-  rebuilt with `images/browser/neko/keyframes-and-resends.patch` (keyframe on RTCP PLI, a budget
-  for resends), which holds 60 fps through a 3.5 Mbit/s bottleneck where the first release fell to
-  10 fps. The region list shows each tier's own stock. Measurements and the rollout steps are in `docs/aws.md`.
+  offers it; the free trial is always Basic. The region list shows each tier's own stock. An
+  earlier release streamed Premium in H.264 at up to 60 fps and Basic in VP8; both now share the
+  H.264 stream. neko is rebuilt with `images/browser/neko/keyframes-and-resends.patch` (keyframe on
+  RTCP PLI, a budget for resends) for every browser. See `docs/aws.md`.
 - **Storage** (page 6): new browsers get a 10 GB data volume (cap `storage_gb`); users can grow it
   up to `storage_max_gb` (100 GB) from the Storage tab, which shows used and total space and the
   monthly cost before confirming. The volume grows online (`ModifyVolume`) and agent 0.2.0 grows
@@ -215,17 +211,19 @@ Cloudflare deployment.
   sweep; none of them is ever undone automatically.
 - **Picture resolution and adaptive quality**: the old screen-size setting was stored but never
   applied. neko now streams a ladder of the same desktop, every level at full resolution
-  (`full` 25 fps, `high` 20 fps, `medium` 15 fps, `low` 10 fps; VP8 at 2.0/1.6/1.2/0.9 Mbit/s with
-  max quantizers 20/24/28/32): lower levels give up frame rate and a little fine detail, never
+  (`full` and `high` 30 fps under 3 and 1.8 Mbit/s, `medium` 15 fps under 1.2, `low` 10 fps under
+  0.8; H.264 at constant quality under the cap, previously VP8 at 25/20/15/10 fps): lower levels
+  give up bitrate, then frame rate, never
   resolution — earlier ladders downscaled to 75% and then 50%, which blurred text; before, `codec: h264` without pipelines
   silently fell back to neko's single default VP8 stream). There is no picture setting: the
   per-browser resolution and *Adjust to my connection* options were removed (their D1 columns stay
   unused so an older API can be rolled back to); every live view starts at `full` and adapts. The
   API still returns `videoQuality: 'full'` and `videoAuto: true` for live views opened before the
-  change; both can go in a later release. A long round trip caps the level to keep 25 fps: the
-  median of the last five readings above 180 ms allows `high`, above 320 ms `medium` (30 ms of
-  hysteresis before a cap lifts); `low` at 15 fps is reached only when frames, loss, freezes or a
-  rise in delay show the connection struggling for three readings (about 6 s). The viewer also
+  change; both can go in a later release. A long round trip caps the level at `high` (the
+  median of the last five readings above 180 ms, 30 ms of hysteresis before the cap lifts), still
+  30 fps; lower levels come only when frames, loss, freezes or a rise in delay show the
+  connection struggling: three readings (about 6 s), two when nothing decodes or a fifth of the
+  packets are lost, and then straight to the level whose bitrate fits 90% of what arrived. The viewer also
   measures the decoded picture against the desktop and never adapts below a level whose picture
   is under 90% of the desktop's width (`MIN_LEGIBLE_SCALE`), so browsers still on an older,
   downscaling ladder stay at `full`.

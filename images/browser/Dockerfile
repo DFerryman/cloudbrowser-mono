@@ -4,10 +4,10 @@
 # neko 3.2.0 fixes WebRTC timestamp drift and stale frames piling up; the agent's protocol
 # (login, system/init, signal/*, control/*, screen/*, signal/video) is unchanged from 3.0.8.
 
-# neko's server, rebuilt from the same release with neko/*.patch (measured in neko-premium.yaml):
+# neko's server, rebuilt from the same release with neko/*.patch (measured in docs/aws.md):
 # - neko 3.2.0 ignores a viewer's keyframe request (RTCP PLI/FIR), so a frame lost beyond what
-#   retransmission repairs froze the picture until the encoder's next periodic keyframe (with
-#   Premium's on-demand keyframes, for good); patched, the next frame is a keyframe.
+#   retransmission repairs froze the picture until the encoder's next periodic keyframe;
+#   patched, the next frame is a keyframe.
 # - It resent every packet a viewer reported lost, all at once, which on a busy path overflowed
 #   it again and collapsed the stream into retransmissions; patched, resends have a budget.
 # Built as neko's own server/Dockerfile does (Go 1.25 on Debian trixie, the base image's OS);
@@ -57,23 +57,6 @@ COPY policies.json /etc/opt/chrome/policies/managed/cloudbrowser.json
 COPY google-chrome.conf /etc/neko/supervisord/google-chrome.conf
 COPY --from=neko /src/server/bin/neko /usr/bin/neko
 COPY neko.yaml /etc/neko/neko.yaml
-# Premium browsers stream at 60 fps (the VM sets NEKO_CONFIG to this file; Basic keeps neko.yaml).
-COPY neko-premium.yaml /etc/neko/neko-premium.yaml
-# Chrome draws no faster than the desktop's refresh rate, and the viewer picks a desktop size that
-# fits the window. neko's X server has 60 Hz modes for 1920x1080, 1280x720 and the VESA sizes;
-# add common laptop sizes (GTF timings, like neko's own lines) and 2560x1440, so Premium keeps
-# 60 fps in every window size the viewer uses. 2560x1440 has short blanking to stay under the
-# dummy driver's 300 MHz pixel clock (GTF needs 312), yet not the CVT reduced-blanking shape
-# that X refuses without a monitor that declares it. 2560x1440 is the heaviest size: neko's own
-# frame counter showed about 40 fps while scrolling a dense page on a 4 vCPU host at 2.8 GHz that
-# also ran the viewer (Chrome's software compositor, the X server and the screen capture share
-# the CPUs; c7i's faster cores leave more room). Basic is unaffected: these sizes already have 30
-# or 25 Hz modes, and its viewer stays at or below 30.
-RUN sed -i \
-      -e '/Modeline "1920x1080_60.00"/a\  Modeline "2560x1440_60.00" 243.12 2560 2608 2648 2736 1440 1443 1448 1481 -HSync +Vsync\n  Modeline "1600x900_60.00" 119.00 1600 1696 1864 2128 900 901 904 932 -HSync +Vsync\n  Modeline "1368x768_60.00" 85.86 1368 1440 1584 1800 768 769 772 795 -HSync +Vsync' \
-      -e 's/Modes "1920x1080_60.00"/Modes "1920x1080_60.00" "2560x1440_60.00" "1600x900_60.00" "1368x768_60.00"/' \
-      /etc/neko/xorg.conf \
- && test "$(grep -c '2560x1440_60.00\|1600x900_60.00\|1368x768_60.00' /etc/neko/xorg.conf)" = 4
 
 # Supervisor needs root to manage its pid/socket and drop privileges for its programs.
 # neko and Chrome run as the unprivileged `neko` user in their supervisor configurations.

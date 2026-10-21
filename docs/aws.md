@@ -28,85 +28,56 @@ Burstable `t3` types are not used:
 when their CPU credits run out they either throttle the video or bill surplus credits that the
 price list does not show. Graviton is not an option: Google Chrome for Linux is x86-64 only.
 
-## Premium: 4 vCPU / 8 GB, 60 fps
+## Premium: 4 vCPU / 8 GB
 
-Basic is capped at 25 fps by two things: its neko pipeline encodes 25 fps, and its desktop runs
-at 30 Hz, which Chrome follows (it draws no more frames than the display shows). Premium browsers
-run a 60 Hz desktop and the 60 fps pipeline in `images/browser/neko-premium.yaml` on
-**`c7i.xlarge`** (4 vCPU, 8 GiB, Sapphire Rapids, full-performance), falling back to
-`c6i.xlarge` and `c5.xlarge` (the same shape, at or below its price). Sydney list prices in
-October 2026 were about $0.23 an hour for `c7i.xlarge` against $0.11 for Basic's `c7i-flex.large`;
-customers see the region's own price list times the compute markup, as for Basic. A browser's
-tier is chosen when it is created and never changes.
+Premium differs from Basic only in its machine: **`c7i.xlarge`** (4 vCPU, 8 GiB,
+full-performance), falling back to `c6i.xlarge` and `c5.xlarge` (the same shape, at or below its
+price), against Basic's 2 vCPU / 4 GB. Busy pages and many tabs have more room. Every browser
+streams the same live view (`images/browser/neko.yaml`, `STREAM` in
+`packages/contracts/src/tiers.ts`): H.264 at full resolution on a 30 Hz desktop, constant quality
+under a cap, 30 fps at 3 or 1.8 Mbit/s, then 15 fps at 1.2 and 10 fps at 0.8 Mbit/s. Sydney list prices in October 2026 were about
+$0.23 an hour for `c7i.xlarge` against $0.11 for Basic's `c7i-flex.large`; customers see the
+region's own price list times the compute markup, as for Basic. A browser's tier is chosen when
+it is created and never changes.
 
-**Why these numbers.** Measured with the pinned neko image and Chrome 155 on a 4 vCPU Cascade Lake
-host at 2.8 GHz (slower per core than `c7i`), with Chrome scrolling a dense page every frame:
+An earlier release gave Premium its own stream (H.264 at up to 60 fps on a 60 Hz desktop) and
+Basic VP8 at 25 fps. On real connections Premium did not feel noticeably better, so the tiers now
+share one stream and one adaptation, and nothing promises Premium a higher frame rate. The shared
+stream is H.264 because measurements favored it, with the real viewer in Google Chrome through a
+local TURN relay (80 ms round trip, 0.5% loss unless noted) while Chrome scrolled a dense 1080p
+page, limited to 2 CPUs as on a Basic VM:
 
-| Live view | Encoded | VM busy |
+| Path | VP8, 25 fps (the old Basic stream) | H.264, 30 fps (now) |
 |---|---|---|
-| Basic: VP8, 25 fps, 30 Hz desktop | 24 fps | 1.7 vCPU (85% of a 2 vCPU VM) |
-| VP8 at 60 fps, every speed setting tried | 17–32 fps | all 4 vCPUs |
-| H.264 (x264 superfast) at 60 fps | 59.5 fps | 2.2 vCPU |
-| H.264 at 60 fps with a 1080p60 video playing in Chrome | 59.6 fps | 2.3 vCPU |
-| H.264 at 60 fps limited to 2 CPUs | 59.4 fps | 2.0 (no headroom left) |
-| H.264 at 60 fps, 2560×1440 desktop, scrolling (neko's own frame counter, viewer on the same host) | about 40 fps | 2.7 vCPU |
+| CPU while scrolling | both CPUs busy, 10–15 fps | 1.3 vCPU, 30 fps |
+| 3.5 Mbit/s, 100 ms queue | 13 fps, 75 s of 2 minutes frozen | 30 fps, nothing frozen |
+| 1.5 Mbit/s, 150 ms queue | no frame ever decoded | adapts between 10 and 30 fps, 13 s frozen |
+| 300 ms round trip, 1% loss | | 30 fps, nothing frozen |
 
-VP8 cannot encode 1080p60 in real time on four vCPUs, so Premium streams H.264 (every browser the
-viewer supports decodes it in WebRTC; Firefox through its OpenH264 plugin). Four vCPUs leave about
-40% headroom for heavier pages; two would have none. Premium encodes at constant quality with a
-4.5 Mbit/s cap, so it sends only what changes: about 0.1 Mbit/s on a still page and 1.7–3
-Mbit/s while scrolling, depending on how dense the page is. The image adds a 2560×1440 60 Hz
-mode for large windows; it is the heaviest case: Chrome's software compositor, the X server and
-the screen capture share the CPUs, and it streamed about 40 fps while scrolling (above; `c7i`'s
-faster cores leave more). Pages are still drawn on the CPU,
-so WebGL-heavy sites and 3D games remain slower than on a local computer; a GPU tier (`g4dn`,
-`g6`) would need NVIDIA drivers, an NVENC pipeline and a G-instance vCPU quota (zero by default).
+What decided it is bursts, which a path drops rather than the average rate: VP8's keyframes were
+110–150 kB even at the lowest level, with its quality floor (needed for readable text) reached and
+a keyframe every second, while x264's VBV bounds every frame, keyframes too, to 100 ms of the cap.
+There are no periodic keyframes; neko sends one when a viewer asks (below).
 
-**Holding 60 fps on a constrained path.** The first Premium release held 60 fps on a fast link,
-then fell to 10 fps within minutes on a slower one, while Basic kept working: what a path drops
-is bursts, not the average rate. Reproduced with the production image, the real viewer in Google
-Chrome, and a local TURN relay (the live view always goes through TURN) that adds 80 ms of round
-trip, 0.5% bursty loss and a bottleneck with a finite queue, while the remote Chrome scrolled a
-dense page at 1080p (Basic limited to 2 CPUs, as on its VM):
+**How the live view adapts.** The viewer (`packages/viewer/src/quality.ts`) reads WebRTC
+statistics every 2 s: round trip, lost packets (after resends), frames decoded, freezes and the
+video bitrate received. Above about 180 ms of round trip (median of the last readings) it uses the
+lighter 30 fps level; the round trip alone never lowers the frame rate (300 ms with 1% loss held
+30 fps). A congested connection (over 6% lost, or the
+round trip risen 300 ms above the path's best of the last minute) goes straight to the sharpest
+level whose constant bitrate fits 90% of what actually arrived, instead of one level per few
+seconds; dropped frames or freezes alone step down one level. Nothing decoding or a fifth of the
+packets lost counts after two readings, anything else after three. A step up is tried after a
+quiet spell and undone at its first bad reading. The lowest level keeps the full resolution, so
+text stays readable.
 
-| Path | Basic | Premium, first release | Premium now |
-|---|---|---|---|
-| 20 Mbit/s | 10 fps (CPU-bound on this page) | 58.5 fps, 0.6 s frozen | 58.5 fps, nothing frozen |
-| 4 Mbit/s, 200 ms queue | 15 fps, 104 s frozen | 23 fps (mostly 20), 5 s frozen | 57 fps, nothing frozen |
-| 3.5 Mbit/s, 100 ms queue | 13 fps, 97 s frozen | 23 fps, 46 s at 10 fps, 20 s frozen | 59 fps, nothing frozen |
-| 20 Mbit/s, 3 Mbit/s for 70 s, 20 Mbit/s again | 11 fps, 65 s frozen | 39 fps, down to 10, 33 s frozen | 58 fps, 1.6 s frozen |
-
-Runs of 2.5 minutes (3.5 for the last). Four causes, all fixed:
-
-- *Keyframe bursts.* Each periodic keyframe (every 2 s) could be 600 ms of the bitrate cap,
-  about 337 kB, handed to the network at once. `vbv-buf-capacity` is now 100 ms (at most
-  56 kB at full), and there are no periodic keyframes.
-- *Lost frames stayed lost.* neko 3.2.0 ignores a viewer's keyframe request (RTCP PLI), so a
-  frame lost beyond repair froze the picture until the next periodic keyframe. The browser image
-  now builds neko with `images/browser/neko/keyframes-and-resends.patch`: a request is answered
-  with a keyframe at once (at most one per 300 ms), which also makes periodic ones unnecessary.
-- *Retransmission storms.* neko resent every packet a viewer reported lost, all at once (a NACK
-  can list hundreds), which overflowed the path again; through a 2.5 Mbit/s bottleneck no frame
-  decoded for 20 s. The same patch gives resends a budget: half the stream's rate over the last
-  second (at least 300 kbit/s), about ten packets back to back.
-- *A ladder that gave up frame rate first, and slow adaptation.* Premium's ladder is now 60 fps
-  at 4.5 Mbit/s, 60 fps at 2.5 Mbit/s, 30 and 20 fps (was 60, 30, 20, 10). The viewer steps down
-  after two readings (4 s) when nothing decodes or a fifth of the packets are lost (three
-  otherwise), and a step up that turns out too much is undone at its first bad reading instead of
-  costing 6 s of stalls; a stream that decodes nothing at all now counts as 0 fps (it was
-  "unknown" and never stepped down).
-
-**Latency does not lower Premium's frame rate.** A lower frame rate does not bring the picture
-sooner: each frame is encoded and sent as soon as it is drawn, and fewer frames only add the wait
-for the next one. What does call for fewer frames is a link that cannot carry the stream, and the
-viewer measures that directly at every round trip. So Premium (`TIERS.premium` in
-`packages/contracts/src/tiers.ts`, applied by `packages/viewer/src/quality.ts`) has no round-trip
-caps; it steps down only for lost packets (over 6%), frames not arriving (under half the level's
-rate: 60, 60, 30 and 20 fps for full, high, medium and low), stutter (the picture frozen more than 10% of the time; WebRTC's frozen time, not the count
-of freezes, because on a long path every resent packet is a short freeze), or a queue building
-(round trip above the path's best of the last minute by more than 300 ms and by more than that
-best round trip itself, so a long path's jitter is not mistaken for one). Basic keeps its
-round-trip caps (20 fps above about 180 ms, 15 above about 320 ms) and steps down on any freeze.
+**neko's resends and keyframes.** The browser image rebuilds neko's server from the pinned
+release with `images/browser/neko/keyframes-and-resends.patch`, for every browser: a viewer's
+keyframe request (RTCP PLI) is answered with a keyframe at once, instead of leaving the picture
+frozen until the next periodic one, and resends of lost packets have a budget (half the stream's
+rate, at least 300 kbit/s). Unpatched, neko resent every packet a viewer reported lost at once;
+on a busy path the resends overflowed it again, and through a 2.5 Mbit/s bottleneck in a test no
+frame decoded for 20 s.
 
 **Turning Premium on in an existing deployment.** Premium is off (`premium` cap 0) until all of
 this is done, so nothing below affects Basic browsers:
@@ -116,20 +87,15 @@ this is done, so nothing below affects Basic browsers:
    `AllowedInstanceTypes=c7i-flex.large,c6i.large,c5.large,c7i.xlarge,c6i.xlarge,c5.xlarge` (the
    new default). AWS Provider deployments: add the three types wherever the
    `nevazu-provider-runtime` role's policy (or an SCP) lists instance types.
-2. Publish the browser and agent images built from this commit (GitHub Actions → Images): the
-   browser image carries `neko-premium.yaml`, the 60 Hz modes (up to 2560×1440) and the patched
-   neko, the agent image the VM script that selects it. A VM takes images at first boot, so this
-   reaches new browsers only: a Premium browser created before the image that fixed constrained
-   paths (`keyframes-and-resends.patch`) keeps the old stream; delete and recreate it. The current
-   viewer still works with it (its high level is 30 fps there, which the viewer treats as
-   struggling and moves on to medium).
+2. Publish the browser and agent images (GitHub Actions → Images). A VM takes images at first
+   boot, so a new image reaches new browsers only.
 3. Apply migration `0029_browser_tiers` and deploy every Worker (`pnpm db:migrate:remote`,
    `pnpm deploy`). Within five minutes the reconciler lists which zones offer the Premium types
    and the engine prices them; the console's *Pricing & margin* page shows each region's Premium
    machine and price, and *AWS* shows Premium stock.
 4. Create a Premium browser for yourself first: `INSERT INTO caps (scope, metric, "limit") VALUES
-   ('user:<your user id>', 'premium', 1)` (or console → Limits with that scope). Check the toolbar
-   shows about 60 fps and the codec `H264`.
+   ('user:<your user id>', 'premium', 1)` (or console → Limits with that scope). Check that it runs
+   on a 4 vCPU machine (console → Browsers) and that its live view works like Basic's.
 5. Console → Limits → **Offer Premium** (`user:default` / `premium` = 1).
 
 Each Premium browser holds 4 of the region's Standard On-Demand vCPUs (Basic holds 2), so ask for
@@ -459,7 +425,6 @@ alerts.
 | *Waiting for capacity* | /admin → Operations | No capacity for any of the three instance types in any zone of the region. A new browser first moves to the region's other zones (the reaper releases the empty disk and interface it leaves), then keeps retrying; a waking browser moves to another zone after 30 minutes. A VM that EC2 ends during launch is relaunched with a new token, never retried as the same dead VM |
 | Alert `quota` | Service Quotas | vCPU or Elastic IP limit (step 2) |
 | Premium create *Failed* with `UnauthorizedOperation`; Basic still works | engine logs; the runtime policy | The runtime identity may not launch `c7i.xlarge`/`c6i.xlarge`/`c5.xlarge` yet (Premium step 1). Such a refusal does not block the region for Basic |
-| Premium browser runs at about 25 fps | VM system log (`cloudbrowser:` lines); toolbar codec | The browser image predates `neko-premium.yaml` (the VM falls back to the Basic stream and logs it), or `BROWSER_IMAGE`/`AGENT_IMAGE` pin an older build |
 | Running, but the live view stays black | browser devtools console; api config | TURN key missing on the api; gateway domain or viewer keys wrong |
 | Chrome fills only part of the desktop, with black space on the right | Browser supervisor configuration and `openbox` process | Preserve the upstream Openbox program when replacing the Chrome configuration; `--start-maximized` needs a window manager |
 | *Needs attention*: "Network paused while we check your dedicated IP" | /admin → the browser → Last IP check | Chrome saw a different IP than the Elastic IP; it stays blocked until checked |

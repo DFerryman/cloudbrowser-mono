@@ -60,7 +60,7 @@ export function SettingsPage() {
           </Row>
           <Row label={t('settings.machine')}>
             {t(`tier.${tier}`)}{' '}
-            <span className="text-muted">· {t('create.machine.hint', { vcpu: TIERS[tier].vcpu, memory: TIERS[tier].memoryGb, fps: TIERS[tier].fps.full })}</span>
+            <span className="text-muted">· {t('create.machine.hint', { vcpu: TIERS[tier].vcpu, memory: TIERS[tier].memoryGb })}</span>
           </Row>
           <Row label={t('settings.ip')}>
             <span className="font-mono">{i.ipAddress ?? t('browsers.reservingIp')}</span>

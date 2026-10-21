@@ -46,9 +46,9 @@ export const SCREEN_SIZES = [
 export const ScreenSize = z.enum(SCREEN_SIZES);
 
 /**
- * Picture levels of the live view, sharpest first (neko video ids, images/browser/neko.yaml and
- * neko-premium.yaml). Every level shows the same desktop at the same size in the viewer; a lower
- * level gives up frame rate first (TIERS[tier].fps) and a little fine detail second. The viewer
+ * Picture levels of the live view, sharpest first (neko video ids, images/browser/neko.yaml).
+ * Every level shows the same desktop at the same size in the viewer; a lower level gives up frame
+ * rate first (STREAM.fps) and a little fine detail second. The viewer
  * picks the level from the connection; there is no per-browser setting.
  */
 export const VIDEO_QUALITIES = ['full', 'high', 'medium', 'low'] as const;

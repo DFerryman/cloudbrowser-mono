@@ -728,14 +728,13 @@ describe('aws-ec2 tiers', () => {
     });
     expect(ec2.calls.filter((c) => c.action === 'RunInstances').map((c) => c.params.InstanceType)).toEqual(['c7i.xlarge', 'c6i.xlarge']);
     expect(vm.instanceType).toBe('c6i.xlarge');
-    expect(ec2.instances.get(vm.vmId)!.userData).toContain('\nBROWSER_TIER=premium\n');
   });
 
-  it('keeps Basic browsers on the Basic machines and tells their VM so', async () => {
+  it('keeps Basic browsers on the Basic machines, with the same first boot as Premium', async () => {
     const { ex, ec2 } = setup();
     const { vm } = await create(ex);
     expect(vm.instanceType).toBe('c7i-flex.large');
-    expect(ec2.instances.get(vm.vmId)!.userData).toContain('\nBROWSER_TIER=basic\n');
+    expect(ec2.instances.get(vm.vmId)!.userData).not.toContain('BROWSER_TIER');
   });
 
   it('prices Premium beside Basic, and leaves only Premium out when one of its machines has no price', async () => {

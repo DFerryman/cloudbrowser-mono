@@ -85,11 +85,9 @@ export interface AwsExecutorOptions extends ClientOptions {
  * 85% busy). `c7i-flex` has the same CPU as the `m7i-flex` the first real browsers ran on, with
  * half the memory; the fallbacks are 2 vCPU / 4 GB at the same price.
  *
- * Premium, 4 vCPU / 8 GB: Chrome drawing 60 fps on a 60 Hz desktop plus x264 at 1080p60 kept
- * about 2.3 vCPUs busy under continuous scrolling or 1080p60 video, leaving room for heavier
- * pages; on 2 vCPUs the same stream had no headroom left. Full-performance `c7i` rather than
- * `c7i-flex`, whose 40% baseline is not sized for a stream that is busy the whole session;
- * `c6i` and `c5` are the same shape at or below its price.
+ * Premium, 4 vCPU / 8 GB: the same live view, with twice the CPU and memory for heavier pages and
+ * more tabs. Full-performance `c7i` rather than `c7i-flex`, whose 40% baseline is not sized for a
+ * VM busy the whole session; `c6i` and `c5` are the same shape at or below its price.
  */
 export const DEFAULT_TIER_INSTANCE_TYPES: Record<BrowserTier, string[]> = {
   basic: ['c7i-flex.large', 'c6i.large', 'c5.large'],
@@ -537,7 +535,6 @@ export class AwsExecutor implements Executor {
         appUrl: this.opts.appUrl,
         agentImage: this.opts.agentImage,
         browserImage: this.opts.browserImage,
-        tier,
         ...(spec.timezone ? { timezone: spec.timezone } : {}),
       });
       for (const [attempt, { type, index }] of types.entries()) {

@@ -1,5 +1,5 @@
 import type { GatewayToViewer, IceServer } from '@cloudbrowser/contracts';
-import { TIERS, VIDEO_QUALITIES, type BrowserTier, type VideoQuality } from '@cloudbrowser/contracts';
+import { STREAM, VIDEO_QUALITIES, type VideoQuality } from '@cloudbrowser/contracts';
 import { decode, EV, fitScreen, sameScreen, screenOf, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
 import { QualityController, type VideoPreference } from './quality.js';
 import { KEYSYM, keyIdentity, keysymFor, keysymForName, matchingKeyIdentity, unidentifiedKey, type KeyIdentityEvent } from './keyboard.js';
@@ -34,11 +34,6 @@ export interface RemoteBrowserOptions {
   macToPc?: boolean;
   /** Picture quality; the sharpest level by default, adapting to the connection. */
   video?: VideoPreference;
-  /**
-   * The browser's machine tier (Basic by default): the frame rate each picture level streams at
-   * and the highest desktop refresh rate to ask for (TIERS).
-   */
-  tier?: BrowserTier;
   /** The level neko streams now, whenever it changes. */
   onVideo?: (quality: VideoQuality) => void;
   statsIntervalMs?: number;
@@ -111,7 +106,7 @@ export class RemoteBrowser {
   private videoId: VideoQuality | null = null;
   /** neko's videos (system/init). Browsers on an image older than the quality ladder offer one. */
   private offeredVideos: string[] = [];
-  private counters: { lost: number; received: number; freezes: number; frozenSeconds: number; frames: number; at: number } | null = null;
+  private counters: { lost: number; received: number; freezes: number; frames: number; at: number } | null = null;
   private readonly files: FileTransfers;
 
   constructor(private readonly opts: RemoteBrowserOptions) {
@@ -161,7 +156,7 @@ export class RemoteBrowser {
     if (video.quality === this.video.quality && video.auto === this.video.auto) return;
     this.video = video;
     const current = this.qualityController?.quality ?? this.videoId ?? video.quality;
-    this.qualityController = video.auto ? new QualityController(video.quality, Date.now(), current, this.stream) : null;
+    this.qualityController = video.auto ? new QualityController(video.quality, Date.now(), current) : null;
     this.selectVideo(this.qualityController?.quality ?? video.quality);
   }
 
@@ -526,11 +521,6 @@ export class RemoteBrowser {
     this.pressedButtons.clear();
   }
 
-  /** What this browser's tier streams. */
-  private get stream() {
-    return TIERS[this.opts.tier ?? 'basic'];
-  }
-
   /** Picture levels need a browser image with the quality ladder (images/browser/neko.yaml). */
   private get levelsOffered() {
     return VIDEO_QUALITIES.every((q) => this.offeredVideos.includes(q));
@@ -546,7 +536,7 @@ export class RemoteBrowser {
       return;
     }
     // The viewer chooses the level itself (QualityController); neko's estimator stays out.
-    if (this.video.auto) this.qualityController ??= new QualityController(this.video.quality, Date.now(), this.video.quality, this.stream);
+    if (this.video.auto) this.qualityController ??= new QualityController(this.video.quality, Date.now(), this.video.quality);
     this.qualityController?.restart(Date.now());
     const id = this.qualityController?.quality ?? this.video.quality;
     this.sendNeko({ event: EV.SIGNAL_REQUEST, payload: { video: { selector: { id, type: 'exact' }, auto: false }, audio: {} } });
@@ -760,7 +750,7 @@ export class RemoteBrowser {
     if (!viewport || (!live && (!this.screenConfigurations.length || !this.signalRequested || this.ws?.readyState !== 1))) return;
     // Neko advertises the actual X11 modes, including their refresh rates. A familiar size
     // such as 1600×900 can support 25 Hz without supporting 30 Hz.
-    const s = fitScreen(viewport.width, viewport.height, this.screenConfigurations, this.stream.maxRefreshRate)
+    const s = fitScreen(viewport.width, viewport.height, this.screenConfigurations, STREAM.maxRefreshRate)
       ?? { ...fitScreen(viewport.width, viewport.height), rate: 60 }; // Neko v3's default for clients without capabilities.
     const key = `${s.width}x${s.height}@${s.rate}`;
     if (key === this.appliedScreen) return;
@@ -791,7 +781,7 @@ export class RemoteBrowser {
     }, this.opts.statsIntervalMs ?? 2000);
   }
 
-  private adapt(stats: ViewerStats, counters: { lost: number; received: number; freezes: number; frozenSeconds: number; frames: number }) {
+  private adapt(stats: ViewerStats, counters: { lost: number; received: number; freezes: number; frames: number }) {
     const before = this.counters;
     const at = Date.now();
     this.counters = { ...counters, at };
@@ -804,14 +794,13 @@ export class RemoteBrowser {
     // missing too: that is 0 fps, not an unknown rate.
     const decodedFps = seconds > 0 && Number.isFinite(counters.frames) && Number.isFinite(before.frames)
       ? (counters.frames - before.frames) / seconds : null;
-    const frozen = counters.frozenSeconds - before.frozenSeconds;
     const next = this.qualityController.observe({
       at,
       stalled: received === 0,
       fps: stats.fps ?? decodedFps,
       lossRate: lost + received > 0 ? lost / (lost + received) : 0,
       freezes: Math.max(0, counters.freezes - before.freezes),
-      frozenShare: seconds > 0 && Number.isFinite(frozen) ? Math.min(1, Math.max(0, frozen) / seconds) : null,
+      kbps: stats.bitrateKbps,
       rttMs: stats.rttMs,
       scale: stats.width && this.remoteScreen?.width ? stats.width / this.remoteScreen.width : null,
     });

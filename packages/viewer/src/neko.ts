@@ -160,7 +160,7 @@ export const sameScreen = (a: ScreenConfiguration, b: ScreenConfiguration) =>
 /**
  * The largest supported size that fits the viewport, at the highest refresh rate up to `maxRate`
  * that neko offers for it: Chrome draws no faster than the desktop, so the rate caps the frame
- * rate (TIERS[tier].maxRefreshRate: 30 for Basic, 60 for Premium).
+ * rate (STREAM.maxRefreshRate).
  */
 export function fitScreen(width: number, height: number): { width: number; height: number };
 export function fitScreen(width: number, height: number, configurations: readonly ScreenConfiguration[], maxRate?: number): ScreenConfiguration | null;

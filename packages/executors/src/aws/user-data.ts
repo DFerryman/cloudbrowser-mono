@@ -18,8 +18,6 @@ export interface BootstrapInput {
   browserImage: string;
   /** IANA timezone for the browser (e.g. Asia/Tokyo); UTC when absent or malformed. */
   timezone?: string;
-  /** Machine tier: `premium` streams the 60 fps live view (images/browser/neko-premium.yaml). */
-  tier?: 'basic' | 'premium';
 }
 
 const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -43,7 +41,6 @@ AGENT_IMAGE=${input.agentImage}
 BROWSER_IMAGE=${input.browserImage}
 ECHO_URL=${echo}
 BROWSER_TZ=${timezone}
-BROWSER_TIER=${input.tier === 'premium' ? 'premium' : 'basic'}
 ENV
 umask 022
 

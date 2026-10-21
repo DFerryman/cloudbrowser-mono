@@ -1,73 +1,86 @@
-# neko v3 configuration (page 5). Confirm the keys against the neko v3 reference for the pinned
-# version. Per-VM values (the admin password the agent signs in with, the static IP that WebRTC
-# advertises) are NEKO_* environment variables written at each boot by
-# images/vm/files/bin/cloudbrowser-browser-env; they are never baked into the image.
+# neko v3 configuration (page 5): the live view of every browser, Basic and Premium alike. Confirm
+# the keys against the neko v3 reference for the pinned version. Per-VM values (the admin password
+# the agent signs in with, the static IP that WebRTC advertises) are NEKO_* environment variables
+# written at each boot by images/vm/files/bin/cloudbrowser-browser-env; they are never baked into
+# the image.
+#
+# H.264 (x264) at constant quality under a bitrate cap, on a 30 Hz desktop. Every level shows the
+# whole desktop at full size, so page text stays as sharp as the screen (the viewer's
+# MIN_LEGIBLE_SCALE is 0.9); a level gives up bitrate first, then frame rate: 30 fps under 3 and
+# 1.8 Mbit/s, then 15 and 10 fps. Each level's frame rate and cap are STREAM in
+# packages/contracts/src/tiers.ts, from which the viewer picks the level (signal/video). Values
+# are gval expressions printed with %v.
+#
+# Why H.264 and these settings (measured with the real viewer through a TURN relay, a dense page
+# scrolling at 1080p, on 2 CPUs as on a Basic VM; docs/aws.md has the tables):
+# - x264 superfast held 30 fps with 1.3 vCPUs busy in all, where the earlier VP8 pipeline (2 Mbit/s
+#   CBR, 25 fps) kept both CPUs busy and managed 10-15 fps.
+# - A path drops bursts, not the average rate. VP8's keyframes were 110-150 kB even at the lowest
+#   level (its quality floor cannot go lower, and a keyframe came every second): through a
+#   1.5 Mbit/s bottleneck no frame ever decoded. x264's VBV bounds every frame, keyframes too, to
+#   100 ms of the cap (vbv-buf-capacity); a bounded keyframe starts a little soft and sharpens over
+#   the next frames.
+# - No periodic keyframes (key-int-max: 5 minutes, a safety net). neko answers a viewer's keyframe
+#   request (RTCP PLI) at once (neko/keyframes-and-resends.patch): a new viewer and every level
+#   change start with one, and so does recovery from a frame lost beyond repair.
+# With these, 30 fps held through a 3.5 Mbit/s bottleneck with a 100 ms queue and over a 300 ms
+# round trip with 1% loss, with nothing frozen.
 desktop:
   screen: "1920x1080@30"
 capture:
   video:
-    # Without explicit pipelines neko 3.0.8 ignores `codec` and streams its default VP8 pipeline
-    # (one quality, about 2 Mbit/s). The ladder below keeps that pipeline as `full` and adds lower
-    # ones. Every quality shows the whole desktop, so the viewer shows the same content at the
-    # same size; a lower one is a downscaled picture: softer, with less data per hour. Ordered from
-    # highest to lowest. The viewer picks one with signal/video (VideoQuality in the contracts),
-    # from the browser's setting and, when it adapts, from what it receives. Values are gval
-    # expressions printed with %v: a plain 1200000 would reach GStreamer as 1.2e+06, round() not.
-    codec: vp8
+    codec: h264
     ids: [full, high, medium, low]
     pipelines:
       full:
-        fps: 25
-        gst_encoder: vp8enc
-        gst_params: &vp8
-          target-bitrate: "round(1996800)"
-          end-usage: cbr
-          undershoot: "95"
-          cpu-used: "4"
+        fps: 30
+        # Constrained baseline: what neko's H.264 SDP offers (profile-level-id 42e01f).
+        gst_prefix: "! video/x-raw,format=I420"
+        gst_encoder: x264enc
+        gst_params: &h264
+          pass: qual                 # constant quality (CRF) at `quantizer` ...
+          quantizer: "23"
+          bitrate: "3000"            # ... never above this many kbit/s
+          vbv-buf-capacity: "100"    # ms of the cap: no frame bigger than a tenth of a second's worth
+          key-int-max: "9000"        # 5 minutes: keyframes come when a viewer needs one (see above)
           threads: "4"
-          deadline: "1"
-          buffer-size: "12288"
-          buffer-initial-size: "6144"
-          buffer-optimal-size: "9216"
-          keyframe-max-dist: "25"
-          min-quantizer: "4"
-          max-quantizer: "20"
-      # Every level streams the desktop at its full size, so page text stays as sharp as the
-      # screen itself (the viewer's MIN_LEGIBLE_SCALE is 0.9). Under pressure the picture gives up
-      # frame rate first and a little fine detail second, never resolution. A lower frame rate at
-      # full size also costs less than a smaller picture would: on a mostly still page each frame
-      # after a keyframe carries only what changed.
+          byte-stream: "true"
+          tune: zerolatency          # no lookahead or B-frames: each frame leaves as it is encoded
+          speed-preset: superfast
+        gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
       high:
-        fps: 20
-        gst_encoder: vp8enc
+        fps: 30
+        gst_prefix: "! video/x-raw,format=I420"
+        gst_encoder: x264enc
         gst_params:
-          <<: *vp8
-          target-bitrate: "round(1600000)"
-          keyframe-max-dist: "20"
-          max-quantizer: "24"
+          <<: *h264
+          bitrate: "1800"
+        gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
       medium:
         fps: 15
-        gst_encoder: vp8enc
+        gst_prefix: "! video/x-raw,format=I420"
+        gst_encoder: x264enc
         gst_params:
-          <<: *vp8
-          target-bitrate: "round(1200000)"
-          keyframe-max-dist: "15"
-          max-quantizer: "28"
+          <<: *h264
+          bitrate: "1200"
+          key-int-max: "4500"
+        gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
       low:
         fps: 10
-        gst_encoder: vp8enc
+        gst_prefix: "! video/x-raw,format=I420"
+        gst_encoder: x264enc
         gst_params:
-          <<: *vp8
-          target-bitrate: "round(900000)"
-          keyframe-max-dist: "10"
-          max-quantizer: "32"
+          <<: *h264
+          bitrate: "800"
+          key-int-max: "3000"
+        gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
 server:
   bind: "127.0.0.1:8080"   # reached only by the agent on the same VM
 webrtc:
   icelite: false           # full ICE: the viewer relays through TURN; neko advertises the static IP (NEKO_WEBRTC_NAT1TO1)
   estimator:
-    # neko 3.0.8 compares its estimate in bits with the stream rate in bytes, so it only steps
-    # down at about an eighth of the needed bandwidth. The viewer adapts the level instead.
+    # neko compares its estimate in bits with the stream rate in bytes, so it only steps down at
+    # about an eighth of the needed bandwidth. The viewer adapts the level instead.
     enabled: false
 member:
   provider: multiuser      # the agent signs in as admin with the VM's password; viewers never see it
