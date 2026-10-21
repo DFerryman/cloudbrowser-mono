@@ -1,0 +1,35 @@
+{
+  "zone_id": "5e2046b8c9fc845552e3ab62c9762a7b",
+  "ruleset_id": "4f541553d6d448f689c8423ad1fdae5e",
+  "ruleset": {
+    "name": "CloudBrowser security",
+    "description": "",
+    "kind": "zone",
+    "phase": "http_request_firewall_custom",
+    "rules": [
+      {
+        "action": "skip",
+        "action_parameters": {
+          "products": [
+            "bic",
+            "securityLevel"
+          ]
+        },
+        "description": "Nevazu: no browser-only checks for public/auth pages, APIs or authenticated gateway protocols",
+        "enabled": true,
+        "expression": "((http.host in {\"nevazu.com\" \"www.nevazu.com\"} and ((http.request.method in {\"GET\" \"HEAD\"} and (http.request.uri.path in {\"/sign-in\" \"/sign-in/\" \"/sign-up\" \"/sign-up/\" \"/sign-up/complete\" \"/sign-up/complete/\" \"/\" \"/pricing\" \"/docs\" \"/status\" \"/terms\" \"/privacy\" \"/refunds\" \"/contact\" \"/build-info.json\" \"/theme-init.js\" \"/nevazu-favicon.png\" \"/apple-touch-icon.png\" \"/favicon.ico\" \"/robots.txt\" \"/sitemap.xml\"} or starts_with(http.request.uri.path, \"/docs/\") or starts_with(http.request.uri.path, \"/assets/\"))) or (http.request.uri.path eq \"/api\" or starts_with(http.request.uri.path, \"/api/\")))) or (http.host eq \"connect.nevazu.com\" and http.request.method in {\"GET\" \"HEAD\"} and (http.request.uri.path in {\"/health\" \"/v1/agent\"} or starts_with(http.request.uri.path, \"/v1/stream/\"))))",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "nevazu_public_health_monitor"
+      },
+      {
+        "action": "managed_challenge",
+        "description": "Retired: email requests use app Turnstile; no full-page auth challenge",
+        "enabled": false,
+        "expression": "(http.host in {\"nevazu.com\" \"www.nevazu.com\"} and http.request.method in {\"GET\" \"HEAD\"} and http.request.uri.path in {\"/sign-in\" \"/sign-in/\" \"/sign-up\" \"/sign-up/\"} and not cf.client.bot)",
+        "ref": "nevazu_require_human"
+      }
+    ]
+  }
+}

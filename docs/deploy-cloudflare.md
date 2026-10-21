@@ -70,7 +70,14 @@ only send to verified destination addresses in your account, which is enough for
 | `APP_URL` | Your public origin, e.g. `https://app.example.com`. It is the auth base URL and the only trusted origin. |
 | `ENVIRONMENT` | `production` (`development` also prints sign-in codes to the log). |
 | `EMAIL_FROM` | A sender on the onboarded domain, e.g. `no-reply@example.com`. |
-| `TURNSTILE_SITE_KEY` | Optional. Site key of a Cloudflare Turnstile widget for your hostname (Dashboard → Turnstile → Add widget, mode *Managed*). With the secret below, every sign-in and sign-up request that sends an email needs a Turnstile token. Unset: no Turnstile. |
+| `TURNSTILE_SITE_KEY` | Optional. Site key of a Cloudflare Turnstile widget for your hostname (Dashboard → Turnstile → Add widget, mode *Managed*). With the secret below, every sign-in and sign-up request that sends an email needs a Turnstile token. To disable it, remove both this var and `TURNSTILE_SECRET_KEY`. |
+
+Nevazu's edge security rules are recorded in `deploy/cloudflare-auth-security.json`. The
+`nevazu_require_human` full-page Managed Challenge rule is disabled. Login, sign-up and registration
+completion pages skip Browser Integrity Check and Security Level challenges so visitors are not
+challenged once before the app and again by Turnstile. Managed WAF and DDoS protections still apply.
+The app checks Turnstile only when requesting an email; method lookup, passkeys, code entry and
+TOTP do not start another challenge.
 
 Secrets and keys:
 
