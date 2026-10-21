@@ -66,9 +66,10 @@ deposit, operation or idempotency record), the API answers `409 region_unavailab
 
 Quota observations expire after 20 minutes. `aws_region_inventory.reason` says why a region is
 unavailable: `stale` (snapshot expired), `sync_failed`, `pending` (never refreshed), `prices` or
-`disabled`; NULL when ready. Only a ready region with `quota_available` 0 is out of AWS quota. The
-create API answers a stale or failing region with `limit: refreshing`, and the region picker shows it
-as `refreshing`, not `no_stock`. Operator alerts (api cron) keep the kinds apart (out of AWS quota,
+`disabled`; NULL when ready. Only a ready region with `quota_available` 0 is out of AWS quota. A
+stale or never-refreshed region comes back within minutes: the create API answers `limit: refreshing`
+and the region picker shows `refreshing`. A failing refresh or missing prices need an operator, so
+those regions show `closed`. Neither is shown as `no_stock`. Operator alerts (api cron) keep the kinds apart (out of AWS quota,
 refresh behind, refresh failing with its error, prices missing), report a problem only after it has
 lasted 10 minutes, put every region with the same problem in one alert (critical when the refresh is
 behind or failing in every AWS region), and announce a recovery once it has held 10 minutes. New purchases stop after 48 hours without a good

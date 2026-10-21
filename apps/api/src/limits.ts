@@ -1,5 +1,5 @@
 import { MICROS_PER_USD, TRIAL, type BrowserTier, type Entitlements } from '@cloudbrowser/contracts';
-import { awsInventory, billingRequired, blocksRegion, convertTrialStatements, launchHealthFor, openProviderIssue, prepaidBalance, reservationQuote, reservationWrite, pricingSettings, schema, userCaps as sharedUserCaps, type Db } from '@cloudbrowser/db';
+import { awaitingRefresh, awsInventory, billingRequired, blocksRegion, convertTrialStatements, launchHealthFor, openProviderIssue, prepaidBalance, reservationQuote, reservationWrite, pricingSettings, schema, userCaps as sharedUserCaps, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 import { storageLimits } from './pricing.js';
 import { problem } from './problem.js';
@@ -146,9 +146,13 @@ async function checkRegionRoom(db: Db, regionId: string, tier: BrowserTier = 'ba
   }
   const inventory = (await awsInventory(db)).get(regionId);
   if (inventory) {
-    // Not a shortage: we have no recent enough view of the region's quota.
+    // Not a shortage: we have no recent enough view of the region's quota, briefly or until an
+    // operator fixes the region's refresh or prices.
     if (inventory.availability !== 'ready') {
-      throw problem(409, 'region_unavailable', 'This region is being checked for room right now. Try again in a few minutes or choose another region.', { limit: 'refreshing' });
+      if (inventory.reason && awaitingRefresh(inventory.reason)) {
+        throw problem(409, 'region_unavailable', 'This region is being checked for room right now. Try again in a few minutes or choose another region.', { limit: 'refreshing' });
+      }
+      throw problem(409, 'region_unavailable', 'New browsers are temporarily unavailable in this region. Choose another region.');
     }
     if (inventory.availableByTier[tier] < 1) {
       throw problem(409, 'region_unavailable', tier === 'premium'

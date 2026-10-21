@@ -1,4 +1,5 @@
 import { createDb, awsInventory } from '@cloudbrowser/db';
+import { admitCreate } from '../src/limits.js';
 import { createTestD1 } from '@cloudbrowser/db/testing';
 import { expect, it } from 'vitest';
 import { setup as appSetup, signIn } from './helpers.js';
@@ -155,4 +156,18 @@ it('tells users a region is being checked, not full, while its snapshot is stale
   await signIn(t,'a@example.com');
   const region=(await t.call('GET','/api/v1/regions')).body.find((r:{id:string})=>r.id==='tyo1');
   expect(region).toMatchObject({acceptingNew:false,availability:'unavailable',availabilityReason:'refreshing',inventory:{status:'unavailable',constraint:'sync_unavailable'}});
+  // A region whose refresh keeps failing (UAE without a browser network) is not coming back on its own.
+  t.d1.sqlite.exec(`UPDATE aws_provider_regions SET status='unavailable',capacity=0,last_error='Regional browser network is not provisioned' WHERE region_id='tyo1'`);
+  const failing=(await t.call('GET','/api/v1/regions')).body.find((r:{id:string})=>r.id==='tyo1');
+  expect(failing).toMatchObject({acceptingNew:false,availability:'unavailable',availabilityReason:'closed'});
+});
+
+it('refuses a create in a stale region as "refreshing", and in a failing one without blaming AWS quota',async()=>{
+  const {d1,db,now}=setup();
+  d1.sqlite.exec(`UPDATE aws_provider_regions SET capacity=5,checked_at=${now-1_214_000} WHERE region_id='syd1'`);
+  const refused=async()=>admitCreate(db,'u','syd1',new Date(),{trial:true}).then(()=>null,(e:{type:string;detail?:string;extra:{limit?:string}})=>({type:e.type,detail:e.detail,limit:e.extra.limit}));
+  expect(await refused()).toMatchObject({type:'region_unavailable',limit:'refreshing'});
+  d1.sqlite.exec(`UPDATE aws_provider_regions SET status='unavailable',last_error='Regional browser network is not provisioned' WHERE region_id='syd1'`);
+  const failing=await refused();
+  expect(failing).toEqual({type:'region_unavailable',detail:'New browsers are temporarily unavailable in this region. Choose another region.',limit:undefined});
 });

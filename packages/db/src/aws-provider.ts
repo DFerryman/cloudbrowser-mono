@@ -8,6 +8,11 @@ export type AwsInventory = {
   region_id: string; checked_at: number | null; status: string; quota_available: number; premium_available: number; premium_offered: number; availability: string;
   reason: InventoryUnavailableReason | null; last_error: string | null; last_error_at: number | null; sync_failures: number;
 };
+/**
+ * Whether an unavailable inventory comes back on its own: a snapshot that is old or not taken yet
+ * is refreshed within minutes. A failing refresh or missing prices need an operator.
+ */
+export const awaitingRefresh = (reason: InventoryUnavailableReason) => reason === 'stale' || reason === 'pending';
 /** A snapshot older than this is not used (aws_region_inventory, migration 0031). */
 export const INVENTORY_MAX_AGE_MS = 20 * 60_000;
 /**
