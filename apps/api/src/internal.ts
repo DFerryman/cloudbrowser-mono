@@ -4,7 +4,7 @@
  * RPC entrypoint of this Worker, reachable only through the gateway's service binding, never from
  * the internet.
  */
-import { AgentFrame, NEVER_SLEEP_TIMEOUT_S, type GatewayToAgent, type ViewerTokenClaims } from '@cloudbrowser/contracts';
+import { AgentFrame, AgentViewerFailureCode, NEVER_SLEEP_TIMEOUT_S, type GatewayToAgent, type ViewerTokenClaims } from '@cloudbrowser/contracts';
 import { createDb, eventRow, schema, sha256Hex, unwrapArchiveKey, type Db } from '@cloudbrowser/db';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Env } from './env.js';
@@ -75,6 +75,7 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
     case 'viewer':
     case 'viewer_error':
     case 'viewer_file':
+    case 'viewer_stage':
       return null; // handled by the gateway
     case 'turn_request':
       // neko's own TURN allocation, refreshed by the agent at each wake (page 5).
@@ -115,18 +116,28 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
           // Agents before 0.2.0 do not send their version (and cannot grow storage).
           agentVersion: typeof d.agentVersion === 'string' ? d.agentVersion.slice(0, 32) : null,
         };
-        await db.insert(instanceHealth).values({ instanceId, ...set }).onConflictDoUpdate({ target: instanceHealth.instanceId, set });
+        const updated = await db.insert(instanceHealth).values({ instanceId, ...set }).onConflictDoUpdate({
+          target: instanceHealth.instanceId, set,
+          setWhere: sql`EXISTS (SELECT 1 FROM ${agentCredentials} WHERE ${agentCredentials.instanceId} = ${instanceId} AND ${agentCredentials.generation} = ${generation})`,
+        }).returning({ instanceId: instanceHealth.instanceId });
+        if (!updated.length) return null;
+        console.info('desktop readiness', { source: 'agent', instanceId, generation, ready: true, checked: d.desktopChecked === true });
         await kickOperation(env, db, instanceId);
       } else if (frame.kind === 'heartbeat') {
         const [health] = await db.select().from(instanceHealth).where(eq(instanceHealth.instanceId, instanceId));
         const lastInputAt = typeof d.lastInputAt === 'string' && !Number.isNaN(Date.parse(d.lastInputAt)) ? new Date(d.lastInputAt) : null;
         const viewers = typeof d.viewers === 'number' ? d.viewers : 0;
+        // A transport heartbeat alone is not proof that the local desktop works.
+        // Older agents omit this field and retain their existing behavior.
+        const desktopReady = typeof d.desktopReady === 'boolean' ? d.desktopReady : undefined;
+        const readinessChanged = desktopReady === false ? health?.agentReadyGeneration != null
+          : desktopReady === true && health?.agentReadyGeneration !== generation;
         const inputInterval = inst.idleTimeoutS === NEVER_SLEEP_TIMEOUT_S ? 60_000 : Math.min(60_000, inst.idleTimeoutS * 500);
         // Transport heartbeats remain frequent; persist only once a minute or on a viewer/input
         // transition. Short idle timeouts keep an appropriately shorter input reporting interval.
         const inputDue = lastInputAt && lastInputAt.getTime() - (health?.lastInputAt?.getTime() ?? 0) >= inputInterval;
         if (health?.lastHeartbeatAt && now.getTime() - health.lastHeartbeatAt.getTime() < 60_000
-          && health.viewers === viewers && !inputDue) return null;
+          && health.viewers === viewers && !inputDue && !readinessChanged) return null;
         const count = (v: unknown) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null);
         const disk = d.disk && typeof d.disk === 'object' ? (d.disk as Record<string, unknown>) : null;
         const used = count(disk?.usedBytes);
@@ -135,12 +146,25 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
         const set = {
           lastHeartbeatAt: now,
           viewers,
+          ...(desktopReady === false ? { agentReadyGeneration: null, agentReadyAt: null }
+            : desktopReady === true && readinessChanged ? { agentReadyGeneration: generation, agentReadyAt: now } : {}),
           ...(lastInputAt ? { lastInputAt: new Date(Math.max(lastInputAt.getTime(), health?.lastInputAt?.getTime() ?? 0)) } : {}),
           // Storage page (used / total) and data-transfer metering (page 6).
           ...(used !== null && total !== null ? { diskUsedBytes: used, diskTotalBytes: total, diskReportedAt: now } : {}),
           ...(tx !== null ? { netTxBytes: tx } : {}),
         };
-        await db.insert(instanceHealth).values({ instanceId, ...set }).onConflictDoUpdate({ target: instanceHealth.instanceId, set });
+        const updated = await db.insert(instanceHealth).values({ instanceId, ...set }).onConflictDoUpdate({
+          target: instanceHealth.instanceId, set,
+          setWhere: sql`EXISTS (SELECT 1 FROM ${agentCredentials} WHERE ${agentCredentials.instanceId} = ${instanceId} AND ${agentCredentials.generation} = ${generation})`,
+        }).returning({ instanceId: instanceHealth.instanceId });
+        if (updated.length && desktopReady !== undefined) {
+          const code = AgentViewerFailureCode.safeParse(d.desktopFailureCode);
+          console.info('desktop readiness', {
+            source: 'agent', instanceId, generation, ready: desktopReady,
+            ...(code.success ? { code: code.data } : {}),
+          });
+          if (desktopReady && readinessChanged) await kickOperation(env, db, instanceId);
+        }
       } else if (frame.kind === 'ip_check') {
         const observed = Array.isArray(d.observed) ? d.observed.filter((x): x is string => typeof x === 'string') : [];
         // The address websites must see is the placement's static IP, not whatever the agent expects.

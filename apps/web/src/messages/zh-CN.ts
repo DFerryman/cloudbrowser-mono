@@ -218,6 +218,8 @@ export const zhCN: Messages = {
   'overlay.reconnecting': '正在重新连接…（第 {attempt} 次）',
   'overlay.retryNow': '立即重试',
   'overlay.connecting': '正在连接你的浏览器…',
+  'overlay.connectionFailed': '浏览器仍在运行，但远程桌面连接失败。请重试。',
+  'overlay.connectionReference': '连接参考编号：{id}',
   'overlay.agentOffline': '远程浏览器暂时离线，正在重新连接…',
   'error.connection_timeout': '浏览器连接请求超时，请重试。',
   'overlay.inputInterrupted': '输入传输已中断，现已暂停输入。请重新连接后继续；之前的点击和按键不会重放。',

@@ -45,17 +45,28 @@ type ViewerError struct {
 	Reason    string `json:"reason"` // relay_unavailable | relay_failed | input_failed
 }
 
+// ViewerStage records admission progress without carrying URLs, credentials or viewer content.
+type ViewerStage struct {
+	T         string `json:"t"`
+	SessionID string `json:"sessionId"`
+	RelayID   string `json:"relayId,omitempty"`
+	Stage     string `json:"stage"`
+	ElapsedMs int64  `json:"elapsedMs"`
+	Code      string `json:"code,omitempty"`
+}
+
 // Incoming is any frame the gateway sends; fields are set according to T.
 type Incoming struct {
-	T          string          `json:"t"` // welcome | command | turn | viewer_open | viewer | viewer_close | pong
-	Credential string          `json:"credential,omitempty"`
-	ID         string          `json:"id,omitempty"`
-	Kind       string          `json:"kind,omitempty"`
-	Payload    map[string]any  `json:"payload,omitempty"`
-	IceServers []IceServer     `json:"iceServers,omitempty"`
-	SessionID  string          `json:"sessionId,omitempty"`
-	RelayID    string          `json:"relayId,omitempty"`
-	Data       json.RawMessage `json:"data,omitempty"`
+	T            string          `json:"t"` // welcome | command | turn | viewer_open | viewer | viewer_close | pong
+	Credential   string          `json:"credential,omitempty"`
+	ViewerStages bool            `json:"viewerStages,omitempty"` // welcome capability; absent on older gateways
+	ID           string          `json:"id,omitempty"`
+	Kind         string          `json:"kind,omitempty"`
+	Payload      map[string]any  `json:"payload,omitempty"`
+	IceServers   []IceServer     `json:"iceServers,omitempty"`
+	SessionID    string          `json:"sessionId,omitempty"`
+	RelayID      string          `json:"relayId,omitempty"`
+	Data         json.RawMessage `json:"data,omitempty"`
 }
 
 type IceServer struct {

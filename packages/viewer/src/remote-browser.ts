@@ -1,5 +1,5 @@
 import type { GatewayToViewer, IceServer } from '@cloudbrowser/contracts';
-import { STREAM, VIDEO_QUALITIES, type VideoQuality } from '@cloudbrowser/contracts';
+import { ConnectionDiagnostic, STREAM, VIDEO_QUALITIES, type VideoQuality } from '@cloudbrowser/contracts';
 import { decode, EV, fitScreen, sameScreen, screenOf, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
 import { QualityController, type VideoPreference } from './quality.js';
 import { KEYSYM, keyIdentity, keysymFor, keysymForName, matchingKeyIdentity, unidentifiedKey, type KeyIdentityEvent } from './keyboard.js';
@@ -8,7 +8,7 @@ import { ScrollAccumulator } from './scroll.js';
 import { InputQueue, type InputFailure } from './input-queue.js';
 import { FileTransfers, type TransferAction, type TransferFile, type TransferUpdate } from './file-transfer.js';
 
-export type ViewerState = 'connecting' | 'live' | 'reconnecting' | 'agent-offline' | 'taken-over' | 'closed';
+export type ViewerState = 'connecting' | 'live' | 'reconnecting' | 'agent-offline' | 'failed' | 'taken-over' | 'closed';
 
 export interface ConnectInfo {
   gatewayUrl: string;
@@ -20,7 +20,9 @@ export interface RemoteBrowserOptions {
   /** Fetches fresh connect info; each viewer token works once, so every (re)connect calls it. */
   getConnectInfo: () => Promise<ConnectInfo>;
   onState?: (state: ViewerState, attempt: number) => void;
-  onStream?: (stream: MediaStream) => void;
+  onStream?: (stream: MediaStream, attemptId: string, frameSequence: number) => void;
+  /** Safe connection milestones only; never contains tokens, SDP or user input. */
+  onDiagnostic?: (diagnostic: ConnectionDiagnostic) => void;
   onStats?: (stats: ViewerStats) => void;
   /** A CSS `cursor` value for the remote cursor, drawn locally (page 5). */
   onCursor?: (css: string) => void;
@@ -39,6 +41,10 @@ export interface RemoteBrowserOptions {
   statsIntervalMs?: number;
   /** Maximum time per token fetch or transport/WebRTC handshake before retrying. Defaults to 20 s. */
   connectionTimeoutMs?: number;
+  /** Total consecutive failed attempts, including the initial one. Defaults to three. */
+  maxConnectionAttempts?: number;
+  /** Renderers confirm a decoded video frame before the desktop becomes live. */
+  requireFirstFrame?: boolean;
   WebSocketImpl?: typeof WebSocket;
   RTCPeerConnectionImpl?: typeof RTCPeerConnection;
 }
@@ -48,6 +54,7 @@ const BACKOFF_MS = [500, 1000, 2000, 4000, 8000, 15000, 30000];
 const SCREEN_DEBOUNCE_MS = 750;
 const SCREEN_MIN_INTERVAL_MS = 5000;
 const CONNECTION_TIMEOUT_MS = 20_000;
+const MAX_CONNECTION_ATTEMPTS = 3;
 const MAX_PENDING_ICE_CANDIDATES = 256;
 /** Characters that require Shift on the remote US X11 keyboard. */
 const SOFTWARE_SHIFTED = new Set([...`~!@#$%^&*()_+{}|:"<>?`]);
@@ -68,6 +75,12 @@ export class RemoteBrowser {
   private dc: RTCDataChannel | null = null;
   private state: ViewerState = 'closed';
   private attempt = 0;
+  private connectionAttempts = 0;
+  private reportedAttempt = -1;
+  private diagnosticAttempt: { id: string; startedAt: number; relayId?: string; stages: Set<string> } | null = null;
+  private peerConnected = false;
+  private firstFrame = false;
+  private frameSequence = 0;
   private connectSequence = 0;
   private cancelConnectInfo: (() => void) | null = null;
   private stopped = true;
@@ -161,6 +174,12 @@ export class RemoteBrowser {
   }
 
   async connect(): Promise<void> {
+    this.attempt = 0;
+    this.connectionAttempts = 0;
+    return this.connectAttempt();
+  }
+
+  private async connectAttempt(): Promise<void> {
     const sequence = ++this.connectSequence;
     this.cancelConnectInfo?.();
     if (this.retryTimer) clearTimeout(this.retryTimer);
@@ -177,20 +196,31 @@ export class RemoteBrowser {
     this.remoteScreen = null;
     this.appliedScreen = '';
     this.stopped = false;
+    this.connectionAttempts++;
+    this.diagnosticAttempt = { id: crypto.randomUUID(), startedAt: Date.now(), stages: new Set() };
+    this.firstFrame = false;
     this.setState(this.attempt === 0 ? 'connecting' : 'reconnecting');
+    this.diagnostic('token_start');
     let info: ConnectInfo;
     let infoTimer: ReturnType<typeof setTimeout> | undefined;
     let cancelInfo: (() => void) | undefined;
+    let tokenTimedOut = false;
     try {
       const pendingInfo = this.opts.getConnectInfo();
       const deadline = new Promise<never>((_resolve, reject) => {
-        infoTimer = setTimeout(() => reject(new Error('connection information timed out')), this.opts.connectionTimeoutMs ?? CONNECTION_TIMEOUT_MS);
+        infoTimer = setTimeout(() => {
+          tokenTimedOut = true;
+          reject(new Error('connection information timed out'));
+        }, this.opts.connectionTimeoutMs ?? CONNECTION_TIMEOUT_MS);
         cancelInfo = () => reject(new Error('connection attempt replaced'));
         this.cancelConnectInfo = cancelInfo;
       });
       info = await Promise.race([pendingInfo, deadline]);
     } catch {
-      if (sequence === this.connectSequence) this.scheduleReconnect();
+      if (sequence === this.connectSequence && !this.stopped) {
+        this.diagnostic('failed', tokenTimedOut ? 'token_timeout' : 'token_failed');
+        this.scheduleReconnect();
+      }
       return;
     } finally {
       clearTimeout(infoTimer);
@@ -199,15 +229,30 @@ export class RemoteBrowser {
     // A repeated Retry click or a slow, older token response must not create a second
     // socket which would take over the newer connection from this same page.
     if (this.stopped || sequence !== this.connectSequence) return;
+    this.diagnostic('token_ok');
     this.iceServers = info.iceServers;
     this.signalRequested = false;
     const WS = this.opts.WebSocketImpl ?? WebSocket;
     const sep = info.gatewayUrl.includes('?') ? '&' : '?';
-    const ws = new WS(`${info.gatewayUrl}${sep}token=${encodeURIComponent(info.token)}`);
+    this.diagnostic('transport_start');
+    let ws: WebSocket;
+    try {
+      ws = new WS(`${info.gatewayUrl}${sep}token=${encodeURIComponent(info.token)}&attemptId=${this.diagnosticAttempt!.id}`);
+    } catch {
+      this.diagnostic('failed', 'transport_error');
+      this.scheduleReconnect();
+      return;
+    }
     this.ws = ws;
     // A blocked WebSocket upgrade may never deliver agent_online or even an error event.
     // Bound the whole transport handshake rather than waiting for the first server frame.
     this.startConnectionTimer(ws);
+    ws.onopen = () => {
+      if (this.ws === ws && !this.stopped) this.diagnostic('transport_open');
+    };
+    ws.onerror = () => {
+      if (this.ws === ws && !this.stopped) this.reconnect(ws, 'transport_error');
+    };
     ws.onmessage = (e) => {
       if (this.ws === ws && !this.stopped) this.onGatewayFrame(e.data, ws);
     };
@@ -218,11 +263,15 @@ export class RemoteBrowser {
       this.ws = null;
       this.clearConnectionTimer();
       this.teardownPeer();
-      if (!this.stopped && this.state !== 'taken-over') this.scheduleReconnect();
+      if (!this.stopped && this.state !== 'taken-over') {
+        this.diagnostic('failed', 'transport_closed');
+        this.scheduleReconnect();
+      }
     };
   }
 
   disconnect() {
+    this.diagnostic('closed', 'canceled');
     this.connectSequence++;
     this.cancelConnectInfo?.();
     this.stopped = true;
@@ -237,6 +286,14 @@ export class RemoteBrowser {
     this.ws = null;
     ws?.close();
     this.setState('closed');
+  }
+
+  /** A renderer calls this only after observing a frame from this attempt's video stream. */
+  reportFirstFrame(attemptId: string, frameSequence: number) {
+    if (this.stopped || this.diagnosticAttempt?.id !== attemptId || frameSequence !== this.frameSequence || !this.ws) return;
+    this.firstFrame = true;
+    this.diagnostic('first_frame');
+    this.becomeLive();
   }
 
   // --- input ---------------------------------------------------------------------------------
@@ -406,21 +463,73 @@ export class RemoteBrowser {
   // --- internals -----------------------------------------------------------------------------
 
   private setState(s: ViewerState) {
-    if (s === this.state) return;
+    if (s === this.state && this.attempt === this.reportedAttempt) return;
     this.state = s;
+    this.reportedAttempt = this.attempt;
     this.opts.onState?.(s, this.attempt);
+  }
+
+  private diagnostic(stage: ConnectionDiagnostic['stage'], code?: ConnectionDiagnostic['code']) {
+    const attempt = this.diagnosticAttempt;
+    const mediaStage = ['signal_received', 'peer_connected', 'first_frame', 'failed', 'closed'].includes(stage);
+    const key = mediaStage ? `${this.frameSequence}:${stage}:${code ?? ''}` : stage;
+    if (!attempt || attempt.stages.has(key)) return;
+    const report = ConnectionDiagnostic.safeParse({
+      attemptId: attempt.id,
+      ...(attempt.relayId ? { relayId: attempt.relayId } : {}),
+      stage,
+      peerSequence: this.frameSequence,
+      elapsedMs: Math.max(0, Math.min(600_000, Math.round(Date.now() - attempt.startedAt))),
+      ...(code ? { code } : {}),
+    });
+    if (!report.success) return;
+    attempt.stages.add(key);
+    if (attempt.stages.size > 256) attempt.stages.delete(attempt.stages.values().next().value!);
+    // Callbacks cannot break connection handling, and receive only this explicit allowlist.
+    try {
+      this.opts.onDiagnostic?.(report.data);
+    } catch { /* Diagnostics must not affect the viewer. */ }
+  }
+
+  private becomeLive() {
+    if (this.stopped || !this.peerConnected || (this.opts.requireFirstFrame && !this.firstFrame)) return;
+    this.clearConnectionTimer();
+    this.attempt = 0;
+    this.connectionAttempts = 0;
+    this.inputReady = true;
+    this.inputQueue.flush();
+    this.setState('live');
+    this.startStats();
+    if (this.pendingViewport) this.applyScreen();
   }
 
   private scheduleReconnect() {
     this.clearConnectionTimer();
     if (this.stopped) return;
     if (this.retryTimer) return;
+    const configuredMax = this.opts.maxConnectionAttempts ?? MAX_CONNECTION_ATTEMPTS;
+    const maxAttempts = Number.isFinite(configuredMax) ? Math.max(1, Math.floor(configuredMax)) : MAX_CONNECTION_ATTEMPTS;
+    if (this.connectionAttempts >= maxAttempts) {
+      this.stopped = true;
+      this.connectSequence++;
+      this.cancelConnectInfo?.();
+      this.releaseTransportKeys();
+      this.inputQueue.clear();
+      this.teardownPeer();
+      const ws = this.ws;
+      this.ws = null;
+      ws?.close();
+      // Keep the original failed stage/code; exhaustion has its own final closed milestone.
+      this.diagnostic('closed', 'retry_exhausted');
+      this.setState('failed');
+      return;
+    }
     const delay = BACKOFF_MS[Math.min(this.attempt, BACKOFF_MS.length - 1)]!;
     this.attempt++;
     this.setState('reconnecting');
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
-      void this.connect();
+      void this.connectAttempt();
     }, delay);
   }
 
@@ -433,12 +542,13 @@ export class RemoteBrowser {
     if (this.connectionTimer) return;
     this.connectionTimer = setTimeout(() => {
       this.connectionTimer = null;
-      if (this.state !== 'live') this.reconnect(ws);
+      if (this.state !== 'live') this.reconnect(ws, 'connection_timeout');
     }, this.opts.connectionTimeoutMs ?? CONNECTION_TIMEOUT_MS);
   }
 
-  private reconnect(ws: WebSocket) {
+  private reconnect(ws: WebSocket, code: ConnectionDiagnostic['code'] = 'relay_failed') {
     if (this.ws !== ws || this.stopped) return;
+    this.diagnostic('failed', code);
     // Negotiation errors and deadlines also replace the socket. Pending preconnect
     // input must pause visibly instead of following the retry into another session.
     this.inputReady = false;
@@ -562,6 +672,12 @@ export class RemoteBrowser {
       return;
     }
     switch (frame.t) {
+      case 'connection_stage':
+        if (typeof frame.relayId === 'string' && /^[0-9a-f-]{36}$/i.test(frame.relayId) && this.diagnosticAttempt) {
+          this.diagnosticAttempt.relayId = frame.relayId;
+        }
+        this.diagnostic(frame.stage === 'received' ? 'agent_received' : frame.stage, frame.code);
+        return;
       case 'agent_online':
         // The tunnel is online before the agent's local neko relay is necessarily ready.
         // Neko's system/init is the acknowledgment that it can receive signal/request.
@@ -573,6 +689,7 @@ export class RemoteBrowser {
         }
         return;
       case 'agent_offline':
+        this.diagnostic('failed', 'agent_offline');
         this.inputReady = false;
         this.inputQueue.interrupt('disconnected');
         this.clearConnectionTimer();
@@ -583,6 +700,11 @@ export class RemoteBrowser {
         return;
       case 'input_error':
         this.inputReady = false;
+        this.diagnostic('failed', 'relay_failed');
+        if (this.state !== 'live') {
+          this.reconnect(ws, 'relay_failed');
+          return;
+        }
         this.inputQueue.interrupt('relay', true);
         return;
       case 'taken_over':
@@ -596,7 +718,7 @@ export class RemoteBrowser {
         this.setState('taken-over');
         return;
       case 'neko':
-        void this.onNeko(frame.data as NekoMessage, ws).catch(() => this.reconnect(ws));
+        void this.onNeko(frame.data as NekoMessage, ws).catch(() => this.reconnect(ws, 'negotiation_failed'));
         return;
       case 'file':
         this.files.handle(frame);
@@ -606,6 +728,7 @@ export class RemoteBrowser {
   private async onNeko(msg: NekoMessage, ws: WebSocket) {
     switch (msg.event) {
       case EV.SYSTEM_INIT: {
+        this.diagnostic('desktop_ready');
         const init = msg.payload as { screen_size?: unknown; webrtc?: { videos?: unknown } } | undefined;
         this.remoteScreen = screenOf(init?.screen_size) ?? this.remoteScreen;
         this.offeredVideos = Array.isArray(init?.webrtc?.videos) ? init.webrtc.videos.filter((v): v is string => typeof v === 'string') : [];
@@ -663,6 +786,7 @@ export class RemoteBrowser {
   private async answer(provide: SignalProvide, ws: WebSocket) {
     // Trickle candidates can arrive before the offer, while neko finishes creating its peer.
     this.teardownPeer(true);
+    this.diagnostic('signal_received');
     this.startConnectionTimer(ws);
     const servers = this.iceServers.length
       ? this.iceServers
@@ -672,12 +796,20 @@ export class RemoteBrowser {
     const PC = this.opts.RTCPeerConnectionImpl ?? RTCPeerConnection;
     const pc = new PC({ iceServers: servers, iceTransportPolicy: relayOnly ? 'relay' : 'all' });
     this.pc = pc;
+    const frameSequence = this.frameSequence;
+    let mediaStream: MediaStream | null = null;
 
     pc.ontrack = (e) => {
-      const stream = e.streams[0] ?? new MediaStream([e.track]);
-      this.opts.onStream?.(stream);
+      if (this.pc !== pc || this.ws !== ws || this.stopped || !this.diagnosticAttempt) return;
+      mediaStream ??= e.streams[0] ?? new MediaStream();
+      if (!mediaStream.getTracks().includes(e.track)) mediaStream.addTrack(e.track);
+      if (!mediaStream.getTracks().some((track) => track.kind === 'video')) return;
+      // Audio and video can arrive in separate streams. Keep one playback source so a later
+      // audio track cannot replace the picture or cancel its pending first-frame observation.
+      this.opts.onStream?.(mediaStream, this.diagnosticAttempt.id, frameSequence);
     };
     pc.ondatachannel = (e) => {
+      if (this.pc !== pc || this.ws !== ws || this.stopped) return;
       const dc = e.channel;
       dc.binaryType = 'arraybuffer';
       dc.onmessage = (m) => {
@@ -696,14 +828,10 @@ export class RemoteBrowser {
     pc.onconnectionstatechange = () => {
       if (this.pc !== pc) return;
       if (pc.connectionState === 'connected') {
-        this.clearConnectionTimer();
-        this.attempt = 0;
+        this.peerConnected = true;
+        this.diagnostic('peer_connected');
         this.sendNeko({ event: EV.CONTROL_REQUEST });
-        this.inputReady = true;
-        this.inputQueue.flush();
-        this.setState('live');
-        this.startStats();
-        if (this.pendingViewport) this.applyScreen();
+        this.becomeLive();
       } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
         this.inputReady = false;
         this.inputQueue.interrupt('disconnected');
@@ -809,6 +937,10 @@ export class RemoteBrowser {
 
   private teardownPeer(preserveCandidates = false) {
     this.inputReady = false;
+    this.peerConnected = false;
+    this.firstFrame = false;
+    this.frameSequence++;
+    if (this.opts.requireFirstFrame && this.state === 'live') this.setState('connecting');
     // Every path that loses the agent ends here (a new offer keeps it); the agent discards the
     // part of a transfer it received.
     if (!preserveCandidates) this.files.failAll();

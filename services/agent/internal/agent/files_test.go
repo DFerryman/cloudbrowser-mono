@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/protocol"
 )
 
 type fakeClipboard struct {
@@ -71,7 +73,7 @@ func fileStatus(t *testing.T, c *websocket.Conn, id string) map[string]any {
 func TestPastedFilesReachTheClipboard(t *testing.T) {
 	a, remote, _, clip, dir := fileAgent(t)
 	ctx := context.Background()
-	a.openViewer(ctx, "viewer1", "relay1")
+	openReadyViewer(t, a, ctx, "viewer1", "relay1")
 
 	// One PNG is pasted as an image.
 	png := "\x89PNG\r\n\x1a\nimage"
@@ -128,7 +130,7 @@ func TestPastedFilesReachTheClipboard(t *testing.T) {
 func TestDroppedFilesReachThePage(t *testing.T) {
 	a, remote, browser, _, _ := fileAgent(t)
 	ctx := context.Background()
-	a.openViewer(ctx, "viewer1", "relay1")
+	openReadyViewer(t, a, ctx, "viewer1", "relay1")
 	a.fromViewer(ctx, "viewer1", frame(t, map[string]any{"t": "file_begin", "id": "d1", "action": "drop", "x": 640, "y": 400,
 		"files": []map[string]any{{"name": "a.txt", "type": "text/plain", "size": 3}}}), "relay1")
 	a.fromViewer(ctx, "viewer1", frame(t, chunk("d1", 0, "abc")), "relay1")
@@ -152,7 +154,7 @@ func TestDroppedFilesReachThePage(t *testing.T) {
 func TestBadTransfersAreRefusedAndRemoved(t *testing.T) {
 	a, remote, _, _, dir := fileAgent(t)
 	ctx := context.Background()
-	a.openViewer(ctx, "viewer1", "relay1")
+	openReadyViewer(t, a, ctx, "viewer1", "relay1")
 	begin := func(id string, size int) {
 		a.fromViewer(ctx, "viewer1", frame(t, map[string]any{"t": "file_begin", "id": id, "action": "paste",
 			"files": []map[string]any{{"name": "a.txt", "type": "text/plain", "size": size}}}), "relay1")
@@ -192,10 +194,86 @@ func TestBadTransfersAreRefusedAndRemoved(t *testing.T) {
 func TestTransfersNeedAnUploadDirectory(t *testing.T) {
 	a, remote := inputAgent(t, &inputSession{done: make(chan struct{})})
 	ctx := context.Background()
-	a.openViewer(ctx, "viewer1", "relay1")
+	openReadyViewer(t, a, ctx, "viewer1", "relay1")
 	a.fromViewer(ctx, "viewer1", frame(t, map[string]any{"t": "file_begin", "id": "u1", "action": "drop", "x": 1, "y": 1,
 		"files": []map[string]any{{"name": "a.txt", "type": "text/plain", "size": 1}}}), "relay1")
 	if m := fileStatus(t, remote, "u1"); m["status"] != "error" || m["reason"] != "unsupported" {
 		t.Fatalf("status: %v", m)
+	}
+}
+
+func TestRelayEOFCleansUpAnInFlightFileChunk(t *testing.T) {
+	a, _, _, _, dir := fileAgent(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	openReadyViewer(t, a, ctx, "viewer1", "relay1")
+	const size = 512 << 10
+	if reason := a.beginTransfer("viewer1", "relay1", protocol.ViewerFrame{ID: "inflight", Action: "paste", Files: []protocol.FileMeta{{Name: "a.bin", Size: size}}}); reason != "" {
+		t.Fatal(reason)
+	}
+	a.mu.Lock()
+	transfer := a.transfers[transferKey("viewer1", "inflight")]
+	a.mu.Unlock()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
+	// A full pipe holds the file write in progress until the test drains it. Relay EOF then
+	// reaches the actual asynchronous cleanup path while the chunk owns the transfer lock.
+	transfer.mu.Lock()
+	_ = transfer.out.Close()
+	transfer.out = writer
+	transfer.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.fromViewer(ctx, "viewer1", frame(t, chunk("inflight", 0, strings.Repeat("x", size))), "relay1")
+	}()
+	deadline := time.Now().Add(time.Second)
+	for transfer.mu.TryLock() {
+		transfer.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("file write never entered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	a.neko.(inputRelay).session.Close()
+	for {
+		a.mu.Lock()
+		closed := a.sessions["viewer1"] == nil
+		a.mu.Unlock()
+		if closed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("relay EOF was not processed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_, _ = io.Copy(io.Discard, reader)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("file chunk did not finish")
+	}
+	for {
+		a.mu.Lock()
+		remaining := len(a.transfers)
+		a.mu.Unlock()
+		entries, _ := os.ReadDir(dir)
+		if remaining == 0 && len(entries) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("EOF retained transfers/files: %d %v", remaining, entries)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if reason := a.beginTransfer("viewer1", "relay1", protocol.ViewerFrame{ID: "late", Action: "paste", Files: []protocol.FileMeta{{Name: "late.bin", Size: 1}}}); reason != "relay_unavailable" {
+		t.Fatalf("dead relay registered a new transfer: %s", reason)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatal("rejected late transfer left files")
 	}
 }

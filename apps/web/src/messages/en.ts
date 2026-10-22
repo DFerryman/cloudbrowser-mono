@@ -216,6 +216,8 @@ export const en = {
   'overlay.reconnecting': 'Reconnecting… (attempt {attempt})',
   'overlay.retryNow': 'Retry now',
   'overlay.connecting': 'Connecting to your browser…',
+  'overlay.connectionFailed': 'Your browser is running, but the remote desktop could not connect. Please retry.',
+  'overlay.connectionReference': 'Connection reference: {id}',
   'overlay.agentOffline': 'The remote browser is temporarily offline. Reconnecting…',
   'error.connection_timeout': 'The browser connection request timed out. Please retry.',
   'overlay.inputInterrupted': 'Input delivery was interrupted. Input is paused; reconnect before continuing. Previous clicks and keystrokes will not be replayed.',

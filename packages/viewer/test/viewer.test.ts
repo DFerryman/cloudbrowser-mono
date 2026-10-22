@@ -112,6 +112,8 @@ class FakeWS {
   sent: unknown[] = [];
   onmessage: ((e: { data: string }) => void) | null = null;
   onclose: (() => void) | null = null;
+  onopen: (() => void) | null = null;
+  onerror: (() => void) | null = null;
   constructor(readonly url: string) {
     FakeWS.all.push(this);
   }
@@ -191,7 +193,7 @@ describe('RemoteBrowser', () => {
 
   function setup(
     iceServers: { urls: string[]; username?: string; credential?: string }[] = [],
-    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'onInputError' | 'video' | 'onVideo'> = {},
+    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'maxConnectionAttempts' | 'requireFirstFrame' | 'onDiagnostic' | 'onStream' | 'onInputError' | 'video' | 'onVideo'> = {},
   ) {
     FakeWS.all = [];
     const getConnectInfo = vi.fn(async () => ({ gatewayUrl: 'wss://gw/v1/stream/i1', token: `tok${getConnectInfo.mock.calls.length}`, iceServers }));
@@ -210,7 +212,8 @@ describe('RemoteBrowser', () => {
     const { b, states } = setup([{ urls: ['turns:turn.cloudflare.com:443?transport=tcp'], username: 'u', credential: 'c' }]);
     await b.connect();
     const ws = FakeWS.all[0]!;
-    expect(ws.url).toBe('wss://gw/v1/stream/i1?token=tok1');
+    expect(new URL(ws.url).searchParams.get('token')).toBe('tok1');
+    expect(new URL(ws.url).searchParams.get('attemptId')).toMatch(/^[0-9a-f-]{36}$/);
 
     ws.push({ t: 'agent_online' });
     expect(ws.neko('signal/request')).toHaveLength(0);
@@ -672,6 +675,245 @@ describe('RemoteBrowser', () => {
     expect(states.at(-1)).toBe('reconnecting');
     await vi.advanceTimersByTimeAsync(500);
     expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    b.disconnect();
+  });
+
+  it('stops after three failed attempts and gives an explicit retry a fresh budget', async () => {
+    vi.useFakeTimers();
+    const onDiagnostic = vi.fn();
+    const { b, getConnectInfo, states } = setup([], { connectionTimeoutMs: 100, onDiagnostic });
+    await b.connect();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(getConnectInfo).toHaveBeenCalledTimes(3);
+    expect(states.at(-1)).toBe('failed');
+    expect(FakeWS.all.every((ws) => ws.readyState === 3)).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    const attempts = onDiagnostic.mock.calls.map(([d]) => d).filter((d) => d.stage === 'token_start');
+    expect(new Set(attempts.map((d) => d.attemptId)).size).toBe(3);
+    expect(onDiagnostic.mock.calls.at(-1)?.[0]).toMatchObject({ stage: 'closed', code: 'retry_exhausted' });
+
+    await b.connect();
+    expect(states.at(-1)).toBe('connecting');
+    await vi.advanceTimersByTimeAsync(600);
+    expect(getConnectInfo).toHaveBeenCalledTimes(5);
+    expect(states.at(-1)).toBe('reconnecting');
+    b.disconnect();
+  });
+
+  it('bounds repeated token failures without exposing the rejected error', async () => {
+    vi.useFakeTimers();
+    const onDiagnostic = vi.fn();
+    const { b, getConnectInfo, states } = setup([], { onDiagnostic });
+    getConnectInfo.mockRejectedValue(new Error('token=private-value https://private.example/path'));
+    await b.connect();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(getConnectInfo).toHaveBeenCalledTimes(3);
+    expect(FakeWS.all).toHaveLength(0);
+    expect(states.at(-1)).toBe('failed');
+    expect(vi.getTimerCount()).toBe(0);
+    expect(JSON.stringify(onDiagnostic.mock.calls)).not.toMatch(/private-value|private\.example/);
+    b.disconnect();
+  });
+
+  it('resets the consecutive failure budget once the desktop becomes live', async () => {
+    vi.useFakeTimers();
+    const { b, getConnectInfo, states } = setup([], { maxConnectionAttempts: 2 });
+    await b.connect();
+    FakeWS.all[0]!.close();
+    await vi.advanceTimersByTimeAsync(500);
+    const current = FakeWS.all[1]!;
+    current.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    expect(states.at(-1)).toBe('live');
+    current.close();
+    expect(states.at(-1)).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(getConnectInfo).toHaveBeenCalledTimes(3);
+    b.disconnect();
+  });
+
+  it('gives a dropped live connection a full new automatic connection budget', async () => {
+    vi.useFakeTimers();
+    const { b, getConnectInfo, states } = setup([], { maxConnectionAttempts: 1, connectionTimeoutMs: 100 });
+    await b.connect();
+    const current = FakeWS.all[0]!;
+    current.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    current.close();
+    expect(states.at(-1)).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(states.at(-1)).toBe('failed');
+    expect(vi.getTimerCount()).toBe(0);
+    b.disconnect();
+  });
+
+  it('does not let a late token response revive the exhausted attempt', async () => {
+    vi.useFakeTimers();
+    const { b, getConnectInfo, states } = setup([], { connectionTimeoutMs: 100, maxConnectionAttempts: 1 });
+    let finish!: (info: { gatewayUrl: string; token: string; iceServers: [] }) => void;
+    getConnectInfo.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const pending = b.connect();
+    await vi.advanceTimersByTimeAsync(100);
+    await pending;
+    expect(states.at(-1)).toBe('failed');
+    finish({ gatewayUrl: 'wss://gw', token: 'late-token', iceServers: [] });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(FakeWS.all).toHaveLength(0);
+    expect(states.at(-1)).toBe('failed');
+    expect(vi.getTimerCount()).toBe(0);
+    b.disconnect();
+  });
+
+  it('correlates safe milestones with the gateway attempt and relay without SDP or tokens', async () => {
+    const onDiagnostic = vi.fn();
+    const { b } = setup([], { onDiagnostic });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    const attemptId = new URL(ws.url).searchParams.get('attemptId');
+    const relayId = '74c20e60-8c15-4c3d-849e-ddc4cc42c728';
+    ws.onopen?.();
+    ws.push({ t: 'connection_stage', stage: 'gateway_accepted', relayId });
+    ws.push({ t: 'connection_stage', stage: 'received', relayId });
+    ws.push({ t: 'connection_stage', stage: 'login_start', relayId });
+    ws.push({ t: 'connection_stage', stage: 'login_ok', relayId });
+    ws.push({ t: 'neko', data: { event: 'system/init', payload: { privateField: 'never-export-this' } } });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'private-sdp-should-not-appear' } } });
+    await tick();
+    const diagnostics = onDiagnostic.mock.calls.map(([d]) => d);
+    expect(diagnostics.every((d) => d.attemptId === attemptId)).toBe(true);
+    expect(diagnostics.map((d) => d.stage)).toEqual([
+      'token_start', 'token_ok', 'transport_start', 'transport_open', 'gateway_accepted',
+      'agent_received', 'login_start', 'login_ok', 'desktop_ready', 'signal_received',
+    ]);
+    expect(diagnostics.find((d) => d.stage === 'agent_received')).toMatchObject({ relayId });
+    expect(JSON.stringify(diagnostics)).not.toMatch(/tok1|private-sdp|never-export/);
+    b.disconnect();
+  });
+
+  it('keeps a rendered desktop connecting until an actual frame from the current attempt arrives', async () => {
+    const onDiagnostic = vi.fn();
+    const onStream = vi.fn();
+    const { b, states } = setup([], { requireFirstFrame: true, onDiagnostic, onStream });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    const attemptId = new URL(ws.url).searchParams.get('attemptId')!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer' } } });
+    await tick();
+    const track = { kind: 'video' };
+    FakePC.last.ontrack({ streams: [{ getTracks: () => [track] }], track });
+    const frameSequence = onStream.mock.calls[0]![2];
+    FakePC.last.connect();
+    expect(states.at(-1)).toBe('connecting');
+    b.reportFirstFrame('older-attempt', frameSequence);
+    expect(states.at(-1)).toBe('connecting');
+    b.reportFirstFrame(attemptId, frameSequence);
+    expect(states.at(-1)).toBe('live');
+    b.reportFirstFrame(attemptId, frameSequence);
+    expect(onDiagnostic.mock.calls.filter(([d]) => d.stage === 'first_frame')).toHaveLength(1);
+    await b.connect();
+    b.reportFirstFrame(attemptId, frameSequence);
+    expect(states.at(-1)).toBe('connecting');
+    b.disconnect();
+  });
+
+  it('times out a connected peer that never produces a video frame', async () => {
+    vi.useFakeTimers();
+    const onDiagnostic = vi.fn();
+    const { b, states } = setup([], { requireFirstFrame: true, connectionTimeoutMs: 100, maxConnectionAttempts: 1, onDiagnostic });
+    await b.connect();
+    FakeWS.all[0]!.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    expect(states.at(-1)).toBe('connecting');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(states.at(-1)).toBe('failed');
+    expect(onDiagnostic.mock.calls.some(([d]) => d.stage === 'peer_connected')).toBe(true);
+    expect(onDiagnostic.mock.calls.some(([d]) => d.stage === 'first_frame')).toBe(false);
+    expect(onDiagnostic.mock.calls.some(([d]) => d.code === 'connection_timeout')).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    b.disconnect();
+  });
+
+  it('requires a fresh frame for a replacement peer on the same socket and ignores its old render callback', async () => {
+    vi.useFakeTimers();
+    const onStream = vi.fn();
+    const onDiagnostic = vi.fn();
+    const { b, states } = setup([], { requireFirstFrame: true, onStream, onDiagnostic });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    const attemptId = new URL(ws.url).searchParams.get('attemptId')!;
+    const track = { kind: 'video' };
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'first' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    const first = FakePC.last;
+    first.ontrack({ streams: [{ getTracks: () => [track] }], track });
+    first.connect();
+    const oldFrameSequence = onStream.mock.calls[0]![2];
+    b.reportFirstFrame(attemptId, oldFrameSequence);
+    expect(states.at(-1)).toBe('live');
+
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'replacement' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(first.closed).toBe(true);
+    FakePC.last.connect();
+    b.reportFirstFrame(attemptId, oldFrameSequence);
+    expect(states.at(-1)).toBe('connecting');
+    FakePC.last.ontrack({ streams: [{ getTracks: () => [track] }], track });
+    const newFrameSequence = onStream.mock.calls[1]![2];
+    expect(newFrameSequence).not.toBe(oldFrameSequence);
+    b.reportFirstFrame(attemptId, oldFrameSequence);
+    expect(states.at(-1)).toBe('connecting');
+    b.reportFirstFrame(attemptId, newFrameSequence);
+    expect(states.at(-1)).toBe('live');
+    const connected = onDiagnostic.mock.calls.map(([d]) => d).filter((d) => d.stage === 'peer_connected');
+    const frames = onDiagnostic.mock.calls.map(([d]) => d).filter((d) => d.stage === 'first_frame');
+    expect(connected.map((d) => d.peerSequence)).toEqual([oldFrameSequence, newFrameSequence]);
+    expect(frames.map((d) => d.peerSequence)).toEqual([oldFrameSequence, newFrameSequence]);
+    expect(frames.every((d) => d.attemptId === attemptId)).toBe(true);
+    b.disconnect();
+  });
+
+  it('keeps video and audio on one playback stream and ignores tracks from a replaced attempt', async () => {
+    const onStream = vi.fn();
+    const { b } = setup([], { onStream });
+    await b.connect();
+    FakeWS.all[0]!.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer' } } });
+    await tick();
+    const old = FakePC.last;
+    const video = { kind: 'video' };
+    const audio = { kind: 'audio' };
+    const tracks = [video];
+    const stream = { getTracks: () => tracks, addTrack: (track: typeof video) => tracks.push(track) };
+    old.ontrack({ streams: [stream], track: video });
+    old.ontrack({ streams: [{ getTracks: () => [audio] }], track: audio });
+    expect(onStream.mock.calls.map(([value]) => value)).toEqual([stream, stream]);
+    expect(stream.getTracks()).toEqual([video, audio]);
+    await b.connect();
+    old.ontrack({ streams: [stream], track: video });
+    expect(onStream).toHaveBeenCalledTimes(2);
+    b.disconnect();
+  });
+
+  it('waits for a video track before attaching an audio-first stream to the renderer', async () => {
+    const onStream = vi.fn();
+    const { b } = setup([], { onStream });
+    await b.connect();
+    FakeWS.all[0]!.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer' } } });
+    await tick();
+    const audio = { kind: 'audio' };
+    const video = { kind: 'video' };
+    const tracks = [audio];
+    const stream = { getTracks: () => tracks, addTrack: (track: typeof audio) => tracks.push(track) };
+    FakePC.last.ontrack({ streams: [stream], track: audio });
+    expect(onStream).not.toHaveBeenCalled();
+    FakePC.last.ontrack({ streams: [{ getTracks: () => [video] }], track: video });
+    expect(onStream).toHaveBeenCalledTimes(1);
+    expect(onStream.mock.calls[0]![0]).toBe(stream);
+    expect(tracks).toEqual([audio, video]);
     b.disconnect();
   });
 

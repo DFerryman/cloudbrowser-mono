@@ -98,6 +98,7 @@ async function open(role: 'agent' | 'viewer', headers: Record<string, string> = 
 
 /** Inside the last half of the one-second lease, where a frame triggers a background re-check. */
 const INPUT_RENEW_AT = 600;
+const ATTEMPT_ID = '5eac2d85-529c-4eec-8398-dd2d25bda1f3';
 
 const frame = (socket: Socket, payload: unknown) => gateway.webSocketMessage(socket as unknown as WebSocket, JSON.stringify(payload));
 
@@ -109,6 +110,136 @@ function expireAuthorizationLease() {
 }
 
 describe('gateway revocation', () => {
+  it('advertises viewer-stage capability in both credential and reconnect welcomes', async () => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const reconnect = await open('agent');
+    expect(reconnect.socket.sent[0]).toEqual({ t: 'welcome', viewerStages: true });
+    const bootstrap = await open('agent', { 'x-cb-credential': 'PRIVATE-ISSUED-CREDENTIAL' });
+    expect(bootstrap.socket.sent[0]).toEqual({ t: 'welcome', credential: 'PRIVATE-ISSUED-CREDENTIAL', viewerStages: true });
+    expect(JSON.stringify(log.mock.calls)).not.toContain('PRIVATE-ISSUED-CREDENTIAL');
+  });
+
+  it('keeps close and error relay cleanup independent of storage needed only for diagnostics', async () => {
+    vi.spyOn(console, 'info').mockImplementation(() => {});
+    const agent = await open('agent');
+    const viewer = await open('viewer');
+    const relayId = (viewer.socket.attachment as { relayId: string }).relayId;
+    const lookup = vi.spyOn(ctx.storage, 'get').mockRejectedValue(new Error('storage unavailable'));
+    await gateway.webSocketClose(viewer.socket as unknown as WebSocket, 1000, '', true);
+    expect(agent.socket.sent.at(-1)).toEqual({ t: 'viewer_close', sessionId: 'viewer1', relayId });
+    await gateway.webSocketError(agent.socket as unknown as WebSocket);
+    expect(viewer.socket.sent.at(-1)).toEqual({ t: 'agent_offline' });
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('correlates admission and agent stages across a hibernation with the current viewer attempt', async () => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const agent = await open('agent');
+    const viewer = await open('viewer', { 'x-cb-attempt': ATTEMPT_ID });
+    const relayId = (viewer.socket.attachment as { relayId: string }).relayId;
+    expect(viewer.socket.sent[0]).toEqual({ t: 'connection_stage', stage: 'gateway_accepted', relayId });
+    expect(viewer.socket.attachment).toMatchObject({ instanceId: 'browser1', generation: 1, sessionId: 'viewer1', attemptId: ATTEMPT_ID });
+    expect(log).toHaveBeenCalledWith('connection stage', expect.objectContaining({
+      stage: 'viewer_open_sent', instanceId: 'browser1', generation: 1, sessionId: 'viewer1', relayId, attemptId: ATTEMPT_ID,
+    }));
+    gateway = new InstanceGateway(ctx as unknown as DurableObjectState, env);
+    await frame(agent.socket, { t: 'viewer_stage', sessionId: 'viewer1', relayId, stage: 'websocket_start', elapsedMs: 24 });
+    expect(viewer.socket.sent.at(-1)).toEqual({ t: 'connection_stage', stage: 'websocket_start', relayId });
+    expect(log).toHaveBeenCalledWith('connection stage', expect.objectContaining({
+      stage: 'agent_websocket_start', instanceId: 'browser1', generation: 1, sessionId: 'viewer1', relayId, attemptId: ATTEMPT_ID, elapsedMs: 24,
+    }));
+    expect(env.API.agentMessage).not.toHaveBeenCalledWith('browser1', 1, expect.objectContaining({ t: 'viewer_stage' }));
+  });
+
+  it('drops stale or unscoped stage acknowledgments rather than advancing a replacement relay', async () => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const agent = await open('agent');
+    const previous = await open('viewer');
+    const previousRelay = (previous.socket.attachment as { relayId: string }).relayId;
+    const current = await open('viewer', { 'x-cb-attempt': ATTEMPT_ID });
+    const relayId = (current.socket.attachment as { relayId: string }).relayId;
+    const before = current.socket.sent.length;
+    await frame(agent.socket, { t: 'viewer_stage', sessionId: 'viewer1', relayId: previousRelay, stage: 'desktop_ready' });
+    await frame(agent.socket, { t: 'viewer_stage', sessionId: 'viewer1', stage: 'desktop_ready' });
+    expect(current.socket.sent).toHaveLength(before);
+    expect(log).not.toHaveBeenCalledWith('connection stage', expect.objectContaining({ stage: 'agent_desktop_ready', relayId }));
+    await frame(agent.socket, { t: 'viewer_stage', sessionId: 'viewer1', relayId, stage: 'failed', code: 'websocket_timeout' });
+    expect(current.socket.sent.at(-1)).toEqual({ t: 'connection_stage', stage: 'failed', relayId, code: 'websocket_timeout' });
+    expect(current.socket.closed).toBeNull();
+  });
+
+  it('rejects stage acknowledgments from a revoked agent generation before forwarding them', async () => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const agent = await open('agent');
+    const viewer = await open('viewer');
+    const relayId = (viewer.socket.attachment as { relayId: string }).relayId;
+    d1.sqlite.exec(`UPDATE agent_credentials SET generation = 2 WHERE instance_id = 'browser1'`);
+    expireAuthorizationLease();
+    const before = viewer.socket.sent.length;
+    await frame(agent.socket, { t: 'viewer_stage', sessionId: 'viewer1', relayId, stage: 'desktop_ready' });
+    expect(viewer.socket.sent).toHaveLength(before);
+    expect(agent.socket.closed?.code).toBe(4003);
+    expect(log).not.toHaveBeenCalledWith('connection stage', expect.objectContaining({ stage: 'agent_desktop_ready' }));
+  });
+
+  it('retains the original failure cause when a late agent stage belongs to a timed-out relay', async () => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const agent = await open('agent');
+    const previous = await open('viewer');
+    const oldRelay = (previous.socket.attachment as { relayId: string }).relayId;
+    const current = await open('viewer', { 'x-cb-attempt': ATTEMPT_ID });
+    const before = current.socket.sent.length;
+    await frame(agent.socket, {
+      t: 'viewer_stage', sessionId: 'viewer1', relayId: oldRelay,
+      stage: 'failed', code: 'desktop_timeout', elapsedMs: 31_000,
+    });
+    expect(current.socket.sent).toHaveLength(before);
+    expect(log).toHaveBeenCalledWith('connection stage', expect.objectContaining({
+      stage: 'agent_failed', role: 'agent', instanceId: 'browser1', generation: 1,
+      sessionId: 'viewer1', relayId: oldRelay, code: 'desktop_timeout', elapsedMs: 31_000,
+      ignored: true, discardReason: 'stale_relay',
+    }));
+  });
+
+  it('logs only fixed signaling names and sanitized identifiers, never SDP, input or close reasons', async () => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const agent = await open('agent');
+    const viewer = await open('viewer', { 'x-cb-attempt': 'private-invalid-attempt' });
+    const relayId = (viewer.socket.attachment as { relayId: string }).relayId;
+    const privateValue = 'PRIVATE-URL-TOKEN-SDP-INPUT';
+    await frame(agent.socket, { t: 'viewer', sessionId: 'viewer1', relayId, data: { event: 'system/init', payload: { sdp: privateValue } } });
+    await frame(agent.socket, { t: 'viewer', sessionId: 'viewer1', relayId, data: { event: 'system/init', payload: { token: privateValue } } });
+    await frame(viewer.socket, { t: 'neko', data: { event: 'signal/answer', payload: { sdp: privateValue } } });
+    await frame(viewer.socket, { t: 'neko', data: { event: 'signal/' + privateValue } });
+    await frame(viewer.socket, { t: 'ime', text: privateValue });
+    await gateway.webSocketClose(viewer.socket as unknown as WebSocket, 1006, 'https://private.example/?token=' + privateValue, false);
+    const logged = JSON.stringify(log.mock.calls);
+    expect(logged).not.toContain(privateValue);
+    expect(logged).not.toContain('private-invalid-attempt');
+    expect(logged).not.toContain('private.example');
+    expect(log.mock.calls.filter(([, fields]) => fields.stage === 'signaling' && fields.event === 'system/init')).toHaveLength(1);
+    expect(log).toHaveBeenCalledWith('connection stage', expect.objectContaining({ stage: 'viewer_socket_closed', closeCode: 1006, wasClean: false }));
+  });
+
+  it('validates public attempt IDs, ignores spoofed correlation headers and never logs credentials', async () => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as CryptoKeyPair;
+    const privateKey = await crypto.subtle.exportKey('jwk', pair.privateKey);
+    env.VIEWER_TOKEN_PUBLIC_KEY = JSON.stringify(await crypto.subtle.exportKey('jwk', pair.publicKey));
+    const signed = await signViewerToken(privateKey, { iid: 'browser1', uid: 'owner1', sid: 'viewer1', jti: 'private-token-id', exp: Math.floor(Date.now() / 1000) + 60 });
+    const response = await worker.fetch!(new Request(`https://connect.test/v1/stream/browser1?token=${signed}&attemptId=${ATTEMPT_ID}&private=PRIVATE-QUERY`, {
+      headers: { upgrade: 'websocket', 'x-cb-attempt': 'f6fcba3c-0af0-490f-b226-5df8b82ffbe8' },
+    }), env, {} as ExecutionContext);
+    expect(response.status).toBe(101);
+    expect(ctx.getWebSockets('viewer').at(-1)!.attachment).toMatchObject({ attemptId: ATTEMPT_ID });
+    await worker.fetch!(new Request('https://connect.test/v1/stream/browser1?token=PRIVATE-TOKEN&attemptId=PRIVATE-INVALID-ATTEMPT', {
+      headers: { upgrade: 'websocket' },
+    }), env, {} as ExecutionContext);
+    const logged = JSON.stringify(log.mock.calls);
+    for (const secret of [signed, 'private-token-id', 'PRIVATE-QUERY', 'PRIVATE-TOKEN', 'PRIVATE-INVALID-ATTEMPT']) expect(logged).not.toContain(secret);
+    expect(log).toHaveBeenCalledWith('connection stage', expect.objectContaining({ stage: 'viewer_upgrade_rejected', code: 'invalid_token', status: 401 }));
+  });
+
   it('keeps normal viewer signaling, agent heartbeat and command delivery working', async () => {
     const agent = await open('agent');
     const viewer = await open('viewer');

@@ -11,6 +11,7 @@ import { verifyViewerToken } from '@cloudbrowser/contracts';
 import type { AgentCommandsMessage } from '@cloudbrowser/db';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import type { Env } from './env.js';
+import { connectionAttempt, connectionLog } from './connection-log.js';
 
 export { InstanceGateway } from './instance-gateway.js';
 
@@ -37,26 +38,58 @@ export default {
 
     if (url.pathname === '/v1/agent') {
       const instanceId = req.headers.get('x-instance-id') ?? '';
+      connectionLog('agent_upgrade_requested', { instanceId, role: 'agent' });
       const [scheme, secret] = (req.headers.get('authorization') ?? '').split(' ');
-      if (!instanceId || !secret) return text('unauthorized', 401);
-      const auth = await env.API.authenticateAgent(
-        scheme === 'Bootstrap' ? { instanceId, bootstrap: secret } : { instanceId, credential: secret },
-      );
-      if (!auth.ok) return text(`unauthorized: ${auth.reason}`, 401);
-      return forward(env, req, instanceId, {
-        'x-cb-role': 'agent',
-        'x-cb-generation': String(auth.generation),
-        ...(auth.credential ? { 'x-cb-credential': auth.credential } : {}),
-      });
+      if (!instanceId || !secret) {
+        connectionLog('agent_upgrade_rejected', { instanceId, role: 'agent', code: 'missing_credentials', status: 401 });
+        return text('unauthorized', 401);
+      }
+      try {
+        const auth = await env.API.authenticateAgent(
+          scheme === 'Bootstrap' ? { instanceId, bootstrap: secret } : { instanceId, credential: secret },
+        );
+        if (!auth.ok) {
+          connectionLog('agent_upgrade_rejected', { instanceId, role: 'agent', code: 'authentication_rejected', status: 401 });
+          return text('unauthorized', 401);
+        }
+        return await forward(env, req, instanceId, {
+          'x-cb-role': 'agent',
+          'x-cb-generation': String(auth.generation),
+          ...(auth.credential ? { 'x-cb-credential': auth.credential } : {}),
+        });
+      } catch {
+        connectionLog('agent_upgrade_failed', { instanceId, role: 'agent', code: 'gateway_unavailable', status: 503 });
+        return text('gateway unavailable', 503);
+      }
     }
 
     const stream = url.pathname.match(/^\/v1\/stream\/([A-Za-z0-9]+)$/);
     if (stream) {
-      if (!env.VIEWER_TOKEN_PUBLIC_KEY) return text('viewer tokens not configured', 503);
-      const claims = await verifyViewerToken(JSON.parse(env.VIEWER_TOKEN_PUBLIC_KEY) as JsonWebKey, url.searchParams.get('token') ?? '');
-      if (!claims || claims.iid !== stream[1]) return text('invalid token', 401);
-      if (!(await env.API.redeemViewerToken(claims))) return text('token already used or session ended', 401);
-      return forward(env, req, claims.iid, { 'x-cb-role': 'viewer', 'x-cb-session': claims.sid });
+      const identity = { instanceId: stream[1], attemptId: connectionAttempt(url.searchParams.get('attemptId')), role: 'viewer' as const };
+      connectionLog('viewer_upgrade_requested', identity);
+      if (!env.VIEWER_TOKEN_PUBLIC_KEY) {
+        connectionLog('viewer_upgrade_rejected', { ...identity, code: 'tokens_not_configured', status: 503 });
+        return text('viewer tokens not configured', 503);
+      }
+      try {
+        const claims = await verifyViewerToken(JSON.parse(env.VIEWER_TOKEN_PUBLIC_KEY) as JsonWebKey, url.searchParams.get('token') ?? '');
+        if (!claims || claims.iid !== stream[1]) {
+          connectionLog('viewer_upgrade_rejected', { ...identity, code: 'invalid_token', status: 401 });
+          return text('invalid token', 401);
+        }
+        if (!(await env.API.redeemViewerToken(claims))) {
+          connectionLog('viewer_upgrade_rejected', { ...identity, sessionId: claims.sid, code: 'session_or_token_rejected', status: 401 });
+          return text('token already used or session ended', 401);
+        }
+        connectionLog('viewer_token_redeemed', { ...identity, sessionId: claims.sid });
+        return await forward(env, req, claims.iid, {
+          'x-cb-role': 'viewer', 'x-cb-session': claims.sid,
+          ...(identity.attemptId ? { 'x-cb-attempt': identity.attemptId } : {}),
+        });
+      } catch {
+        connectionLog('viewer_upgrade_failed', { ...identity, code: 'gateway_unavailable', status: 503 });
+        return text('gateway unavailable', 503);
+      }
     }
     return text('not found', 404);
   },

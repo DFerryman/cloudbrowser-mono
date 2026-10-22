@@ -125,7 +125,10 @@ const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
 /** Per-user limit on API writes (page 2: rate limits per user), via the Workers Rate Limiting binding. */
 const limitWrites: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (c.env.API_LIMITER && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
-    const { success } = await c.env.API_LIMITER.limit({ key: `user:${c.get('user').id}` });
+    // Connection evidence must not consume the budget for lifecycle/billing actions.
+    const diagnostics = /^\/api\/v1\/sessions\/[^/]+\/diagnostics$/.test(c.req.path);
+    const key = diagnostics ? `diagnostics:${c.get('user').id}` : `user:${c.get('user').id}`;
+    const { success } = await c.env.API_LIMITER.limit({ key });
     if (!success) throw problem(429, 'rate_limited');
   }
   await next();

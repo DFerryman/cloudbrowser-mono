@@ -26,5 +26,15 @@
       "migrations_dir": "../../packages/db/migrations"
     }
   ],
-  "observability": { "enabled": true }
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "persist": true,
+      "head_sampling_rate": 1,
+      // Invocation logs include the request URL, whose WebSocket query contains a viewer token.
+      // Keep all allowlisted connection-stage logs while disabling automatic request records.
+      "invocation_logs": false
+    }
+  }
 }

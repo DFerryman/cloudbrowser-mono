@@ -2,8 +2,10 @@ import { AgentFrame, ViewerFrame, type GatewayToAgent, type GatewayToViewer } fr
 import { createDb, prepaidAccess } from '@cloudbrowser/db';
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from './env.js';
+import { connectionAttempt, connectionLog, type ConnectionIdentity } from './connection-log.js';
 
-type Attachment = { role: 'agent'; generation: number } | { role: 'viewer'; sessionId: string; generation: number; relayId?: string };
+type Attachment = ({ instanceId?: string } & { role: 'agent'; generation: number })
+  | ({ instanceId?: string; attemptId?: string; signalsSeen?: string[] } & { role: 'viewer'; sessionId: string; generation: number; relayId?: string });
 type CommandRow = { id: string; kind: string; payload: string };
 type LiveInstance = { user_id: string; status: string; desired_state: string; generation: number | null };
 
@@ -78,6 +80,24 @@ export class InstanceGateway extends DurableObject<Env> {
     return this.ctx.getWebSockets(role).filter((ws) => ws.readyState === WebSocket.OPEN);
   }
 
+  private identity(ws: WebSocket, instanceId?: string): ConnectionIdentity & { role?: 'agent' | 'viewer' } {
+    const att = ws.deserializeAttachment() as Attachment | null;
+    return {
+      instanceId: att?.instanceId ?? instanceId,
+      generation: att?.generation,
+      role: att?.role,
+      ...(att?.role === 'viewer' ? { sessionId: att.sessionId, relayId: att.relayId, attemptId: att.attemptId } : {}),
+    };
+  }
+
+  private openViewerRelay(agent: WebSocket, viewer: WebSocket): void {
+    const att = viewer.deserializeAttachment() as Attachment | null;
+    if (att?.role !== 'viewer') return;
+    const sent = this.send(agent, { t: 'viewer_open', sessionId: att.sessionId, relayId: att.relayId });
+    connectionLog(sent ? 'viewer_open_sent' : 'viewer_open_failed', { ...this.identity(viewer), code: sent ? undefined : 'relay_unavailable' });
+    if (!sent) this.inputFailure(att.sessionId, 'relay_unavailable', att.relayId);
+  }
+
   private send(ws: WebSocket, frame: GatewayToAgent | GatewayToViewer) {
     if (ws.readyState !== WebSocket.OPEN) return false;
     try {
@@ -89,6 +109,7 @@ export class InstanceGateway extends DurableObject<Env> {
   }
 
   private closeViewer(ws: WebSocket, sessionId: string, code = 4003, reason = 'session revoked') {
+    connectionLog('viewer_revoked', { ...this.identity(ws), closeCode: code, code: reason.replaceAll(' ', '_') });
     this.inputGrants.delete(sessionId);
     const attachment = ws.deserializeAttachment() as Attachment | null;
     const relayId = attachment?.role === 'viewer' ? attachment.relayId : undefined;
@@ -103,7 +124,10 @@ export class InstanceGateway extends DurableObject<Env> {
       if (attachment?.role === 'viewer') this.closeViewer(viewer, attachment.sessionId, code, reason);
       else viewer.close(code, reason);
     }
-    for (const agent of this.sockets('agent')) agent.close(code, reason);
+    for (const agent of this.sockets('agent')) {
+      connectionLog('agent_revoked', { ...this.identity(agent), closeCode: code, code: reason.replaceAll(' ', '_') });
+      agent.close(code, reason);
+    }
   }
 
   /** D1 is authoritative; upgrades and expired authorization leases read current state. */
@@ -118,6 +142,7 @@ export class InstanceGateway extends DurableObject<Env> {
       }
       return row;
     } catch {
+      connectionLog('instance_lookup_failed', { instanceId, code: 'authorization_unavailable' });
       this.closeAll('authorization unavailable');
       return null;
     }
@@ -126,6 +151,7 @@ export class InstanceGateway extends DurableObject<Env> {
   private async validSocket(ws: WebSocket, row: LiveInstance, instanceId: string, allowCached = false): Promise<boolean> {
     const attachment = ws.deserializeAttachment() as Attachment | null;
     if (!attachment || !['agent', 'viewer'].includes(attachment.role) || !row.generation || attachment.generation !== row.generation) {
+      connectionLog('socket_rejected', { ...this.identity(ws, instanceId), code: 'generation_revoked', closeCode: 4003 });
       ws.close(4003, 'generation revoked');
       return false;
     }
@@ -164,8 +190,14 @@ export class InstanceGateway extends DurableObject<Env> {
           .bind(sessionId, instanceId, row.user_id).first(),
         prepaidAccess(createDb(this.env.DB), row.user_id, instanceId),
       ]));
-      if (!session) return false;
-      if (!access.allowed || epoch !== this.revocationEpoch) return false;
+      if (!session) {
+        connectionLog('viewer_authorization_rejected', { instanceId, generation: row.generation, sessionId, code: 'session_ended' });
+        return false;
+      }
+      if (!access.allowed || epoch !== this.revocationEpoch) {
+        connectionLog('viewer_authorization_rejected', { instanceId, generation: row.generation, sessionId, code: access.allowed ? 'revoked' : 'billing_denied' });
+        return false;
+      }
       const until = Math.min(Date.now() + INPUT_AUTH_LEASE_MS, access.deadlineAt?.getTime() ?? Infinity);
       if (until <= Date.now()) return false;
       const recheckAt = Math.min(Date.now() + IDLE_RECHECK_MS, access.deadlineAt?.getTime() ?? Infinity);
@@ -179,6 +211,7 @@ export class InstanceGateway extends DurableObject<Env> {
       }
       return true;
     } catch {
+      connectionLog('viewer_authorization_failed', { instanceId, generation: row.generation, sessionId, code: 'authorization_unavailable' });
       this.closeAll('authorization unavailable');
       return false;
     }
@@ -218,6 +251,13 @@ export class InstanceGateway extends DurableObject<Env> {
     }
     const epoch = this.revocationEpoch;
     const instanceId = req.headers.get('x-cb-instance') ?? '';
+    const role = req.headers.get('x-cb-role');
+    const admission: ConnectionIdentity & { role?: 'agent' | 'viewer' } = {
+      instanceId, sessionId: role === 'viewer' ? req.headers.get('x-cb-session') ?? undefined : undefined,
+      attemptId: role === 'viewer' ? connectionAttempt(req.headers.get('x-cb-attempt')) : undefined,
+      role: role === 'agent' || role === 'viewer' ? role : undefined,
+    };
+    if (role === 'viewer') connectionLog('viewer_admission_started', admission);
     if (instanceId) await this.ctx.storage.put('instanceId', instanceId);
 
     if (url.pathname === '/deliver') {
@@ -227,32 +267,46 @@ export class InstanceGateway extends DurableObject<Env> {
     if (req.headers.get('upgrade') !== 'websocket') return new Response('expected websocket', { status: 426 });
 
     const row = await this.liveInstance(instanceId);
-    if (!row || epoch !== this.revocationEpoch) return new Response('browser unavailable', { status: 403 });
+    if (!row || epoch !== this.revocationEpoch) {
+      connectionLog('upgrade_rejected', { ...admission, code: 'instance_unavailable', status: 403 });
+      return new Response('browser unavailable', { status: 403 });
+    }
     await this.pruneSockets(row, instanceId, true);
-    if (epoch !== this.revocationEpoch) return new Response('browser unavailable', { status: 403 });
+    if (epoch !== this.revocationEpoch) {
+      connectionLog('upgrade_rejected', { ...admission, generation: row.generation, code: 'revoked', status: 403 });
+      return new Response('browser unavailable', { status: 403 });
+    }
 
     const { 0: client, 1: server } = new WebSocketPair();
-    const role = req.headers.get('x-cb-role');
     if (role === 'agent') {
       const generation = Number(req.headers.get('x-cb-generation') ?? 0);
-      if (!row.generation || generation !== row.generation) return new Response('generation revoked', { status: 403 });
+      if (!row.generation || generation !== row.generation) {
+        connectionLog('agent_upgrade_rejected', { ...admission, generation, code: 'generation_revoked', status: 403 });
+        return new Response('generation revoked', { status: 403 });
+      }
       // A reconnecting agent replaces the old tunnel.
-      for (const old of this.sockets('agent')) old.close(4000, 'replaced');
-      const att: Attachment = { role: 'agent', generation };
+      for (const old of this.sockets('agent')) {
+        connectionLog('agent_replaced', { ...this.identity(old, instanceId), closeCode: 4000 });
+        old.close(4000, 'replaced');
+      }
+      const att: Attachment = { role: 'agent', generation, instanceId };
       this.ctx.acceptWebSocket(server, ['agent']);
       server.serializeAttachment(att);
+      connectionLog('agent_tunnel_accepted', this.identity(server));
       const credential = req.headers.get('x-cb-credential');
-      this.send(server, credential ? { t: 'welcome', credential } : { t: 'welcome' });
+      this.send(server, credential ? { t: 'welcome', credential, viewerStages: true } : { t: 'welcome', viewerStages: true });
       for (const v of this.sockets('viewer')) {
         this.send(v, { t: 'agent_online' });
-        const a = v.deserializeAttachment() as Attachment;
-        if (a.role === 'viewer') this.send(server, { t: 'viewer_open', sessionId: a.sessionId, relayId: a.relayId });
+        this.openViewerRelay(server, v);
       }
       await this.deliverPending();
     } else if (role === 'viewer') {
       const sessionId = req.headers.get('x-cb-session') ?? '';
-      const attachment: Attachment = { role: 'viewer', sessionId, generation: row.generation ?? 0, relayId: crypto.randomUUID() };
-      if (!row.generation || !(await this.validSession(sessionId, row, instanceId)) || epoch !== this.revocationEpoch) return new Response('session revoked', { status: 403 });
+      const attachment: Attachment = { role: 'viewer', sessionId, generation: row.generation ?? 0, relayId: crypto.randomUUID(), instanceId, attemptId: admission.attemptId };
+      if (!row.generation || !(await this.validSession(sessionId, row, instanceId)) || epoch !== this.revocationEpoch) {
+        connectionLog('viewer_admission_rejected', { ...admission, generation: row.generation, relayId: attachment.relayId, code: 'authorization_rejected', status: 403 });
+        return new Response('session revoked', { status: 403 });
+      }
       // One controller at a time: the newest viewer takes over (page 5).
       for (const old of this.sockets('viewer')) {
         const prior = old.deserializeAttachment() as Attachment | null;
@@ -261,9 +315,12 @@ export class InstanceGateway extends DurableObject<Env> {
       }
       this.ctx.acceptWebSocket(server, ['viewer', `session:${sessionId}`]);
       server.serializeAttachment(attachment);
+      connectionLog('viewer_gateway_accepted', this.identity(server));
+      this.send(server, { t: 'connection_stage', stage: 'gateway_accepted', relayId: attachment.relayId });
       const agent = this.sockets('agent')[0];
       this.send(server, agent ? { t: 'agent_online' } : { t: 'agent_offline' });
-      if (agent) this.send(agent, { t: 'viewer_open', sessionId, relayId: attachment.relayId });
+      if (agent) this.openViewerRelay(agent, server);
+      else connectionLog('viewer_agent_offline', { ...this.identity(server), code: 'relay_unavailable' });
     } else {
       return new Response('forbidden', { status: 403 });
     }
@@ -304,7 +361,7 @@ export class InstanceGateway extends DurableObject<Env> {
     }
     const attachment = ws.deserializeAttachment() as Attachment | null;
     const relayedSession = attachment?.role === 'viewer' ? attachment.sessionId
-      : raw && typeof raw === 'object' && 't' in raw && ['viewer', 'viewer_error'].includes(String(raw.t))
+      : raw && typeof raw === 'object' && 't' in raw && ['viewer', 'viewer_error', 'viewer_stage'].includes(String(raw.t))
         && 'sessionId' in raw && typeof raw.sessionId === 'string' ? raw.sessionId : null;
     const cached = relayedSession ? this.inputGrants.get(relayedSession) : null;
     // SDP and system/init are on the same authorized channel as input. Reading the instance,
@@ -317,7 +374,7 @@ export class InstanceGateway extends DurableObject<Env> {
     if (relayedSession) this.renewSoon(relayedSession, instanceId);
     const att = ws.deserializeAttachment() as Attachment;
     if (att.role === 'agent') await this.fromAgent(ws, att, raw);
-    else this.fromViewer(att, raw);
+    else this.fromViewer(ws, att, raw);
   }
 
   override async alarm() {
@@ -341,19 +398,38 @@ export class InstanceGateway extends DurableObject<Env> {
   private async fromAgent(ws: WebSocket, att: Extract<Attachment, { role: 'agent' }>, raw: unknown) {
     const parsed = AgentFrame.safeParse(raw);
     if (!parsed.success) {
+      connectionLog('agent_frame_rejected', { ...this.identity(ws), code: 'invalid_frame', closeCode: 1007 });
       ws.close(1007, 'invalid frame');
       return;
     }
     const frame = parsed.data;
+    if (frame.t === 'viewer_stage') {
+      let matched = false;
+      for (const viewer of this.sockets('viewer')) {
+        const attachment = viewer.deserializeAttachment() as Attachment | null;
+        if (attachment?.role !== 'viewer' || attachment.sessionId !== frame.sessionId || attachment.relayId !== frame.relayId) continue;
+        matched = true;
+        connectionLog(`agent_${frame.stage}`, { ...this.identity(viewer), role: 'agent', code: frame.code, elapsedMs: frame.elapsedMs });
+        this.send(viewer, { t: 'connection_stage', stage: frame.stage, relayId: attachment.relayId, ...(frame.code ? { code: frame.code } : {}) });
+      }
+      // A viewer may have timed out and retried before a late agent failure arrives. Keep the
+      // original failure evidence joinable by relayId without advancing the replacement UI.
+      if (!matched) connectionLog(`agent_${frame.stage}`, {
+        ...this.identity(ws), sessionId: frame.sessionId, relayId: frame.relayId,
+        code: frame.code, elapsedMs: frame.elapsedMs, ignored: true, discardReason: 'stale_relay',
+      });
+      return;
+    }
     if (frame.t === 'viewer_error') {
       this.inputFailure(frame.sessionId, frame.reason, frame.relayId);
       return;
     }
     if (frame.t === 'viewer') {
-      this.traceSignal('agent', frame.sessionId, frame.data);
       for (const v of this.ctx.getWebSockets(`session:${frame.sessionId}`)) {
+        if (v.readyState !== WebSocket.OPEN) continue;
         const attachment = v.deserializeAttachment() as Attachment | null;
         if (frame.relayId && (attachment?.role !== 'viewer' || attachment.relayId !== frame.relayId)) continue;
+        this.traceSignal(v, 'agent', frame.data);
         this.send(v, { t: 'neko', data: frame.data });
       }
       return;
@@ -374,12 +450,12 @@ export class InstanceGateway extends DurableObject<Env> {
     if (frame.t === 'event' && frame.kind === 'heartbeat') await this.deliverPending();
   }
 
-  private fromViewer(att: Extract<Attachment, { role: 'viewer' }>, raw: unknown) {
+  private fromViewer(ws: WebSocket, att: Extract<Attachment, { role: 'viewer' }>, raw: unknown) {
     const parsed = ViewerFrame.safeParse(raw);
     const agent = this.sockets('agent')[0];
     if (!parsed.success) { this.inputFailure(att.sessionId, 'invalid_input'); return; }
     if (!agent) { this.inputFailure(att.sessionId, 'relay_unavailable'); return; }
-    if (parsed.data.t === 'neko') this.traceSignal('viewer', att.sessionId, parsed.data.data);
+    if (parsed.data.t === 'neko') this.traceSignal(ws, 'viewer', parsed.data.data);
     if (!this.send(agent, { t: 'viewer', sessionId: att.sessionId, relayId: att.relayId, data: parsed.data })) {
       this.inputFailure(att.sessionId, 'relay_failed');
     }
@@ -390,21 +466,31 @@ export class InstanceGateway extends DurableObject<Env> {
       if (viewer.readyState !== WebSocket.OPEN) continue;
       const attachment = viewer.deserializeAttachment() as Attachment | null;
       if (relayId && (attachment?.role !== 'viewer' || attachment.relayId !== relayId)) continue;
+      connectionLog('viewer_error', { ...this.identity(viewer), code: reason });
       this.send(viewer, { t: 'input_error', reason });
       this.closeViewer(viewer, sessionId, 1011, 'remote input unavailable');
     }
   }
 
   /** Signal names help diagnose stalled handshakes without logging SDP, tokens or input. */
-  private traceSignal(role: 'agent' | 'viewer', sessionId: string, data: unknown) {
+  private traceSignal(viewer: WebSocket, role: 'agent' | 'viewer', data: unknown) {
     const event = data && typeof data === 'object' && 'event' in data ? data.event : undefined;
-    if (typeof event === 'string' && (event.startsWith('signal/') || event === 'system/init')) {
-      console.info('viewer signaling', { role, sessionId, event });
-    }
+    const allowed = ['system/init', 'signal/request', 'signal/provide', 'signal/answer', 'signal/candidate', 'signal/video', 'signal/audio'];
+    if (typeof event !== 'string' || !allowed.includes(event)) return;
+    const att = viewer.deserializeAttachment() as Attachment | null;
+    if (att?.role !== 'viewer') return;
+    const key = `${role}:${event}`;
+    if (att.signalsSeen?.includes(key)) return;
+    att.signalsSeen = [...(att.signalsSeen ?? []), key];
+    viewer.serializeAttachment(att);
+    connectionLog('signaling', { ...this.identity(viewer), role, event });
   }
 
-  override async webSocketClose(ws: WebSocket) {
+  override async webSocketClose(ws: WebSocket, code?: number, _reason?: string, wasClean?: boolean) {
     const att = ws.deserializeAttachment() as Attachment | null;
+    // Logging must never require storage availability before relay cleanup can run. New
+    // attachments retain their instance ID across hibernation; legacy IDs may be absent.
+    connectionLog(att?.role === 'agent' ? 'agent_tunnel_closed' : 'viewer_socket_closed', { ...this.identity(ws), closeCode: code, wasClean });
     if (att?.role === 'agent') {
       if (this.sockets('agent').every((s) => s === ws)) for (const v of this.sockets('viewer')) this.send(v, { t: 'agent_offline' });
     } else if (att?.role === 'viewer') {
@@ -419,6 +505,7 @@ export class InstanceGateway extends DurableObject<Env> {
   }
 
   override async webSocketError(ws: WebSocket) {
+    connectionLog('socket_error', { ...this.identity(ws), code: 'transport_error' });
     await this.webSocketClose(ws);
   }
 
