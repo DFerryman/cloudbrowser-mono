@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type CSSProperties } from 'react';
 import { isMac } from './keyboard.js';
-import { toRemotePoint, unrotate } from './mapping.js';
+import { elementPoint, toRemotePoint, unrotate, type PositionedEvent } from './mapping.js';
 import type { ConnectionDiagnostic, VideoQuality } from '@cloudbrowser/contracts';
 import type { VideoPreference } from './quality.js';
 import { RemoteBrowser, type AutomationStatus, type ConnectInfo, type ViewerState } from './remote-browser.js';
@@ -63,6 +63,11 @@ export interface RemoteBrowserViewProps {
   onTransfer?: (update: TransferUpdate) => void;
   /** A coding agent's bridge connected or left, or control changed hands. */
   onAutomation?: (status: AutomationStatus) => void;
+  /**
+   * Shows where each pointer down and up is registered (a marker at the point the browser
+   * reported, in the box) with the geometry behind the mapping, for a screenshot.
+   */
+  debug?: boolean;
   /** Picture quality; the sharpest level adapting to the connection by default. Changes apply to the live stream. */
   video?: VideoPreference;
   /** The level being streamed now. */
@@ -77,7 +82,7 @@ export interface RemoteBrowserViewProps {
  * textarea that owns the keyboard (so IME composition works), and the remote cursor drawn locally.
  */
 export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserViewProps>(function RemoteBrowserView(
-  { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onTransfer, onAutomation, rotated = false, video, onVideo, muted = true, className, style },
+  { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onTransfer, onAutomation, rotated = false, debug = false, video, onVideo, muted = true, className, style },
   ref,
 ) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -93,6 +98,9 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   const [boxSize, setBoxSize] = useState<{ width: number; height: number } | null>(null);
   const rotatedRef = useRef(rotated);
   rotatedRef.current = rotated;
+  const debugRef = useRef(debug);
+  debugRef.current = debug;
+  const [debugInfo, setDebugInfo] = useState<{ x: number; y: number; lines: string[] } | null>(null);
   const callbacks = useRef({ getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation });
   callbacks.current = { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation };
   const initialVideo = useRef(video);
@@ -230,18 +238,29 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     if (boxSize) fitViewport(boxSize);
   }, [rotated]);
 
-  /** A client point in the picture's own (unturned) frame, and that frame. */
-  const toLocal = (clientX: number, clientY: number) => {
+  /**
+   * Input is mapped in the box's own coordinates (elementPoint), never through client coordinates
+   * and element rectangles: iOS Safari can report those against different viewports while the
+   * on-screen keyboard pans the page, which put taps beside what they touched. The picture fills
+   * the box's padding box, turned or not, so no layout is read per event.
+   */
+  const boxFrame = () => {
     const box = boxRef.current!;
-    if (rotatedRef.current) return unrotate(clientX, clientY, box.getBoundingClientRect());
-    return { x: clientX, y: clientY, frame: videoRef.current!.getBoundingClientRect() };
+    return { left: 0, top: 0, width: box.clientWidth, height: box.clientHeight };
+  };
+  /** A box point in the picture's own (unturned) frame, and that frame. */
+  const toLocal = (x: number, y: number) => {
+    const frame = boxFrame();
+    if (rotatedRef.current) return unrotate(x, y, frame);
+    return { x, y, frame };
   };
   const remoteAt = (x: number, y: number, frame: { left: number; top: number; width: number; height: number }) => {
     const video = videoRef.current!;
     return toRemotePoint(x, y, frame, { width: video.videoWidth, height: video.videoHeight }, browserRef.current?.screenSize ?? null);
   };
-  const toRemote = (clientX: number, clientY: number) => {
-    const local = toLocal(clientX, clientY);
+  const toRemote = (event: PositionedEvent) => {
+    const point = elementPoint(event, boxRef.current!);
+    const local = toLocal(point.x, point.y);
     return remoteAt(local.x, local.y, local.frame);
   };
 
@@ -253,7 +272,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     const pressedButtons = new Set<number>();
     // Gestures work in the picture's frame, so a turned view scrolls along the page's own axes.
     const touchEvent = (e: PointerEvent) => {
-      const local = toLocal(e.clientX, e.clientY);
+      const point = elementPoint(e, box);
+      const local = toLocal(point.x, point.y);
       return { pointerId: e.pointerId, clientX: local.x, clientY: local.y };
     };
     const touch = new TouchGestureController({
@@ -268,19 +288,40 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     const capture = (e: PointerEvent) => {
       try { box.setPointerCapture(e.pointerId); } catch { /* A synthetic or already-ended pointer. */ }
     };
+    /** Input diagnostics: the point as the browser reported it, and everything the mapping used. */
+    const trace = (kind: string, e: PointerEvent) => {
+      if (!debugRef.current) return;
+      const point = elementPoint(e, box);
+      const local = toLocal(point.x, point.y);
+      const remote = remoteAt(local.x, local.y, local.frame);
+      const rect = box.getBoundingClientRect();
+      const video = videoRef.current!;
+      const screen = browserRef.current?.screenSize;
+      const vv = window.visualViewport;
+      const n = (value: number) => value.toFixed(0);
+      setDebugInfo({ x: point.x, y: point.y, lines: [
+        `${kind} ${e.pointerType} client ${n(e.clientX)},${n(e.clientY)} offset ${n(e.offsetX)},${n(e.offsetY)} page ${n(e.pageX)},${n(e.pageY)} target ${e.target === box ? 'box' : 'other'}`,
+        `box point ${n(point.x)},${n(point.y)} → remote ${remote ? `${n(remote.x)},${n(remote.y)}` : 'outside the picture'}`,
+        `box ${box.clientWidth}×${box.clientHeight} rect ${n(rect.left)},${n(rect.top)} ${n(rect.width)}×${n(rect.height)} rotated ${rotatedRef.current}`,
+        `video ${video.videoWidth}×${video.videoHeight} screen ${screen ? `${screen.width}×${screen.height}` : '?'}`,
+        `viewport ${vv ? `offset ${n(vv.offsetLeft)},${n(vv.offsetTop)} page ${n(vv.pageLeft)},${n(vv.pageTop)} ${n(vv.width)}×${n(vv.height)} scale ${vv.scale.toFixed(2)}` : 'none'}`,
+        `scroll ${window.scrollX},${window.scrollY} inner ${window.innerWidth}×${window.innerHeight} client ${document.documentElement.clientWidth}×${document.documentElement.clientHeight}`,
+      ] });
+    };
     const onMove = (e: PointerEvent) => {
       if (e.pointerType === 'touch') {
         touch.pointerMove(touchEvent(e));
         e.preventDefault();
         return;
       }
-      const point = toRemote(e.clientX, e.clientY);
+      const point = toRemote(e);
       if (point) {
         browserRef.current?.move(point.x, point.y);
         callbacks.current.onInput?.();
       }
     };
     const onDown = (e: PointerEvent) => {
+      trace('down', e);
       if (e.pointerType === 'touch') {
         if (touch.pointerDown(touchEvent(e))) {
           capture(e);
@@ -289,7 +330,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         e.preventDefault();
         return;
       }
-      const p = toRemote(e.clientX, e.clientY);
+      const p = toRemote(e);
       if (!p) return;
       keysRef.current?.focus({ preventScroll: true });
       capture(e);
@@ -299,6 +340,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       e.preventDefault();
     };
     const onUp = (e: PointerEvent) => {
+      trace('up', e);
       if (e.pointerType === 'touch') {
         touch.pointerUp(touchEvent(e));
         browserRef.current?.finishScroll();
@@ -306,7 +348,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         return;
       }
       if (!pressedButtons.delete(e.button)) return;
-      const p = toRemote(e.clientX, e.clientY);
+      const p = toRemote(e);
       browserRef.current?.button(false, e.button, p?.x, p?.y);
     };
     const reset = () => {
@@ -329,7 +371,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       // The entire viewer owns scrolling, including its letterbox. Never scroll the local page.
       e.preventDefault();
       e.stopPropagation();
-      const p = toRemote(e.clientX, e.clientY);
+      const p = toRemote(e);
       if (!p) return;
       browserRef.current?.move(p.x, p.y);
       const line = 19;
@@ -421,7 +463,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       // Without this the local browser opens the file in place of the app.
       e.preventDefault();
       if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-      const point = toRemote(e.clientX, e.clientY);
+      const point = toRemote(e);
       if (point) browserRef.current?.move(point.x, point.y);
     };
     const onLeave = (e: DragEvent) => {
@@ -435,7 +477,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       const files = [...(e.dataTransfer?.files ?? [])];
       if (files.length === 0) return;
       e.preventDefault();
-      const point = toRemote(e.clientX, e.clientY);
+      const point = toRemote(e);
       if (!point) return;
       browserRef.current?.sendFiles('drop', files, point);
       keysRef.current?.focus({ preventScroll: true });
@@ -503,6 +545,15 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         <video ref={videoRef} autoPlay playsInline muted={muted} style={{ width: '100%', height: '100%', objectFit: 'contain', pointerEvents: 'none' }} />
       </div>
       {dragging ? <div aria-hidden style={{ position: 'absolute', inset: 0, pointerEvents: 'none', outline: '2px dashed currentColor', outlineOffset: -6, opacity: 0.6 }} /> : null}
+      {debug && debugInfo ? (
+        // The marker sits at the registered point, in the box: it shows beside the finger exactly when painting and hit-testing disagree.
+        <div aria-hidden data-testid="input-diagnostics" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 11, lineHeight: 1.35, color: '#fff' }}>
+          <div style={{ position: 'absolute', left: debugInfo.x - 14, top: debugInfo.y - 14, width: 28, height: 28, boxSizing: 'border-box', border: '2px solid #ff2fd0', borderRadius: '50%' }} />
+          <div style={{ position: 'absolute', left: debugInfo.x - 1, top: debugInfo.y - 40, width: 2, height: 80, background: '#ff2fd0' }} />
+          <div style={{ position: 'absolute', left: debugInfo.x - 40, top: debugInfo.y - 1, width: 80, height: 2, background: '#ff2fd0' }} />
+          <pre style={{ position: 'absolute', left: 8, bottom: 8, margin: 0, padding: '6px 8px', maxWidth: 'calc(100% - 16px)', whiteSpace: 'pre-wrap', background: 'rgba(0,0,0,0.75)' }}>{debugInfo.lines.join('\n')}</pre>
+        </div>
+      ) : null}
       <textarea
         ref={keysRef}
         aria-label="Remote browser keyboard"

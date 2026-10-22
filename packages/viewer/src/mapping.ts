@@ -29,6 +29,34 @@ export function toRemotePoint(
 
 type Rect = { left: number; top: number; width: number; height: number };
 
+/** The coordinates a pointer, wheel or drag event carries. */
+export interface PositionedEvent {
+  clientX: number;
+  clientY: number;
+  offsetX?: number;
+  offsetY?: number;
+  target?: unknown;
+}
+
+/**
+ * A point in an element's padding box. For an event the element itself received, the browser's
+ * offsetX/offsetY are used: it computed them against the element with the geometry it hit-tested,
+ * so the point stays right where client coordinates and element rectangles disagree, as on iOS
+ * Safari while the on-screen keyboard pans the page, or after it (iOS 26 leaves the visual
+ * viewport offset). An event delivered to another element, or without offsets, uses the rectangle.
+ */
+export function elementPoint(
+  event: PositionedEvent,
+  element: { getBoundingClientRect(): Rect; clientLeft: number; clientTop: number },
+): { x: number; y: number } {
+  if (event.target === element && typeof event.offsetX === 'number' && typeof event.offsetY === 'number'
+    && Number.isFinite(event.offsetX) && Number.isFinite(event.offsetY)) {
+    return { x: event.offsetX, y: event.offsetY };
+  }
+  const rect = element.getBoundingClientRect();
+  return { x: event.clientX - rect.left - element.clientLeft, y: event.clientY - rect.top - element.clientTop };
+}
+
 /**
  * The view turned a quarter clockwise (a phone held sideways): the picture's frame as laid out
  * before the turn, centered on the box, and a client point carried back into that frame.

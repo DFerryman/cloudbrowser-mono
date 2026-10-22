@@ -73,6 +73,8 @@ const en: Article[] = [
       { ul: [
         'Tap to click; swipe with one or two fingers to scroll.',
         'Use the keyboard button in the toolbar to show or hide the software keyboard. Touching the picture keeps your choice.',
+        'Maximize hides the toolbar and gives the whole screen to the page; a small control in the corner keeps the keyboard and the way back a tap away. The maximized view stays within your browser (Add to Home Screen hides its address bar), because iPhone and iPad allow no typing in a fullscreen page.',
+        'If the picture stops responding, More → Reconnect live view starts the connection again without leaving the page. Coming back to a tab that was in the background reconnects by itself.',
       ] },
       { h: 'Typing other languages', id: 'ime' },
       { p: 'Input methods (such as Chinese or Japanese) work: the composed text is inserted into the page. Send keys in the toolbar sends combinations like Ctrl+Alt+Del that your own computer would catch.' },
@@ -281,6 +283,8 @@ const zh: Article[] = [
       { ul: [
         '轻点即点击；单指或双指滑动即可滚动。',
         '使用工具栏中的键盘按钮显示或隐藏软键盘。触摸画面不会改变你的选择。',
+        '“最大化”会隐藏工具栏，把整个屏幕留给网页；角落里的小控件让键盘和退出始终触手可及。最大化画面保持在你的浏览器内（“添加到主屏幕”可隐藏地址栏），因为 iPhone 和 iPad 不允许在全屏页面中输入文字。',
+        '如果画面没有响应，可在“更多”中选择“重新连接画面”，无需离开页面即可重新建立连接。从后台切回标签页时会自动重新连接。',
       ] },
       { h: '输入其他语言', id: 'ime' },
       { p: '支持中文、日文等输入法：组合好的文字会直接插入页面。工具栏中的“发送按键”可发送 Ctrl+Alt+Del 等会被本机拦截的组合键。' },

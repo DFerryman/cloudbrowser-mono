@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import {
   ArrowLeft,
   Bot,
+  Bug,
   ClipboardCopy,
   Command,
   Download,
@@ -14,6 +15,7 @@ import {
   Minimize,
   Moon,
   MoreHorizontal,
+  RefreshCw,
   RotateCw,
   RotateCwSquare,
   Settings,
@@ -46,6 +48,18 @@ const decodesH264 = (() => {
 })();
 
 const IDLE_WARNING_MS = 60_000;
+/** iOS can leave the page panned after the on-screen keyboard closes; the page is put back once more after its closing animation. */
+const KEYBOARD_CLOSE_SETTLE_MS = 500;
+/** iPhone and iPad, including an iPad presenting itself as a Mac. */
+const appleTouch = () => /iPad|iPhone|iPod/.test(navigator.platform) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+/**
+ * Maximize within the page rather than with the Fullscreen API: WebKit allows no keyboard input
+ * while an element is fullscreen on iPhone and iPad (an on-screen keyboard never opens there),
+ * phones and tablets handle the on-screen keyboard the same way in either, and some browsers have
+ * no element fullscreen at all. Desktops, touch screens included, keep true fullscreen with Keyboard Lock.
+ */
+const maximizesInPage = () => typeof document === 'undefined' || appleTouch() || window.matchMedia('(pointer: coarse)').matches
+  || !document.fullscreenEnabled || typeof HTMLElement.prototype.requestFullscreen !== 'function';
 const SESSION_REQUEST_TIMEOUT_MS = 20_000;
 /** Viewer tokens expire 60 s after issue; a prefetched one is handed over only while well inside that. */
 const PREFETCHED_TOKEN_MAX_AGE_MS = 30_000;
@@ -99,6 +113,10 @@ export function SessionPage() {
   const [sleepReason, setSleepReason] = useState<'idle' | 'balance'>('idle');
   const [now, setNow] = useState(Date.now());
   const [fullscreen, setFullscreen] = useState(false);
+  /** Maximized within the page: the toolbar gives way to the picture and a small floating control. */
+  const [maximized, setMaximized] = useState(false);
+  /** Any touch screen, an iPad with a trackpad included: the on-screen keyboard and the visual viewport behave the same. */
+  const [touchScreen] = useState(() => typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0);
   const viewerRef = useRef<RemoteBrowserHandle>(null);
   const [viewer, setViewer] = useState<{ state: ViewerState; attempt: number }>({ state: 'connecting', attempt: 0 });
   const heartbeat = useRef<ReturnType<typeof sessionHeartbeat<HeartbeatResult>> | null>(null);
@@ -137,8 +155,13 @@ export function SessionPage() {
   // click takes control, and the banner is where control is handed back or screenshots paused.
   const [automation, setAutomation] = useState<AutomationStatus | null>(null);
   const setControl = useSetControl();
-  /** While the on-screen keyboard is up: the part of the page left visible above it. */
-  const [visibleArea, setVisibleArea] = useState<{ top: number; height: number } | null>(null);
+  /** On a touch screen: the visible part of the page (the visual viewport), in page coordinates; the frame is laid out exactly there. */
+  const [visibleArea, setVisibleArea] = useState<{ top: number; left: number; width: number; height: number } | null>(() =>
+    touchScreen && typeof window !== 'undefined' ? { top: 0, left: 0, width: window.innerWidth, height: window.innerHeight } : null);
+  /** Shows where each tap is registered and the geometry behind it (More → Input diagnostics, or ?debug=input). */
+  const [debugInput, setDebugInput] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get('debug') === 'input'; } catch { return false; }
+  });
   const openRequest = useRef<{ instanceId: string; promise: Promise<void> } | null>(null);
   const openIntent = useRef<{ instanceId: string; key: string } | null>(null);
   const openSequence = useRef(0);
@@ -267,49 +290,118 @@ export function SessionPage() {
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
 
-  // The page follows the visual viewport while the keyboard is up, so the remote screen moves up
-  // and shrinks into the space above it instead of being covered. The remote screen keeps its size
-  // (the viewer stops resizing it while typing), so the picture scales down proportionally.
+  // On a touch screen the frame is not fixed to the viewport: it is laid out within the page at
+  // the visual viewport's position and size, at all times. WebKit paints a fixed element pinned to
+  // the visual viewport while it lays out and hit-tests it against the layout viewport; whenever
+  // the two differ (iOS pans and shrinks the visible area for the on-screen keyboard, and iOS 26
+  // can leave it offset or short after the keyboard closes, even from the sign-in page earlier in
+  // the tab) the picture was drawn lower than where taps were registered, so a tap landed below
+  // what it touched. An absolutely positioned frame is painted and hit-tested in one place. The
+  // page itself never scrolls (overflow hidden below), so page and layout coordinates agree. The
+  // remote screen keeps its size while typing (the viewer stops resizing it), so the picture
+  // scales down proportionally into the space above the keyboard instead of being covered.
   useEffect(() => {
-    if (!keyboardOpen) {
-      setVisibleArea(null);
-      // iOS can leave the page panned after the keyboard closes.
-      if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
-      return;
-    }
+    if (!touchScreen) return;
     const viewport = window.visualViewport;
+    if (!viewport) return;
     let frame = 0;
     const update = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
-        const height = Math.round(viewport?.height ?? window.innerHeight);
-        // iOS pans the layout viewport to keep the focused field in view; follow the pan.
-        const top = Math.max(0, Math.round(viewport?.offsetTop ?? 0));
-        setVisibleArea((prev) => (prev?.top === top && prev.height === height ? prev : { top, height }));
+        // Pinch zoom also shrinks the visual viewport; the frame then keeps its size.
+        if (viewport.scale > 1.01) return;
+        const next = {
+          top: Math.max(0, Math.round(viewport.pageTop)),
+          left: Math.max(0, Math.round(viewport.pageLeft)),
+          width: Math.round(viewport.width),
+          height: Math.round(viewport.height),
+        };
+        setVisibleArea((prev) => prev && prev.top === next.top && prev.left === next.left && prev.width === next.width && prev.height === next.height ? prev : next);
       });
     };
     update();
-    viewport?.addEventListener('resize', update);
-    viewport?.addEventListener('scroll', update);
+    viewport.addEventListener('resize', update);
+    viewport.addEventListener('scroll', update);
     window.addEventListener('resize', update);
+    window.addEventListener('orientationchange', update);
     return () => {
       cancelAnimationFrame(frame);
-      viewport?.removeEventListener('resize', update);
-      viewport?.removeEventListener('scroll', update);
+      viewport.removeEventListener('resize', update);
+      viewport.removeEventListener('scroll', update);
       window.removeEventListener('resize', update);
+      window.removeEventListener('orientationchange', update);
     };
+  }, [touchScreen]);
+
+  // The frame is laid out within the page on touch screens: the page itself must never scroll.
+  useEffect(() => {
+    if (!touchScreen) return;
+    const html = document.documentElement;
+    const body = document.body;
+    const previous = [html.style.overflow, body.style.overflow];
+    html.style.overflow = 'hidden';
+    body.style.overflow = 'hidden';
+    return () => {
+      html.style.overflow = previous[0]!;
+      body.style.overflow = previous[1]!;
+    };
+  }, [touchScreen]);
+
+  // iOS can leave the page panned after the keyboard closes: put it back, and again once the
+  // keyboard's closing animation is over.
+  useEffect(() => {
+    if (keyboardOpen) return;
+    const restore = () => {
+      if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
+    };
+    restore();
+    const later = setTimeout(restore, KEYBOARD_CLOSE_SETTLE_MS);
+    return () => clearTimeout(later);
   }, [keyboardOpen]);
 
+  // A page in the background loses its connection (Safari suspends it, and the viewer gives up
+  // after its attempts); coming back reconnects by itself instead of waiting for Retry.
+  const viewerState = viewer.state;
+  useEffect(() => {
+    if (viewerState !== 'failed') return;
+    const resume = () => {
+      if (document.visibilityState !== 'visible') return;
+      setConnectionError(null);
+      viewerRef.current?.reconnect();
+    };
+    document.addEventListener('visibilitychange', resume);
+    window.addEventListener('pageshow', resume);
+    return () => {
+      document.removeEventListener('visibilitychange', resume);
+      window.removeEventListener('pageshow', resume);
+    };
+  }, [viewerState]);
+
   const toggleFullscreen = async () => {
+    if (maximized) {
+      setMaximized(false);
+      viewerRef.current?.focus();
+      return;
+    }
     if (document.fullscreenElement) {
       await document.exitFullscreen();
       return;
     }
-    await frameRef.current?.requestFullscreen();
-    // Lets Ctrl+W, T, N and Tab reach the remote browser in fullscreen (page 5).
-    const kb = (navigator as Navigator & { keyboard?: { lock?: (keys?: string[]) => Promise<void> } }).keyboard;
-    await kb?.lock?.().catch(() => {});
+    if (!maximizesInPage()) {
+      try {
+        await frameRef.current?.requestFullscreen();
+        // Lets Ctrl+W, T, N and Tab reach the remote browser in fullscreen (page 5).
+        const kb = (navigator as Navigator & { keyboard?: { lock?: (keys?: string[]) => Promise<void> } }).keyboard;
+        await kb?.lock?.().catch(() => {});
+        return;
+      } catch {
+        // Refused (an embedded page, a browser without it): maximize within the page instead.
+      }
+    }
+    setMaximized(true);
+    viewerRef.current?.focus();
   };
+  const enlarged = fullscreen || maximized;
 
   const stayAwake = () => {
     hadInput.current = true;
@@ -435,6 +527,42 @@ export function SessionPage() {
     toast(t(key), 'error');
   };
 
+  const rotateButton = touchDevice ? (
+    <Button
+      size="icon"
+      variant="ghost"
+      className="text-zinc-300 hover:bg-zinc-800"
+      aria-label={t('session.rotate')}
+      title={t('session.rotate')}
+      aria-pressed={rotated}
+      onClick={toggleRotated}
+    >
+      <RotateCwSquare />
+    </Button>
+  ) : null;
+  const keyboardButton = (
+    <Button
+      size="icon"
+      variant="ghost"
+      className="text-zinc-300 hover:bg-zinc-800"
+      disabled={!live}
+      aria-label={t(keyboardOpen ? 'session.hideKeyboard' : 'session.showKeyboard')}
+      title={t(keyboardOpen ? 'session.hideKeyboard' : 'session.showKeyboard')}
+      aria-pressed={keyboardOpen}
+      onPointerDown={(e) => e.preventDefault()}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={() => viewerRef.current?.toggleKeyboard()}
+    >
+      <Keyboard />
+    </Button>
+  );
+  const sizeLabel = t(enlarged ? 'session.restore' : maximizesInPage() ? 'session.maximize' : 'session.fullscreen');
+  const sizeButton = (
+    <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={sizeLabel} title={sizeLabel} aria-pressed={enlarged} onClick={() => void toggleFullscreen()}>
+      {enlarged ? <Minimize /> : <Maximize />}
+    </Button>
+  );
+
   const disabledTool = (label: string, Icon: typeof Upload) => (
     <Button key={label} size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" disabled aria-label={label} title={`${label} · ${t('session.needsStream')}`}>
       <Icon />
@@ -442,7 +570,12 @@ export function SessionPage() {
   );
 
   return (
-    <div ref={frameRef} className="cb-dark fixed inset-0 flex h-dvh flex-col overflow-hidden overscroll-none bg-frame text-zinc-100" style={visibleArea === null ? undefined : { top: visibleArea.top, bottom: 'auto', height: visibleArea.height }}>
+    <div
+      ref={frameRef}
+      className={cn('cb-dark flex flex-col overflow-hidden overscroll-none bg-frame text-zinc-100', touchScreen ? 'absolute' : 'fixed inset-0 h-dvh')}
+      style={touchScreen && visibleArea ? { top: visibleArea.top, left: visibleArea.left, width: visibleArea.width, height: visibleArea.height } : undefined}
+    >
+      {maximized ? null : (
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-zinc-800 px-2">
         <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.back')} onClick={() => navigate('/browsers')}>
           <ArrowLeft />
@@ -470,33 +603,8 @@ export function SessionPage() {
               <span className="size-2 rounded-full bg-starting" aria-hidden /> {t('session.simulated')}
             </span>
           ) : null}
-          {touchDevice ? (
-            <Button
-              size="icon"
-              variant="ghost"
-              className="text-zinc-300 hover:bg-zinc-800"
-              aria-label={t('session.rotate')}
-              title={t('session.rotate')}
-              aria-pressed={rotated}
-              onClick={toggleRotated}
-            >
-              <RotateCwSquare />
-            </Button>
-          ) : null}
-          <Button
-            size="icon"
-            variant="ghost"
-            className="text-zinc-300 hover:bg-zinc-800"
-            disabled={!live}
-            aria-label={t(keyboardOpen ? 'session.hideKeyboard' : 'session.showKeyboard')}
-            title={t(keyboardOpen ? 'session.hideKeyboard' : 'session.showKeyboard')}
-            aria-pressed={keyboardOpen}
-            onPointerDown={(e) => e.preventDefault()}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => viewerRef.current?.toggleKeyboard()}
-          >
-            <Keyboard />
-          </Button>
+          {rotateButton}
+          {keyboardButton}
           <div className="hidden items-center gap-0.5 sm:flex">
             {live ? (
               <Button
@@ -585,9 +693,7 @@ export function SessionPage() {
               disabledTool(t('session.sound'), Volume2)
             )}
           </div>
-          <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.fullscreen')} title={t('session.fullscreen')} onClick={() => void toggleFullscreen()}>
-            {fullscreen ? <Minimize /> : <Maximize />}
-          </Button>
+          {sizeButton}
           <Menu
             trigger={
               <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.more')}>
@@ -601,12 +707,26 @@ export function SessionPage() {
             <MenuItem disabled={i?.status !== 'running'} onSelect={() => i && lifecycle.mutate({ id: i.id, action: 'stop' })}>
               <Moon /> {t('browsers.sleepNow')}
             </MenuItem>
+            <MenuItem
+              disabled={!session || takenOver || connect.data?.mode !== 'webrtc'}
+              onSelect={() => {
+                setConnectionError(null);
+                setInputInterrupted(false);
+                viewerRef.current?.reconnect();
+              }}
+            >
+              <RefreshCw /> {t('session.reconnect')}
+            </MenuItem>
+            <MenuItem onSelect={() => setDebugInput((on) => !on)}>
+              <Bug /> {t(debugInput ? 'session.inputDiagnosticsOff' : 'session.inputDiagnostics')}
+            </MenuItem>
             <MenuItem onSelect={() => navigate(`/browsers/${id}/settings`)}>
               <Settings /> {t('browsers.settings')}
             </MenuItem>
           </Menu>
         </div>
       </header>
+      )}
 
       <div
         className="relative min-h-0 flex-1"
@@ -622,6 +742,7 @@ export function SessionPage() {
             onInputError={() => setInputInterrupted(true)}
             onTransfer={onTransfer}
             rotated={rotated}
+            debug={debugInput}
             className="absolute inset-0 bg-frame"
             muted={muted}
             // Each viewer token works once, so every (re)connect asks the api for a fresh one.
@@ -661,6 +782,14 @@ export function SessionPage() {
         ) : null}
         {i?.status === 'running' && connect.isError ? <Overlay message={connectionErrorMessage(connect.error)} action={<Button onClick={() => void connect.refetch()}>{t('common.retry')}</Button>} /> : null}
         {overlay}
+        {maximized ? (
+          // The way out of the maximized view, with the keyboard still a tap away (it needs the toolbar's gesture, not the picture's).
+          <div role="toolbar" aria-label={t('session.maximizedTools')} className="absolute right-3 bottom-3 z-30 flex items-center gap-0.5 border border-zinc-700 bg-zinc-950/85 p-1 backdrop-blur">
+            {keyboardButton}
+            {rotateButton}
+            {sizeButton}
+          </div>
+        ) : null}
         {live && automation && (automation.connected || automation.control.mode !== 'agent') ? (
           <AgentBanner
             status={automation}

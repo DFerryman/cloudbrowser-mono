@@ -34,6 +34,20 @@ app.onError((err) => {
 });
 app.notFound((c) => (c.req.path.startsWith('/api/') ? problem(404, 'not_found').toResponse() : c.env.ASSETS.fetch(c.req.raw)));
 
+/**
+ * Hashed build files (run_worker_first in wrangler.jsonc): after a deployment, a page still open
+ * asks for files that no longer exist. The assets binding would answer with index.html (its
+ * single-page-application fallback); a plain 404 lets the app reload itself instead of parsing
+ * HTML as a script or stylesheet.
+ */
+app.get('/assets/*', async (c) => {
+  const response = await c.env.ASSETS.fetch(c.req.raw);
+  if (response.ok && (response.headers.get('content-type') ?? '').includes('text/html')) {
+    return c.text('Not found', 404, { 'cache-control': 'no-store' });
+  }
+  return response;
+});
+
 app.use('/api/*', async (c, next) => {
   // The administrator host exposes only its own API. Its identity never comes from Better Auth.
   const adminHost = isAdminOrigin(c.env, c.req.url);

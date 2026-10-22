@@ -12,6 +12,7 @@ export type InputFailure = 'overflow' | 'transport' | 'disconnected' | 'relay';
  * quiet spell lost nothing, so it reconnects without asking the user.
  */
 const SETTLED_MS = 10_000;
+const encoder = new TextEncoder();
 
 /** One FIFO for every input kind. WebSocket.send order is preserved across backpressure pauses. */
 export class InputQueue {
@@ -38,7 +39,7 @@ export class InputQueue {
   enqueue(frame: unknown): boolean {
     if (this.blocked) return false;
     const data = JSON.stringify(frame);
-    const bytes = new TextEncoder().encode(data).byteLength;
+    const bytes = encoder.encode(data).byteLength;
     if (this.pending.length >= (this.options.maxEvents ?? 4096) || this.bytes + bytes > (this.options.maxBytes ?? 1024 * 1024)) {
       this.interrupt('overflow', true);
       return false;
