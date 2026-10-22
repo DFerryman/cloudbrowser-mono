@@ -36,7 +36,7 @@ try {
     if (info.commit !== commit || info.branch !== 'main' || info.dirty) {
       throw new Error('The frontend build does not belong to this clean main commit.');
     }
-    run('pnpm', ['exec', 'wrangler', 'deploy', '--message', `Deploy origin/main ${commit}`], api);
+    run('pnpm', ['exec', 'wrangler', 'deploy', '--keep-vars', '--message', `Deploy origin/main ${commit}`], api);
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);

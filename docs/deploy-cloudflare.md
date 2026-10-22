@@ -27,6 +27,11 @@ The deployed `/build-info.json` reports the commit and branch with `Cache-Contro
 the same commit is recorded in the Cloudflare version message. Do not deploy an old `dist/`
 directory or bypass this command with a direct `wrangler deploy`.
 
+The deploy command keeps additional runtime variables configured in the Cloudflare dashboard.
+Variables declared in `apps/api/wrangler.jsonc` still take precedence, so keep its Creem API
+base and top-up product IDs set to the live values; use `.dev.vars` for local test-mode values.
+Existing secrets are retained by deployments.
+
 The API's Custom Domains (`nevazu.com`, `www.nevazu.com`, and `admin.console.nevazu.com`) are
 declared in `apps/api/wrangler.jsonc`, including managed DNS and HTTPS certificates. The zone's
 `http_request_dynamic_redirect` rule is recorded in `deploy/cloudflare-www-redirect.json` and
