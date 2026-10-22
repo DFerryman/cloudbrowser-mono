@@ -19,7 +19,7 @@ Never sleep setting. An open socket or healthy VM alone does not keep a browser 
 | Create, wake, or recover finishes as running | Starts a fresh idle window from completion, not from the creation request |
 | A new viewer session is successfully opened | Records activity immediately, before media connection or its first frame |
 | An idempotent replay of the same session-open request | Does not create another activity event |
-| Mouse movement, clicks, scrolling, keyboard/touch input, paste or file input | The frontend records input for the next 15-second heartbeat; the agent also reports relayed viewer activity |
+| Mouse movement, clicks, scrolling, keyboard/touch input, paste or file input | The frontend records input for the next 15-second heartbeat; legacy clients also use the agent's relayed activity |
 | Heartbeat with input | Persists activity and returns the resulting idle deadline |
 | Visible, established, playing picture | Renews activity every 15 seconds, even with no input |
 | First accepted visible-to-hidden/disconnected transition | Records a final activity anchor and starts a full idle window |
@@ -73,6 +73,8 @@ Presence is a finite activity renewal, not a permanent keep-awake flag. If the b
 frozen or loses its reporting path, the last successful activity deadline still expires.
 The client bounds heartbeat requests to 5 seconds, coalesces visibility changes, flushes the
 latest state after an in-flight request, and attempts hide reports with fetch keepalive.
+Failed human-input reports are retried for at most 30 seconds; a missing response must not
+replay a single old gesture forever under new presence sequence numbers.
 If the hide/end report cannot arrive, the fallback clock begins at the last confirmed activity
 (normally within the preceding 15 seconds). A local gesture is not durable until the service
 receives it; no implementation can guarantee immediate observation during a network outage.
