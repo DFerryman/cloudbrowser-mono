@@ -1,5 +1,5 @@
 import { cn, Eyebrow, Menu, MenuItem, MenuSeparator, PageHeader as Header, ResizeHandle, Skeleton, useResizableWidth } from '@cloudbrowser/ui';
-import { BookOpen, Gift, Globe, LayoutGrid, LogOut, PanelLeftClose, PanelLeftOpen, Plus, UserRound, Wallet } from 'lucide-react';
+import { BookOpen, Gift, Globe, LayoutGrid, LogOut, Mail, PanelLeftClose, PanelLeftOpen, Plus, UserRound, Wallet } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react-router';
 import { fundedHours, isLowBalance, runwayLabel } from '../features/billing/access.js';
@@ -134,6 +134,9 @@ export function AppShell() {
       <MenuSeparator />
       <MenuItem onSelect={() => window.open('/docs', '_blank', 'noopener')}>
         <BookOpen /> {t('nav.help')}
+      </MenuItem>
+      <MenuItem onSelect={() => navigate('/contact')}>
+        <Mail /> {t('contact.title')}
       </MenuItem>
       <MenuSeparator />
       <MenuItem onSelect={() => void signOut()}>
