@@ -1,5 +1,5 @@
 import { useRegionInfo } from '../instances/hooks.js';
-import { STREAM, type ConnectInfo, type Instance, type VideoQuality, type ViewerSession } from '@cloudbrowser/contracts';
+import { STREAM, type ConnectionDiagnostic, type ConnectInfo, type Instance, type VideoQuality, type ViewerSession } from '@cloudbrowser/contracts';
 import { Button, cn, Menu, MenuItem, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -31,6 +31,7 @@ import { keys, queryClient } from '../../lib/query.js';
 import { CreateProgress } from '../instances/CreateProgress.js';
 import { useInstance, useLifecycle, useVerifyIp } from '../instances/hooks.js';
 import { shownStatus, STATUS_TONE, statusKey } from '../instances/status.js';
+import { connectionDiagnosticReporter } from './diagnostics.js';
 
 /** Whether this web browser decodes H.264 over WebRTC, which the live view needs. Unknown counts as yes. */
 const decodesH264 = (() => {
@@ -99,6 +100,22 @@ export function SessionPage() {
   const [fullscreen, setFullscreen] = useState(false);
   const viewerRef = useRef<RemoteBrowserHandle>(null);
   const [viewer, setViewer] = useState<{ state: ViewerState; attempt: number }>({ state: 'connecting', attempt: 0 });
+  const [diagnosticId, setDiagnosticId] = useState<string | null>(null);
+  const diagnostics = useRef<{ sessionId: string; reporter: ReturnType<typeof connectionDiagnosticReporter> } | null>(null);
+  const pendingDiagnostics = useRef<{ sessionId: string; diagnostic: ConnectionDiagnostic }[]>([]);
+  useEffect(() => {
+    if (!session) return;
+    const current = { sessionId: session.id, reporter: connectionDiagnosticReporter(session.id) };
+    diagnostics.current = current;
+    // Child effects can start an attempt before this parent effect, including in StrictMode.
+    for (const pending of pendingDiagnostics.current.splice(0)) {
+      if (pending.sessionId === session.id) current.reporter.report(pending.diagnostic);
+    }
+    return () => {
+      current.reporter.dispose();
+      if (diagnostics.current === current) diagnostics.current = null;
+    };
+  }, [session?.id]);
   const [stats, setStats] = useState<ViewerStats | null>(null);
   const [streaming, setStreaming] = useState<VideoQuality | null>(null);
   const [muted, setMuted] = useState(true);
@@ -144,6 +161,7 @@ export function SessionPage() {
         setSleepAt(null);
         setSleepReason('idle');
         setViewer({ state: 'connecting', attempt: 0 });
+        setDiagnosticId(null);
         void queryClient.invalidateQueries({ queryKey: keys.instance(id) });
       } catch (e) {
         // A timeout or unknown server/network result may already have opened the session.
@@ -306,7 +324,7 @@ export function SessionPage() {
       setInputInterrupted(false);
       viewerRef.current?.reconnect();
     }}>{t('overlay.retryNow')}</Button>} />;
-  } else if (openError || connectionError) {
+  } else if (openError || (connectionError && viewer.state !== 'failed')) {
     overlay = <Overlay message={connectionErrorMessage(openError ?? connectionError)} action={<Button onClick={() => void open()}>{t('common.retry')}</Button>} />;
   } else if (!decodesH264 && i?.status === 'running') {
     // The live view is H.264 (images/browser/neko.yaml); without a decoder the picture stays black.
@@ -362,7 +380,19 @@ export function SessionPage() {
         overlay = <Overlay message={t('overlay.deleted')} action={<Button onClick={() => navigate('/browsers')}>{t('session.back')}</Button>} />;
         break;
       case 'running':
-        if (connect.data?.mode === 'webrtc' && viewer.state === 'reconnecting') {
+        if (connect.data?.mode === 'webrtc' && viewer.state === 'failed') {
+          overlay = <Overlay
+            message={t('overlay.connectionFailed')}
+            body={<>
+              {connectionError ? <p className="text-sm text-zinc-400">{connectionErrorMessage(connectionError)}</p> : null}
+              {diagnosticId ? <p className="font-mono text-xs text-zinc-400">{t('overlay.connectionReference', { id: diagnosticId })}</p> : null}
+            </>}
+            action={<Button onClick={() => {
+              setConnectionError(null);
+              viewerRef.current?.reconnect();
+            }}>{t('overlay.retryNow')}</Button>}
+          />;
+        } else if (connect.data?.mode === 'webrtc' && viewer.state === 'reconnecting') {
           overlay = (
             <Overlay
               message={t('overlay.reconnecting', { attempt: viewer.attempt })}
@@ -620,6 +650,12 @@ export function SessionPage() {
               }
             }}
             onState={(state, attempt) => setViewer({ state, attempt })}
+            onDiagnostic={(diagnostic) => {
+              if (currentSessionId.current !== session.id) return;
+              setDiagnosticId(diagnostic.attemptId);
+              if (diagnostics.current?.sessionId === session.id) diagnostics.current.reporter.report(diagnostic);
+              else if (pendingDiagnostics.current.length < 32) pendingDiagnostics.current.push({ sessionId: session.id, diagnostic });
+            }}
             onStats={setStats}
             onVideo={setStreaming}
             onInput={() => (hadInput.current = true)}

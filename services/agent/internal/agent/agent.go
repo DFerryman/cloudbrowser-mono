@@ -28,8 +28,8 @@ import (
 // commands and delivers their replies across a gateway reconnect, and reports its final data-out
 // count in the shutdown reply. 0.2.3 waits for Chrome to take the hidden page instead of opening a
 // visible one when Chrome has no window yet (the check at every wake). 0.3.0 receives files a viewer
-// pastes or drops (files.go).
-const Version = "0.3.0"
+// pastes or drops (files.go). 0.3.1 bounds desktop admission and verifies local desktop readiness.
+const Version = "0.3.1"
 
 // Browser is Chrome as the agent controls it through CDP.
 type Browser interface {
@@ -79,14 +79,16 @@ type Config struct {
 	Host           Host   // optional: disk and network reports, file system growth
 	// Files viewers paste or drop (files.go): written to UploadDir, which Chrome sees as
 	// UploadBrowserDir; both empty disables them. Clipboard is needed for pastes.
-	UploadDir        string
-	UploadBrowserDir string
-	Clipboard        Clipboard
-	EchoURLs         []string
-	ExpectedIP       string // optional; reported with checks
-	Generation       int    // placement generation, from user data
-	Heartbeat        time.Duration
-	IPCheckEvery     time.Duration
+	UploadDir         string
+	UploadBrowserDir  string
+	Clipboard         Clipboard
+	EchoURLs          []string
+	ExpectedIP        string // optional; reported with checks
+	Generation        int    // placement generation, from user data
+	Heartbeat         time.Duration
+	IPCheckEvery      time.Duration
+	ViewerOpenTimeout time.Duration // total bound, in addition to the relay's stage deadlines
+	DesktopProbeRetry time.Duration
 }
 
 type Agent struct {
@@ -96,12 +98,17 @@ type Agent struct {
 	firewall Firewall
 	log      *slog.Logger
 
-	mu          sync.Mutex
-	conn        *websocket.Conn
-	sessions    map[string]NekoSession
-	relayIDs    map[string]string
-	lastInputAt time.Time
-	transfers   map[string]*transfer
+	mu                   sync.Mutex
+	conn                 *websocket.Conn
+	sessions             map[string]NekoSession
+	relayIDs             map[string]string
+	viewerOpens          map[string]*viewerOpen
+	desktopReady         bool
+	desktopFailure       string
+	desktopProbeRequests chan struct{}
+	viewerStages         bool // negotiated by the current gateway's welcome
+	lastInputAt          time.Time
+	transfers            map[string]*transfer
 	// clipboardQuietUntil: neko's clipboard reports are not relayed until then (files.go).
 	clipboardQuietUntil time.Time
 }
@@ -113,7 +120,13 @@ func New(cfg Config, b Browser, n Neko, f Firewall, log *slog.Logger) *Agent {
 	if cfg.IPCheckEvery == 0 {
 		cfg.IPCheckEvery = 5 * time.Minute
 	}
-	return &Agent{cfg: cfg, browser: b, neko: n, firewall: f, log: log, sessions: map[string]NekoSession{}, relayIDs: map[string]string{}, transfers: map[string]*transfer{}}
+	if cfg.ViewerOpenTimeout == 0 {
+		cfg.ViewerOpenTimeout = 35 * time.Second
+	}
+	if cfg.DesktopProbeRetry == 0 {
+		cfg.DesktopProbeRetry = 10 * time.Second
+	}
+	return &Agent{cfg: cfg, browser: b, neko: n, firewall: f, log: log, sessions: map[string]NekoSession{}, relayIDs: map[string]string{}, viewerOpens: map[string]*viewerOpen{}, desktopProbeRequests: make(chan struct{}, 1), transfers: map[string]*transfer{}}
 }
 
 func (a *Agent) credentialPath() string { return filepath.Join(a.cfg.StateDir, "credential") }
@@ -188,6 +201,7 @@ func (a *Agent) session(ctx context.Context, chromeMajor int) error {
 	defer cancel()
 	a.mu.Lock()
 	a.conn = conn
+	a.viewerStages = false
 	a.mu.Unlock()
 	defer a.closeSessions()
 
@@ -197,8 +211,10 @@ func (a *Agent) session(ctx context.Context, chromeMajor int) error {
 	if err := a.write(sctx, protocol.TurnRequest{T: "turn_request"}); err != nil {
 		return err
 	}
-	if err := a.event(sctx, "ready", map[string]any{"chromeMajor": chromeMajor, "agentVersion": Version}); err != nil {
-		return err
+	if _, checked := a.neko.(desktopProber); checked {
+		go a.reportReadiness(sctx, chromeMajor)
+	} else {
+		a.reportReadiness(sctx, chromeMajor)
 	}
 	go a.loops(sctx)
 
@@ -221,7 +237,7 @@ func (a *Agent) loops(ctx context.Context) {
 	ip := time.NewTicker(a.cfg.IPCheckEvery)
 	defer hb.Stop()
 	defer ip.Stop()
-	a.selfCheck(ctx) // at every (re)connect, i.e. every wake
+	go a.selfCheck(ctx) // IP checks must not delay heartbeats or desktop readiness.
 	for {
 		select {
 		case <-ctx.Done():
@@ -229,8 +245,15 @@ func (a *Agent) loops(ctx context.Context) {
 		case <-hb.C:
 			a.mu.Lock()
 			viewers, last := len(a.sessions), a.lastInputAt
+			desktopReady, desktopFailure := a.desktopReady, a.desktopFailure
 			a.mu.Unlock()
 			data := map[string]any{"viewers": viewers}
+			if _, checked := a.neko.(desktopProber); checked {
+				data["desktopReady"] = desktopReady
+			}
+			if desktopFailure != "" {
+				data["desktopFailureCode"] = desktopFailure
+			}
 			if !last.IsZero() {
 				data["lastInputAt"] = last.UTC().Format(time.RFC3339)
 			}
@@ -293,6 +316,9 @@ func (a *Agent) selfCheck(ctx context.Context) {
 func (a *Agent) handle(ctx context.Context, in protocol.Incoming) {
 	switch in.T {
 	case "welcome":
+		a.mu.Lock()
+		a.viewerStages = in.ViewerStages
+		a.mu.Unlock()
 		if in.Credential != "" {
 			if err := a.saveCredential(in.Credential); err != nil {
 				a.log.Error("save credential", "err", err)
@@ -469,82 +495,6 @@ func (a *Agent) restoreProfile(ctx context.Context, payload map[string]any) erro
 	return restoreErr
 }
 
-func (a *Agent) openViewer(ctx context.Context, sessionID string, relayIDs ...string) {
-	if a.neko == nil || sessionID == "" {
-		return
-	}
-	a.closeViewer(sessionID)
-	relayID := ""
-	if len(relayIDs) > 0 {
-		relayID = relayIDs[0]
-	}
-	s, err := a.neko.Open(ctx, sessionID, func(msg json.RawMessage) {
-		if a.clipboardEchoed(msg) {
-			return
-		}
-		_ = a.write(ctx, protocol.ToViewer{T: "viewer", SessionID: sessionID, RelayID: relayID, Data: msg})
-	})
-	if err != nil {
-		a.log.Error("open neko", "err", err)
-		a.viewerError(ctx, sessionID, relayID, "relay_unavailable")
-		return
-	}
-	a.mu.Lock()
-	a.sessions[sessionID] = s
-	a.relayIDs[sessionID] = relayID
-	a.mu.Unlock()
-	go func() {
-		select {
-		case <-ctx.Done():
-			return
-		case <-s.Done():
-			a.mu.Lock()
-			if a.sessions[sessionID] != s {
-				a.mu.Unlock()
-				return // Intentional close or a replacement owns the session now.
-			}
-			delete(a.sessions, sessionID)
-			delete(a.relayIDs, sessionID)
-			a.mu.Unlock()
-			s.Close()
-			_ = a.write(ctx, protocol.ViewerError{T: "viewer_error", SessionID: sessionID, RelayID: relayID, Reason: "relay_failed"})
-		}
-	}()
-}
-
-func (a *Agent) viewerError(ctx context.Context, sessionID, relayID, reason string) {
-	a.closeViewer(sessionID, relayID)
-	_ = a.write(ctx, protocol.ViewerError{T: "viewer_error", SessionID: sessionID, RelayID: relayID, Reason: reason})
-}
-
-func (a *Agent) closeViewer(sessionID string, relayIDs ...string) {
-	a.mu.Lock()
-	if len(relayIDs) > 0 && a.relayIDs[sessionID] != relayIDs[0] {
-		a.mu.Unlock()
-		return
-	}
-	s := a.sessions[sessionID]
-	delete(a.sessions, sessionID)
-	delete(a.relayIDs, sessionID)
-	a.mu.Unlock()
-	if s != nil {
-		s.Close()
-	}
-	a.endSessionTransfers(sessionID)
-}
-
-func (a *Agent) closeSessions() {
-	a.mu.Lock()
-	all := a.sessions
-	a.sessions = map[string]NekoSession{}
-	a.relayIDs = map[string]string{}
-	a.mu.Unlock()
-	for id, s := range all {
-		s.Close()
-		a.endSessionTransfers(id)
-	}
-}
-
 func (a *Agent) fromViewer(ctx context.Context, sessionID string, data json.RawMessage, relayIDs ...string) {
 	var f protocol.ViewerFrame
 	if err := json.Unmarshal(data, &f); err != nil {
@@ -554,11 +504,15 @@ func (a *Agent) fromViewer(ctx context.Context, sessionID string, data json.RawM
 	s := a.sessions[sessionID]
 	relayID := a.relayIDs[sessionID]
 	if len(relayIDs) > 0 {
-		if s != nil && relayIDs[0] != relayID {
+		if (s != nil || a.viewerOpens[sessionID] != nil) && relayIDs[0] != relayID {
 			a.mu.Unlock()
 			return
 		}
 		relayID = relayIDs[0]
+	}
+	if s == nil && a.viewerOpens[sessionID] != nil {
+		a.mu.Unlock()
+		return // An early input must not cancel an opening desktop.
 	}
 	a.lastInputAt = time.Now()
 	a.mu.Unlock()

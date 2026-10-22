@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -44,6 +45,7 @@ type Clipboard interface {
 }
 
 type transfer struct {
+	mu                             sync.Mutex // local relay EOF cleanup can race the gateway's ordered file_chunk handler
 	sessionID, relayID, id, action string
 	x, y                           int
 	dir                            string // under UploadDir
@@ -176,6 +178,12 @@ func (a *Agent) beginTransfer(sessionID, relayID string, f protocol.ViewerFrame)
 		return "write_failed"
 	}
 	a.mu.Lock()
+	if a.sessions[sessionID] == nil || a.relayIDs[sessionID] != relayID {
+		a.mu.Unlock()
+		t.close()
+		_ = os.RemoveAll(t.dir)
+		return "relay_unavailable"
+	}
 	a.transfers[key] = t
 	a.mu.Unlock()
 	return ""
@@ -201,6 +209,8 @@ func (t *transfer) open() error {
 }
 
 func (t *transfer) write(f protocol.ViewerFrame) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	data, err := base64.StdEncoding.DecodeString(f.Chunk)
 	if err != nil || len(data) == 0 || t.out == nil || f.File != t.current {
 		return "invalid"
@@ -230,14 +240,22 @@ func (t *transfer) write(f protocol.ViewerFrame) string {
 
 // finish checks that every file arrived whole.
 func (t *transfer) finish() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if t.out != nil || t.current != len(t.files) {
-		t.close()
+		t.closeLocked()
 		return "invalid"
 	}
 	return ""
 }
 
 func (t *transfer) close() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.closeLocked()
+}
+
+func (t *transfer) closeLocked() {
 	if t.out != nil {
 		_ = t.out.Close()
 		t.out = nil
@@ -257,17 +275,19 @@ func (a *Agent) endTransfer(key string, discard bool) *transfer {
 	return t
 }
 
-func (a *Agent) endSessionTransfers(sessionID string) {
+func (a *Agent) endSessionTransfers(sessionID string, relayIDs ...string) {
 	a.mu.Lock()
-	var keys []string
+	var removed []*transfer
 	for key, t := range a.transfers {
-		if t.sessionID == sessionID {
-			keys = append(keys, key)
+		if t.sessionID == sessionID && (len(relayIDs) == 0 || t.relayID == relayIDs[0]) {
+			delete(a.transfers, key)
+			removed = append(removed, t)
 		}
 	}
 	a.mu.Unlock()
-	for _, key := range keys {
-		a.endTransfer(key, true)
+	for _, t := range removed {
+		t.close()
+		_ = os.RemoveAll(t.dir)
 	}
 }
 

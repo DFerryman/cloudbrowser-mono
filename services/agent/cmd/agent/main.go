@@ -162,8 +162,22 @@ func (b containerBrowser) Close(ctx context.Context) error {
 type nekoAdapter struct{ r *neko.Relay }
 
 func (n nekoAdapter) Open(ctx context.Context, sessionID string, toViewer func(json.RawMessage)) (agent.NekoSession, error) {
-	return n.r.Open(ctx, sessionID, toViewer)
+	s, err := n.r.Open(ctx, sessionID, toViewer)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
 }
+
+func (n nekoAdapter) OpenWithProgress(ctx context.Context, sessionID string, toViewer func(json.RawMessage), progress func(string, string)) (agent.NekoSession, error) {
+	s, err := n.r.OpenWithProgress(ctx, sessionID, toViewer, progress)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (n nekoAdapter) Probe(ctx context.Context) error { return n.r.Probe(ctx) }
 
 // fakeBrowser stands in for Chrome in local runs against the fake executor.
 type fakeBrowser struct{ ip string }

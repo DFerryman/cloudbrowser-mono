@@ -62,6 +62,23 @@ export const AgentViewerError = z.object({
   reason: z.enum(['relay_unavailable', 'relay_failed', 'input_failed']),
 });
 
+/** Safe milestones only: never include a local URL, token, SDP or viewer input. */
+export const AgentViewerStageName = z.enum([
+  'received', 'login_start', 'login_ok', 'websocket_start', 'websocket_open',
+  'desktop_ready', 'failed', 'closed',
+]);
+export const AgentViewerFailureCode = z.enum([
+  'login_timeout', 'login_rejected', 'login_unavailable', 'websocket_timeout',
+  'websocket_unavailable', 'desktop_timeout', 'canceled', 'relay_unavailable',
+]);
+export const AgentViewerStage = z.object({
+  t: z.literal('viewer_stage'), sessionId: z.string().max(128), relayId: z.string().max(64).optional(),
+  stage: AgentViewerStageName,
+  elapsedMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  code: AgentViewerFailureCode.optional(),
+});
+export type AgentViewerStage = z.infer<typeof AgentViewerStage>;
+
 /** How a file transfer is going, for the viewer that sent it (agent 0.3.0). */
 export const AgentViewerFile = z.object({
   t: z.literal('viewer_file'), sessionId: z.string(), relayId: z.string().optional(),
@@ -72,14 +89,14 @@ export const AgentViewerFile = z.object({
   reason: z.string().max(64).optional(),
 });
 
-export const AgentFrame = z.discriminatedUnion('t', [AgentHello, AgentEvent, AgentReply, AgentTurnRequest, AgentToViewer, AgentViewerError, AgentViewerFile]);
+export const AgentFrame = z.discriminatedUnion('t', [AgentHello, AgentEvent, AgentReply, AgentTurnRequest, AgentToViewer, AgentViewerError, AgentViewerFile, AgentViewerStage]);
 export type AgentFrame = z.infer<typeof AgentFrame>;
 
 // --- gateway -> agent -----------------------------------------------------------------------
 
 export type GatewayToAgent =
   /** Sent once after a bootstrap exchange: the long-lived credential to store (mode 0600). */
-  | { t: 'welcome'; credential?: string }
+  | { t: 'welcome'; credential?: string; viewerStages?: boolean }
   | { t: 'command'; id: string; kind: AgentCommandKind; payload: Record<string, unknown> }
   | { t: 'turn'; iceServers: IceServer[] }
   | { t: 'viewer_open'; sessionId: string; relayId?: string }
@@ -135,6 +152,7 @@ export type GatewayToViewer =
   | { t: 'input_error'; reason: string }
   | { t: 'agent_online' }
   | { t: 'agent_offline' }
+  | { t: 'connection_stage'; stage: 'gateway_accepted' | AgentViewerStage['stage']; relayId?: string; code?: AgentViewerStage['code'] }
   /** Another tab or device opened this browser (one controller at a time). */
   | { t: 'taken_over' }
   | { t: 'file'; id: string; status: 'progress' | 'done' | 'error'; received?: number; reason?: string };

@@ -2,6 +2,7 @@ import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import {
   Accepted,
   ConnectInfo,
+  ConnectionDiagnostic,
   CreateInstanceBody,
   DEFAULT_IDLE_TIMEOUT_S,
   IDLE_TIMEOUT_OPTIONS_S,
@@ -704,6 +705,28 @@ async function ownedSession(c: Vars, id: string) {
   if (inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) throw problem(409, 'invalid_state', 'This browser has been deleted.');
   return s;
 }
+
+v1.openapi(
+  createRoute({
+    method: 'post',
+    path: '/sessions/{id}/diagnostics',
+    tags: ['sessions'],
+    description: 'Allowlisted client connection milestones. These reports do not renew a session, keep the VM awake or change billing.',
+    request: { params: IdParam, body: { content: { 'application/json': { schema: ConnectionDiagnostic } }, required: true } },
+    responses: { 204: { description: 'Diagnostic recorded' }, ...errors },
+  }),
+  async (c) => {
+    // A late failure report may arrive after this session was replaced or ended.
+    // Ownership still applies; a diagnostic never revives that session.
+    const s = await ownedSession(c, c.req.valid('param').id);
+    const report = c.req.valid('json');
+    console.info('viewer connection', {
+      source: 'viewer', instanceId: s.instanceId, sessionId: s.id,
+      ...report, observedAt: new Date().toISOString(),
+    });
+    return c.body(null, 204);
+  },
+);
 
 v1.openapi(
   createRoute({

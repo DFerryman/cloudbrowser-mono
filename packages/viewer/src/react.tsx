@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type CSSProperties } from 'react';
 import { isMac } from './keyboard.js';
 import { toRemotePoint, unrotate } from './mapping.js';
-import type { VideoQuality } from '@cloudbrowser/contracts';
+import type { ConnectionDiagnostic, VideoQuality } from '@cloudbrowser/contracts';
 import type { VideoPreference } from './quality.js';
 import { RemoteBrowser, type ConnectInfo, type ViewerState } from './remote-browser.js';
 import type { ViewerStats } from './stats.js';
@@ -9,6 +9,7 @@ import { TouchGestureController } from './touch.js';
 import { TextInputController } from './text-input.js';
 import type { InputFailure } from './input-queue.js';
 import { pastedFiles, type TransferUpdate } from './file-transfer.js';
+import { observeFirstFrame } from './first-frame.js';
 
 /** Image types Chrome cannot paste from the X clipboard; one is pasted as a PNG instead. */
 const CONVERTED_IMAGES = ['image/jpeg', 'image/webp', 'image/bmp', 'image/avif'];
@@ -44,6 +45,7 @@ export interface RemoteBrowserHandle {
 export interface RemoteBrowserViewProps {
   getConnectInfo: () => Promise<ConnectInfo>;
   onState?: (state: ViewerState, attempt: number) => void;
+  onDiagnostic?: (diagnostic: ConnectionDiagnostic) => void;
   onStats?: (stats: ViewerStats) => void;
   /** Called on any user input, for the idle timeout. */
   onInput?: () => void;
@@ -70,7 +72,7 @@ export interface RemoteBrowserViewProps {
  * textarea that owns the keyboard (so IME composition works), and the remote cursor drawn locally.
  */
 export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserViewProps>(function RemoteBrowserView(
-  { getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError, onTransfer, rotated = false, video, onVideo, muted = true, className, style },
+  { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onTransfer, rotated = false, video, onVideo, muted = true, className, style },
   ref,
 ) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -86,8 +88,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   const [boxSize, setBoxSize] = useState<{ width: number; height: number } | null>(null);
   const rotatedRef = useRef(rotated);
   rotatedRef.current = rotated;
-  const callbacks = useRef({ getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer });
-  callbacks.current = { getConnectInfo, onState, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer };
+  const callbacks = useRef({ getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer });
+  callbacks.current = { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer };
   const initialVideo = useRef(video);
 
   const updateKeyboard = (open: boolean) => {
@@ -108,17 +110,26 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   };
 
   useEffect(() => {
+    let stopFirstFrame: (() => void) | undefined;
+    let observedFrameSequence: number | undefined;
     const browser = new RemoteBrowser({
       getConnectInfo: () => callbacks.current.getConnectInfo(),
       onState: (s, a) => callbacks.current.onState?.(s, a),
+      onDiagnostic: (d) => callbacks.current.onDiagnostic?.(d),
+      requireFirstFrame: true,
       onStats: (s) => callbacks.current.onStats?.(s),
       onInputError: (reason) => {
         textInputRef.current?.reset();
         callbacks.current.onInputError?.(reason);
       },
-      onStream: (stream) => {
+      onStream: (stream, attemptId, frameSequence) => {
         if (videoRef.current) {
-          videoRef.current.srcObject = stream;
+          if (videoRef.current.srcObject !== stream || observedFrameSequence !== frameSequence) {
+            stopFirstFrame?.();
+            videoRef.current.srcObject = stream;
+            observedFrameSequence = frameSequence;
+            stopFirstFrame = observeFirstFrame(videoRef.current, stream, () => browser.reportFirstFrame(attemptId, frameSequence));
+          }
           void videoRef.current.play().catch(() => {});
         }
       },
@@ -146,6 +157,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     });
     void browser.connect();
     return () => {
+      stopFirstFrame?.();
       keyboardRequested.current = false;
       callbacks.current.onKeyboardChange?.(false);
       textInputRef.current?.reset();

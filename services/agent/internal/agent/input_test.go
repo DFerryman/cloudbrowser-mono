@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -53,7 +54,7 @@ func TestInputDeliveryFailuresAreReported(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if mode != "missing" {
-				a.openViewer(ctx, "viewer1", "relay-current")
+				openReadyViewer(t, a, ctx, "viewer1", "relay-current")
 			}
 			var expected string
 			switch mode {
@@ -69,7 +70,7 @@ func TestInputDeliveryFailuresAreReported(t *testing.T) {
 			if mode != "read" {
 				a.fromViewer(ctx, "viewer1", json.RawMessage(`{"t":"neko","data":{"event":"control/keydown","payload":{"keysym":97}}}`), "relay-current")
 			}
-			frame := read(t, remote)
+			frame := readUntil(t, remote, func(m map[string]any) bool { return m["t"] == "viewer_error" })
 			if frame["t"] != "viewer_error" || frame["sessionId"] != "viewer1" || frame["reason"] != expected {
 				t.Fatalf("unexpected input error: %v", frame)
 			}
@@ -106,8 +107,8 @@ func TestOldRelayCannotControlReplacementOrTypeAfterClose(t *testing.T) {
 	a := New(Config{}, browser, &rotatingInputRelay{sessions: []NekoSession{old, current}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	a.openViewer(ctx, "viewer1", "old-relay")
-	a.openViewer(ctx, "viewer1", "new-relay")
+	openReadyViewer(t, a, ctx, "viewer1", "old-relay")
+	openReadyViewer(t, a, ctx, "viewer1", "new-relay")
 	a.closeViewer("viewer1", "old-relay")
 	a.fromViewer(ctx, "viewer1", json.RawMessage(`{"t":"ime","text":"stale"}`), "old-relay")
 	a.mu.Lock()
@@ -123,4 +124,22 @@ func TestOldRelayCannotControlReplacementOrTypeAfterClose(t *testing.T) {
 	if len(browser.inserted) != 1 || browser.inserted[0] != "current" {
 		t.Fatalf("unexpected inserted text: %v", browser.inserted)
 	}
+}
+
+// Existing input/file tests require an admitted relay before sending input. Admission is now
+// asynchronous so production command delivery remains responsive during a stalled desktop.
+func openReadyViewer(t *testing.T, a *Agent, ctx context.Context, sessionID, relayID string) {
+	t.Helper()
+	a.openViewer(ctx, sessionID, relayID)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		a.mu.Lock()
+		ready := a.sessions[sessionID] != nil && a.relayIDs[sessionID] == relayID
+		a.mu.Unlock()
+		if ready {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("viewer did not become admitted")
 }
