@@ -4,6 +4,9 @@ An EC2 VM can be running and its agent can send heartbeats while its remote desk
 accept a viewer. Instance lifecycle status and connection availability are separate signals.
 The viewer stops after three consecutive unsuccessful attempts; explicit Retry starts a new
 budget. The web viewer reports live only after a frame from the current peer is rendered.
+Media statistics and automatic quality adjustment start as soon as the peer connects, including
+while waiting for that first frame. This lets an undecodable stream try a lower quality before
+the original connection deadline; it does not mark the desktop live or enable input early.
 
 ## Correlating one attempt
 
