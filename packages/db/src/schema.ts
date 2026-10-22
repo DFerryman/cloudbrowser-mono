@@ -499,6 +499,11 @@ export const viewerSessions = sqliteTable(
     endedAt: ts('ended_at'),
     country: text('country'),
     userAgent: text('user_agent'),
+    /** -1 identifies legacy clients whose activity still comes from the agent. */
+    presenceSeq: integer('presence_seq').notNull().default(-1),
+    /** null means the client cannot report document visibility and uses input activity only. */
+    viewing: integer('viewing', { mode: 'boolean' }),
+    presenceAt: ts('presence_at'),
   },
   (t) => [index('viewer_sessions_instance_idx').on(t.instanceId, t.lastSeenAt)],
 );

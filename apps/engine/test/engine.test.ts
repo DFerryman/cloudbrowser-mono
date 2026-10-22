@@ -15,6 +15,7 @@ const MASTER_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
 
 class World {
   db: Db;
+  sqlite: ReturnType<typeof createTestD1>['sqlite'];
   store = new MemoryFakeStore();
   clock = new Date('2026-10-01T00:00:00Z');
   faults: FaultPlan = () => null;
@@ -27,6 +28,7 @@ class World {
 
   constructor() {
     const d1 = createTestD1();
+    this.sqlite = d1.sqlite;
     // These tests fund accounts explicitly; signup awards are covered by API registration tests.
     d1.sqlite.exec("UPDATE caps SET `limit` = 0 WHERE metric = 'signup_credit_cents'");
     this.db = createDb(d1);
@@ -340,6 +342,33 @@ describe('lifecycle', () => {
     expect((await w.instance()).status).toBe('sleeping');
   });
 
+  it.each(['input', 'lastActive', 'timeout'] as const)('rejects a stale scheduler candidate when %s changes before stop admission', async (change) => {
+    w.advance(11 * 60_000);
+    const deps = w.deps();
+    let clockReads = 0;
+    deps.now = () => {
+      if (++clockReads === 2) {
+        // idleStops has already read its candidate and busy operations. A viewer open/input
+        // (or setting change) commits before requestStop captures its later admission time.
+        w.advance(1_000);
+        const activity = w.clock.getTime() - 500;
+        if (change === 'input') {
+          w.sqlite.prepare('INSERT INTO instance_health(instance_id,last_input_at) VALUES (?,?) ON CONFLICT(instance_id) DO UPDATE SET last_input_at=excluded.last_input_at').run('inst1', activity);
+        } else if (change === 'lastActive') {
+          w.sqlite.prepare('UPDATE browser_instances SET last_active_at=? WHERE id=?').run(activity, 'inst1');
+        } else {
+          w.sqlite.prepare('UPDATE browser_instances SET idle_timeout_s=1800 WHERE id=?').run('inst1');
+        }
+      }
+      return w.clock;
+    };
+    expect(await idleStops(deps)).toEqual([]);
+    expect(clockReads).toBe(2);
+    expect(await w.db.select().from(operations).where(eq(operations.kind, 'stop'))).toEqual([]);
+    expect(await w.instance()).toMatchObject({ status: 'running', desiredState: 'running' });
+    expect(w.liveProvider().find((r) => r.kind === 'vm')?.state).toBe('running');
+  });
+
   it('keeps never-sleep browsers running until inactivity sleep is enabled again', async () => {
     await w.db.update(browserInstances).set({ idleTimeoutS: 0 }).where(eq(browserInstances.id, 'inst1'));
     w.advance(30 * 24 * 60 * 60_000);
@@ -425,6 +454,39 @@ describe('lifecycle', () => {
       expect(vmState()).toBe('running');
     });
 
+    it('rechecks recent input even when its timestamp predates stop creation', async () => {
+      const op = await queueIdleStop();
+      const queued = await stopRow(op);
+      // The input happened just before admission but its agent heartbeat arrived afterwards.
+      await w.db.insert(schema.instanceHealth).values({ instanceId: 'inst1', lastInputAt: new Date(queued.createdAt.getTime() - 1) })
+        .onConflictDoUpdate({ target: schema.instanceHealth.instanceId, set: { lastInputAt: new Date(queued.createdAt.getTime() - 1) } });
+      expect(await w.settle(op)).toEqual({ state: 'canceled' });
+      expect(await w.instance()).toMatchObject({ status: 'running', desiredState: 'running' });
+      expect(vmState()).toBe('running');
+    });
+
+    it.each(['lastActive', 'timeout'] as const)('rechecks the full current deadline when %s changes after queuing', async (change) => {
+      const op = await queueIdleStop();
+      w.advance(1_000);
+      if (change === 'lastActive') {
+        await w.db.update(browserInstances).set({ lastActiveAt: w.clock }).where(eq(browserInstances.id, 'inst1'));
+      } else {
+        // Check the timeout itself, independently from PATCH's accompanying input timestamp.
+        await w.db.update(browserInstances).set({ idleTimeoutS: 1800 }).where(eq(browserInstances.id, 'inst1'));
+      }
+      expect(await w.settle(op)).toEqual({ state: 'canceled' });
+      expect(await w.instance()).toMatchObject({ status: 'running', desiredState: 'running' });
+      expect(vmState()).toBe('running');
+    });
+
+    it('defensively cancels a legacy idle stop without a pre-settlement activity baseline', async () => {
+      const op = await queueIdleStop();
+      await w.db.update(operations).set({ params: { reason: 'idle' } }).where(eq(operations.id, op));
+      expect(await w.settle(op)).toEqual({ state: 'canceled' });
+      expect(await w.instance()).toMatchObject({ status: 'running', desiredState: 'running' });
+      expect(vmState()).toBe('running');
+    });
+
     it('is canceled by a new idle setting, which counts from the moment it is saved', async () => {
       const op = await queueIdleStop();
       w.advance(1_000);
@@ -457,7 +519,21 @@ describe('lifecycle', () => {
     });
 
     it('still stops a browser that stayed idle', async () => {
+      const baseline = (await w.instance()).lastActiveAt?.getTime() ?? null;
+      const inputAt = w.clock.getTime() - 1_000;
+      await w.db.insert(schema.instanceHealth).values({ instanceId: 'inst1', lastInputAt: new Date(inputAt) })
+        .onConflictDoUpdate({ target: schema.instanceHealth.instanceId, set: { lastInputAt: new Date(inputAt) } });
+      await w.db.insert(schema.viewerSessions).values({ id: 'idle-evidence-session', instanceId: 'inst1', userId: 'u1',
+        startedAt: w.clock, lastSeenAt: w.clock, endedAt: w.clock, presenceSeq: 4, viewing: false, presenceAt: new Date(inputAt) });
       const op = await queueIdleStop();
+      const queued = await stopRow(op);
+      expect(queued.params?.idleLastActiveAt).toBe(baseline);
+      expect(queued.params?.idleLastInputAt).toBe(inputAt);
+      expect(queued.params?.idleTimeoutS).toBe(600);
+      expect(queued.params?.idleViewerPresence).toEqual({ sessionId: 'idle-evidence-session', sequence: 4,
+        viewing: 0, presenceAt: inputAt, endedAt: queued.createdAt.getTime() - 11 * 60_000 });
+      // Admission still settles billing as before; its timestamp must not cancel its own stop.
+      expect((await w.instance()).lastActiveAt?.getTime()).toBe(queued.createdAt.getTime());
       expect(await w.settle(op)).toEqual({ state: 'succeeded' });
       expect(await w.instance()).toMatchObject({ status: 'sleeping', desiredState: 'stopped' });
       expect(vmState()).toBe('stopped');

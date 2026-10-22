@@ -1,4 +1,5 @@
 import { createDb } from '@cloudbrowser/db';
+import type { ConnectionMediaSnapshot } from '@cloudbrowser/contracts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agentMessage } from '../src/internal.js';
 import { setup, signIn } from './helpers.js';
@@ -10,6 +11,14 @@ const report = {
   attemptId: 'b7580036-cd1e-4d81-96dc-7d0bd550a6e4',
   relayId: '98937d61-f25e-46bb-a72e-b4c0042206ef',
   stage: 'failed', elapsedMs: 20_000, code: 'connection_timeout',
+};
+const media: ConnectionMediaSnapshot = {
+  connectionState: 'connected', iceConnectionState: 'completed', iceGatheringState: 'complete',
+  sampleAgeMs: 240, inboundVideo: true, rttMs: 310,
+  localCandidateType: 'relay', remoteCandidateType: 'relay', protocol: 'udp', relayProtocol: 'tls',
+  video: { bytesReceived: 120_000, packetsReceived: 100, packetsLost: -1,
+    framesReceived: 4, framesDecoded: 0, keyFramesDecoded: 0, nackCount: 2, pliCount: 1, jitterMs: 23 },
+  playback: { paused: false, readyState: 1, width: 0, height: 0, visibility: 'visible', playState: 'resolved', frameCallback: true },
 };
 const endpoint = () => `/api/v1/sessions/${sessionId}/diagnostics`;
 const logs = () => vi.spyOn(console, 'info').mockImplementation(() => {});
@@ -32,19 +41,72 @@ beforeEach(async () => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('connection evidence', () => {
-  it('logs an owned attempt without renewing activity, billing or an ended session', async () => {
+  it.each([{ label: 'legacy', evidence: report }, { label: 'media', evidence: { ...report, media } }])(
+    'logs $label evidence without renewing activity, billing or an ended session', async ({ evidence }) => {
     const log = logs();
     expect((await t.call('POST', `/api/v1/sessions/${sessionId}/end`)).status).toBe(204);
     const activity = t.d1.sqlite.prepare('SELECT last_input_at,last_heartbeat_at,metered_at FROM instance_health WHERE instance_id=?').get(instanceId);
     const session = t.d1.sqlite.prepare('SELECT * FROM viewer_sessions WHERE id=?').get(sessionId);
     const before = t.d1.sqlite.prepare('SELECT total_changes() AS n').get();
-    expect((await t.call('POST', endpoint(), report)).status).toBe(204);
+    expect((await t.call('POST', endpoint(), evidence)).status).toBe(204);
     expect(t.d1.sqlite.prepare('SELECT total_changes() AS n').get()).toEqual(before);
     expect(t.d1.sqlite.prepare('SELECT last_input_at,last_heartbeat_at,metered_at FROM instance_health WHERE instance_id=?').get(instanceId)).toEqual(activity);
     expect(t.d1.sqlite.prepare('SELECT * FROM viewer_sessions WHERE id=?').get(sessionId)).toEqual(session);
     expect(log).toHaveBeenCalledWith('viewer connection', expect.objectContaining({
-      source: 'viewer', instanceId, sessionId, ...report,
+      source: 'viewer', instanceId, sessionId, ...evidence,
     }));
+  });
+
+  it('preserves signed loss and missing receiver counters at the two terminal milestones', async () => {
+    const log = logs();
+    const before = t.d1.sqlite.prepare('SELECT total_changes() AS n').get();
+    const completed = { ...report, stage: 'first_frame', code: undefined, media };
+    expect((await t.call('POST', endpoint(), completed)).status).toBe(204);
+    expect(log.mock.calls.at(-1)?.[1]).toMatchObject({ stage: 'first_frame', media });
+    const noReceiver = { ...report, media: { sampleAgeMs: 0, inboundVideo: false } };
+    expect((await t.call('POST', endpoint(), noReceiver)).status).toBe(204);
+    expect(log.mock.calls.at(-1)?.[1]).toMatchObject({ media: { sampleAgeMs: 0, inboundVideo: false } });
+    expect((log.mock.calls.at(-1)?.[1] as { media: ConnectionMediaSnapshot }).media).not.toHaveProperty('video');
+    expect(t.d1.sqlite.prepare('SELECT total_changes() AS n').get()).toEqual(before);
+  });
+
+  it('rejects nested addresses, URLs, SDP and raw playback errors before logging', async () => {
+    const log = logs();
+    const forbidden = [
+      { ...media, address: '203.0.113.7' },
+      { ...media, candidate: { address: '203.0.113.7' } },
+      { ...media, url: 'turns:relay.example:443?credential=private' },
+      { ...media, video: { ...media.video, sdp: 'private-offer' } },
+      { ...media, playback: { ...media.playback, error: 'Failed at https://private.example?token=secret' } },
+      { ...media, playback: { ...media.playback, playState: 'NotAllowedError: private URL' } },
+      { ...media, localCandidateType: '203.0.113.7' },
+      { ...media, protocol: 'https://private.example' },
+    ];
+    for (const snapshot of forbidden) expect((await t.call('POST', endpoint(), { ...report, media: snapshot })).status).toBe(400);
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('rejects out-of-range media values and snapshots on intermediate stages', async () => {
+    const log = logs();
+    const invalid = [
+      { ...media, sampleAgeMs: 5001 }, { ...media, sampleAgeMs: -1 },
+      { ...media, rttMs: -1 }, { ...media, rttMs: 0.5 },
+      { ...media, inboundVideo: 'true' },
+      { ...media, video: { framesDecoded: -1 } },
+      { ...media, video: { packetsLost: -2_147_483_649 } },
+      { ...media, video: { packetsLost: -0.5 } },
+      { ...media, video: { bytesReceived: Number.MAX_SAFE_INTEGER + 1 } },
+      { ...media, video: { jitterMs: -1 } },
+      { ...media, playback: { ...media.playback, readyState: 5 } },
+      { ...media, playback: { ...media.playback, width: 32769 } },
+      { ...media, playback: { ...media.playback, height: -1 } },
+      { ...media, playback: { ...media.playback, visibility: 'prerender' } },
+    ];
+    for (const snapshot of invalid) expect((await t.call('POST', endpoint(), { ...report, media: snapshot })).status).toBe(400);
+    for (const stage of ['token_start', 'transport_open', 'desktop_ready', 'peer_connected', 'closed']) {
+      expect((await t.call('POST', endpoint(), { ...report, stage, media })).status).toBe(400);
+    }
+    expect(log).not.toHaveBeenCalled();
   });
 
   it('rejects content-bearing fields, arbitrary reasons and invalid correlation identifiers before logging', async () => {

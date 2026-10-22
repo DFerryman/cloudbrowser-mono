@@ -20,7 +20,7 @@ const { operations, operationSteps, browserInstances, regions, placements, event
 
 /** Stops the user did not ask for and auto-sleep did not decide: the user is emailed (page 6). */
 const NOTIFIED_STOP_REASONS = new Set(['operator', 'suspended', 'frozen']);
-const IDLE_STOP_CANCELED = 'The browser was used or set to never sleep after this idle stop was queued.';
+const IDLE_STOP_CANCELED = 'The browser is no longer idle under its current sleep setting.';
 
 // Provider calls can last two minutes. A shorter lease lets a second worker overlap them.
 const LEASE_MS = 3 * 60_000;
@@ -309,8 +309,8 @@ async function buildEnv(deps: EngineDeps, op: OperationRow): Promise<StepEnv | n
 }
 
 /**
- * An idle stop is decided by the scheduler and runs later, so the user may use the browser or turn
- * on Never sleep in between. The decision is checked again in the transaction that starts the
+ * An idle stop is decided by the scheduler and runs later, so the user may use the browser or
+ * change the timeout in between. The full current idle deadline is checked in the transaction that starts the
  * stop: either the browser shows stopping and the stop runs, or the stop is canceled and the
  * browser keeps running with its intent restored. A change saved after that applies to the next run.
  */
@@ -318,9 +318,17 @@ async function beginIdleStop(deps: EngineDeps, env: StepEnv): Promise<boolean> {
   const { db } = deps;
   const at = deps.now();
   const { op, instance } = env;
+  const baseline = op.params?.idleLastActiveAt;
+  const captured = Object.prototype.hasOwnProperty.call(op.params ?? {}, 'idleLastActiveAt')
+    && (baseline === null || (typeof baseline === 'number' && Number.isSafeInteger(baseline)));
+  // requestStop settles billing at createdAt, which also writes last_active_at. Only substitute
+  // the captured baseline while that exact accounting stamp remains current; honor any later
+  // activity normally. Old queued jobs lack this proof, so cancel them and let a fresh cron decide.
+  const lastActive = sql`CASE WHEN b.last_active_at = ${op.createdAt.getTime()} THEN ${captured ? baseline ?? 0 : 0} ELSE coalesce(b.last_active_at, 0) END`;
   const stillIdle = sql`EXISTS (SELECT 1 FROM browser_instances b LEFT JOIN instance_health h ON h.instance_id = b.id
     WHERE b.id = ${instance.id} AND b.status = 'running' AND b.desired_state = 'stopped' AND b.idle_timeout_s <> ${NEVER_SLEEP_TIMEOUT_S}
-    AND (h.last_input_at IS NULL OR h.last_input_at <= ${op.createdAt.getTime()}))`;
+    AND ${captured ? 1 : 0} = 1
+    AND max(${lastActive}, coalesce(h.last_input_at, 0)) + b.idle_timeout_s * 1000 <= ${at.getTime()})`;
   const canceledHere = sql`EXISTS (SELECT 1 FROM operations WHERE id = ${op.id} AND status = 'canceled' AND finished_at = ${at.getTime()} AND error = ${IDLE_STOP_CANCELED})`;
   const [, started] = await db.batch([
     db.update(operations).set({ status: 'canceled', finishedAt: at, updatedAt: at, leaseOwner: null, leaseExpiresAt: null, errorClass: 'superseded', error: IDLE_STOP_CANCELED })

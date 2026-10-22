@@ -1,3 +1,5 @@
+import type { ConnectionMediaSnapshot } from '@cloudbrowser/contracts';
+
 /** Connection quality read from RTCPeerConnection.getStats() every 2 s (page 5, "Quality telemetry"). */
 export interface ViewerStats {
   rttMs: number | null;
@@ -22,16 +24,80 @@ export function qualityLevel(s: Pick<ViewerStats, 'rttMs' | 'loss'>): 'good' | '
 
 type AnyStat = Record<string, unknown> & { type: string; id: string };
 
+function counter(value: unknown, signed = false): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= (signed ? -2_147_483_648 : 0)
+    ? value : undefined;
+}
+
+function milliseconds(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+  const ms = Math.round(value * 1000);
+  return Number.isSafeInteger(ms) ? ms : undefined;
+}
+
+function allowed<T extends string>(value: unknown, values: readonly T[]): T | undefined {
+  return typeof value === 'string' && values.includes(value as T) ? value as T : undefined;
+}
+
+/** Prefer the video transport's selected pair; several nominated pairs can remain after ICE changes. */
+function selectedPair(all: Map<string, AnyStat>, video: AnyStat | undefined): AnyStat | undefined {
+  const transport = typeof video?.transportId === 'string' ? all.get(video.transportId) : undefined;
+  // An explicit but unavailable video transport must not borrow another track's route.
+  if (typeof video?.transportId === 'string' && transport?.type !== 'transport') return undefined;
+  const selected = transport
+    ? (typeof transport.selectedCandidatePairId === 'string' ? [transport.selectedCandidatePairId] : [])
+    : [...new Set([...all.values()].filter((s) => s.type === 'transport')
+      .flatMap((s) => typeof s.selectedCandidatePairId === 'string' ? [s.selectedCandidatePairId] : []))];
+  if (selected.length) {
+    if (selected.length !== 1) return undefined;
+    const pair = all.get(selected[0]!);
+    return pair?.type === 'candidate-pair' ? pair : undefined;
+  }
+  // Older browsers omit transport.selectedCandidatePairId. Do not guess between multiple pairs.
+  const pairs = [...all.values()].filter((s) => s.type === 'candidate-pair' && s.state === 'succeeded'
+    && (!transport || typeof s.transportId !== 'string' || s.transportId === transport.id));
+  const legacySelected = pairs.filter((s) => s.selected === true);
+  const candidates = legacySelected.length ? legacySelected : pairs.filter((s) => s.nominated === true);
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+/** Only fixed enums and numeric counters leave the RTCStatsReport; never candidate addresses or SDP. */
+function mediaSnapshot(pair: AnyStat | undefined, video: AnyStat | undefined, all: Map<string, AnyStat>): ConnectionMediaSnapshot {
+  const media: ConnectionMediaSnapshot = { inboundVideo: video !== undefined };
+  const local = typeof pair?.localCandidateId === 'string' ? all.get(pair.localCandidateId) : undefined;
+  const remote = typeof pair?.remoteCandidateId === 'string' ? all.get(pair.remoteCandidateId) : undefined;
+  const rttMs = milliseconds(pair?.currentRoundTripTime);
+  const localCandidateType = allowed(local?.candidateType, ['host', 'srflx', 'prflx', 'relay'] as const);
+  const remoteCandidateType = allowed(remote?.candidateType, ['host', 'srflx', 'prflx', 'relay'] as const);
+  const protocol = allowed(local?.protocol, ['udp', 'tcp'] as const);
+  const relayProtocol = allowed(local?.relayProtocol, ['udp', 'tcp', 'tls'] as const);
+  if (rttMs !== undefined) media.rttMs = rttMs;
+  if (localCandidateType) media.localCandidateType = localCandidateType;
+  if (remoteCandidateType) media.remoteCandidateType = remoteCandidateType;
+  if (protocol) media.protocol = protocol;
+  if (relayProtocol) media.relayProtocol = relayProtocol;
+  if (video) {
+    const result: NonNullable<ConnectionMediaSnapshot['video']> = {};
+    for (const key of ['bytesReceived', 'packetsReceived', 'packetsLost', 'framesReceived', 'framesDecoded', 'keyFramesDecoded', 'nackCount', 'pliCount'] as const) {
+      const value = counter(video[key], key === 'packetsLost');
+      if (value !== undefined) result[key] = value;
+    }
+    const jitterMs = milliseconds(video.jitter);
+    if (jitterMs !== undefined) result.jitterMs = jitterMs;
+    if (Object.keys(result).length) media.video = result;
+  }
+  return media;
+}
+
 export async function readStats(pc: RTCPeerConnection, previous: { bytes: number; at: number } | null) {
   const report = await pc.getStats();
   const all = new Map<string, AnyStat>();
   report.forEach((s: AnyStat) => all.set(s.id, s));
-  let pair: AnyStat | undefined;
   let video: AnyStat | undefined;
   for (const s of all.values()) {
-    if (s.type === 'candidate-pair' && (s.nominated || s.selected) && s.state === 'succeeded') pair = s;
-    if (s.type === 'inbound-rtp' && s.kind === 'video') video = s;
+    if (s.type === 'inbound-rtp' && s.isRemote !== true && (s.kind === 'video' || s.mediaType === 'video')) video = s;
   }
+  const pair = selectedPair(all, video);
   const bytes = Number(video?.bytesReceived ?? 0);
   const lost = Number(video?.packetsLost ?? 0);
   const received = Number(video?.packetsReceived ?? 0);
@@ -56,5 +122,5 @@ export async function readStats(pc: RTCPeerConnection, previous: { bytes: number
     width: typeof video?.frameWidth === 'number' ? video.frameWidth : null,
     height: typeof video?.frameHeight === 'number' ? video.frameHeight : null,
   };
-  return { stats, bytes, counters };
+  return { stats, bytes, counters, media: mediaSnapshot(pair, video, all) };
 }

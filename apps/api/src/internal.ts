@@ -124,7 +124,12 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
         console.info('desktop readiness', { source: 'agent', instanceId, generation, ready: true, checked: d.desktopChecked === true });
         await kickOperation(env, db, instanceId);
       } else if (frame.kind === 'heartbeat') {
-        const [health] = await db.select().from(instanceHealth).where(eq(instanceHealth.instanceId, instanceId));
+        // The last admitted session remains authoritative after it ends. Otherwise automatic
+        // desktop signaling could restart a hidden/closed view's idle countdown indefinitely.
+        const legacyActivity = sql`coalesce((SELECT presence_seq FROM viewer_sessions WHERE instance_id = ${instanceId} ORDER BY rowid DESC LIMIT 1), -1) < 0`;
+        const [report] = await db.select({ health: instanceHealth, legacyActivity: sql<number>`${legacyActivity}` })
+          .from(instanceHealth).where(eq(instanceHealth.instanceId, instanceId));
+        const health = report?.health;
         const lastInputAt = typeof d.lastInputAt === 'string' && !Number.isNaN(Date.parse(d.lastInputAt)) ? new Date(d.lastInputAt) : null;
         const viewers = typeof d.viewers === 'number' ? d.viewers : 0;
         // A transport heartbeat alone is not proof that the local desktop works.
@@ -135,7 +140,7 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
         const inputInterval = inst.idleTimeoutS === NEVER_SLEEP_TIMEOUT_S ? 60_000 : Math.min(60_000, inst.idleTimeoutS * 500);
         // Transport heartbeats remain frequent; persist only once a minute or on a viewer/input
         // transition. Short idle timeouts keep an appropriately shorter input reporting interval.
-        const inputDue = lastInputAt && lastInputAt.getTime() - (health?.lastInputAt?.getTime() ?? 0) >= inputInterval;
+        const inputDue = (report?.legacyActivity ?? 1) && lastInputAt && lastInputAt.getTime() - (health?.lastInputAt?.getTime() ?? 0) >= inputInterval;
         if (health?.lastHeartbeatAt && now.getTime() - health.lastHeartbeatAt.getTime() < 60_000
           && health.viewers === viewers && !inputDue && !readinessChanged) return null;
         const count = (v: unknown) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null);
@@ -148,13 +153,16 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
           viewers,
           ...(desktopReady === false ? { agentReadyGeneration: null, agentReadyAt: null }
             : desktopReady === true && readinessChanged ? { agentReadyGeneration: generation, agentReadyAt: now } : {}),
-          ...(lastInputAt ? { lastInputAt: new Date(Math.max(lastInputAt.getTime(), health?.lastInputAt?.getTime() ?? 0)) } : {}),
+          ...(lastInputAt ? { lastInputAt: sql`CASE WHEN ${legacyActivity} THEN ${lastInputAt.getTime()} ELSE NULL END` } : {}),
           // Storage page (used / total) and data-transfer metering (page 6).
           ...(used !== null && total !== null ? { diskUsedBytes: used, diskTotalBytes: total, diskReportedAt: now } : {}),
           ...(tx !== null ? { netTxBytes: tx } : {}),
         };
         const updated = await db.insert(instanceHealth).values({ instanceId, ...set }).onConflictDoUpdate({
-          target: instanceHealth.instanceId, set,
+          target: instanceHealth.instanceId,
+          // A viewer heartbeat, open or setting change may have committed after the health
+          // read above. Merge against the current row so delayed reports never erase activity.
+          set: { ...set, ...(lastInputAt ? { lastInputAt: sql`CASE WHEN ${legacyActivity} THEN max(coalesce(${instanceHealth.lastInputAt}, 0), ${lastInputAt.getTime()}) ELSE ${instanceHealth.lastInputAt} END` } : {}) },
           setWhere: sql`EXISTS (SELECT 1 FROM ${agentCredentials} WHERE ${agentCredentials.instanceId} = ${instanceId} AND ${agentCredentials.generation} = ${generation})`,
         }).returning({ instanceId: instanceHealth.instanceId });
         if (updated.length && desktopReady !== undefined) {

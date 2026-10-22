@@ -193,7 +193,7 @@ describe('RemoteBrowser', () => {
 
   function setup(
     iceServers: { urls: string[]; username?: string; credential?: string }[] = [],
-    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'maxConnectionAttempts' | 'requireFirstFrame' | 'onDiagnostic' | 'onStream' | 'onStats' | 'onInputError' | 'video' | 'onVideo'> = {},
+    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'maxConnectionAttempts' | 'requireFirstFrame' | 'onDiagnostic' | 'getPlaybackState' | 'onStream' | 'onStats' | 'onInputError' | 'video' | 'onVideo'> = {},
   ) {
     FakeWS.all = [];
     const getConnectInfo = vi.fn(async () => ({ gatewayUrl: 'wss://gw/v1/stream/i1', token: `tok${getConnectInfo.mock.calls.length}`, iceServers }));
@@ -838,6 +838,85 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
+  it('attaches recent media and peer-fenced playback only to first-frame and failure milestones', async () => {
+    vi.useFakeTimers();
+    const onDiagnostic = vi.fn();
+    const onStream = vi.fn();
+    const playback = { paused: false, readyState: 2 as const, width: 1280, height: 720, visibility: 'visible' as const, playState: 'resolved' as const, frameCallback: true };
+    const getPlaybackState = vi.fn(() => playback);
+    // Fixed quality without a toolbar still needs diagnostic measurements.
+    const { b } = setup([], { requireFirstFrame: true, onDiagnostic, onStream, getPlaybackState, video: { quality: 'high', auto: false } });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    const attemptId = new URL(ws.url).searchParams.get('attemptId')!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'private-offer' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    const pc = FakePC.last;
+    Object.assign(pc, { iceConnectionState: 'completed', iceGatheringState: 'complete' });
+    pc.getStats = vi.fn(async () => new Map([
+      ['v', { id: 'v', type: 'inbound-rtp', kind: 'video', transportId: 't', packetsReceived: 100, bytesReceived: 80_000, packetsLost: -1, framesReceived: 5, framesDecoded: 4, keyFramesDecoded: 1, nackCount: 2, pliCount: 3, jitter: 0.012 }],
+      ['t', { id: 't', type: 'transport', selectedCandidatePairId: 'p' }],
+      ['p', { id: 'p', type: 'candidate-pair', localCandidateId: 'c', currentRoundTripTime: 0.15 }],
+      ['c', { id: 'c', type: 'local-candidate', candidateType: 'relay', protocol: 'udp', relayProtocol: 'tls', address: '203.0.113.7', url: 'turns:private.example' }],
+    ]));
+    const track = { kind: 'video' };
+    pc.ontrack({ streams: [{ getTracks: () => [track] }], track });
+    const peerSequence = onStream.mock.calls[0]![2];
+    pc.connect();
+    await vi.advanceTimersByTimeAsync(2_000);
+    b.reportFirstFrame(attemptId, peerSequence);
+    const firstFrame = onDiagnostic.mock.calls.map(([d]) => d).find((d) => d.stage === 'first_frame');
+    expect(firstFrame).toMatchObject({ attemptId, peerSequence, media: {
+      connectionState: 'connected', iceConnectionState: 'completed', iceGatheringState: 'complete', sampleAgeMs: 0, inboundVideo: true,
+      rttMs: 150, localCandidateType: 'relay', protocol: 'udp', relayProtocol: 'tls',
+      video: { packetsReceived: 100, bytesReceived: 80_000, packetsLost: -1, framesReceived: 5, framesDecoded: 4, keyFramesDecoded: 1, nackCount: 2, pliCount: 3, jitterMs: 12 }, playback,
+    } });
+    expect(getPlaybackState).toHaveBeenCalledWith(attemptId, peerSequence);
+    await vi.advanceTimersByTimeAsync(500);
+    ws.close();
+    const failure = onDiagnostic.mock.calls.map(([d]) => d).find((d) => d.code === 'transport_closed');
+    expect(failure).toMatchObject({ attemptId, peerSequence, media: { connectionState: 'connected', sampleAgeMs: 500, video: { framesDecoded: 4 }, playback } });
+    expect(onDiagnostic.mock.calls.map(([d]) => d).filter((d) => d.media).map((d) => d.stage)).toEqual(['first_frame', 'failed']);
+    expect(JSON.stringify(onDiagnostic.mock.calls)).not.toMatch(/203\.0\.113|turns:|private-offer|private\.example|tok1/);
+    b.disconnect();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('reports fresh connection state while omitting a sample more than five seconds old', async () => {
+    vi.useFakeTimers();
+    const onDiagnostic = vi.fn();
+    const { b } = setup([], { requireFirstFrame: true, onDiagnostic, connectionTimeoutMs: 8_001, maxConnectionAttempts: 1 });
+    await b.connect();
+    FakeWS.all[0]!.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    const pc = FakePC.last;
+    pc.getStats = vi.fn()
+      .mockResolvedValueOnce(new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', packetsReceived: 0, framesDecoded: 0 }]]))
+      .mockRejectedValue(new Error('private-stats-error'));
+    pc.connect();
+    await vi.advanceTimersByTimeAsync(8_001);
+    const failure = onDiagnostic.mock.calls.map(([d]) => d).find((d) => d.code === 'connection_timeout');
+    expect(failure.media).toEqual({ connectionState: 'connected' });
+    expect(JSON.stringify(onDiagnostic.mock.calls)).not.toContain('private-stats-error');
+    b.disconnect();
+  });
+
+  it('does not attach unsampled or malformed playback as zero media counters', async () => {
+    vi.useFakeTimers();
+    const onDiagnostic = vi.fn();
+    const getPlaybackState = vi.fn(() => ({ paused: false, readyState: 2, width: 1280, height: 720, visibility: 'visible', playState: 'https://private.example/error', frameCallback: true }) as never);
+    const { b } = setup([], { requireFirstFrame: true, onDiagnostic, getPlaybackState, connectionTimeoutMs: 100, maxConnectionAttempts: 1 });
+    await b.connect();
+    FakeWS.all[0]!.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    await vi.advanceTimersByTimeAsync(100);
+    const failure = onDiagnostic.mock.calls.map(([d]) => d).find((d) => d.code === 'connection_timeout');
+    expect(failure.media).toEqual({ connectionState: 'connected' });
+    expect(JSON.stringify(onDiagnostic.mock.calls)).not.toContain('private.example');
+    b.disconnect();
+  });
+
   it('requires a fresh frame for a replacement peer on the same socket and ignores its old render callback', async () => {
     vi.useFakeTimers();
     const onStream = vi.fn();
@@ -1232,7 +1311,9 @@ describe('RemoteBrowser', () => {
   it('ignores pending media stats from a replaced peer and does not overlap reads', async () => {
     vi.useFakeTimers();
     const onStats = vi.fn();
-    const { b } = setup([], { requireFirstFrame: true, onStats });
+    const onStream = vi.fn();
+    const onDiagnostic = vi.fn();
+    const { b } = setup([], { requireFirstFrame: true, onStats, onStream, onDiagnostic });
     await b.connect();
     const ws = FakeWS.all[0]!;
     ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'first' } } });
@@ -1246,16 +1327,49 @@ describe('RemoteBrowser', () => {
     ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'replacement' } } });
     await vi.advanceTimersByTimeAsync(0);
     const current = FakePC.last;
-    current.getStats = vi.fn(async () => new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', frameWidth: 1280 }]]));
+    current.getStats = vi.fn(async () => new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', frameWidth: 1280, framesDecoded: 3 }]]));
     current.connect();
-    finishOld(new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', frameWidth: 640 }]]));
+    finishOld(new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', frameWidth: 640, framesDecoded: 640 }]]));
     await vi.advanceTimersByTimeAsync(0);
     expect(onStats).not.toHaveBeenCalled();
+    const track = { kind: 'video' };
+    current.ontrack({ streams: [{ getTracks: () => [track] }], track });
+    b.reportFirstFrame(new URL(ws.url).searchParams.get('attemptId')!, onStream.mock.calls[0]![2]);
+    const frame = onDiagnostic.mock.calls.map(([d]) => d).find((d) => d.stage === 'first_frame');
+    expect(frame.media).toEqual({ connectionState: 'connected' });
     await vi.advanceTimersByTimeAsync(2_000);
     expect(current.getStats).toHaveBeenCalledTimes(1);
     expect(onStats).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ width: 1280 }));
+    ws.close();
+    const failure = onDiagnostic.mock.calls.map(([d]) => d).find((d) => d.code === 'transport_closed');
+    expect(failure.media).toMatchObject({ sampleAgeMs: 0, inboundVideo: true, video: { framesDecoded: 3 } });
     b.disconnect();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('measures sample age from a slow getStats request start rather than its completion', async () => {
+    vi.useFakeTimers();
+    const onDiagnostic = vi.fn();
+    const onStream = vi.fn();
+    const { b } = setup([], { requireFirstFrame: true, onDiagnostic, onStream });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    const pc = FakePC.last;
+    let finish!: (report: Map<string, unknown>) => void;
+    pc.getStats = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+    pc.connect();
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(pc.getStats).toHaveBeenCalledTimes(1);
+    finish(new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', framesDecoded: 9 }]]));
+    await vi.advanceTimersByTimeAsync(0);
+    const track = { kind: 'video' };
+    pc.ontrack({ streams: [{ getTracks: () => [track] }], track });
+    b.reportFirstFrame(new URL(ws.url).searchParams.get('attemptId')!, onStream.mock.calls[0]![2]);
+    const frame = onDiagnostic.mock.calls.map(([d]) => d).find((d) => d.stage === 'first_frame');
+    expect(frame.media).toEqual({ connectionState: 'connected' });
+    b.disconnect();
   });
 
   it('streams the one video of an older browser image, without picture levels', async () => {

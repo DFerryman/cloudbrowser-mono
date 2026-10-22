@@ -40,6 +40,19 @@ their original stage, failure code and duration, with `ignored: true`; they neve
 replacement viewer. An initial connection error followed by successful playback resets the
 consecutive failure budget.
 
+`failed` and `first_frame` can include a bounded `media` snapshot: selected candidate types and
+UDP/TCP/TLS transport, RTP packet/byte/frame counters, RTT/jitter, and current video playback
+and visibility state. Samples older than five seconds or from another peer are omitted.
+`sampleAgeMs` identifies a usable stats sample; `inboundVideo: false` means that sample had no
+video receiver report, not that a browser independently measured zero packets. Missing
+counters remain unknown rather than becoming zero. `packetsLost` may legitimately be negative.
+
+Packets with no decoded frames direct investigation toward delivery/reassembly/keyframes or
+decoding; decoded frames without presentation direct it toward playback/rendering. A selected
+TURN path's RTT includes both the user's route to Cloudflare and the route onward to the VM,
+so it alone cannot attribute failure to the user's local network. Compare failed/successful
+attempts, and use a controlled network comparison where available.
+
 ## Readiness and privacy
 
 Agent 0.3.1 probes the real local Neko login, WebSocket and `system/init` before reporting
@@ -48,7 +61,8 @@ Local admission or relay failure requests a coalesced recheck; a single viewer e
 by itself declare the entire desktop unhealthy. This probe does not test a user's media path.
 Client first-frame evidence covers that later part of the connection.
 
-Milestones contain only identifiers, fixed stage/error names and timing. They do not contain
+Milestones contain identifiers, fixed stage/error names, timing and allowlisted numeric/enum
+media evidence. They do not contain
 tokens, credential-bearing URLs, SDP, pasted text, keyboard input or desktop content. Gateway
 automatic invocation logs are disabled because stream URLs carry a single-use token; custom
 connection logs remain persisted at 100% sampling. Client reports use an authenticated,

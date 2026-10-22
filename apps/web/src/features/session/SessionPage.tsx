@@ -32,6 +32,7 @@ import { CreateProgress } from '../instances/CreateProgress.js';
 import { useInstance, useLifecycle, useVerifyIp } from '../instances/hooks.js';
 import { shownStatus, STATUS_TONE, statusKey } from '../instances/status.js';
 import { connectionDiagnosticReporter } from './diagnostics.js';
+import { sessionHeartbeat, viewingPresence } from './heartbeat.js';
 
 /** Whether this web browser decodes H.264 over WebRTC, which the live view needs. Unknown counts as yes. */
 const decodesH264 = (() => {
@@ -43,7 +44,6 @@ const decodesH264 = (() => {
   }
 })();
 
-const HEARTBEAT_MS = 15_000;
 const IDLE_WARNING_MS = 60_000;
 const SESSION_REQUEST_TIMEOUT_MS = 20_000;
 /** Viewer tokens expire 60 s after issue; a prefetched one is handed over only while well inside that. */
@@ -100,6 +100,11 @@ export function SessionPage() {
   const [fullscreen, setFullscreen] = useState(false);
   const viewerRef = useRef<RemoteBrowserHandle>(null);
   const [viewer, setViewer] = useState<{ state: ViewerState; attempt: number }>({ state: 'connecting', attempt: 0 });
+  const heartbeat = useRef<ReturnType<typeof sessionHeartbeat<HeartbeatResult>> | null>(null);
+  // Effect recreation (including StrictMode) must never reuse a sequence for this session.
+  const presenceSequence = useRef(0);
+  const presenceContext = useRef({ running: false, live: false, takenOver: false });
+  presenceContext.current = { running: instance.data?.status === 'running', live: viewer.state === 'live', takenOver };
   const [diagnosticId, setDiagnosticId] = useState<string | null>(null);
   const diagnostics = useRef<{ sessionId: string; reporter: ReturnType<typeof connectionDiagnosticReporter> } | null>(null);
   const pendingDiagnostics = useRef<{ sessionId: string; diagnostic: ConnectionDiagnostic }[]>([]);
@@ -193,37 +198,41 @@ export function SessionPage() {
 
   const status = instance.data?.status;
 
-  // Heartbeats carry whether the user interacted, which drives the idle timeout.
+  // Visible, playing desktops count as activity even when the user is only watching.
+  // A hidden or disconnected viewer sends false; the server anchors that transition once.
   useEffect(() => {
     if (!session || takenOver) return;
-    let active = true;
-    let inFlight = false;
-    const beat = async () => {
-      if (!active || inFlight) return;
-      inFlight = true;
-      const input = hadInput.current;
-      hadInput.current = false;
-      try {
-        const r = await api<HeartbeatResult>('POST', `/sessions/${session.id}/heartbeat`, { body: { input } });
-        if (!active) return;
+    const current = sessionHeartbeat<HeartbeatResult>({
+      takeInput: () => { const input = hadInput.current; hadInput.current = false; return input; },
+      viewing: () => {
+        const context = presenceContext.current;
+        return viewingPresence(document.visibilityState,
+          context.running && context.live && !context.takenOver,
+          viewerRef.current?.isDisplaying() ?? false);
+      },
+      nextSequence: () => ++presenceSequence.current,
+      send: (body, signal) => api<HeartbeatResult>('POST', `/sessions/${session.id}/heartbeat`, { body, signal, keepalive: true }),
+      result: (r) => {
         setSleepAt(r.sleepAt ? Date.parse(r.sleepAt) : null);
         setSleepReason(r.reason ?? 'idle');
-      } catch (e) {
-        if (!active) return;
-        hadInput.current ||= input;
+      },
+      error: (e) => {
         if (e instanceof ApiError && e.status === 409) setTakenOver(true);
         else if (e instanceof ApiError && [401, 402, 403, 404].includes(e.status)) setOpenError(e);
-      } finally {
-        inFlight = false;
-      }
-    };
-    void beat();
-    const h = setInterval(beat, HEARTBEAT_MS);
+      },
+    });
+    heartbeat.current = current;
+    document.addEventListener('visibilitychange', current.refresh);
+    window.addEventListener('pageshow', current.refresh);
     return () => {
-      active = false;
-      clearInterval(h);
+      document.removeEventListener('visibilitychange', current.refresh);
+      window.removeEventListener('pageshow', current.refresh);
+      current.dispose();
+      if (heartbeat.current === current) heartbeat.current = null;
     };
-  }, [session, takenOver, status]);
+  }, [session?.id, takenOver]);
+
+  useEffect(() => { heartbeat.current?.refresh(); }, [viewer.state, status]);
 
   // Out of credit: say so once, while there is still time to finish up (page 6).
   const toast = useToast();
@@ -299,14 +308,7 @@ export function SessionPage() {
 
   const stayAwake = () => {
     hadInput.current = true;
-    if (session) {
-      void api<HeartbeatResult>('POST', `/sessions/${session.id}/heartbeat`, { body: { input: true } })
-        .then((r) => {
-          setSleepAt(r.sleepAt ? Date.parse(r.sleepAt) : null);
-          setSleepReason(r.reason ?? 'idle');
-        })
-        .catch(() => {});
-    }
+    heartbeat.current?.refresh();
   };
 
   const i = instance.data;
@@ -407,17 +409,6 @@ export function SessionPage() {
         } else if (sleepReason !== 'idle' && idleLeft < IDLE_WARNING_MS) {
           const seconds = Math.max(0, Math.ceil(idleLeft / 1000));
           overlay = <Overlay message={t('overlay.balanceEnding', { seconds })} />;
-        } else if (idleLeft < IDLE_WARNING_MS) {
-          overlay = (
-            <Overlay
-              message={t('overlay.idle', { seconds: Math.max(0, Math.ceil(idleLeft / 1000)) })}
-              action={
-                <Button variant="primary" onClick={stayAwake}>
-                  {t('overlay.stayAwake')}
-                </Button>
-              }
-            />
-          );
         }
         break;
     }
@@ -664,6 +655,12 @@ export function SessionPage() {
         ) : null}
         {i?.status === 'running' && connect.isError ? <Overlay message={connectionErrorMessage(connect.error)} action={<Button onClick={() => void connect.refetch()}>{t('common.retry')}</Button>} /> : null}
         {overlay}
+        {session && !takenOver && i?.status === 'running' && sleepReason === 'idle' && idleLeft < IDLE_WARNING_MS ? (
+          <div role="status" className="absolute inset-x-4 bottom-4 z-20 flex flex-wrap items-center justify-center gap-3 border border-amber-500/50 bg-zinc-950 p-4 text-sm text-zinc-100">
+            <span>{t('overlay.idle', { seconds: Math.max(0, Math.ceil(idleLeft / 1000)) })}</span>
+            <Button variant="primary" onClick={stayAwake}>{t('overlay.stayAwake')}</Button>
+          </div>
+        ) : null}
       </div>
     </div>
   );

@@ -43,7 +43,10 @@ export async function requestStop(deps: EngineDeps, inst: { id: string; userId: 
   // Recheck the reason with the stop admission: inventory or billing reads can race a wake,
   // top-up. Aborting the batch also prevents a stray unfinished operation.
   const reasonStillApplies = reason === 'intent_reconcile' ? sql`${browserInstances.desiredState} = 'stopped'`
-    : reason === 'idle' ? sql`${browserInstances.idleTimeoutS} <> ${NEVER_SLEEP_TIMEOUT_S}`
+    : reason === 'idle' ? sql`EXISTS (SELECT 1 FROM browser_instances b LEFT JOIN instance_health h ON h.instance_id = b.id
+      WHERE b.id = ${inst.id} AND b.status = 'running' AND b.desired_state = 'running'
+      AND b.idle_timeout_s <> ${NEVER_SLEEP_TIMEOUT_S}
+      AND max(coalesce(b.last_active_at, 0), coalesce(h.last_input_at, 0)) + b.idle_timeout_s * 1000 <= ${now.getTime()})`
     : reason === 'frozen' ? sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${inst.userId} AND ${billingAccounts.frozenAt} IS NOT NULL)`
     : reason === 'balance' ? sql`(
       NOT EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${inst.userId} AND ${billingAccounts.balanceMicros} - ${reservedTotalSql(inst.userId)} > 0)
@@ -51,12 +54,26 @@ export async function requestStop(deps: EngineDeps, inst: { id: string; userId: 
     : sql`1`;
 
   try {
+    // Billing settlement advances last_active_at. Preserve the actual pre-settlement activity
+    // atomically with admission so execution can recheck the full idle deadline without treating
+    // this stop's own accounting write as new user activity.
+    const insertStop = db.insert(operations).values(reason === 'idle' ? {
+      ...row,
+      params: sql`json_object(
+        'reason', 'idle',
+        'idleLastActiveAt', (SELECT last_active_at FROM browser_instances WHERE id = ${inst.id}),
+        'idleLastInputAt', (SELECT last_input_at FROM instance_health WHERE instance_id = ${inst.id}),
+        'idleTimeoutS', (SELECT idle_timeout_s FROM browser_instances WHERE id = ${inst.id}),
+        'idleViewerPresence', json((SELECT json_object('sessionId', id, 'sequence', presence_seq,
+          'viewing', viewing, 'presenceAt', presence_at, 'endedAt', ended_at)
+          FROM viewer_sessions WHERE instance_id = ${inst.id} ORDER BY rowid DESC LIMIT 1)))`,
+    } : row);
+    const settlement = settleRunningStatements(db, inst.id, now);
     await db.batch([
       db.insert(auditLog).values({ actor: 'engine', action: 'operation.stop.guard', target: `instance:${inst.id}`,
         createdAt: sql`CASE WHEN EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${inst.id} AND ${browserInstances.desiredState} <> 'deleted' AND ${browserInstances.status} <> 'purged' AND (${reasonStillApplies})) THEN ${now.getTime()} ELSE NULL END`,
       }),
-      ...settleRunningStatements(db, inst.id, now),
-      db.insert(operations).values(row),
+      ...(reason === 'idle' ? [insertStop, ...settlement] : [...settlement, insertStop]),
       db.update(browserInstances).set({ desiredState: 'stopped', updatedAt: now }).where(eq(browserInstances.id, inst.id)),
       db.insert(events).values(eventRow(inst.userId, 'operation.updated', { operationId: row.id, instanceId: inst.id }, now)),
     ]);

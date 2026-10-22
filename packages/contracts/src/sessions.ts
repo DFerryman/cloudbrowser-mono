@@ -7,6 +7,45 @@ export const ViewerSession = z.object({
 });
 export type ViewerSession = z.infer<typeof ViewerSession>;
 
+const MediaCounter = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const CandidateType = z.enum(['host', 'srflx', 'prflx', 'relay']);
+
+/** Fixed, bounded media evidence. No candidate addresses, credentials, SDP or error messages. */
+export const ConnectionMediaSnapshot = z.object({
+  connectionState: z.enum(['new', 'connecting', 'connected', 'disconnected', 'failed', 'closed']).optional(),
+  iceConnectionState: z.enum(['new', 'checking', 'connected', 'completed', 'disconnected', 'failed', 'closed']).optional(),
+  iceGatheringState: z.enum(['new', 'gathering', 'complete']).optional(),
+  sampleAgeMs: z.number().int().min(0).max(5_000).optional(),
+  inboundVideo: z.boolean().optional(),
+  rttMs: MediaCounter.optional(),
+  localCandidateType: CandidateType.optional(),
+  remoteCandidateType: CandidateType.optional(),
+  protocol: z.enum(['udp', 'tcp']).optional(),
+  relayProtocol: z.enum(['udp', 'tcp', 'tls']).optional(),
+  video: z.object({
+    bytesReceived: MediaCounter.optional(),
+    packetsReceived: MediaCounter.optional(),
+    // RTCStats can report negative cumulative loss after duplicate/late arrivals.
+    packetsLost: z.number().int().min(-2_147_483_648).max(Number.MAX_SAFE_INTEGER).optional(),
+    framesReceived: MediaCounter.optional(),
+    framesDecoded: MediaCounter.optional(),
+    keyFramesDecoded: MediaCounter.optional(),
+    nackCount: MediaCounter.optional(),
+    pliCount: MediaCounter.optional(),
+    jitterMs: MediaCounter.optional(),
+  }).strict().optional(),
+  playback: z.object({
+    paused: z.boolean(),
+    readyState: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
+    width: z.number().int().min(0).max(32_768),
+    height: z.number().int().min(0).max(32_768),
+    visibility: z.enum(['visible', 'hidden', 'unknown']),
+    playState: z.enum(['unknown', 'resolved', 'not_allowed', 'unsupported', 'aborted', 'failed']),
+    frameCallback: z.boolean(),
+  }).strict().optional(),
+}).strict();
+export type ConnectionMediaSnapshot = z.infer<typeof ConnectionMediaSnapshot>;
+
 /** Client observations complement gateway/agent logs when the stream never opens. */
 export const ConnectionDiagnostic = z.object({
   attemptId: z.string().uuid(),
@@ -25,7 +64,10 @@ export const ConnectionDiagnostic = z.object({
     'login_timeout', 'login_rejected', 'login_unavailable', 'websocket_timeout',
     'websocket_unavailable', 'desktop_timeout', 'relay_unavailable',
   ]).optional(),
-}).strict();
+  media: ConnectionMediaSnapshot.optional(),
+}).strict().refine((value) => value.media === undefined || value.stage === 'failed' || value.stage === 'first_frame', {
+  message: 'Media snapshots are only accepted at failure or first frame', path: ['media'],
+});
 export type ConnectionDiagnostic = z.infer<typeof ConnectionDiagnostic>;
 
 /**

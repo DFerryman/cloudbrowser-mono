@@ -37,6 +37,7 @@ import { enqueueOperation, notifyUser, replayed, requireIdempotencyKey } from '.
 import { problem, ProblemError } from '../problem.js';
 import { toInstances, toOperation } from '../views.js';
 import { neverSleepQuote, neverSleepRefused } from '../never-sleep.js';
+import { endViewerSession, recordViewerHeartbeat } from '../viewer-presence.js';
 import { eventsRoute } from './events.js';
 import { promotionsRoute } from './promotions.js';
 import { resizeQuota } from '../storage.js';
@@ -286,7 +287,7 @@ v1.openapi(
       // A new idle setting counts from now, as if the user had just used the browser. This also
       // cancels an idle stop queued under the old setting (the engine rechecks input before stopping).
       ...(idleChanged ? [db.insert(instanceHealth).values({ instanceId: row.id, lastInputAt: now })
-        .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastInputAt: now } })] : []),
+        .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastInputAt: sql`max(coalesce(${instanceHealth.lastInputAt}, 0), ${now.getTime()})` } })] : []),
       db.insert(events).values(eventRow(user.id, 'instance.updated', { instanceId: row.id }, now)),
     ]);
     notifyUser(c, user.id);
@@ -676,11 +677,11 @@ v1.openapi(
         .set({ endedAt: now })
         .where(and(eq(viewerSessions.instanceId, row.id), isNull(viewerSessions.endedAt), newIntent, available)),
       db.insert(viewerSessions).select(sql`SELECT ${sessionId}, ${row.id}, ${user.id}, ${now.getTime()}, ${now.getTime()}, NULL,
-        ${c.req.header('cf-ipcountry') ?? null}, ${c.req.header('user-agent')?.slice(0, 300) ?? null}
+        ${c.req.header('cf-ipcountry') ?? null}, ${c.req.header('user-agent')?.slice(0, 300) ?? null}, -1, NULL, NULL
         WHERE ${available}`).onConflictDoNothing(),
       // Opening another viewer is input activity, not a new billable run or fresh credit.
       db.insert(instanceHealth).values({ instanceId: row.id, lastInputAt: sql`CASE WHEN ${openActive} THEN ${now.getTime()} ELSE NULL END` })
-        .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastInputAt: now }, setWhere: openActive }),
+        .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastInputAt: sql`max(coalesce(${instanceHealth.lastInputAt}, 0), ${now.getTime()})` }, setWhere: openActive }),
       // Read back in the same transaction rather than another round trip.
       db.select().from(viewerSessions)
         .where(and(eq(viewerSessions.id, sessionId), eq(viewerSessions.instanceId, row.id), eq(viewerSessions.userId, user.id))),
@@ -777,7 +778,10 @@ v1.openapi(
   },
 );
 
-const HeartbeatBody = z.object({ input: z.boolean() });
+const HeartbeatBody = z.object({
+  input: z.boolean(),
+  presence: z.object({ sequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), viewing: z.boolean().nullable() }).optional(),
+});
 const HeartbeatResult = z.object({
   sleepAt: z.string().nullable(),
   /** `balance`: available prepaid credit is projected to run out at `sleepAt` regardless of input. */
@@ -789,7 +793,7 @@ v1.openapi(
     method: 'post',
     path: '/sessions/{id}/heartbeat',
     tags: ['sessions'],
-    description: 'Sent by the viewer every 15 s. `input` is true if the user interacted since the last heartbeat.',
+    description: 'Sent by the viewer every 15 s. Input renews activity; ordered presence keeps a visible live view awake and starts the idle countdown when it becomes hidden. Null visibility uses input-only behavior.',
     request: { params: IdParam, body: { content: { 'application/json': { schema: HeartbeatBody } }, required: true } },
     responses: { 200: jsonResponse(HeartbeatResult, 'When the browser will go to sleep without input'), ...errors },
   }),
@@ -799,22 +803,14 @@ v1.openapi(
     if (s.endedAt) throw problem(409, 'invalid_state', 'This browser is open in another tab or device.');
     await requireViewerCredit(db, s.userId, s.instanceId);
     const now = new Date();
-    const { input } = c.req.valid('json');
+    const { input, presence } = c.req.valid('json');
     const [inst] = await db.select().from(browserInstances).where(eq(browserInstances.id, s.instanceId));
-    const [h] = await db.select().from(instanceHealth).where(eq(instanceHealth.instanceId, s.instanceId));
-    // Keep the 15-second authorization checks, but do not rewrite D1 on every heartbeat.
-    if (now.getTime() - s.lastSeenAt.getTime() >= 60_000) {
-      await db.update(viewerSessions).set({ lastSeenAt: now }).where(and(eq(viewerSessions.id, s.id), isNull(viewerSessions.endedAt),
-        sql`${viewerSessions.lastSeenAt} <= ${now.getTime() - 60_000}`));
-    }
-    const inputInterval = inst?.idleTimeoutS === NEVER_SLEEP_TIMEOUT_S ? 60_000 : Math.min(60_000, (inst?.idleTimeoutS ?? 60) * 500);
-    if (input && (!h?.lastInputAt || now.getTime() - h.lastInputAt.getTime() >= inputInterval)) {
-      await db.insert(instanceHealth).values({ instanceId: s.instanceId, lastInputAt: now })
-        .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastInputAt: now },
-          setWhere: sql`${instanceHealth.lastInputAt} IS NULL OR ${instanceHealth.lastInputAt} <= ${now.getTime() - inputInterval}` });
-    }
+    // The transaction rechecks session ownership and ordering at the activity write, after any
+    // takeover. Its readback also keeps sleepAt consistent with the durable deadline.
+    const activity = await recordViewerHeartbeat(c.env.DB, s, input, presence, now);
+    if (!activity.active) throw problem(409, 'invalid_state', 'This browser is open in another tab or device.');
     if (!inst || inst.status !== 'running') return c.json({ sleepAt: null }, 200);
-    const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, h?.lastInputAt?.getTime() ?? 0, input ? now.getTime() : 0);
+    const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, activity.lastInputAt ?? 0);
     const idleAt = inst.idleTimeoutS === NEVER_SLEEP_TIMEOUT_S ? Infinity : last + inst.idleTimeoutS * 1000;
     // A paid authorization lease is renewed every minute. Its renewal time is not a sleep
     // deadline: only a genuine depletion projection should produce a balance warning.
@@ -838,7 +834,7 @@ v1.openapi(
   async (c) => {
     const s = await ownedSession(c, c.req.valid('param').id);
     if (!s.endedAt) {
-      await c.get('db').update(viewerSessions).set({ endedAt: new Date() }).where(eq(viewerSessions.id, s.id));
+      await endViewerSession(c.env.DB, s, new Date());
     }
     return c.body(null, 204);
   },

@@ -10,6 +10,7 @@ import { TextInputController } from './text-input.js';
 import type { InputFailure } from './input-queue.js';
 import { pastedFiles, type TransferUpdate } from './file-transfer.js';
 import { observeFirstFrame } from './first-frame.js';
+import { isDisplaying, playbackFailure, readPlayback, type PlaybackState } from './playback.js';
 
 /** Image types Chrome cannot paste from the X clipboard; one is pasted as a PNG instead. */
 const CONVERTED_IMAGES = ['image/jpeg', 'image/webp', 'image/bmp', 'image/avif'];
@@ -32,6 +33,8 @@ async function asPng(file: File): Promise<File> {
 }
 
 export interface RemoteBrowserHandle {
+  /** Whether the current video element is playing a live video track with a usable picture. */
+  isDisplaying(): boolean;
   sendCombo(names: string[]): void;
   /** Pastes local text into the remote page: remote clipboard, then Ctrl+V. */
   paste(text: string): void;
@@ -111,11 +114,25 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
 
   useEffect(() => {
     let stopFirstFrame: (() => void) | undefined;
+    let active = true;
+    let observedAttemptId: string | undefined;
     let observedFrameSequence: number | undefined;
+    let observedStream: MediaStream | undefined;
+    let playSequence = 0;
+    let playState: PlaybackState = 'unknown';
     const browser = new RemoteBrowser({
       getConnectInfo: () => callbacks.current.getConnectInfo(),
       onState: (s, a) => callbacks.current.onState?.(s, a),
       onDiagnostic: (d) => callbacks.current.onDiagnostic?.(d),
+      getPlaybackState: (attemptId, frameSequence) => {
+        const element = videoRef.current;
+        if (!active || !element || observedAttemptId !== attemptId || observedFrameSequence !== frameSequence || element.srcObject !== observedStream) return undefined;
+        return readPlayback(element, {
+          visibility: document.visibilityState,
+          playState,
+          frameCallback: typeof element.requestVideoFrameCallback === 'function',
+        });
+      },
       requireFirstFrame: true,
       onStats: (s) => callbacks.current.onStats?.(s),
       onInputError: (reason) => {
@@ -123,14 +140,29 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         callbacks.current.onInputError?.(reason);
       },
       onStream: (stream, attemptId, frameSequence) => {
-        if (videoRef.current) {
-          if (videoRef.current.srcObject !== stream || observedFrameSequence !== frameSequence) {
+        const element = videoRef.current;
+        if (element) {
+          if (element.srcObject !== stream || observedAttemptId !== attemptId || observedFrameSequence !== frameSequence) {
             stopFirstFrame?.();
-            videoRef.current.srcObject = stream;
+            element.srcObject = stream;
+            observedStream = stream;
+            observedAttemptId = attemptId;
             observedFrameSequence = frameSequence;
-            stopFirstFrame = observeFirstFrame(videoRef.current, stream, () => browser.reportFirstFrame(attemptId, frameSequence));
+            playState = 'unknown';
+            stopFirstFrame = observeFirstFrame(element, stream, () => browser.reportFirstFrame(attemptId, frameSequence));
           }
-          void videoRef.current.play().catch(() => {});
+          const request = ++playSequence;
+          playState = 'unknown';
+          const current = () => active && videoRef.current === element && element.srcObject === stream
+            && observedAttemptId === attemptId && observedFrameSequence === frameSequence && request === playSequence;
+          try {
+            void element.play().then(
+              () => { if (current()) playState = 'resolved'; },
+              (error: unknown) => { if (current()) playState = playbackFailure(error); },
+            );
+          } catch (error) {
+            if (current()) playState = playbackFailure(error);
+          }
         }
       },
       onCursor: setCursor,
@@ -157,6 +189,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     });
     void browser.connect();
     return () => {
+      active = false;
+      playSequence++;
       stopFirstFrame?.();
       keyboardRequested.current = false;
       callbacks.current.onKeyboardChange?.(false);
@@ -238,7 +272,10 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         return;
       }
       const point = toRemote(e.clientX, e.clientY);
-      if (point) browserRef.current?.move(point.x, point.y);
+      if (point) {
+        browserRef.current?.move(point.x, point.y);
+        callbacks.current.onInput?.();
+      }
     };
     const onDown = (e: PointerEvent) => {
       if (e.pointerType === 'touch') {
@@ -414,9 +451,14 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   }, []);
 
   useImperativeHandle(ref, () => ({
-    sendCombo: (names) => browserRef.current?.sendCombo(names),
+    isDisplaying: () => isDisplaying(videoRef.current),
+    sendCombo: (names) => {
+      browserRef.current?.sendCombo(names);
+      callbacks.current.onInput?.();
+    },
     paste: (text) => {
       browserRef.current?.paste(text);
+      if (text) callbacks.current.onInput?.();
     },
     pasteFiles: (files) => void pasteFiles(files),
     focus: () => {
@@ -475,6 +517,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
           if (files.length > 0) void pasteFiles(files);
           else if (text) {
             browserRef.current?.paste(text);
+            callbacks.current.onInput?.();
           }
         }}
       />

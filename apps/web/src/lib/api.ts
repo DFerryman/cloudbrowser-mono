@@ -12,7 +12,7 @@ export class ApiError extends Error {
   }
 }
 
-type Options = { body?: unknown; idempotent?: boolean; idempotencyKey?: string; signal?: AbortSignal; headers?: Record<string, string> };
+type Options = { body?: unknown; idempotent?: boolean; idempotencyKey?: string; signal?: AbortSignal; headers?: Record<string, string>; keepalive?: boolean };
 
 /**
  * All data comes from /api/v1 on the same origin; the session cookie is HttpOnly. Lifecycle
@@ -29,6 +29,7 @@ export async function api<T>(method: string, path: string, opts: Options = {}): 
     credentials: 'same-origin',
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     signal: opts.signal,
+    ...(opts.keepalive ? { keepalive: true } : {}),
   });
   if (res.status === 204) return undefined as T;
   const text = await res.text();

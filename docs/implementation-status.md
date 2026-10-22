@@ -199,9 +199,11 @@ Cloudflare deployment.
   top-up on the account and available credit for 24 hours of the account's combined spending with
   the browser always on. `GET /instances/{id}/never-sleep` quotes 24 hours of compute, IP and
   storage in the browser's region; PATCH needs that quote's priceVersion. Changing the timeout restarts the idle countdown
-  (`instance_health.last_input_at`). An idle stop queued before the user acts is rechecked in the
-  transaction that starts it (input since it was queued, or Never sleep, cancels it and restores
-  the running intent); a stop that has started finishes, and the new setting applies to the next run.
+  (`instance_health.last_input_at`). The full current idle deadline is rechecked atomically at
+  stop admission and execution, preserving the activity baseline across billing settlement;
+  a stop that has started finishes, and the new setting applies to the next run. Visible,
+  established playback renews activity without input; hidden/disconnected views start a full
+  countdown with ordered presence reports. See `auto-sleep.md` for timing and delivery boundaries.
 - **Funded time and stop notices**: `accountRunway` (the authorization projection, shared with
   `prepaidAccess`) gives the combined spending rate and when available credit runs out; the
   sidebar, Billing page and banner show it, and the billing sweep emails once each below 24, 6 and

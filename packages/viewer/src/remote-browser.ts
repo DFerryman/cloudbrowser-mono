@@ -1,5 +1,5 @@
 import type { GatewayToViewer, IceServer } from '@cloudbrowser/contracts';
-import { ConnectionDiagnostic, STREAM, VIDEO_QUALITIES, type VideoQuality } from '@cloudbrowser/contracts';
+import { ConnectionDiagnostic, ConnectionMediaSnapshot, STREAM, VIDEO_QUALITIES, type VideoQuality } from '@cloudbrowser/contracts';
 import { decode, EV, fitScreen, sameScreen, screenOf, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
 import { QualityController, type VideoPreference } from './quality.js';
 import { KEYSYM, keyIdentity, keysymFor, keysymForName, matchingKeyIdentity, unidentifiedKey, type KeyIdentityEvent } from './keyboard.js';
@@ -23,6 +23,8 @@ export interface RemoteBrowserOptions {
   onStream?: (stream: MediaStream, attemptId: string, frameSequence: number) => void;
   /** Safe connection milestones only; never contains tokens, SDP or user input. */
   onDiagnostic?: (diagnostic: ConnectionDiagnostic) => void;
+  /** Playback state for this exact peer only; diagnostics never read pixels or page content. */
+  getPlaybackState?: (attemptId: string, frameSequence: number) => ConnectionMediaSnapshot['playback'];
   onStats?: (stats: ViewerStats) => void;
   /** A CSS `cursor` value for the remote cursor, drawn locally (page 5). */
   onCursor?: (css: string) => void;
@@ -56,6 +58,7 @@ const SCREEN_MIN_INTERVAL_MS = 5000;
 const CONNECTION_TIMEOUT_MS = 20_000;
 const MAX_CONNECTION_ATTEMPTS = 3;
 const MAX_PENDING_ICE_CANDIDATES = 256;
+const MAX_MEDIA_SAMPLE_AGE_MS = 5000;
 /** Characters that require Shift on the remote US X11 keyboard. */
 const SOFTWARE_SHIFTED = new Set([...`~!@#$%^&*()_+{}|:"<>?`]);
 const SHIFTED_KEYSYMS = new Map([...'`1234567890-=[]\\;\',./'].map((character, index) =>
@@ -89,6 +92,7 @@ export class RemoteBrowser {
   private pendingCandidates: SignalCandidate[] = [];
   private iceServers: IceServer[] = [];
   private statsTimer: ReturnType<typeof setInterval> | null = null;
+  private mediaSample: { pc: RTCPeerConnection; ws: WebSocket; frameSequence: number; at: number; media: ConnectionMediaSnapshot } | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private connectionTimer: ReturnType<typeof setTimeout> | null = null;
   private pressed = new Set<number>();
@@ -260,11 +264,12 @@ export class RemoteBrowser {
       if (this.ws !== ws) return;
       this.inputReady = false;
       this.inputQueue.interrupt('disconnected');
+      // Capture the peer and its last bounded sample before teardown advances its sequence.
+      if (!this.stopped && this.state !== 'taken-over') this.diagnostic('failed', 'transport_closed');
       this.ws = null;
       this.clearConnectionTimer();
       this.teardownPeer();
       if (!this.stopped && this.state !== 'taken-over') {
-        this.diagnostic('failed', 'transport_closed');
         this.scheduleReconnect();
       }
     };
@@ -471,16 +476,20 @@ export class RemoteBrowser {
 
   private diagnostic(stage: ConnectionDiagnostic['stage'], code?: ConnectionDiagnostic['code']) {
     const attempt = this.diagnosticAttempt;
+    const frameSequence = this.frameSequence;
     const mediaStage = ['signal_received', 'peer_connected', 'first_frame', 'failed', 'closed'].includes(stage);
-    const key = mediaStage ? `${this.frameSequence}:${stage}:${code ?? ''}` : stage;
+    const key = mediaStage ? `${frameSequence}:${stage}:${code ?? ''}` : stage;
     if (!attempt || attempt.stages.has(key)) return;
+    const media = stage === 'failed' || stage === 'first_frame' ? this.captureMediaSnapshot() : undefined;
+    if (attempt !== this.diagnosticAttempt || frameSequence !== this.frameSequence) return;
     const report = ConnectionDiagnostic.safeParse({
       attemptId: attempt.id,
       ...(attempt.relayId ? { relayId: attempt.relayId } : {}),
       stage,
-      peerSequence: this.frameSequence,
+      peerSequence: frameSequence,
       elapsedMs: Math.max(0, Math.min(600_000, Math.round(Date.now() - attempt.startedAt))),
       ...(code ? { code } : {}),
+      ...(media ? { media } : {}),
     });
     if (!report.success) return;
     attempt.stages.add(key);
@@ -489,6 +498,31 @@ export class RemoteBrowser {
     try {
       this.opts.onDiagnostic?.(report.data);
     } catch { /* Diagnostics must not affect the viewer. */ }
+  }
+
+  private captureMediaSnapshot(): ConnectionMediaSnapshot | undefined {
+    const pc = this.pc;
+    const ws = this.ws;
+    const frameSequence = this.frameSequence;
+    const attemptId = this.diagnosticAttempt?.id;
+    if (!pc || !ws || !attemptId) return undefined;
+    const media: ConnectionMediaSnapshot = {};
+    const sample = this.mediaSample;
+    const age = sample ? Date.now() - sample.at : -1;
+    if (sample?.pc === pc && sample.ws === ws && sample.frameSequence === frameSequence && age >= 0 && age <= MAX_MEDIA_SAMPLE_AGE_MS) {
+      Object.assign(media, sample.media, { sampleAgeMs: age });
+    }
+    // States and playback are read at the milestone; counters must come from a recent getStats.
+    if (['new', 'connecting', 'connected', 'disconnected', 'failed', 'closed'].includes(pc.connectionState)) media.connectionState = pc.connectionState;
+    if (['new', 'checking', 'connected', 'completed', 'disconnected', 'failed', 'closed'].includes(pc.iceConnectionState)) media.iceConnectionState = pc.iceConnectionState;
+    if (['new', 'gathering', 'complete'].includes(pc.iceGatheringState)) media.iceGatheringState = pc.iceGatheringState;
+    try {
+      const playback = this.opts.getPlaybackState?.(attemptId, frameSequence);
+      const parsed = ConnectionMediaSnapshot.safeParse({ playback });
+      if (parsed.success && parsed.data.playback) media.playback = parsed.data.playback;
+    } catch { /* A renderer cannot break connection handling or add unvalidated fields. */ }
+    if (this.pc !== pc || this.ws !== ws || this.frameSequence !== frameSequence || this.diagnosticAttempt?.id !== attemptId) return undefined;
+    return Object.keys(media).length ? media : undefined;
   }
 
   private becomeLive() {
@@ -903,7 +937,7 @@ export class RemoteBrowser {
     const pc = this.pc;
     const ws = this.ws;
     const frameSequence = this.frameSequence;
-    if (!pc || !ws || !this.mediaConnected || this.statsTimer || (!this.opts.onStats && !this.video.auto)) return;
+    if (!pc || !ws || !this.mediaConnected || this.statsTimer || (!this.opts.onStats && !this.opts.onDiagnostic && !this.video.auto)) return;
     let previous: { bytes: number; at: number } | null = null;
     let pending = false;
     const current = () => this.pc === pc && this.ws === ws && this.frameSequence === frameSequence && this.mediaConnected;
@@ -911,6 +945,7 @@ export class RemoteBrowser {
     this.statsTimer = setInterval(async () => {
       if (pending || !current()) return;
       pending = true;
+      const sampledAt = Date.now();
       try {
         let reading: Awaited<ReturnType<typeof readStats>>;
         try {
@@ -921,6 +956,7 @@ export class RemoteBrowser {
         // An earlier peer may finish getStats after a reconnect or a new offer on this socket.
         // Its counters must not change the replacement's quality or be reported as its stats.
         if (!current()) return;
+        this.mediaSample = { pc, ws, frameSequence, at: sampledAt, media: reading.media };
         previous = { bytes: reading.bytes, at: Date.now() };
         this.adapt(reading.stats, reading.counters);
         this.opts.onStats?.(reading.stats);
@@ -961,6 +997,7 @@ export class RemoteBrowser {
     this.peerConnected = false;
     this.firstFrame = false;
     this.frameSequence++;
+    this.mediaSample = null;
     if (this.opts.requireFirstFrame && this.state === 'live') this.setState('connecting');
     // Every path that loses the agent ends here (a new offer keeps it); the agent discards the
     // part of a transfer it received.

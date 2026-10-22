@@ -1,10 +1,56 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import type { ConnectionDiagnostic } from '@cloudbrowser/contracts';
+import type { ConnectionDiagnostic, ConnectionMediaSnapshot } from '@cloudbrowser/contracts';
 import { connectionDiagnosticReporter } from '../src/features/session/diagnostics.js';
 
 afterEach(() => vi.useRealTimers());
 const diagnostic = (stage: ConnectionDiagnostic['stage'] = 'token_start'): ConnectionDiagnostic => ({
   attemptId: '658338e1-5c61-4933-a886-1554d138e613', stage, elapsedMs: 0,
+});
+const media: ConnectionMediaSnapshot = {
+  connectionState: 'connected', iceConnectionState: 'completed', iceGatheringState: 'complete',
+  sampleAgeMs: 5000, inboundVideo: true, rttMs: 300,
+  localCandidateType: 'relay', remoteCandidateType: 'srflx', protocol: 'tcp', relayProtocol: 'tls',
+  video: { bytesReceived: 120_000, packetsReceived: 100, packetsLost: -1, framesDecoded: 0, jitterMs: 20 },
+  playback: { paused: false, readyState: 2, width: 1280, height: 720, visibility: 'visible', playState: 'resolved', frameCallback: true },
+};
+
+it('preserves bounded terminal media evidence once per peer, including signed loss and absent counters', async () => {
+  const send = vi.fn(async (_value: ConnectionDiagnostic) => {});
+  const reporter = connectionDiagnosticReporter('session', send);
+  const first = { ...diagnostic('first_frame'), peerSequence: 1, media };
+  expect(reporter.report(first)).toBe(true);
+  expect(reporter.report({ ...first, media: { ...media, video: { framesDecoded: 100 } } })).toBe(false);
+  const next = { ...diagnostic('failed'), peerSequence: 2, code: 'connection_timeout' as const,
+    media: { sampleAgeMs: 0, inboundVideo: false } };
+  expect(reporter.report(next)).toBe(true);
+  await Promise.resolve();
+  expect(send.mock.calls.map(([value]) => value)).toEqual([first, next]);
+  expect(send.mock.calls[1]?.[0].media).not.toHaveProperty('video');
+  reporter.dispose();
+});
+
+it('drops sensitive nested media and invalid evidence before any request is sent', async () => {
+  const send = vi.fn(async () => {});
+  const reporter = connectionDiagnosticReporter('session', send);
+  for (const snapshot of [
+    { ...media, address: '203.0.113.7' },
+    { ...media, url: 'turns:relay.example?credential=private-value' },
+    { ...media, video: { framesDecoded: 0, sdp: 'private-value' } },
+    { ...media, playback: { ...media.playback, error: 'private-value' } },
+    { ...media, playback: { ...media.playback, playState: 'NotAllowedError: private-value' } },
+    { ...media, sampleAgeMs: 5001 },
+    { ...media, video: { packetsLost: -2_147_483_649 } },
+    { ...media, video: { framesDecoded: Number.NaN } },
+    { ...media, video: { bytesReceived: Number.POSITIVE_INFINITY } },
+    { ...media, playback: { ...media.playback, readyState: 5 } },
+    { ...media, playback: { ...media.playback, width: 32769 } },
+  ]) expect(reporter.report({ ...diagnostic('failed'), media: snapshot } as never)).toBe(false);
+  for (const stage of ['token_start', 'desktop_ready', 'peer_connected', 'closed'] as const) {
+    expect(reporter.report({ ...diagnostic(stage), media })).toBe(false);
+  }
+  await Promise.resolve();
+  expect(send).not.toHaveBeenCalled();
+  reporter.dispose();
 });
 
 it('reports allowlisted milestones once and refuses sensitive or malformed payloads', async () => {
