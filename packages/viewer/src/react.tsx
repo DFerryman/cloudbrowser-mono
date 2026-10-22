@@ -61,6 +61,11 @@ export interface RemoteBrowserViewProps {
   rotated?: boolean;
   /** Files pasted or dropped into the view: started, progressing, done or failed. */
   onTransfer?: (update: TransferUpdate) => void;
+  /**
+   * Shows where each pointer down and up is registered (a marker at the point the browser
+   * reported, in the box) with the geometry behind the mapping, for a screenshot.
+   */
+  debug?: boolean;
   /** Picture quality; the sharpest level adapting to the connection by default. Changes apply to the live stream. */
   video?: VideoPreference;
   /** The level being streamed now. */
@@ -75,7 +80,7 @@ export interface RemoteBrowserViewProps {
  * textarea that owns the keyboard (so IME composition works), and the remote cursor drawn locally.
  */
 export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserViewProps>(function RemoteBrowserView(
-  { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onTransfer, rotated = false, video, onVideo, muted = true, className, style },
+  { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onTransfer, rotated = false, debug = false, video, onVideo, muted = true, className, style },
   ref,
 ) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -91,6 +96,9 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   const [boxSize, setBoxSize] = useState<{ width: number; height: number } | null>(null);
   const rotatedRef = useRef(rotated);
   rotatedRef.current = rotated;
+  const debugRef = useRef(debug);
+  debugRef.current = debug;
+  const [debugInfo, setDebugInfo] = useState<{ x: number; y: number; lines: string[] } | null>(null);
   const callbacks = useRef({ getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer });
   callbacks.current = { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer };
   const initialVideo = useRef(video);
@@ -277,6 +285,26 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     const capture = (e: PointerEvent) => {
       try { box.setPointerCapture(e.pointerId); } catch { /* A synthetic or already-ended pointer. */ }
     };
+    /** Input diagnostics: the point as the browser reported it, and everything the mapping used. */
+    const trace = (kind: string, e: PointerEvent) => {
+      if (!debugRef.current) return;
+      const point = elementPoint(e, box);
+      const local = toLocal(point.x, point.y);
+      const remote = remoteAt(local.x, local.y, local.frame);
+      const rect = box.getBoundingClientRect();
+      const video = videoRef.current!;
+      const screen = browserRef.current?.screenSize;
+      const vv = window.visualViewport;
+      const n = (value: number) => value.toFixed(0);
+      setDebugInfo({ x: point.x, y: point.y, lines: [
+        `${kind} ${e.pointerType} client ${n(e.clientX)},${n(e.clientY)} offset ${n(e.offsetX)},${n(e.offsetY)} page ${n(e.pageX)},${n(e.pageY)} target ${e.target === box ? 'box' : 'other'}`,
+        `box point ${n(point.x)},${n(point.y)} → remote ${remote ? `${n(remote.x)},${n(remote.y)}` : 'outside the picture'}`,
+        `box ${box.clientWidth}×${box.clientHeight} rect ${n(rect.left)},${n(rect.top)} ${n(rect.width)}×${n(rect.height)} rotated ${rotatedRef.current}`,
+        `video ${video.videoWidth}×${video.videoHeight} screen ${screen ? `${screen.width}×${screen.height}` : '?'}`,
+        `viewport ${vv ? `offset ${n(vv.offsetLeft)},${n(vv.offsetTop)} page ${n(vv.pageLeft)},${n(vv.pageTop)} ${n(vv.width)}×${n(vv.height)} scale ${vv.scale.toFixed(2)}` : 'none'}`,
+        `scroll ${window.scrollX},${window.scrollY} inner ${window.innerWidth}×${window.innerHeight} client ${document.documentElement.clientWidth}×${document.documentElement.clientHeight}`,
+      ] });
+    };
     const onMove = (e: PointerEvent) => {
       if (e.pointerType === 'touch') {
         touch.pointerMove(touchEvent(e));
@@ -290,6 +318,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       }
     };
     const onDown = (e: PointerEvent) => {
+      trace('down', e);
       if (e.pointerType === 'touch') {
         if (touch.pointerDown(touchEvent(e))) {
           capture(e);
@@ -308,6 +337,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       e.preventDefault();
     };
     const onUp = (e: PointerEvent) => {
+      trace('up', e);
       if (e.pointerType === 'touch') {
         touch.pointerUp(touchEvent(e));
         browserRef.current?.finishScroll();
@@ -512,6 +542,15 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         <video ref={videoRef} autoPlay playsInline muted={muted} style={{ width: '100%', height: '100%', objectFit: 'contain', pointerEvents: 'none' }} />
       </div>
       {dragging ? <div aria-hidden style={{ position: 'absolute', inset: 0, pointerEvents: 'none', outline: '2px dashed currentColor', outlineOffset: -6, opacity: 0.6 }} /> : null}
+      {debug && debugInfo ? (
+        // The marker sits at the registered point, in the box: it shows beside the finger exactly when painting and hit-testing disagree.
+        <div aria-hidden data-testid="input-diagnostics" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 11, lineHeight: 1.35, color: '#fff' }}>
+          <div style={{ position: 'absolute', left: debugInfo.x - 14, top: debugInfo.y - 14, width: 28, height: 28, boxSizing: 'border-box', border: '2px solid #ff2fd0', borderRadius: '50%' }} />
+          <div style={{ position: 'absolute', left: debugInfo.x - 1, top: debugInfo.y - 40, width: 2, height: 80, background: '#ff2fd0' }} />
+          <div style={{ position: 'absolute', left: debugInfo.x - 40, top: debugInfo.y - 1, width: 80, height: 2, background: '#ff2fd0' }} />
+          <pre style={{ position: 'absolute', left: 8, bottom: 8, margin: 0, padding: '6px 8px', maxWidth: 'calc(100% - 16px)', whiteSpace: 'pre-wrap', background: 'rgba(0,0,0,0.75)' }}>{debugInfo.lines.join('\n')}</pre>
+        </div>
+      ) : null}
       <textarea
         ref={keysRef}
         aria-label="Remote browser keyboard"

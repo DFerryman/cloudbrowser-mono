@@ -278,14 +278,19 @@ Cloudflare deployment.
   for a phone held sideways in portrait orientation; the remote screen takes the turned shape, and
   pointer, touch, wheel and drop input are mapped through the turn. The choice is remembered per
   device.
-- **Touch screens and the on-screen keyboard**: the session frame follows `window.visualViewport`
-  at all times on touch screens (offset, size; not while pinch-zoomed), so the keyboard never
-  covers the picture and an offset iOS 26 leaves after the keyboard closes cannot hide the
-  toolbar. The viewer maps every pointer, wheel and drop event from its own `offsetX`/`offsetY`
-  within the picture box (`elementPoint`), which the browser computed with the geometry it
-  hit-tested, instead of client coordinates against `getBoundingClientRect` (iOS Safari reports
-  those against different viewports while the keyboard pans the page: taps landed beside what they
-  touched). *Maximize* on phones and tablets, and wherever element fullscreen is unavailable, is
+- **Touch screens and the on-screen keyboard**: on touch screens the session frame is
+  `position: absolute` within the never-scrolling page (html/body overflow hidden), laid out at
+  `window.visualViewport`'s page position and size at all times (not while pinch-zoomed). WebKit
+  paints a `position: fixed` element pinned to the visual viewport while it hit-tests it against
+  the layout viewport, so whenever the two differed (the on-screen keyboard; iOS 26 leaves the
+  visual viewport offset or short after the keyboard closes, even from the sign-in page earlier in
+  the same tab) the picture was drawn lower than where taps were registered: a tap landed below
+  what it touched, on iPad in particular. The viewer maps every pointer, wheel and drop event from
+  its own `offsetX`/`offsetY` within the picture box (`elementPoint`), which the browser computed
+  with the geometry it hit-tested, instead of client coordinates against `getBoundingClientRect`.
+  More → *Input diagnostics* (or `?debug=input`) draws a marker at the registered point of each
+  pointer down and up, in the box, with the geometry behind the mapping: it shows beside the
+  finger exactly when painting and hit-testing disagree. *Maximize* on phones and tablets, and wherever element fullscreen is unavailable, is
   an in-page mode (toolbar hidden, a floating control with keyboard, rotate and exit) because
   WebKit allows no keyboard input in a fullscreen element on iPhone and iPad; desktops keep the
   Fullscreen API with Keyboard Lock. More → *Reconnect live view* reconnects in place, and a

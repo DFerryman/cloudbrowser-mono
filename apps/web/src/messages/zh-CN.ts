@@ -203,6 +203,8 @@ export const zhCN: Messages = {
   'session.restore': '退出最大化',
   'session.maximizedTools': '画面控制',
   'session.reconnect': '重新连接画面',
+  'session.inputDiagnostics': '输入诊断',
+  'session.inputDiagnosticsOff': '隐藏输入诊断',
   'session.more': '更多',
   'session.needsStream': '实时画面上线后可用',
   'session.fakeTitle': '模拟浏览器',

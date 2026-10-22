@@ -4,6 +4,7 @@ import { Button, cn, Menu, MenuItem, RegionIpChip, StatusBadge, useToast } from 
 import { useQuery } from '@tanstack/react-query';
 import {
   ArrowLeft,
+  Bug,
   ClipboardCopy,
   Command,
   Download,
@@ -149,8 +150,13 @@ export function SessionPage() {
   const uploadRef = useRef<HTMLInputElement>(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [inputInterrupted, setInputInterrupted] = useState(false);
-  /** On a touch screen: the visible part of the page (the visual viewport) when it is not the whole layout viewport, e.g. above the on-screen keyboard. */
-  const [visibleArea, setVisibleArea] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
+  /** On a touch screen: the visible part of the page (the visual viewport), in page coordinates; the frame is laid out exactly there. */
+  const [visibleArea, setVisibleArea] = useState<{ top: number; left: number; width: number; height: number } | null>(() =>
+    touchScreen && typeof window !== 'undefined' ? { top: 0, left: 0, width: window.innerWidth, height: window.innerHeight } : null);
+  /** Shows where each tap is registered and the geometry behind it (More → Input diagnostics, or ?debug=input). */
+  const [debugInput, setDebugInput] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get('debug') === 'input'; } catch { return false; }
+  });
   const openRequest = useRef<{ instanceId: string; promise: Promise<void> } | null>(null);
   const openIntent = useRef<{ instanceId: string; key: string } | null>(null);
   const openSequence = useRef(0);
@@ -279,12 +285,16 @@ export function SessionPage() {
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
 
-  // On a touch screen the frame follows the visual viewport at all times, not only while the
-  // keyboard is up: iOS pans and shrinks the visible area for the on-screen keyboard, and can
-  // leave it offset or short after the keyboard closes (iOS 26). Following it keeps the toolbar
-  // reachable and the picture where it is seen, whatever the toggling order. The remote screen
-  // keeps its size while typing (the viewer stops resizing it), so the picture scales down
-  // proportionally into the space above the keyboard instead of being covered.
+  // On a touch screen the frame is not fixed to the viewport: it is laid out within the page at
+  // the visual viewport's position and size, at all times. WebKit paints a fixed element pinned to
+  // the visual viewport while it lays out and hit-tests it against the layout viewport; whenever
+  // the two differ (iOS pans and shrinks the visible area for the on-screen keyboard, and iOS 26
+  // can leave it offset or short after the keyboard closes, even from the sign-in page earlier in
+  // the tab) the picture was drawn lower than where taps were registered, so a tap landed below
+  // what it touched. An absolutely positioned frame is painted and hit-tested in one place. The
+  // page itself never scrolls (overflow hidden below), so page and layout coordinates agree. The
+  // remote screen keeps its size while typing (the viewer stops resizing it), so the picture
+  // scales down proportionally into the space above the keyboard instead of being covered.
   useEffect(() => {
     if (!touchScreen) return;
     const viewport = window.visualViewport;
@@ -293,22 +303,15 @@ export function SessionPage() {
     const update = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
-        const layout = document.documentElement;
-        // Pinch zoom also shrinks the visual viewport; the layout then stays as it is.
-        const next = viewport.scale > 1.01 ? null : {
-          top: Math.max(0, Math.round(viewport.offsetTop)),
-          left: Math.max(0, Math.round(viewport.offsetLeft)),
+        // Pinch zoom also shrinks the visual viewport; the frame then keeps its size.
+        if (viewport.scale > 1.01) return;
+        const next = {
+          top: Math.max(0, Math.round(viewport.pageTop)),
+          left: Math.max(0, Math.round(viewport.pageLeft)),
           width: Math.round(viewport.width),
           height: Math.round(viewport.height),
         };
-        const whole = next !== null && next.top === 0 && next.left === 0
-          && Math.abs(next.width - layout.clientWidth) <= 1 && Math.abs(next.height - layout.clientHeight) <= 1;
-        setVisibleArea((prev) => {
-          const area = whole ? null : next;
-          if (prev === area) return prev;
-          if (prev && area && prev.top === area.top && prev.left === area.left && prev.width === area.width && prev.height === area.height) return prev;
-          return area;
-        });
+        setVisibleArea((prev) => prev && prev.top === next.top && prev.left === next.left && prev.width === next.width && prev.height === next.height ? prev : next);
       });
     };
     update();
@@ -322,6 +325,20 @@ export function SessionPage() {
       viewport.removeEventListener('scroll', update);
       window.removeEventListener('resize', update);
       window.removeEventListener('orientationchange', update);
+    };
+  }, [touchScreen]);
+
+  // The frame is laid out within the page on touch screens: the page itself must never scroll.
+  useEffect(() => {
+    if (!touchScreen) return;
+    const html = document.documentElement;
+    const body = document.body;
+    const previous = [html.style.overflow, body.style.overflow];
+    html.style.overflow = 'hidden';
+    body.style.overflow = 'hidden';
+    return () => {
+      html.style.overflow = previous[0]!;
+      body.style.overflow = previous[1]!;
     };
   }, [touchScreen]);
 
@@ -550,8 +567,8 @@ export function SessionPage() {
   return (
     <div
       ref={frameRef}
-      className="cb-dark fixed inset-0 flex h-dvh flex-col overflow-hidden overscroll-none bg-frame text-zinc-100"
-      style={visibleArea === null ? undefined : { top: visibleArea.top, left: visibleArea.left, width: visibleArea.width, height: visibleArea.height, right: 'auto', bottom: 'auto' }}
+      className={cn('cb-dark flex flex-col overflow-hidden overscroll-none bg-frame text-zinc-100', touchScreen ? 'absolute' : 'fixed inset-0 h-dvh')}
+      style={touchScreen && visibleArea ? { top: visibleArea.top, left: visibleArea.left, width: visibleArea.width, height: visibleArea.height } : undefined}
     >
       {maximized ? null : (
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-zinc-800 px-2">
@@ -695,6 +712,9 @@ export function SessionPage() {
             >
               <RefreshCw /> {t('session.reconnect')}
             </MenuItem>
+            <MenuItem onSelect={() => setDebugInput((on) => !on)}>
+              <Bug /> {t(debugInput ? 'session.inputDiagnosticsOff' : 'session.inputDiagnostics')}
+            </MenuItem>
             <MenuItem onSelect={() => navigate(`/browsers/${id}/settings`)}>
               <Settings /> {t('browsers.settings')}
             </MenuItem>
@@ -717,6 +737,7 @@ export function SessionPage() {
             onInputError={() => setInputInterrupted(true)}
             onTransfer={onTransfer}
             rotated={rotated}
+            debug={debugInput}
             className="absolute inset-0 bg-frame"
             muted={muted}
             // Each viewer token works once, so every (re)connect asks the api for a fresh one.

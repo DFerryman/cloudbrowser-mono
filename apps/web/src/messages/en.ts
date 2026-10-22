@@ -201,6 +201,8 @@ export const en = {
   'session.restore': 'Exit maximized view',
   'session.maximizedTools': 'View controls',
   'session.reconnect': 'Reconnect live view',
+  'session.inputDiagnostics': 'Input diagnostics',
+  'session.inputDiagnosticsOff': 'Hide input diagnostics',
   'session.more': 'More',
   'session.needsStream': 'Available with the live stream',
   'session.fakeTitle': 'Simulated browser',

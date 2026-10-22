@@ -114,12 +114,15 @@ IME and clipboard events, with backpressure and visible failure instead of silen
 
 On touch screens, tap to click and swipe with one or two fingers to scroll. Use the toolbar's
 keyboard button to show or hide the software keyboard; touching the picture keeps that choice.
-The session frame follows the visual viewport at all times on touch screens, so while the keyboard
-is up the view moves above it and the picture shrinks proportionally to fit, and an offset iOS
-leaves behind after the keyboard closes cannot hide the toolbar; the remote desktop keeps its
-size. Input is mapped from the event's own offsets within the picture, never from client
-coordinates against element rectangles, which iOS Safari reports against different viewports while
-the keyboard pans the page. Maximize on phones and tablets (and wherever element fullscreen is
+On touch screens the session frame is not fixed to the viewport: it is laid out within the
+never-scrolling page at the visual viewport's position and size, at all times. WebKit paints a
+fixed element pinned to the visual viewport but hit-tests it against the layout viewport, so
+whenever the two differed (the on-screen keyboard, and an offset iOS 26 leaves behind after it
+closes) taps landed below what they touched; an absolutely positioned frame is painted and
+hit-tested in one place. While the keyboard is up the view moves above it and the picture shrinks
+proportionally to fit; the remote desktop keeps its size. Input is mapped from the event's own
+offsets within the picture. More → *Input diagnostics* (or `?debug=input`) marks where each tap is
+registered, with the geometry behind it, for a screenshot. Maximize on phones and tablets (and wherever element fullscreen is
 unavailable) hides the toolbar within the page and shows a floating control with the keyboard and
 the way back, since WebKit allows no keyboard input in a fullscreen element on iPhone and iPad;
 desktops keep true fullscreen with Keyboard Lock. More → *Reconnect live view* restarts the
