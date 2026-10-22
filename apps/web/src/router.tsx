@@ -1,6 +1,7 @@
 import { createBrowserRouter, Navigate, Outlet, useLocation } from 'react-router';
 import { useEffect } from 'react';
 import { AppShell } from './app/AppShell.js';
+import { RouteError } from './app/RouteError.js';
 import { AccountPage } from './features/account/AccountPage.js';
 import { BillingPage } from './features/billing/BillingPage.js';
 import { BillingSuccessPage } from './features/billing/BillingSuccessPage.js';
@@ -20,9 +21,10 @@ import { StatusPage } from './site/StatusPage.js';
 
 /**
  * Routes from page 1, "Information architecture": the public site (home, pricing, docs, status,
- * policies) for everyone, sign-in and sign-up, and the app behind it.
+ * policies) for everyone, sign-in and sign-up, and the app behind it. Every route renders its
+ * errors with RouteError (a lazily loaded page gone after a deployment, a render error).
  */
-export const router = createBrowserRouter(isAdminHost() ? [
+export const router = createBrowserRouter([{ errorElement: <RouteError />, children: isAdminHost() ? [
   { path: '/admin/*', element: <AdminRedirect /> },
   { path: '*', lazy: async () => ({ Component: (await import('./features/admin/AdminApp.js')).AdminApp }) },
 ] : [
@@ -78,7 +80,7 @@ export const router = createBrowserRouter(isAdminHost() ? [
       { path: '/promotions', lazy: async () => ({ Component: (await import('./features/promotions/PromotionsPage.js')).PromotionsPage }) },
     ],
   },
-]);
+] }]);
 
 function AdminRedirect() {
   const location = useLocation();

@@ -148,6 +148,8 @@ RemoteBrowser.prototype.connect = async function () {
     getConnectInfo: async () => ({ gatewayUrl: 'ws://fixture', token: 'fixture', iceServers: [] }),
     WebSocketImpl: FixtureSocket,
     RTCPeerConnectionImpl: FixturePeer,
+    // The fixture peer carries no video; input becomes live on the connected peer alone.
+    requireFirstFrame: false,
   });
   return actualConnect.call(this);
 };

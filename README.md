@@ -114,8 +114,18 @@ IME and clipboard events, with backpressure and visible failure instead of silen
 
 On touch screens, tap to click and swipe with one or two fingers to scroll. Use the toolbar's
 keyboard button to show or hide the software keyboard; touching the picture keeps that choice.
-While the keyboard is up, the view moves above it and the picture shrinks proportionally to fit,
-so the page stays visible while typing; the remote desktop keeps its size.
+The session frame follows the visual viewport at all times on touch screens, so while the keyboard
+is up the view moves above it and the picture shrinks proportionally to fit, and an offset iOS
+leaves behind after the keyboard closes cannot hide the toolbar; the remote desktop keeps its
+size. Input is mapped from the event's own offsets within the picture, never from client
+coordinates against element rectangles, which iOS Safari reports against different viewports while
+the keyboard pans the page. Maximize on phones and tablets (and wherever element fullscreen is
+unavailable) hides the toolbar within the page and shows a floating control with the keyboard and
+the way back, since WebKit allows no keyboard input in a fullscreen element on iPhone and iPad;
+desktops keep true fullscreen with Keyboard Lock. More → *Reconnect live view* restarts the
+connection in place, and a page that lost its connection in the background reconnects when it is
+shown again. After a deployment, an open page whose lazily loaded parts are gone reloads itself
+once (`vite:preloadError`); anything else lands on the app's own error page with a Reload button.
 The standalone touch/input regression mounts the real viewer and interprets its Neko wire events, without
 sign-in or a running VM:
 

@@ -278,6 +278,23 @@ Cloudflare deployment.
   for a phone held sideways in portrait orientation; the remote screen takes the turned shape, and
   pointer, touch, wheel and drop input are mapped through the turn. The choice is remembered per
   device.
+- **Touch screens and the on-screen keyboard**: the session frame follows `window.visualViewport`
+  at all times on touch screens (offset, size; not while pinch-zoomed), so the keyboard never
+  covers the picture and an offset iOS 26 leaves after the keyboard closes cannot hide the
+  toolbar. The viewer maps every pointer, wheel and drop event from its own `offsetX`/`offsetY`
+  within the picture box (`elementPoint`), which the browser computed with the geometry it
+  hit-tested, instead of client coordinates against `getBoundingClientRect` (iOS Safari reports
+  those against different viewports while the keyboard pans the page: taps landed beside what they
+  touched). *Maximize* on phones and tablets, and wherever element fullscreen is unavailable, is
+  an in-page mode (toolbar hidden, a floating control with keyboard, rotate and exit) because
+  WebKit allows no keyboard input in a fullscreen element on iPhone and iPad; desktops keep the
+  Fullscreen API with Keyboard Lock. More → *Reconnect live view* reconnects in place, and a
+  viewer that failed while the page was in the background reconnects when the page is shown again.
+- **Stale build files**: after a deployment, a page already open asks for hashed files that no
+  longer exist. The api Worker answers `/assets/*` misses with 404 (instead of the assets binding's
+  index.html fallback), the web app reloads itself once on Vite's `vite:preloadError` (at most once
+  per 30 s), and every route has the app's own error page (`RouteError`) with Reload, in place of
+  react-router's unstyled default that *Promotions* used to land on.
 - **Promotions**: a *Promotions* entry at the bottom of the dashboard sidebar (with a count of
   pending tasks; a fifth tab on phones) lists the user's tasks with progress, and the ones they
   completed. Operators define tasks in the console (*Promotions*): English and Chinese wording, the
@@ -303,7 +320,8 @@ Cloudflare deployment.
   second step), dashboard with live status, create dialog (regions with price and latency, permanence note, collapsed advanced options, a cost
   summary with the full breakdown on request, actions and balance status in a footer that stays
   visible; a bottom sheet on phones), four progress steps and auto-open when ready, session view (44 px toolbar, region/IP chip, every state overlay, idle
-  warning, fullscreen with Keyboard Lock), browser settings (identity, verify IP,
+  warning, fullscreen with Keyboard Lock on desktops and an in-page maximized view on touch
+  screens), browser settings (identity, verify IP,
   backups with restore, behavior, activity, delete with type-to-confirm, also from a card's menu;
   no per-browser language: Chrome uses English), account page, Simplified Chinese and English.
 

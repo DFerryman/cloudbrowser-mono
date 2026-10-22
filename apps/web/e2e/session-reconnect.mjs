@@ -26,6 +26,12 @@ async function fixture({ holdHeartbeat = false, heartbeatDenied = false, holdCon
   const context = await browser.newContext({ viewport: { width: 1365, height: 1024 }, locale: 'en-US' });
   await context.addInitScript(() => {
     window.fixtureSockets = [];
+    // Playwright's headless Chromium decodes no H.264; the fixture streams no video, so advertise it.
+    const capabilities = RTCRtpReceiver.getCapabilities?.bind(RTCRtpReceiver);
+    if (capabilities) RTCRtpReceiver.getCapabilities = (kind) => {
+      const c = capabilities(kind);
+      return kind === 'video' && c ? { ...c, codecs: [...c.codecs, { mimeType: 'video/H264', clockRate: 90000 }] } : c;
+    };
     window.WebSocket = class {
       readyState = 1;
       bufferedAmount = 0;
@@ -75,6 +81,7 @@ async function fixture({ holdHeartbeat = false, heartbeatDenied = false, holdCon
         if (state.denyConnect) return route.fulfill(problem(403, 'The browser connection is currently denied.'));
         body = { mode: 'webrtc', gatewayUrl: 'wss://nevazu.com/local-fixture', token: `token${state.connects}`, iceServers: [] };
       } else if (url.pathname.endsWith('/end')) return route.fulfill({ status: 204 });
+      else if (url.pathname.endsWith('/diagnostics')) return route.fulfill({ status: 204 });
       else if (url.pathname === '/api/v1/events') return route.fulfill({ contentType: 'text/event-stream', body: ': local fixture\n\n' });
       else if (url.pathname === '/api/v1/regions') body = [{
         id: 'syd1', name: 'AWS Sydney', country: 'AU', city: 'Sydney', timezone: 'Australia/Sydney', enabled: true, acceptingNew: true,
@@ -120,7 +127,7 @@ try {
   await deniedReconnect.page.waitForFunction(() => window.fixtureSockets.length === 1);
   // The page's own token request is handed to the first viewer attempt; no second request is made.
   assert.equal(deniedReconnect.state.connects, 1, 'the first viewer attempt must reuse the prefetched token');
-  assert.match(await deniedReconnect.page.evaluate(() => window.fixtureSockets[0].url), /token=token1$/);
+  assert.match(await deniedReconnect.page.evaluate(() => window.fixtureSockets[0].url), /[?&]token=token1(&|$)/);
   deniedReconnect.state.denyConnect = true;
   await deniedReconnect.page.evaluate(() => window.fixtureSockets[0].close());
   await deniedReconnect.page.getByText('The browser connection is currently denied.', { exact: true }).waitFor();

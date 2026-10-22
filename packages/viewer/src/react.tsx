@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type CSSProperties } from 'react';
 import { isMac } from './keyboard.js';
-import { toRemotePoint, unrotate } from './mapping.js';
+import { elementPoint, toRemotePoint, unrotate, type PositionedEvent } from './mapping.js';
 import type { ConnectionDiagnostic, VideoQuality } from '@cloudbrowser/contracts';
 import type { VideoPreference } from './quality.js';
 import { RemoteBrowser, type ConnectInfo, type ViewerState } from './remote-browser.js';
@@ -227,18 +227,29 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     if (boxSize) fitViewport(boxSize);
   }, [rotated]);
 
-  /** A client point in the picture's own (unturned) frame, and that frame. */
-  const toLocal = (clientX: number, clientY: number) => {
+  /**
+   * Input is mapped in the box's own coordinates (elementPoint), never through client coordinates
+   * and element rectangles: iOS Safari can report those against different viewports while the
+   * on-screen keyboard pans the page, which put taps beside what they touched. The picture fills
+   * the box's padding box, turned or not, so no layout is read per event.
+   */
+  const boxFrame = () => {
     const box = boxRef.current!;
-    if (rotatedRef.current) return unrotate(clientX, clientY, box.getBoundingClientRect());
-    return { x: clientX, y: clientY, frame: videoRef.current!.getBoundingClientRect() };
+    return { left: 0, top: 0, width: box.clientWidth, height: box.clientHeight };
+  };
+  /** A box point in the picture's own (unturned) frame, and that frame. */
+  const toLocal = (x: number, y: number) => {
+    const frame = boxFrame();
+    if (rotatedRef.current) return unrotate(x, y, frame);
+    return { x, y, frame };
   };
   const remoteAt = (x: number, y: number, frame: { left: number; top: number; width: number; height: number }) => {
     const video = videoRef.current!;
     return toRemotePoint(x, y, frame, { width: video.videoWidth, height: video.videoHeight }, browserRef.current?.screenSize ?? null);
   };
-  const toRemote = (clientX: number, clientY: number) => {
-    const local = toLocal(clientX, clientY);
+  const toRemote = (event: PositionedEvent) => {
+    const point = elementPoint(event, boxRef.current!);
+    const local = toLocal(point.x, point.y);
     return remoteAt(local.x, local.y, local.frame);
   };
 
@@ -250,7 +261,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     const pressedButtons = new Set<number>();
     // Gestures work in the picture's frame, so a turned view scrolls along the page's own axes.
     const touchEvent = (e: PointerEvent) => {
-      const local = toLocal(e.clientX, e.clientY);
+      const point = elementPoint(e, box);
+      const local = toLocal(point.x, point.y);
       return { pointerId: e.pointerId, clientX: local.x, clientY: local.y };
     };
     const touch = new TouchGestureController({
@@ -271,7 +283,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         e.preventDefault();
         return;
       }
-      const point = toRemote(e.clientX, e.clientY);
+      const point = toRemote(e);
       if (point) {
         browserRef.current?.move(point.x, point.y);
         callbacks.current.onInput?.();
@@ -286,7 +298,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         e.preventDefault();
         return;
       }
-      const p = toRemote(e.clientX, e.clientY);
+      const p = toRemote(e);
       if (!p) return;
       keysRef.current?.focus({ preventScroll: true });
       capture(e);
@@ -303,7 +315,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         return;
       }
       if (!pressedButtons.delete(e.button)) return;
-      const p = toRemote(e.clientX, e.clientY);
+      const p = toRemote(e);
       browserRef.current?.button(false, e.button, p?.x, p?.y);
     };
     const reset = () => {
@@ -326,7 +338,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       // The entire viewer owns scrolling, including its letterbox. Never scroll the local page.
       e.preventDefault();
       e.stopPropagation();
-      const p = toRemote(e.clientX, e.clientY);
+      const p = toRemote(e);
       if (!p) return;
       browserRef.current?.move(p.x, p.y);
       const line = 19;
@@ -418,7 +430,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       // Without this the local browser opens the file in place of the app.
       e.preventDefault();
       if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-      const point = toRemote(e.clientX, e.clientY);
+      const point = toRemote(e);
       if (point) browserRef.current?.move(point.x, point.y);
     };
     const onLeave = (e: DragEvent) => {
@@ -432,7 +444,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       const files = [...(e.dataTransfer?.files ?? [])];
       if (files.length === 0) return;
       e.preventDefault();
-      const point = toRemote(e.clientX, e.clientY);
+      const point = toRemote(e);
       if (!point) return;
       browserRef.current?.sendFiles('drop', files, point);
       keysRef.current?.focus({ preventScroll: true });
