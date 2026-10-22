@@ -29,7 +29,9 @@ import (
 // count in the shutdown reply. 0.2.3 waits for Chrome to take the hidden page instead of opening a
 // visible one when Chrome has no window yet (the check at every wake). 0.3.0 receives files a viewer
 // pastes or drops (files.go). 0.3.1 bounds desktop admission and verifies local desktop readiness.
-const Version = "0.3.1"
+// 0.4.0 admits coding-agent bridges (docs/agent-access.md): full-display screenshots, input
+// steps, stored files, and one arbiter for input between the bridge and the live view.
+const Version = "0.4.0"
 
 // Browser is Chrome as the agent controls it through CDP.
 type Browser interface {
@@ -111,6 +113,10 @@ type Agent struct {
 	transfers            map[string]*transfer
 	// clipboardQuietUntil: neko's clipboard reports are not relayed until then (files.go).
 	clipboardQuietUntil time.Time
+	// Coding-agent bridges (automation.go) and who may drive the browser (control.go).
+	automations map[string]*automation
+	control     controlState
+	screen      screenState
 }
 
 func New(cfg Config, b Browser, n Neko, f Firewall, log *slog.Logger) *Agent {
@@ -126,7 +132,8 @@ func New(cfg Config, b Browser, n Neko, f Firewall, log *slog.Logger) *Agent {
 	if cfg.DesktopProbeRetry == 0 {
 		cfg.DesktopProbeRetry = 10 * time.Second
 	}
-	return &Agent{cfg: cfg, browser: b, neko: n, firewall: f, log: log, sessions: map[string]NekoSession{}, relayIDs: map[string]string{}, viewerOpens: map[string]*viewerOpen{}, desktopProbeRequests: make(chan struct{}, 1), transfers: map[string]*transfer{}}
+	return &Agent{cfg: cfg, browser: b, neko: n, firewall: f, log: log, sessions: map[string]NekoSession{}, relayIDs: map[string]string{}, viewerOpens: map[string]*viewerOpen{}, desktopProbeRequests: make(chan struct{}, 1), transfers: map[string]*transfer{},
+		automations: map[string]*automation{}, control: controlState{controller: ctlNone, mode: modeAgent, access: true}}
 }
 
 func (a *Agent) credentialPath() string { return filepath.Join(a.cfg.StateDir, "credential") }
@@ -204,6 +211,7 @@ func (a *Agent) session(ctx context.Context, chromeMajor int) error {
 	a.viewerStages = false
 	a.mu.Unlock()
 	defer a.closeSessions()
+	defer a.closeAutomations()
 
 	if err := a.write(sctx, protocol.Hello{T: "hello", AgentVersion: Version, Generation: a.cfg.Generation}); err != nil {
 		return err
@@ -324,6 +332,11 @@ func (a *Agent) handle(ctx context.Context, in protocol.Incoming) {
 				a.log.Error("save credential", "err", err)
 			}
 		}
+		// The persisted control mode: a manual takeover outlives agent restarts and reconnects.
+		if in.Automation != nil {
+			access := in.Automation.Access
+			a.applyControl(ctx, in.Automation.Mode, &access, "restored")
+		}
 	case "turn":
 		a.log.Info("turn credentials received", "servers", len(in.IceServers))
 	case "command":
@@ -341,7 +354,30 @@ func (a *Agent) handle(ctx context.Context, in protocol.Incoming) {
 		a.closeViewer(in.SessionID, in.RelayID)
 	case "viewer":
 		a.fromViewer(ctx, in.SessionID, in.Data, in.RelayID)
+	case "automation_open":
+		a.openAutomation(ctx, in.SessionID, in.ClientID)
+	case "automation_close":
+		a.closeAutomation(in.SessionID)
+	case "automation":
+		a.fromAutomation(ctx, in.SessionID, in.Data)
+	case "automation_control":
+		a.applyControl(ctx, in.Mode, in.Access, controlReason(in.Mode, in.Access))
 	}
+}
+
+func controlReason(mode string, access *bool) string {
+	if access != nil && !*access {
+		return "revoked"
+	}
+	switch mode {
+	case modeAgent:
+		return "resumed"
+	case modePrivacy:
+		return "privacy"
+	case modeUser:
+		return "paused"
+	}
+	return "restored"
 }
 
 func (a *Agent) command(ctx context.Context, in protocol.Incoming) {
@@ -516,6 +552,17 @@ func (a *Agent) fromViewer(ctx context.Context, sessionID string, data json.RawM
 	}
 	a.lastInputAt = time.Now()
 	a.mu.Unlock()
+	// Input control (control.go): a real input takes over from a coding agent's bridge before it
+	// is executed; pointer movement under bridge control is withheld.
+	ahead, forward := a.arbitrateViewer(ctx, f)
+	if !forward {
+		return
+	}
+	for _, msg := range ahead {
+		if s != nil {
+			_ = s.Send(msg)
+		}
+	}
 	switch f.T {
 	case "ime":
 		if s == nil {

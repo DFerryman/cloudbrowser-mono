@@ -26,6 +26,8 @@ const TITLES: Record<ErrorType, string> = {
   price_unavailable: 'Prices are being updated',
   price_changed: 'Prices changed',
   account_frozen: 'Account on hold',
+  agent_access_off: 'Coding agent access is off',
+  pairing_invalid: 'Pairing code not accepted',
   internal: 'Something went wrong',
 };
 

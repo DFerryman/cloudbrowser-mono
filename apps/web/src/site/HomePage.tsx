@@ -1,6 +1,6 @@
 import { REGION_AREAS } from '@cloudbrowser/contracts';
 import { Button, cn, Eyebrow } from '@cloudbrowser/ui';
-import { ArrowRight, Check, Cloud, Globe2, HardDrive, Lock, MonitorSmartphone, MoonStar, ShieldCheck, Wallet, Zap } from 'lucide-react';
+import { ArrowRight, Bot, Check, Cloud, Globe2, HardDrive, Lock, MonitorSmartphone, MoonStar, ShieldCheck, Wallet, Zap } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
 import { money } from '../lib/money.js';
 import { regionPlace } from '../features/instances/region-names.js';
@@ -18,6 +18,7 @@ const PILLARS = [
 
 const FEATURES = [
   { key: 'view', icon: Zap },
+  { key: 'agents', icon: Bot },
   { key: 'sleep', icon: MoonStar },
   { key: 'billing', icon: Wallet },
   { key: 'devices', icon: MonitorSmartphone },
@@ -64,7 +65,7 @@ export function HomePage() {
               </p>
             ) : null}
             <ul className="mt-8 hidden flex-wrap gap-x-5 gap-y-2 text-[13px] text-subtle sm:flex">
-              {(['home.chip.chrome', 'home.chip.encrypted', 'home.chip.devices'] as const).map((k) => (
+              {(['home.chip.chrome', 'home.chip.encrypted', 'home.chip.devices', 'home.chip.agents'] as const).map((k) => (
                 <li key={k} className="flex items-center gap-1.5">
                   <ShieldCheck className="size-3.5" aria-hidden /> {t(k)}
                 </li>
@@ -94,7 +95,7 @@ export function HomePage() {
             </article>
           ))}
         </div>
-        <div className="grid grid-cols-2 gap-px border-x border-b border-border bg-border lg:grid-cols-4">
+        <div className="grid grid-cols-2 gap-px border-x border-b border-border bg-border lg:grid-cols-5">
           {FEATURES.map(({ key, icon: Icon }) => (
             <div key={key} className="bg-bg p-5 md:p-6">
               <Icon className="size-4 text-subtle" aria-hidden />

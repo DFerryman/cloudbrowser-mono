@@ -1,5 +1,5 @@
 import { REGION_INFO } from '@cloudbrowser/contracts';
-import type { Accepted, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, NeverSleepQuote, Region } from '@cloudbrowser/contracts';
+import type { Accepted, AgentControlMode, AutomationStatus, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, NeverSleepQuote, Pairing, Region } from '@cloudbrowser/contracts';
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api.js';
 import { keys, queryClient } from '../../lib/query.js';
@@ -68,7 +68,7 @@ export function useCreateInstance() {
 /** Rename and settings edits are reversible, so they update the cache optimistically. */
 export function useUpdateInstance() {
   return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: Partial<Pick<Instance, 'name' | 'idleTimeoutS' | 'screen'>> & { priceVersion?: string } }) =>
+    mutationFn: ({ id, patch }: { id: string; patch: Partial<Pick<Instance, 'name' | 'idleTimeoutS' | 'screen' | 'agentAccess'>> & { priceVersion?: string } }) =>
       api<Instance>('PATCH', `/instances/${id}`, { body: patch }),
     onMutate: async ({ id, patch }) => {
       await Promise.all([queryClient.cancelQueries({ queryKey: keys.instances }), queryClient.cancelQueries({ queryKey: keys.instance(id) })]);
@@ -103,6 +103,38 @@ export function useResizeStorage() {
     mutationFn: ({ id, sizeGb, priceVersion }: { id: string; sizeGb: number; priceVersion: string }) =>
       api<Accepted>('POST', `/instances/${id}/storage`, { idempotent: true, body: { sizeGb, priceVersion } }),
     onError: refreshChangedPrices,
+    onSettled: (_d, _e, v) => refresh(v.id),
+  });
+}
+
+// --- coding-agent access (docs/agent-access.md) ----------------------------------------------
+
+export const useAutomation = (id: string, enabled = true) =>
+  useQuery({ queryKey: keys.automation(id), queryFn: () => api<AutomationStatus>('GET', `/instances/${id}/automation`), enabled, refetchInterval: 15_000 });
+
+/** Pairs a new bridge: the code comes back once. */
+export function useCreatePairing() {
+  return useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => api<Pairing>('POST', `/instances/${id}/automation/pairings`, { body: { name } }),
+    onSettled: (_d, _e, v) => void queryClient.invalidateQueries({ queryKey: keys.automation(v.id) }),
+  });
+}
+
+export function useRevokeClient() {
+  return useMutation({
+    mutationFn: ({ id, clientId }: { id: string; clientId: string }) => api<void>('DELETE', `/instances/${id}/automation/clients/${clientId}`),
+    onSettled: (_d, _e, v) => void queryClient.invalidateQueries({ queryKey: keys.automation(v.id) }),
+  });
+}
+
+/** Hand control back to the agent, keep it, or privacy-pause; the browser's own query shows the new mode. */
+export function useSetControl() {
+  return useMutation({
+    mutationFn: ({ id, mode }: { id: string; mode: AgentControlMode }) => api<Instance>('POST', `/instances/${id}/automation/control`, { body: { mode } }),
+    onSuccess: (instance) => {
+      queryClient.setQueryData<Instance>(keys.instance(instance.id), instance);
+      queryClient.setQueryData<Instance[]>(keys.instances, (list) => list?.map((i) => (i.id === instance.id ? instance : i)));
+    },
     onSettled: (_d, _e, v) => refresh(v.id),
   });
 }

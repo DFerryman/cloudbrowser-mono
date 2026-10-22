@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { AgentControlMode, AutomationRequest, AutomationResponse, ControlState } from './automation.js';
+import { FILE_TRANSFER } from './transfer.js';
 
 /**
  * Wire protocol between the in-VM agent, the session gateway and the viewer (page 2, "Contracts").
@@ -17,6 +19,9 @@ export type AgentCommandKind = z.infer<typeof AgentCommandKind>;
 
 /** Events an agent reports (stored by the api in `instance_health` and `audit_log`). */
 export const AgentEventKind = z.enum(['ready', 'heartbeat', 'ip_check', 'chrome_exited']);
+/** Why the VM changed who may drive the browser (control_state frames). */
+export const ControlChangeReason = z.enum(['user_input', 'resumed', 'paused', 'privacy', 'released', 'revoked', 'restored', 'agent_input']);
+export type ControlChangeReason = z.infer<typeof ControlChangeReason>;
 export type AgentEventKind = z.infer<typeof AgentEventKind>;
 
 export const IpCheckResult = z.object({
@@ -89,35 +94,42 @@ export const AgentViewerFile = z.object({
   reason: z.string().max(64).optional(),
 });
 
-export const AgentFrame = z.discriminatedUnion('t', [AgentHello, AgentEvent, AgentReply, AgentTurnRequest, AgentToViewer, AgentViewerError, AgentViewerFile, AgentViewerStage]);
+/** A response for one bridge session (docs/agent-access.md); blobs are the screenshot bytes. */
+export const AgentAutomationResult = z.object({ t: z.literal('automation_result'), sessionId: z.string().max(128), data: AutomationResponse });
+/**
+ * The VM changed who may drive the browser. The gateway fans it out to viewers and bridges and
+ * the api persists the mode (`browser_instances.agent_control`) and audits the change.
+ */
+export const AgentControlState = z.object({ t: z.literal('control_state'), control: ControlState, reason: ControlChangeReason });
+export type AgentControlState = z.infer<typeof AgentControlState>;
+
+export const AgentFrame = z.discriminatedUnion('t', [AgentHello, AgentEvent, AgentReply, AgentTurnRequest, AgentToViewer, AgentViewerError, AgentViewerFile, AgentViewerStage, AgentAutomationResult, AgentControlState]);
 export type AgentFrame = z.infer<typeof AgentFrame>;
 
 // --- gateway -> agent -----------------------------------------------------------------------
 
 export type GatewayToAgent =
-  /** Sent once after a bootstrap exchange: the long-lived credential to store (mode 0600). */
-  | { t: 'welcome'; credential?: string; viewerStages?: boolean }
+  /**
+   * Sent once after a bootstrap exchange: the long-lived credential to store (mode 0600).
+   * `automation` carries the persisted control mode, so a takeover survives agent restarts.
+   */
+  | { t: 'welcome'; credential?: string; viewerStages?: boolean; automation?: { mode: AgentControlMode; access: boolean } }
   | { t: 'command'; id: string; kind: AgentCommandKind; payload: Record<string, unknown> }
   | { t: 'turn'; iceServers: IceServer[] }
   | { t: 'viewer_open'; sessionId: string; relayId?: string }
   /** A frame from the viewer: a neko message or IME text. */
   | { t: 'viewer'; sessionId: string; relayId?: string; data: ViewerFrame }
-  | { t: 'viewer_close'; sessionId: string; relayId?: string };
+  | { t: 'viewer_close'; sessionId: string; relayId?: string }
+  /** A bridge session (docs/agent-access.md): opened, a request, closed. */
+  | { t: 'automation_open'; sessionId: string; clientId: string }
+  | { t: 'automation'; sessionId: string; data: AutomationRequest }
+  | { t: 'automation_close'; sessionId: string }
+  /** The user's choice from the api: hand control back (`agent`), pause (`user`) or privacy pause. */
+  | { t: 'automation_control'; mode: AgentControlMode; access: boolean };
 
 // --- viewer <-> gateway ---------------------------------------------------------------------
 
-/**
- * Files a viewer pasted or dropped. They travel to the VM as ordered base64 chunks on the viewer
- * socket, each file's bytes in order; the agent acknowledges what it wrote, and the viewer keeps
- * only a few chunks unacknowledged so the gateway's input queue never fills.
- */
-export const FILE_TRANSFER = {
-  maxFiles: 10,
-  maxBytes: 50 * 1024 * 1024,
-  chunkBytes: 96 * 1024,
-  /** Chunks sent ahead of the agent's acknowledgement. */
-  window: 3,
-} as const;
+export { FILE_TRANSFER } from './transfer.js';
 const TransferId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 
 export const ViewerFrame = z.discriminatedUnion('t', [
@@ -155,7 +167,9 @@ export type GatewayToViewer =
   | { t: 'connection_stage'; stage: 'gateway_accepted' | AgentViewerStage['stage']; relayId?: string; code?: AgentViewerStage['code'] }
   /** Another tab or device opened this browser (one controller at a time). */
   | { t: 'taken_over' }
-  | { t: 'file'; id: string; status: 'progress' | 'done' | 'error'; received?: number; reason?: string };
+  | { t: 'file'; id: string; status: 'progress' | 'done' | 'error'; received?: number; reason?: string }
+  /** A coding agent's bridge is connected (or not) and who may drive the browser (docs/agent-access.md). */
+  | { t: 'automation_status'; connected: boolean; control: ControlState };
 
 /** Claims of the single-use viewer token (Ed25519, 60 s, page 2). */
 export const ViewerTokenClaims = z.object({

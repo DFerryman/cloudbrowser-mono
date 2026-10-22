@@ -82,6 +82,8 @@ export async function toInstances(db: Db, rows: InstanceRow[]): Promise<Instance
       storageGb: r.storageGb,
       stopReason: r.status === 'sleeping' && stop.success ? stop.data : null,
       deletesAt: iso(retained.find((x) => x.instanceId === r.id)?.endsAt),
+      agentAccess: r.agentAccess,
+      agentControl: r.agentControl === 'user' || r.agentControl === 'privacy' ? r.agentControl : 'agent',
     };
   });
 }

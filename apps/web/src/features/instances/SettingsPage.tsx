@@ -9,6 +9,7 @@ import { PAGE_SIZE, usePagerLabels } from '../../lib/paging.js';
 import { useManagedInstance } from './BrowserLayout.js';
 import { DeleteBrowserForm } from './DeleteBrowser.js';
 import { NeverSleepDialog } from './NeverSleep.js';
+import { AgentAccessSection } from './AgentAccess.js';
 import { useMe, useRecentSessions, useUpdateInstance, useVerifyIp } from './hooks.js';
 import { regionPlace } from './region-names.js';
 
@@ -149,6 +150,10 @@ export function SettingsPage() {
           )}
           <Pagination page={sessionPage} hasMore={sessions.hasMore} onPage={setSessionPage} labels={pagerLabels} />
         </Section>
+      </div>
+
+      <div className="lg:col-span-2">
+        <AgentAccessSection instance={i} />
       </div>
 
       <Section title={t('settings.danger')} description={t('settings.deleteBody')} className="border-error/30 lg:col-span-2">

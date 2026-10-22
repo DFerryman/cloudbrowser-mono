@@ -4,49 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker, { Internal } from '../src/index.js';
 import { InstanceGateway } from '../src/instance-gateway.js';
 import type { Env } from '../src/env.js';
-
-class Socket {
-  static OPEN = 1;
-  readyState = 0;
-  attachment: unknown = null;
-  sent: unknown[] = [];
-  closed: { code?: number; reason?: string } | null = null;
-  send(frame: string) {
-    if (this.readyState !== Socket.OPEN) throw new Error('socket closed');
-    this.sent.push(JSON.parse(frame));
-  }
-  close(code?: number, reason?: string) { this.readyState = 3; this.closed = { code, reason }; }
-  serializeAttachment(value: unknown) {
-    if (this.readyState !== Socket.OPEN) throw new Error('accept the socket first');
-    this.attachment = value;
-  }
-  deserializeAttachment() { return this.attachment; }
-}
-
-const NativeResponse = Response;
-class UpgradeResponse extends NativeResponse {
-  webSocket?: Socket;
-  constructor(body: BodyInit | null, init: ResponseInit & { webSocket?: Socket } = {}) {
-    super(body, { ...init, status: init.status === 101 ? 200 : init.status });
-    if (init.status === 101) Object.defineProperty(this, 'status', { value: 101 });
-    this.webSocket = init.webSocket;
-  }
-}
-
-function state() {
-  const storage = new Map<string, unknown>();
-  const sockets: { ws: Socket; tags: string[] }[] = [];
-  return {
-    storage: {
-      get: async (key: string) => storage.get(key),
-      put: async (key: string, value: unknown) => void storage.set(key, value),
-      setAlarm: async (at: number) => void storage.set('alarm', at),
-    },
-    setWebSocketAutoResponse() {},
-    acceptWebSocket(ws: Socket, tags: string[]) { ws.readyState = Socket.OPEN; sockets.push({ ws, tags }); },
-    getWebSockets: (tag?: string) => sockets.filter((s) => !tag || s.tags.includes(tag)).map((s) => s.ws),
-  };
-}
+import { Socket, UpgradeResponse, state } from './harness.js';
 
 let d1: ReturnType<typeof createTestD1>;
 let env: Env;
@@ -77,6 +35,8 @@ beforeEach(() => {
       agentMessage: vi.fn().mockResolvedValue(null),
       redeemViewerToken: vi.fn().mockResolvedValue(true),
       archiveKey: vi.fn().mockResolvedValue('private-archive-key'),
+      authenticateAutomation: vi.fn().mockResolvedValue({ ok: false, reason: 'invalid_token' }),
+      endAutomationSession: vi.fn().mockResolvedValue(undefined),
     },
     INSTANCE_GATEWAY: {
       idFromName: (id: string) => id,
@@ -113,9 +73,9 @@ describe('gateway revocation', () => {
   it('advertises viewer-stage capability in both credential and reconnect welcomes', async () => {
     const log = vi.spyOn(console, 'info').mockImplementation(() => {});
     const reconnect = await open('agent');
-    expect(reconnect.socket.sent[0]).toEqual({ t: 'welcome', viewerStages: true });
+    expect(reconnect.socket.sent[0]).toEqual({ t: 'welcome', viewerStages: true, automation: { mode: 'agent', access: true } });
     const bootstrap = await open('agent', { 'x-cb-credential': 'PRIVATE-ISSUED-CREDENTIAL' });
-    expect(bootstrap.socket.sent[0]).toEqual({ t: 'welcome', credential: 'PRIVATE-ISSUED-CREDENTIAL', viewerStages: true });
+    expect(bootstrap.socket.sent[0]).toEqual({ t: 'welcome', credential: 'PRIVATE-ISSUED-CREDENTIAL', viewerStages: true, automation: { mode: 'agent', access: true } });
     expect(JSON.stringify(log.mock.calls)).not.toContain('PRIVATE-ISSUED-CREDENTIAL');
   });
 

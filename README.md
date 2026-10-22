@@ -39,8 +39,14 @@ packages/
   db/           Drizzle schema + D1 migrations (single schema authority)
   executors/    Executor interface, `aws-ec2` (the only provider) and the `fake` simulator
   viewer/       Live-view client: neko v3 over the gateway, WebRTC, input, IME, clipboard, stats
+  bridge/       Local MCP server pairing a coding agent with a browser (docs/agent-access.md)
   ui/           Design tokens and components
 ```
+
+A **coding agent** (Claude Code, Cursor, Codex, any MCP client) can drive a browser through the same
+Chrome and sign-ins the live view shows, while the user watches and takes control back with a single
+input. Access is on by default and can be turned off per browser. See
+[`docs/agent-access.md`](docs/agent-access.md).
 
 ## Local development
 
@@ -109,7 +115,20 @@ node packages/viewer/e2e/run.mjs <instance id> <wrangler log> shot.png
 ```
 
 The runner signs in to the real web app, opens the session view and checks that the fake neko's
-WebRTC video plays. User input uses one ordered WebSocket queue across mouse, touch, keyboard,
+WebRTC video plays.
+
+### Coding-agent bridge
+
+Pair once from a browser's Settings → Coding agent access, then run the bridge locally:
+
+```bash
+pnpm --filter @cloudbrowser/bridge build
+node packages/bridge/dist/cli.mjs pair --app http://localhost:8787 --code <code-from-settings>
+node packages/bridge/dist/cli.mjs serve                 # MCP over stdio for your coding agent
+```
+
+The bridge stores its credential at mode 0600 and exposes `screenshot`, `act`, `upload_files`,
+`attach_files` and `get_status` (docs/agent-access.md). User input uses one ordered WebSocket queue across mouse, touch, keyboard,
 IME and clipboard events, with backpressure and visible failure instead of silent input loss.
 
 On touch screens, tap to click and swipe with one or two fingers to scroll. Use the toolbar's

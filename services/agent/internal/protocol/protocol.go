@@ -57,7 +57,7 @@ type ViewerStage struct {
 
 // Incoming is any frame the gateway sends; fields are set according to T.
 type Incoming struct {
-	T            string          `json:"t"` // welcome | command | turn | viewer_open | viewer | viewer_close | pong
+	T            string          `json:"t"` // welcome | command | turn | viewer_open | viewer | viewer_close | automation_open | automation | automation_close | automation_control | pong
 	Credential   string          `json:"credential,omitempty"`
 	ViewerStages bool            `json:"viewerStages,omitempty"` // welcome capability; absent on older gateways
 	ID           string          `json:"id,omitempty"`
@@ -67,6 +67,40 @@ type Incoming struct {
 	SessionID    string          `json:"sessionId,omitempty"`
 	RelayID      string          `json:"relayId,omitempty"`
 	Data         json.RawMessage `json:"data,omitempty"`
+	// Coding-agent access (packages/contracts automation.ts): the persisted control mode in
+	// `welcome` and `automation_control`, and the bridge client of an `automation_open`.
+	Automation *AutomationWelcome `json:"automation,omitempty"`
+	Mode       string             `json:"mode,omitempty"`
+	Access     *bool              `json:"access,omitempty"`
+	ClientID   string             `json:"clientId,omitempty"`
+}
+
+// AutomationWelcome is the control state the gateway persisted: a manual takeover survives an
+// agent restart because the welcome carries it back.
+type AutomationWelcome struct {
+	Mode   string `json:"mode"` // agent | user | privacy
+	Access bool   `json:"access"`
+}
+
+// ControlState is who may drive the browser (contracts ControlState).
+type ControlState struct {
+	Controller string `json:"controller"` // none | agent | user
+	Mode       string `json:"mode"`       // agent | user | privacy
+	Epoch      int64  `json:"epoch"`
+}
+
+// ControlStateFrame reports a change of control to the gateway, which fans it out and persists it.
+type ControlStateFrame struct {
+	T       string       `json:"t"` // "control_state"
+	Control ControlState `json:"control"`
+	Reason  string       `json:"reason"`
+}
+
+// AutomationResult carries one response to a bridge session; Data is a contracts AutomationResponse.
+type AutomationResult struct {
+	T         string `json:"t"` // "automation_result"
+	SessionID string `json:"sessionId"`
+	Data      any    `json:"data"`
 }
 
 type IceServer struct {

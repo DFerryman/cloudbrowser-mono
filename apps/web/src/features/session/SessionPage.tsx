@@ -4,6 +4,7 @@ import { Button, cn, Menu, MenuItem, RegionIpChip, StatusBadge, useToast } from 
 import { useQuery } from '@tanstack/react-query';
 import {
   ArrowLeft,
+  Bot,
   ClipboardCopy,
   Command,
   Download,
@@ -20,7 +21,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import { COMBOS, qualityLevel, type TransferUpdate, type ViewerState, type ViewerStats } from '@cloudbrowser/viewer';
+import { COMBOS, qualityLevel, type AutomationStatus, type TransferUpdate, type ViewerState, type ViewerStats } from '@cloudbrowser/viewer';
 import { RemoteBrowserView, type RemoteBrowserHandle } from '@cloudbrowser/viewer/react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
@@ -29,7 +30,7 @@ import { useI18n } from '../../lib/i18n.js';
 import type { MessageKey } from '../../messages/en.js';
 import { keys, queryClient } from '../../lib/query.js';
 import { CreateProgress } from '../instances/CreateProgress.js';
-import { useInstance, useLifecycle, useVerifyIp } from '../instances/hooks.js';
+import { useInstance, useLifecycle, useSetControl, useVerifyIp } from '../instances/hooks.js';
 import { shownStatus, STATUS_TONE, statusKey } from '../instances/status.js';
 import { connectionDiagnosticReporter } from './diagnostics.js';
 import { sessionHeartbeat, viewingPresence } from './heartbeat.js';
@@ -132,6 +133,10 @@ export function SessionPage() {
   const uploadRef = useRef<HTMLInputElement>(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [inputInterrupted, setInputInterrupted] = useState(false);
+  // A coding agent's bridge (docs/agent-access.md): shown while one is connected; the user's own
+  // click takes control, and the banner is where control is handed back or screenshots paused.
+  const [automation, setAutomation] = useState<AutomationStatus | null>(null);
+  const setControl = useSetControl();
   /** While the on-screen keyboard is up: the part of the page left visible above it. */
   const [visibleArea, setVisibleArea] = useState<{ top: number; height: number } | null>(null);
   const openRequest = useRef<{ instanceId: string; promise: Promise<void> } | null>(null);
@@ -651,10 +656,18 @@ export function SessionPage() {
             onVideo={setStreaming}
             onInput={() => (hadInput.current = true)}
             onKeyboardChange={setKeyboardOpen}
+            onAutomation={setAutomation}
           />
         ) : null}
         {i?.status === 'running' && connect.isError ? <Overlay message={connectionErrorMessage(connect.error)} action={<Button onClick={() => void connect.refetch()}>{t('common.retry')}</Button>} /> : null}
         {overlay}
+        {live && automation && (automation.connected || automation.control.mode !== 'agent') ? (
+          <AgentBanner
+            status={automation}
+            busy={setControl.isPending}
+            onMode={(mode) => setControl.mutate({ id, mode }, { onError: (e) => toast(errorMessage(e), 'error') })}
+          />
+        ) : null}
         {session && !takenOver && i?.status === 'running' && sleepReason === 'idle' && idleLeft < IDLE_WARNING_MS ? (
           <div role="status" className="absolute inset-x-4 bottom-4 z-20 flex flex-wrap items-center justify-center gap-3 border border-amber-500/50 bg-zinc-950 p-4 text-sm text-zinc-100">
             <span>{t('overlay.idle', { seconds: Math.max(0, Math.ceil(idleLeft / 1000)) })}</span>
@@ -662,6 +675,30 @@ export function SessionPage() {
           </div>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Who drives the browser while a coding agent is paired. While the agent controls, any click or
+ * key of the user's takes over at once (the VM does that, not this banner); the banner then offers
+ * to hand control back, and a privacy pause that also withholds screenshots.
+ */
+function AgentBanner({ status, busy, onMode }: { status: AutomationStatus; busy: boolean; onMode: (mode: 'agent' | 'user' | 'privacy') => void }) {
+  const { t } = useI18n();
+  const { mode, controller } = status.control;
+  const message = !status.connected ? t('agents.banner.disconnected')
+    : mode === 'privacy' ? t('agents.banner.privacy')
+      : mode === 'user' ? t('agents.banner.user')
+        : controller === 'agent' ? t('agents.banner.agent') : t('agents.banner.idle');
+  return (
+    <div role="status" className={cn('absolute inset-x-4 top-3 z-20 flex flex-wrap items-center justify-center gap-x-3 gap-y-2 border bg-zinc-950/95 px-4 py-2.5 text-sm text-zinc-100',
+      mode === 'agent' && controller === 'agent' ? 'border-accent/60' : 'border-zinc-700')}>
+      <Bot className="size-4 shrink-0 text-zinc-300" aria-hidden />
+      <span>{message}</span>
+      {mode !== 'agent' ? <Button size="sm" variant="primary" disabled={busy} onClick={() => onMode('agent')}>{t('agents.handBack')}</Button> : null}
+      {mode === 'agent' && status.connected ? <Button size="sm" disabled={busy} onClick={() => onMode('user')}>{t('agents.pause')}</Button> : null}
+      {mode !== 'privacy' && status.connected ? <Button size="sm" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" disabled={busy} onClick={() => onMode('privacy')}>{t('agents.privacy')}</Button> : null}
     </div>
   );
 }

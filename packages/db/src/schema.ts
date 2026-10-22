@@ -199,6 +199,10 @@ export const browserInstances = sqliteTable(
     backupsEnabled: integer('backups_enabled', { mode: 'boolean' }).notNull().default(false),
     /** Machine tier (contracts TIERS): basic | premium. Set at creation, never changes (trigger). */
     tier: text('tier').notNull().default('basic'),
+    /** Whether paired coding agents may connect (docs/agent-access.md). Owner: api. */
+    agentAccess: integer('agent_access', { mode: 'boolean' }).notNull().default(true),
+    /** agent | user | privacy: who may drive the browser. Owner: api (user choices), VM via api (takeovers). */
+    agentControl: text('agent_control').notNull().default('agent'),
   },
   (t) => [index('instances_user_idx').on(t.userId), index('instances_status_idx').on(t.status)],
 );
@@ -476,6 +480,53 @@ export const agentCommands = sqliteTable(
     completedAt: ts('completed_at'),
   },
   (t) => [index('agent_commands_pending_idx').on(t.instanceId, t.status)],
+);
+
+/**
+ * A paired coding-agent bridge (docs/agent-access.md): the owner creates a pairing in Settings and
+ * the bridge redeems its code once for a long-lived credential. Only hashes are stored. Owner: api.
+ */
+export const automationClients = sqliteTable(
+  'automation_clients',
+  {
+    id: text('id').primaryKey(),
+    instanceId: text('instance_id')
+      .notNull()
+      .references(() => browserInstances.id),
+    userId: text('user_id').notNull(),
+    name: text('name').notNull(),
+    /** What the bridge said about the machine it runs on, at redemption. */
+    clientInfo: text('client_info'),
+    pairingHash: text('pairing_hash'),
+    pairingExpiresAt: ts('pairing_expires_at'),
+    credentialHash: text('credential_hash'),
+    createdAt: ts('created_at').notNull(),
+    activatedAt: ts('activated_at'),
+    lastSeenAt: ts('last_seen_at'),
+    revokedAt: ts('revoked_at'),
+  },
+  (t) => [index('automation_clients_instance_idx').on(t.instanceId, t.revokedAt), uniqueIndex('automation_clients_pairing_idx').on(t.pairingHash)],
+);
+
+/** One bridge connection the gateway admitted. Owner: api (through the gateway's RPCs). */
+export const automationSessions = sqliteTable(
+  'automation_sessions',
+  {
+    id: text('id').primaryKey(),
+    instanceId: text('instance_id')
+      .notNull()
+      .references(() => browserInstances.id),
+    clientId: text('client_id')
+      .notNull()
+      .references(() => automationClients.id),
+    userId: text('user_id').notNull(),
+    generation: integer('generation').notNull(),
+    startedAt: ts('started_at').notNull(),
+    lastSeenAt: ts('last_seen_at').notNull(),
+    endedAt: ts('ended_at'),
+    endReason: text('end_reason'),
+  },
+  (t) => [index('automation_sessions_instance_idx').on(t.instanceId, t.endedAt)],
 );
 
 /** Redeemed viewer token ids: each 60 s token works once (page 2). Owner: api; pruned by the reaper. */

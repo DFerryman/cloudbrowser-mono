@@ -63,6 +63,33 @@ export default {
       }
     }
 
+    // A coding agent's bridge (docs/agent-access.md), with the credential its pairing issued.
+    const automation = url.pathname.match(/^\/v1\/automation\/([A-Za-z0-9]+)$/);
+    if (automation) {
+      const instanceId = automation[1]!;
+      const identity = { instanceId, role: 'automation' as const };
+      connectionLog('automation_upgrade_requested', identity);
+      const [scheme, credential] = (req.headers.get('authorization') ?? '').split(' ');
+      if (scheme !== 'Bearer' || !credential) {
+        connectionLog('automation_upgrade_rejected', { ...identity, code: 'missing_credentials', status: 401 });
+        return text('unauthorized', 401);
+      }
+      try {
+        const auth = await env.API.authenticateAutomation({ instanceId, credential });
+        if (!auth.ok) {
+          connectionLog('automation_upgrade_rejected', { ...identity, code: auth.reason, status: 401 });
+          return text('unauthorized', 401);
+        }
+        return await forward(env, req, instanceId, {
+          'x-cb-role': 'automation', 'x-cb-session': auth.sessionId, 'x-cb-client': auth.clientId,
+          'x-cb-user': auth.userId, 'x-cb-generation': String(auth.generation),
+        });
+      } catch {
+        connectionLog('automation_upgrade_failed', { ...identity, code: 'gateway_unavailable', status: 503 });
+        return text('gateway unavailable', 503);
+      }
+    }
+
     const stream = url.pathname.match(/^\/v1\/stream\/([A-Za-z0-9]+)$/);
     if (stream) {
       const identity = { instanceId: stream[1], attemptId: connectionAttempt(url.searchParams.get('attemptId')), role: 'viewer' as const };
@@ -118,5 +145,25 @@ export class Internal extends WorkerEntrypoint<Env> {
       method: 'POST', headers: { 'x-cb-instance': instanceId },
     });
     if (!response.ok) throw new Error('gateway revocation failed');
+  }
+
+  /** The user's control choice (hand back, pause, privacy) or the access switch, pushed to the VM at once. */
+  async automationControl(instanceId: string, mode: 'agent' | 'user' | 'privacy', access: boolean): Promise<void> {
+    if (!/^[A-Za-z0-9]+$/.test(instanceId)) throw new Error('invalid instance id');
+    const response = await stub(this.env, instanceId).fetch('https://gateway/automation-control', {
+      method: 'POST', headers: { 'x-cb-instance': instanceId, 'content-type': 'application/json' },
+      body: JSON.stringify({ mode, access }),
+    });
+    if (!response.ok) throw new Error('gateway automation control failed');
+  }
+
+  /** Closes a revoked bridge's connection (all of the browser's bridges without a client id). */
+  async revokeAutomation(instanceId: string, clientId?: string): Promise<void> {
+    if (!/^[A-Za-z0-9]+$/.test(instanceId)) throw new Error('invalid instance id');
+    const response = await stub(this.env, instanceId).fetch('https://gateway/revoke-automation', {
+      method: 'POST', headers: { 'x-cb-instance': instanceId, 'content-type': 'application/json' },
+      body: JSON.stringify({ clientId: clientId ?? null }),
+    });
+    if (!response.ok) throw new Error('gateway automation revocation failed');
   }
 }

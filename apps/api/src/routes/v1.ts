@@ -21,9 +21,14 @@ import {
   BALANCE_GRACE_MS,
   UpdateInstanceBody,
   ViewerSession,
+  AutomationStatus,
+  CreatePairingBody,
+  Pairing,
+  SetControlBody,
   signViewerToken,
   type RegionId,
 } from '@cloudbrowser/contracts';
+import { automationStatus, createPairing, revokeClient, setAccess, setControl } from '../automation.js';
 import { turnIceServers } from '../turn.js';
 import { callerLocation, regionViews } from '../availability.js';
 import { awsInventory, billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, sha256Hex, settleRunningStatements } from '@cloudbrowser/db';
@@ -210,6 +215,8 @@ v1.openapi(
           backupsEnabled: false,
           idleTimeoutS: DEFAULT_IDLE_TIMEOUT_S,
           screen,
+          // Coding agents may connect unless the user unticked it in the create dialog.
+          agentAccess: body.agentAccess ?? true,
           fingerprint: { timezone: info.timezone, screen, chromeMajor: null },
           createdAt: now,
           updatedAt: now,
@@ -221,7 +228,7 @@ v1.openapi(
           actor: `user:${user.id}`,
           action: 'instance.create',
           target: `instance:${instanceId}`,
-          detail: { regionId: body.regionId, tier, priceVersion: body.priceVersion ?? null },
+          detail: { regionId: body.regionId, tier, priceVersion: body.priceVersion ?? null, agentAccess: body.agentAccess ?? true },
           createdAt: now,
         }),
       ],
@@ -257,7 +264,9 @@ v1.openapi(
     const db = c.get('db');
     const user = c.get('user');
     const row = await ownedInstance(c, c.req.valid('param').id);
-    const { priceVersion, ...body } = c.req.valid('json');
+    const { priceVersion, agentAccess, ...body } = c.req.valid('json');
+    // The access switch has its own side effects (ending bridge sessions), so it is applied apart.
+    if (agentAccess !== undefined && agentAccess !== row.agentAccess) await setAccess(db, c.env, user.id, row, agentAccess);
     const idleChanged = body.idleTimeoutS !== undefined && body.idleTimeoutS !== row.idleTimeoutS;
     if (body.idleTimeoutS !== undefined) {
       if (!(IDLE_TIMEOUT_OPTIONS_S as readonly number[]).includes(body.idleTimeoutS)) {
@@ -433,6 +442,72 @@ for (const l of lifecycle) {
     },
   );
 }
+
+// --- coding-agent access (docs/agent-access.md) ----------------------------------------------
+
+v1.openapi(
+  createRoute({
+    method: 'get',
+    path: '/instances/{id}/automation',
+    tags: ['automation'],
+    description: 'Coding-agent access: whether it is allowed, who may drive the browser now, the paired bridges and the connected one.',
+    request: { params: IdParam },
+    responses: { 200: jsonResponse(AutomationStatus, 'Coding-agent access'), ...errors },
+  }),
+  async (c) => c.json(await automationStatus(c.get('db'), await ownedInstance(c, c.req.valid('param').id)), 200),
+);
+
+v1.openapi(
+  createRoute({
+    method: 'post',
+    path: '/instances/{id}/automation/pairings',
+    tags: ['automation'],
+    description: 'Pairs a new bridge: returns a one-time code (shown once, valid ten minutes) that the bridge redeems for its credential.',
+    request: { params: IdParam, body: { content: { 'application/json': { schema: CreatePairingBody } }, required: true } },
+    responses: { 201: jsonResponse(Pairing, 'Pairing code'), ...errors },
+  }),
+  async (c) => {
+    const row = await ownedInstance(c, c.req.valid('param').id);
+    return c.json(await createPairing(c.get('db'), c.env, c.get('user').id, row, c.req.valid('json').name), 201);
+  },
+);
+
+v1.openapi(
+  createRoute({
+    method: 'delete',
+    path: '/instances/{id}/automation/clients/{clientId}',
+    tags: ['automation'],
+    description: 'Revokes a paired bridge: its credential stops working and its connection is closed at once.',
+    request: { params: z.object({ id: z.string().min(1).max(64), clientId: z.string().min(1).max(64) }) },
+    responses: { 204: { description: 'Revoked' }, ...errors },
+  }),
+  async (c) => {
+    const { id, clientId } = c.req.valid('param');
+    const row = await ownedInstance(c, id);
+    if (!(await revokeClient(c.get('db'), c.env, c.get('user').id, row, clientId))) throw problem(404, 'not_found');
+    return c.body(null, 204);
+  },
+);
+
+v1.openapi(
+  createRoute({
+    method: 'post',
+    path: '/instances/{id}/automation/control',
+    tags: ['automation'],
+    description: 'Who may drive the browser: `agent` hands control back to the connected coding agent, `user` keeps it, `privacy` also stops screenshots.',
+    request: { params: IdParam, body: { content: { 'application/json': { schema: SetControlBody } }, required: true } },
+    responses: { 200: jsonResponse(Instance, 'Updated browser'), ...errors },
+  }),
+  async (c) => {
+    const db = c.get('db');
+    const row = await ownedInstance(c, c.req.valid('param').id);
+    const { mode } = c.req.valid('json');
+    if (mode !== 'agent' || row.agentAccess) await setControl(db, c.env, c.get('user').id, row, mode);
+    else throw problem(409, 'agent_access_off', 'Coding agent access is turned off for this browser.');
+    notifyUser(c, c.get('user').id);
+    return c.json(await oneInstance(db, row.id), 200);
+  },
+);
 
 // --- IP ----------------------------------------------------------------------------------------
 

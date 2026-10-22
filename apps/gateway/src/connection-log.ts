@@ -9,7 +9,7 @@ export type ConnectionIdentity = {
 };
 
 type ConnectionEvidence = ConnectionIdentity & {
-  role?: 'agent' | 'viewer';
+  role?: 'agent' | 'viewer' | 'automation';
   code?: string;
   event?: string;
   elapsedMs?: number;

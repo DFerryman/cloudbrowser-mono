@@ -1,7 +1,7 @@
 import { CreateInstanceBody, DEFAULT_REGION, TIERS, browserEstimate, retentionReserve, type BrowserTier, type Instance, type Region, type RegionPricing } from '@cloudbrowser/contracts';
 import { Button, cn, Hint, Input, Label, SidePanel } from '@cloudbrowser/ui';
 import { DocsLink } from '../../app/DocsLink.js';
-import { AlertCircle, ChevronDown, ChevronRight, Gauge, Monitor } from 'lucide-react';
+import { AlertCircle, Bot, ChevronDown, ChevronRight, Gauge, Monitor } from 'lucide-react';
 import { useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
@@ -37,6 +37,8 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
   const [name, setName] = useState('');
   const [regionId, setRegionId] = useState<Region['id']>(DEFAULT_REGION);
   const [tier, setTier] = useState<BrowserTier>('basic');
+  // Coding agents may connect unless unticked here (docs/agent-access.md); changeable in Settings later.
+  const [agentAccess, setAgentAccess] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // The cost stays folded away so the panel reads cleanly; one click shows the whole estimate.
   const [costOpen, setCostOpen] = useState(false);
@@ -47,6 +49,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
       setName(initialInstance?.name ?? `Browser ${(instances.data?.length ?? 0) + 1}`);
       if (initialInstance) setRegionId(initialInstance.regionId);
       setTier(initialInstance?.tier ?? 'basic');
+      setAgentAccess(initialInstance?.agentAccess ?? true);
       setError(null);
     }
   }, [open, initialInstance?.id]);
@@ -74,7 +77,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    const parsed = CreateInstanceBody.safeParse({ name, regionId, priceVersion: price?.version ?? undefined, storageGb: price?.defaultStorageGb, ...(machine === 'premium' ? { tier: machine } : {}) });
+    const parsed = CreateInstanceBody.safeParse({ name, regionId, priceVersion: price?.version ?? undefined, storageGb: price?.defaultStorageGb, agentAccess, ...(machine === 'premium' ? { tier: machine } : {}) });
     if (!parsed.success) {
       setError(t('error.validation_failed'));
       return;
@@ -162,6 +165,17 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
             storageFor={storageFor}
             reasonFor={machine === 'premium' ? (r) => (r.premium ? null : t('create.region.noPremium')) : undefined}
           />
+        </fieldset>
+
+        <fieldset>
+          <legend className="mb-2 text-sm font-medium">{t('create.agents')}</legend>
+          <label className="flex cursor-pointer gap-3 border border-border p-3 transition-colors hover:border-border-strong has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent">
+            <input type="checkbox" className="mt-0.5 size-4 accent-[var(--color-fg)]" checked={agentAccess} onChange={(e) => setAgentAccess(e.target.checked)} />
+            <span className="min-w-0">
+              <span className="flex items-center gap-1.5 text-sm font-medium"><Bot className="size-4 text-muted" aria-hidden /> {t('create.agentAccess')}</span>
+              <span className="mt-0.5 block text-xs leading-relaxed text-subtle">{t('create.agentAccess.hint')} <DocsLink to="coding-agents" /></span>
+            </span>
+          </label>
         </fieldset>
 
         <section aria-labelledby={`${formId}-cost`} className="border border-border">

@@ -9,6 +9,7 @@ import { createDb, eventRow, schema, sha256Hex, unwrapArchiveKey, type Db } from
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Env } from './env.js';
 import { turnIceServers } from './turn.js';
+import { authenticateAutomation, endAutomationSession, recordControlState } from './automation.js';
 
 const { placements, archiveKeys, agentCredentials, agentCommands, instanceHealth, browserInstances, operations, viewerSessions, viewerTokens, auditLog, events } = schema;
 
@@ -77,6 +78,11 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
     case 'viewer_file':
     case 'viewer_stage':
       return null; // handled by the gateway
+    case 'automation_result':
+      return null; // relayed by the gateway to the bridge
+    case 'control_state':
+      await recordControlState(db, instanceId, frame, now);
+      return null;
     case 'turn_request':
       // neko's own TURN allocation, refreshed by the agent at each wake (page 5).
       return { t: 'turn', iceServers: await turnIceServers(env, 24 * 3600) };
@@ -239,5 +245,7 @@ export function internalApi(env: Env) {
     agentMessage: (instanceId: string, generation: number, frame: unknown) => agentMessage(env, db, instanceId, generation, frame),
     redeemViewerToken: (claims: ViewerTokenClaims) => redeemViewerToken(db, claims),
     archiveKey: (instanceId: string) => archiveKey(env, db, instanceId),
+    authenticateAutomation: (input: { instanceId: string; credential: string }) => authenticateAutomation(db, input),
+    endAutomationSession: (sessionId: string, reason: string) => endAutomationSession(db, sessionId, reason),
   };
 }

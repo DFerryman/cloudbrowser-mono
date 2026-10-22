@@ -3,7 +3,7 @@ import { isMac } from './keyboard.js';
 import { toRemotePoint, unrotate } from './mapping.js';
 import type { ConnectionDiagnostic, VideoQuality } from '@cloudbrowser/contracts';
 import type { VideoPreference } from './quality.js';
-import { RemoteBrowser, type ConnectInfo, type ViewerState } from './remote-browser.js';
+import { RemoteBrowser, type AutomationStatus, type ConnectInfo, type ViewerState } from './remote-browser.js';
 import type { ViewerStats } from './stats.js';
 import { TouchGestureController } from './touch.js';
 import { TextInputController } from './text-input.js';
@@ -61,6 +61,8 @@ export interface RemoteBrowserViewProps {
   rotated?: boolean;
   /** Files pasted or dropped into the view: started, progressing, done or failed. */
   onTransfer?: (update: TransferUpdate) => void;
+  /** A coding agent's bridge connected or left, or control changed hands. */
+  onAutomation?: (status: AutomationStatus) => void;
   /** Picture quality; the sharpest level adapting to the connection by default. Changes apply to the live stream. */
   video?: VideoPreference;
   /** The level being streamed now. */
@@ -75,7 +77,7 @@ export interface RemoteBrowserViewProps {
  * textarea that owns the keyboard (so IME composition works), and the remote cursor drawn locally.
  */
 export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserViewProps>(function RemoteBrowserView(
-  { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onTransfer, rotated = false, video, onVideo, muted = true, className, style },
+  { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onTransfer, onAutomation, rotated = false, video, onVideo, muted = true, className, style },
   ref,
 ) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -91,8 +93,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   const [boxSize, setBoxSize] = useState<{ width: number; height: number } | null>(null);
   const rotatedRef = useRef(rotated);
   rotatedRef.current = rotated;
-  const callbacks = useRef({ getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer });
-  callbacks.current = { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer };
+  const callbacks = useRef({ getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation });
+  callbacks.current = { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation };
   const initialVideo = useRef(video);
 
   const updateKeyboard = (open: boolean) => {
@@ -177,6 +179,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       ...(initialVideo.current ? { video: initialVideo.current } : {}),
       onVideo: (q) => callbacks.current.onVideo?.(q),
       onTransfer: (update) => callbacks.current.onTransfer?.(update),
+      onAutomation: (status) => callbacks.current.onAutomation?.(status),
     });
     browserRef.current = browser;
     textInputRef.current = new TextInputController({

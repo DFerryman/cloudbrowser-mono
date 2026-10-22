@@ -7,9 +7,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,6 +67,9 @@ type Session struct {
 	conn   *websocket.Conn
 	cancel context.CancelFunc
 	ctx    context.Context
+	// The session token (BaseURL mode) for neko's HTTP API: screenshots and the upload dialog.
+	token string
+	relay *Relay
 }
 
 // login signs in to neko v3 (POST /api/login) and returns the session token, from the response
@@ -113,25 +122,25 @@ func (r *Relay) login(ctx context.Context, sessionID string) (string, error) {
 	return "", &OpenError{Code: "login_unavailable"}
 }
 
-func (r *Relay) wsURL(ctx context.Context, sessionID string, progress func(string, string)) (string, error) {
+func (r *Relay) wsURL(ctx context.Context, sessionID string, progress func(string, string)) (string, string, error) {
 	if r.BaseURL == "" {
-		return r.URL, nil
+		return r.URL, "", nil
 	}
 	progress("login_start", "")
 	token, err := r.login(ctx, sessionID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	progress("login_ok", "")
 	u, err := url.Parse(strings.TrimRight(r.BaseURL, "/") + "/api/ws")
 	if err != nil {
-		return "", &OpenError{Code: "websocket_unavailable"}
+		return "", "", &OpenError{Code: "websocket_unavailable"}
 	}
 	u.Scheme = strings.Replace(u.Scheme, "http", "ws", 1)
 	q := u.Query()
 	q.Set("token", token)
 	u.RawQuery = q.Encode()
-	return u.String(), nil
+	return u.String(), token, nil
 }
 
 func (r *Relay) Open(ctx context.Context, sessionID string, toViewer func(json.RawMessage)) (*Session, error) {
@@ -151,7 +160,7 @@ func (r *Relay) OpenWithProgress(ctx context.Context, sessionID string, toViewer
 		progress("failed", err.(interface{ FailureCode() string }).FailureCode())
 		return nil, err
 	}
-	target, err := r.wsURL(sctx, sessionID, progress)
+	target, token, err := r.wsURL(sctx, sessionID, progress)
 	if err != nil {
 		return fail(err)
 	}
@@ -195,7 +204,7 @@ func (r *Relay) OpenWithProgress(ctx context.Context, sessionID string, toViewer
 	}
 	dcancel()
 	progress("desktop_ready", "")
-	s := &Session{conn: conn, cancel: cancel, ctx: sctx}
+	s := &Session{conn: conn, cancel: cancel, ctx: sctx, token: token, relay: r}
 	go func() {
 		defer cancel()
 		defer conn.CloseNow()
@@ -242,4 +251,94 @@ func (s *Session) Done() <-chan struct{} { return s.ctx.Done() }
 func (s *Session) Close() {
 	s.cancel()
 	_ = s.conn.CloseNow()
+}
+
+// --- coding-agent bridge (docs/agent-access.md) ---------------------------------------------
+
+func (r *Relay) httpClient() *http.Client {
+	if r.Client != nil {
+		return r.Client
+	}
+	return http.DefaultClient
+}
+
+// api sends an authenticated request to neko's HTTP API on the loopback interface.
+func (s *Session) api(ctx context.Context, method, path string, contentType string, body io.Reader) (*http.Response, error) {
+	if s.relay == nil || s.relay.BaseURL == "" || s.token == "" {
+		return nil, errors.New("neko http api unavailable")
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(s.relay.BaseURL, "/")+"/api"+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	return s.relay.httpClient().Do(req)
+}
+
+// Screenshot is the whole display as neko captures it (`GET /api/room/screen/shot.jpg`): every
+// window, the tab strip, the address bar and any dialog, without changing focus or layout.
+func (s *Session) Screenshot(ctx context.Context, quality int) ([]byte, error) {
+	resp, err := s.api(ctx, http.MethodGet, "/room/screen/shot.jpg?quality="+strconv.Itoa(quality), "", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("screenshot: status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < 4 || data[0] != 0xff || data[1] != 0xd8 {
+		return nil, errors.New("screenshot: not a jpeg")
+	}
+	return data, nil
+}
+
+// UploadDialog hands files to Chrome's open file-chooser dialog (`POST /api/room/upload/dialog`),
+// which neko fills in and confirms. False means no dialog is open.
+func (s *Session) UploadDialog(ctx context.Context, paths []string) (bool, error) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	for _, p := range paths {
+		f, err := os.Open(p)
+		if err != nil {
+			return false, err
+		}
+		part, err := w.CreateFormFile("files", filepath.Base(p))
+		if err == nil {
+			_, err = io.Copy(part, f)
+		}
+		f.Close()
+		if err != nil {
+			return false, err
+		}
+	}
+	if err := w.Close(); err != nil {
+		return false, err
+	}
+	resp, err := s.api(ctx, http.MethodPost, "/room/upload/dialog", w.FormDataContentType(), &buf)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent:
+		return true, nil
+	case resp.StatusCode == http.StatusUnprocessableEntity || resp.StatusCode == http.StatusBadRequest:
+		return false, nil // no file dialog is open
+	}
+	return false, fmt.Errorf("upload dialog: status %d", resp.StatusCode)
+}
+
+// OpenAutomation is the bridge's own neko session: its input and screen events, separate from
+// any viewer's relay.
+func (r *Relay) OpenAutomation(ctx context.Context, onEvent func(json.RawMessage)) (*Session, error) {
+	var nonce [6]byte
+	_, _ = rand.Read(nonce[:])
+	return r.Open(ctx, fmt.Sprintf("bridge-%x", nonce), onEvent)
 }

@@ -22,6 +22,8 @@ import { promotionSweep } from './promotions.js';
 import { adminRoute } from './routes/admin.js';
 import { publicRoute } from './routes/public.js';
 import { v1 } from './routes/v1.js';
+import { redeemPairing } from './automation.js';
+import { RedeemPairingBody } from '@cloudbrowser/contracts';
 
 const app = new OpenAPIHono<AppEnv>();
 
@@ -100,6 +102,22 @@ app.get('/api/echo/ip', (c) => {
 app.post('/api/webhooks/creem', async (c) => {
   const status = await receiveWebhook(c.env, c.get('db'), await c.req.text(), c.req.header('creem-signature'));
   return c.text(status === 200 ? 'ok' : 'rejected', status as 200 | 400 | 401);
+});
+
+/**
+ * A coding agent's bridge redeems its pairing code here (docs/agent-access.md): no user session
+ * and no origin check, because it runs on the user's own machine, outside the web app. The code
+ * is the proof; it works once, expires in ten minutes and attempts are rate limited per address.
+ */
+app.post('/api/automation/pair', async (c) => {
+  const ip = c.req.header('cf-connecting-ip') ?? 'unknown';
+  if (c.env.AUTH_LIMITER && !(await c.env.AUTH_LIMITER.limit({ key: `pair-ip:${ip}` })).success) return c.json(tooMany, 429);
+  const body = RedeemPairingBody.safeParse(await c.req.json().catch(() => null));
+  if (!body.success) throw problem(400, 'validation_failed', 'A pairing code is required.');
+  if (!c.env.GATEWAY_URL) throw problem(503, 'viewer_unavailable', 'The session gateway is not configured.');
+  const grant = await redeemPairing(c.get('db'), c.env, body.data.code, body.data.client);
+  if (!grant) throw problem(401, 'pairing_invalid', 'This pairing code is invalid, expired or already used. Create a new one in the browser\'s settings.');
+  return c.json(grant, 200);
 });
 
 /** State-changing requests must come from our own origin (page 1, "Security"). */
@@ -197,5 +215,11 @@ export class Internal extends WorkerEntrypoint<Env> {
   }
   archiveKey(instanceId: string) {
     return internalApi(this.env).archiveKey(instanceId);
+  }
+  authenticateAutomation(input: { instanceId: string; credential: string }) {
+    return internalApi(this.env).authenticateAutomation(input);
+  }
+  endAutomationSession(sessionId: string, reason: string) {
+    return internalApi(this.env).endAutomationSession(sessionId, reason);
   }
 }

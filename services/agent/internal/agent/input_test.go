@@ -24,11 +24,21 @@ type inputSession struct {
 	done chan struct{}
 	once sync.Once
 	err  error
+	// got receives every frame sent, when a test wants to see them (buffered; never blocks).
+	got chan json.RawMessage
 }
 
-func (s *inputSession) Send(json.RawMessage) error { return s.err }
-func (s *inputSession) Done() <-chan struct{}      { return s.done }
-func (s *inputSession) Close()                     { s.once.Do(func() { close(s.done) }) }
+func (s *inputSession) Send(m json.RawMessage) error {
+	if s.got != nil {
+		select {
+		case s.got <- append(json.RawMessage(nil), m...):
+		default:
+		}
+	}
+	return s.err
+}
+func (s *inputSession) Done() <-chan struct{} { return s.done }
+func (s *inputSession) Close()                { s.once.Do(func() { close(s.done) }) }
 
 func inputAgent(t *testing.T, session *inputSession) (*Agent, *websocket.Conn) {
 	t.Helper()

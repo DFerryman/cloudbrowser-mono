@@ -141,6 +141,27 @@ Cloudflare deployment.
   the route answers 410). Viewer open
   requests accept a stable Idempotency-Key so a timed-out retry cannot take over its own session.
   Paid access renewal deadlines are separate from actual credit-depletion warnings.
+- **Coding-agent access** (`docs/agent-access.md`): a local coding agent (Claude Code, Cursor,
+  Codex, any MCP client) drives a browser through the same Chrome, profile and desktop the live view
+  shows. A per-browser `agent_access` setting (on by default, unchecked at creation or toggled in
+  Settings) and an `agent_control` mode (agent / user / privacy) are the switch and the arbitration
+  state. The VM is the single input arbiter (`services/agent/control.go`): a real user input takes
+  control from the agent at once (running action cancelled, held keys released), pointer movement is
+  withheld while the agent drives, and a takeover is persisted so a reconnect or restart never hands
+  control back silently; only an explicit hand-back resumes the agent, which re-screenshots. The
+  agent's channel is independent of the Viewer: full-display screenshots from neko's screenshot
+  endpoint stamped with a screen version and control epoch (a resolution change voids old
+  coordinates rather than remapping them), bounded `act` steps (move, click, drag, scroll, keys,
+  type, paste, wait) run in order in the VM with cancellation, and a two-stage file workflow (store
+  without control, attach — picker/paste/drop — only under control). The gateway adds
+  `GET /v1/automation/:instanceId` and relays requests, screenshot blobs and control changes through
+  the browser's `InstanceGateway` Durable Object, enforcing the mode and one bridge at a time and
+  sharing the Viewer's credit and authorization lease. The api owns pairing (one-time code, ten
+  minutes, redeemed by the bridge at the public `POST /api/automation/pair` for a long-lived
+  credential; only hashes stored), revocation, the control choice and an audited history. The
+  **bridge** (`packages/bridge`) is the local MCP stdio server (`screenshot`, `act`, `upload_files`,
+  `attach_files`, `get_status`); the credential and channel never enter the model's context, and
+  local file reads are limited to allowed directories. The public site and user docs describe it.
 - **Session gateway** (`apps/gateway`): a Worker on `connect.example.com` plus one `InstanceGateway`
   Durable Object per browser (WebSocket hibernation). Agents authenticate with a single-use
   bootstrap token (swapped for a long-lived credential) or that credential, checked through the

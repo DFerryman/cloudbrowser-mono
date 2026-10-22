@@ -1,4 +1,4 @@
-import type { GatewayToViewer, IceServer } from '@cloudbrowser/contracts';
+import type { ControlState, GatewayToViewer, IceServer } from '@cloudbrowser/contracts';
 import { ConnectionDiagnostic, ConnectionMediaSnapshot, STREAM, VIDEO_QUALITIES, type VideoQuality } from '@cloudbrowser/contracts';
 import { decode, EV, fitScreen, sameScreen, screenOf, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
 import { QualityController, type VideoPreference } from './quality.js';
@@ -9,6 +9,9 @@ import { InputQueue, type InputFailure } from './input-queue.js';
 import { FileTransfers, type TransferAction, type TransferFile, type TransferUpdate } from './file-transfer.js';
 
 export type ViewerState = 'connecting' | 'live' | 'reconnecting' | 'agent-offline' | 'failed' | 'taken-over' | 'closed';
+
+/** A coding agent's bridge is connected (or not) and who may drive the browser (docs/agent-access.md). */
+export type AutomationStatus = { connected: boolean; control: ControlState };
 
 export interface ConnectInfo {
   gatewayUrl: string;
@@ -34,6 +37,8 @@ export interface RemoteBrowserOptions {
   onTransfer?: (update: TransferUpdate) => void;
   /** Delivery was interrupted; discard old input and require an explicit reconnect. */
   onInputError?: (reason: InputFailure) => void;
+  /** A coding agent connected, left, took or lost control; the gateway sends it on connect and on every change. */
+  onAutomation?: (status: AutomationStatus) => void;
   /** Map Cmd → Ctrl and Option → Alt (macOS default, page 5). */
   macToPc?: boolean;
   /** Picture quality; the sharpest level by default, adapting to the connection. */
@@ -761,6 +766,11 @@ export class RemoteBrowser {
         return;
       case 'file':
         this.files.handle(frame);
+        return;
+      case 'automation_status':
+        try {
+          this.opts.onAutomation?.({ connected: frame.connected, control: frame.control });
+        } catch { /* A status callback cannot affect the connection. */ }
     }
   }
 

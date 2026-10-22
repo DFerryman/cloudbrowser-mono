@@ -8,7 +8,7 @@ Everything in the control plane runs on Cloudflare. Five Workers share one D1 da
 | `cloudbrowser-engine` | `apps/engine/wrangler.jsonc` | No | Queue, cron every minute, service binding | D1, Queues (consumer + producer), Durable Object `EventHub`, R2 (presigned archive URLs) |
 | `cloudbrowser-reaper` | `apps/engine/wrangler.reaper.jsonc` | No | cron every minute | D1, Durable Object binding, R2 (deletes archives) |
 | `cloudbrowser-reconciler` | `apps/reconciler/wrangler.jsonc` | No | cron every 5 min | D1 |
-| `cloudbrowser-gateway` | `apps/gateway/wrangler.jsonc` | Yes: `connect.` domain | HTTP (WebSocket), Queue | Durable Object `InstanceGateway`, Queues (consumer), service binding to the api's `Internal` entrypoint, D1 |
+| `cloudbrowser-gateway` | `apps/gateway/wrangler.jsonc` | Yes: `connect.` domain | HTTP (WebSocket: viewers, agent tunnels and coding-agent bridges), Queue | Durable Object `InstanceGateway`, Queues (consumer), service binding to the api's `Internal` entrypoint, D1 |
 
 ## Prerequisites
 
@@ -322,6 +322,15 @@ CloudFormation stack, the access keys and the images are in [docs/aws.md](aws.md
 pnpm db:migrate:remote
 pnpm deploy   # builds everything, then deploys gateway, engine + reaper, reconciler and api, in that order
 ```
+
+Migration `0034` adds coding-agent access (`docs/agent-access.md`): the per-browser `agent_access`
+and `agent_control` columns and the `automation_clients` and `automation_sessions` tables. It is
+additive and can be applied before the new Workers. Deploy the gateway before the api as usual: the
+api reaches the gateway's `Internal` entrypoint for the new `automationControl` and
+`revokeAutomation` methods, and the gateway reaches the api's `Internal` entrypoint for
+`authenticateAutomation` and `endAutomationSession`. No new variables or secrets are needed; agent
+access is on by default for new browsers and the public `POST /api/automation/pair` endpoint uses
+the existing `AUTH_LIMITER`.
 
 The api deploys last: it binds to the gateway's `Internal` entrypoint (to revoke live connections),
 to the engine as a service and to its `EventHub` Durable Object. The gateway and the api call each

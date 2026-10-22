@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { RegionId } from './regions.js';
 import { OperationSummary } from './operations.js';
 import { BrowserTier } from './tiers.js';
+import { AgentControlMode } from './automation.js';
 
 /**
  * Engine-owned lifecycle status (page 2, "Instance lifecycle").
@@ -110,6 +111,10 @@ export const Instance = z.object({
   stopReason: StopReason.nullable(),
   /** Set while credit has run out: the browser is permanently deleted at this time unless credit is added. */
   deletesAt: z.string().nullable(),
+  /** Whether paired coding agents may connect to this browser (docs/agent-access.md). */
+  agentAccess: z.boolean(),
+  /** Who may drive it: a connected agent, or the user until they hand control back (`privacy` also withholds screenshots). */
+  agentControl: AgentControlMode,
 });
 export type Instance = z.infer<typeof Instance>;
 
@@ -152,6 +157,8 @@ export const CreateInstanceBody = z.object({
   priceVersion: PriceVersion,
   /** Data volume size shown in the quote; must still match the default size when confirmed. */
   storageGb: z.number().int().min(1).max(16_384),
+  /** Allow paired coding agents to connect (default true; the create dialog offers to turn it off). */
+  agentAccess: z.boolean().optional(),
 });
 export type CreateInstanceBody = z.infer<typeof CreateInstanceBody>;
 
@@ -162,6 +169,8 @@ export const UpdateInstanceBody = z
     idleTimeoutS: z.union([z.literal(NEVER_SLEEP_TIMEOUT_S), z.number().int().min(60).max(3600)]).optional(),
     screen: ScreenSize.optional(),
     priceVersion: PriceVersion.optional(),
+    /** Turning it off revokes every connected bridge at once. */
+    agentAccess: z.boolean().optional(),
   })
   .strict();
 export type UpdateInstanceBody = z.infer<typeof UpdateInstanceBody>;

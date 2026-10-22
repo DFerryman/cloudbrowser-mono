@@ -30,6 +30,8 @@ export const ErrorType = z.enum([
   'price_unavailable',
   'price_changed',
   'account_frozen',
+  'agent_access_off',
+  'pairing_invalid',
   'internal',
 ]);
 export type ErrorType = z.infer<typeof ErrorType>;
