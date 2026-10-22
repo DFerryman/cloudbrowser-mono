@@ -653,8 +653,13 @@ export class RemoteBrowser {
   }
 
   private selectVideo(id: VideoQuality) {
-    if (this.state !== 'live' || id === this.videoId || !this.levelsOffered) return;
+    if (!this.mediaConnected || id === this.videoId || !this.levelsOffered) return;
     this.sendNeko({ event: EV.SIGNAL_VIDEO, payload: { selector: { id, type: 'exact' }, auto: false } });
+  }
+
+  /** Media can receive diagnostics and quality changes before a rendered frame permits input. */
+  private get mediaConnected() {
+    return !this.stopped && this.peerConnected && this.pc?.connectionState === 'connected' && this.ws?.readyState === 1;
   }
 
   private videoChanged(id: unknown) {
@@ -831,6 +836,9 @@ export class RemoteBrowser {
         this.peerConnected = true;
         this.diagnostic('peer_connected');
         this.sendNeko({ event: EV.CONTROL_REQUEST });
+        // Waiting for a first frame must not also stop the measurements and quality changes
+        // that can recover it. This does not make the desktop live or release queued input.
+        this.startStats();
         this.becomeLive();
       } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
         this.inputReady = false;
@@ -892,20 +900,33 @@ export class RemoteBrowser {
   }
 
   private startStats() {
-    if (this.statsTimer || (!this.opts.onStats && !this.video.auto)) return;
+    const pc = this.pc;
+    const ws = this.ws;
+    const frameSequence = this.frameSequence;
+    if (!pc || !ws || !this.mediaConnected || this.statsTimer || (!this.opts.onStats && !this.video.auto)) return;
     let previous: { bytes: number; at: number } | null = null;
+    let pending = false;
+    const current = () => this.pc === pc && this.ws === ws && this.frameSequence === frameSequence && this.mediaConnected;
     this.counters = null;
     this.statsTimer = setInterval(async () => {
-      if (!this.pc) return;
-      let reading: Awaited<ReturnType<typeof readStats>>;
+      if (pending || !current()) return;
+      pending = true;
       try {
-        reading = await readStats(this.pc, previous);
-      } catch {
-        return; // A closing connection; the next one starts its own readings.
+        let reading: Awaited<ReturnType<typeof readStats>>;
+        try {
+          reading = await readStats(pc, previous);
+        } catch {
+          return; // A closing connection; the next one starts its own readings.
+        }
+        // An earlier peer may finish getStats after a reconnect or a new offer on this socket.
+        // Its counters must not change the replacement's quality or be reported as its stats.
+        if (!current()) return;
+        previous = { bytes: reading.bytes, at: Date.now() };
+        this.adapt(reading.stats, reading.counters);
+        this.opts.onStats?.(reading.stats);
+      } finally {
+        pending = false;
       }
-      previous = { bytes: reading.bytes, at: Date.now() };
-      this.adapt(reading.stats, reading.counters);
-      this.opts.onStats?.(reading.stats);
     }, this.opts.statsIntervalMs ?? 2000);
   }
 
@@ -913,7 +934,7 @@ export class RemoteBrowser {
     const before = this.counters;
     const at = Date.now();
     this.counters = { ...counters, at };
-    if (!this.qualityController || !before || this.state !== 'live' || !this.levelsOffered) return;
+    if (!this.qualityController || !before || !this.mediaConnected || !this.levelsOffered) return;
     const lost = Math.max(0, counters.lost - before.lost);
     const received = Math.max(0, counters.received - before.received);
     const seconds = (at - before.at) / 1000;

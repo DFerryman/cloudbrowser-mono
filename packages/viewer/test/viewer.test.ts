@@ -193,7 +193,7 @@ describe('RemoteBrowser', () => {
 
   function setup(
     iceServers: { urls: string[]; username?: string; credential?: string }[] = [],
-    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'maxConnectionAttempts' | 'requireFirstFrame' | 'onDiagnostic' | 'onStream' | 'onInputError' | 'video' | 'onVideo'> = {},
+    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'maxConnectionAttempts' | 'requireFirstFrame' | 'onDiagnostic' | 'onStream' | 'onStats' | 'onInputError' | 'video' | 'onVideo'> = {},
   ) {
     FakeWS.all = [];
     const getConnectInfo = vi.fn(async () => ({ gatewayUrl: 'wss://gw/v1/stream/i1', token: `tok${getConnectInfo.mock.calls.length}`, iceServers }));
@@ -1119,10 +1119,10 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
-  it('steps down when packets arrive but no frame decodes, and not when frames go unreported', async () => {
+  it.each([false, true])('steps down for undecoded frames, not unknown counts (requireFirstFrame=%s)', async (requireFirstFrame) => {
     vi.useFakeTimers();
     for (const framesDecoded of [0, undefined]) {
-      const { b } = setup([], { video: { quality: 'full', auto: true } });
+      const { b } = setup([], { requireFirstFrame, video: { quality: 'full', auto: true } });
       await b.connect();
       const ws = FakeWS.all[0]!;
       ws.push({ t: 'agent_online' });
@@ -1139,8 +1139,123 @@ describe('RemoteBrowser', () => {
       await vi.advanceTimersByTimeAsync(10_000);
       // Another level starts with a keyframe; a browser that reports no frame counts is left alone.
       expect(ws.neko('signal/video')).toEqual(framesDecoded === 0 ? [{ selector: { id: 'high', type: 'exact' }, auto: false }] : []);
+      expect(b.currentState).toBe(requireFirstFrame ? 'connecting' : 'live');
       b.disconnect();
     }
+  });
+
+  it('recovers picture quality before the first frame without enabling input or reporting live early', async () => {
+    vi.useFakeTimers();
+    const onStream = vi.fn();
+    const onStats = vi.fn();
+    const { b, states } = setup([], { requireFirstFrame: true, onStream, onStats });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init', payload: { webrtc: { videos: ['full', 'high', 'medium', 'low'] } } } });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer', video: { id: 'full' } } } });
+    await vi.advanceTimersByTimeAsync(0);
+    const pc = FakePC.last;
+    let received = 0;
+    pc.getStats = vi.fn(async () => {
+      received += 500;
+      return new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', packetsReceived: received, bytesReceived: received * 1200, framesDecoded: 0 }]]);
+    });
+    const track = { kind: 'video' };
+    pc.ontrack({ streams: [{ getTracks: () => [track] }], track });
+    pc.connect();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(ws.neko('signal/video')).toEqual([{ selector: { id: 'high', type: 'exact' }, auto: false }]);
+    expect(pc.getStats).toHaveBeenCalledTimes(5);
+    expect(onStats).toHaveBeenCalledTimes(5);
+    expect(states).not.toContain('live');
+    b.key(true, { key: 'a', code: 'KeyA' });
+    expect(ws.neko('control/keydown')).toEqual([]);
+    b.reportFirstFrame(new URL(ws.url).searchParams.get('attemptId')!, onStream.mock.calls[0]![2]);
+    expect(states.at(-1)).toBe('live');
+    // First-frame confirmation keeps the existing sampler instead of starting another one.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(pc.getStats).toHaveBeenCalledTimes(6);
+    b.disconnect();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([0, 9000])('keeps the connection deadline while adapting a peer connected after %i ms', async (connectDelay) => {
+    vi.useFakeTimers();
+    const onDiagnostic = vi.fn();
+    const { b, states } = setup([], { requireFirstFrame: true, maxConnectionAttempts: 1, onDiagnostic });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init', payload: { webrtc: { videos: ['full', 'high', 'medium', 'low'] } } } });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer', video: { id: 'full' } } } });
+    await vi.advanceTimersByTimeAsync(0);
+    let received = 0;
+    FakePC.last.getStats = async () => {
+      received += 500;
+      return new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', packetsReceived: received, bytesReceived: received * 1200, framesDecoded: 0 }]]);
+    };
+    await vi.advanceTimersByTimeAsync(connectDelay);
+    FakePC.last.connect();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(ws.neko('signal/video')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(10_000 - connectDelay - 1);
+    expect(states.at(-1)).toBe('connecting');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(states.at(-1)).toBe('failed');
+    expect(states).not.toContain('live');
+    expect(onDiagnostic.mock.calls.some(([d]) => d.code === 'connection_timeout')).toBe(true);
+    expect(onDiagnostic.mock.calls.some(([d]) => d.code === 'retry_exhausted')).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    b.disconnect();
+  });
+
+  it('collects pre-frame stats without overriding a fixed picture preference', async () => {
+    vi.useFakeTimers();
+    const onStats = vi.fn();
+    const { b } = setup([], { requireFirstFrame: true, video: { quality: 'high', auto: false }, onStats });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init', payload: { webrtc: { videos: ['full', 'high', 'medium', 'low'] } } } });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer', video: { id: 'high' } } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.getStats = async () => new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', packetsReceived: 0, framesDecoded: 0 }]]);
+    FakePC.last.connect();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(onStats).toHaveBeenCalledTimes(5);
+    expect(ws.neko('signal/video')).toEqual([]);
+    expect(b.currentState).toBe('connecting');
+    b.disconnect();
+  });
+
+  it('ignores pending media stats from a replaced peer and does not overlap reads', async () => {
+    vi.useFakeTimers();
+    const onStats = vi.fn();
+    const { b } = setup([], { requireFirstFrame: true, onStats });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'first' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    const old = FakePC.last;
+    let finishOld!: (report: Map<string, unknown>) => void;
+    old.getStats = vi.fn(() => new Promise((resolve) => { finishOld = resolve; }));
+    old.connect();
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(old.getStats).toHaveBeenCalledTimes(1);
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'replacement' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    const current = FakePC.last;
+    current.getStats = vi.fn(async () => new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', frameWidth: 1280 }]]));
+    current.connect();
+    finishOld(new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', frameWidth: 640 }]]));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onStats).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(current.getStats).toHaveBeenCalledTimes(1);
+    expect(onStats).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ width: 1280 }));
+    b.disconnect();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('streams the one video of an older browser image, without picture levels', async () => {
