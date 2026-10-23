@@ -22,8 +22,12 @@ function randomSecret() {
 }
 
 /**
- * Bootstrap tokens are single-use: the first connect swaps one for a long-lived credential, which
- * the agent stores. Afterwards only the credential works.
+ * A bootstrap token is swapped for a long-lived credential, which the agent stores. The credential
+ * reaches the agent only in the gateway's `welcome`, after this call: a failed tunnel admission or a
+ * lost response would otherwise leave the agent with a spent token and no credential, locked out
+ * for good. So until the agent first connects with a credential, its bootstrap token keeps working
+ * (within its expiry) and each use issues a new credential that replaces the previous one; that
+ * first credential connect ends the token. Afterwards only the credential works.
  */
 export async function authenticateAgent(
   db: Db,
@@ -35,9 +39,14 @@ export async function authenticateAgent(
   if (!row || !inst || inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) return { ok: false, reason: 'unknown_instance' };
 
   if (input.credential) {
-    return row.credentialHash && row.credentialHash === (await sha256Hex(input.credential))
-      ? { ok: true, generation: row.generation }
-      : { ok: false, reason: 'invalid_token' };
+    const hash = await sha256Hex(input.credential);
+    if (!row.credentialHash || row.credentialHash !== hash) return { ok: false, reason: 'invalid_token' };
+    // The agent has its credential: the bootstrap token has done its job.
+    if (row.bootstrapHash) {
+      await db.update(agentCredentials).set({ bootstrapHash: null })
+        .where(and(eq(agentCredentials.instanceId, input.instanceId), eq(agentCredentials.credentialHash, hash)));
+    }
+    return { ok: true, generation: row.generation };
   }
   if (input.bootstrap) {
     if (!row.bootstrapHash || row.bootstrapHash !== (await sha256Hex(input.bootstrap))) return { ok: false, reason: 'invalid_token' };
@@ -45,7 +54,7 @@ export async function authenticateAgent(
     const credential = randomSecret();
     const activated = await db
       .update(agentCredentials)
-      .set({ credentialHash: await sha256Hex(credential), bootstrapHash: null, activatedAt: now })
+      .set({ credentialHash: await sha256Hex(credential), activatedAt: row.activatedAt ?? now })
       .where(and(eq(agentCredentials.instanceId, input.instanceId), eq(agentCredentials.bootstrapHash, row.bootstrapHash)))
       .returning({ instanceId: agentCredentials.instanceId });
     // A deletion or another bootstrap activation may have won after the read above.

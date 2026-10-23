@@ -93,12 +93,17 @@ describe('permanent deletion and browser profile isolation', () => {
     expect(await access.api.redeemViewerToken({ ...access.claims, uid: 'other-user' })).toBe(false);
   });
 
-  it('activates a bootstrap at most once even when two handshakes race', async () => {
+  it('leaves exactly one working credential even when two bootstrap handshakes race', async () => {
     const id = await createBrowser();
     const token = 'one-use-bootstrap';
     t.d1.sqlite.prepare('UPDATE agent_credentials SET bootstrap_hash = ?, bootstrap_expires_at = ? WHERE instance_id = ?').run(await sha256Hex(token), Date.now() + 60_000, id);
     const api = internalApi(t.env as never);
     const attempts = await Promise.all([api.authenticateAgent({ instanceId: id, bootstrap: token }), api.authenticateAgent({ instanceId: id, bootstrap: token })]);
-    expect(attempts.filter((a) => a.ok)).toHaveLength(1);
+    const issued = attempts.flatMap((a) => (a.ok && a.credential ? [a.credential] : []));
+    const working = [];
+    for (const credential of issued) if ((await api.authenticateAgent({ instanceId: id, credential })).ok) working.push(credential);
+    expect(working).toHaveLength(1);
+    // Its first use spends the bootstrap token.
+    expect(await api.authenticateAgent({ instanceId: id, bootstrap: token })).toEqual({ ok: false, reason: 'invalid_token' });
   });
 });
