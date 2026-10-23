@@ -6,7 +6,7 @@ import { FakeEc2 } from '../../../packages/executors/test/fake-ec2.js';
 
 const REGION = 'ap-northeast-1';
 let n = 0;
-const ctx = (): OpContext => ({ operationId: `op${++n}`, step: 'allocate_ip', token: `op${n}:allocate_ip:1`, tags: { 'cb:managed': 'true', 'cb:env': 'test' }, deadline: Date.now() + 60_000 });
+const ctx = (): OpContext => ({ operationId: `op${++n}`, step: 'allocate_ip', token: `op${n}:allocate_ip:1`, tags: { 'cb:managed': 'true', 'cb:env': 'test', 'cb:instance': 'inst1', 'cb:op': `op${n}` }, deadline: Date.now() + 60_000 });
 
 afterEach(() => vi.unstubAllGlobals());
 
