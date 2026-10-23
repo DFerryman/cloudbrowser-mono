@@ -561,8 +561,8 @@ export function SessionPage() {
   const agentKey = agentShown && automation ? agentState(automation) : null;
   const [agentNotice, setAgentNotice] = useState<AgentState | null>(null);
   const lastAgentKey = useRef<AgentState | null>(null);
-  // Who drives the browser lives in a toolbar chip; a change while the user watches is also said
-  // once, briefly. A pause found on arrival is not news (it persists until handed back), so only
+  // Who drives the browser is shown by the picture's outline and a toolbar button; a change while
+  // the user watches is also said once, briefly. A pause found on arrival is not news (it persists until handed back), so only
   // an agent already driving is announced then.
   useEffect(() => {
     if (!agentKey) { lastAgentKey.current = null; return; }
@@ -894,11 +894,11 @@ export function SessionPage() {
             {sizeButton}
           </div>
         ) : null}
-        {agentKey === 'agent' ? (
-          // The agent is driving: said by the frame's edge, which covers nothing of the page.
-          <div aria-hidden data-testid="agent-driving" className="pointer-events-none absolute inset-0 z-10 ring-2 ring-inset ring-accent/70" />
+        {agentKey ? (
+          // Who has control, said by the picture's edge, which covers nothing of the page.
+          <div aria-hidden data-testid="agent-frame" data-control={AGENT_SIDE[agentKey]} className={cn('pointer-events-none absolute inset-0 z-10 transition-shadow duration-300', AGENT_FRAME[agentKey])} />
         ) : null}
-        {agentShown && agentNotice ? <AgentNotice state={agentNotice} onDismiss={() => setAgentNotice(null)} /> : null}
+        {agentShown && agentNotice ? <AgentNotice state={agentNotice} raised={maximized} onDismiss={() => setAgentNotice(null)} /> : null}
         {session && !takenOver && i?.status === 'running' && sleepReason === 'idle' && idleLeft < IDLE_WARNING_MS ? (
           <div role="status" className="absolute inset-x-4 bottom-4 z-20 flex flex-wrap items-center justify-center gap-3 border border-amber-500/50 bg-zinc-950 p-4 text-sm text-zinc-100">
             <span>{t('overlay.idle', { seconds: Math.max(0, Math.ceil(idleLeft / 1000)) })}</span>
@@ -920,12 +920,24 @@ function agentState(status: AutomationStatus): AgentState {
   return controller === 'agent' ? 'agent' : 'idle';
 }
 
+/** Whose the browser is: the agent's while it may act (orange), the user's once they took over (blue). */
+const AGENT_SIDE: Record<AgentState, 'agent' | 'user'> = { agent: 'agent', idle: 'agent', user: 'user', privacy: 'user', disconnected: 'user' };
+
 const AGENT_DOT: Record<AgentState, string> = {
-  agent: 'bg-accent animate-pulse',
-  idle: 'bg-running',
-  user: 'bg-starting',
-  privacy: 'bg-sleeping',
-  disconnected: 'bg-starting',
+  agent: 'bg-orange-500 animate-pulse',
+  idle: 'bg-orange-500/60',
+  user: 'bg-blue-500',
+  privacy: 'bg-blue-500',
+  disconnected: 'bg-blue-500',
+};
+
+/** The outline around the picture: strongest while the agent is acting, quieter while it only may. */
+const AGENT_FRAME: Record<AgentState, string> = {
+  agent: 'inset-ring-[3px] inset-ring-orange-500 inset-shadow-[0_0_28px] inset-shadow-orange-500/40',
+  idle: 'inset-ring-2 inset-ring-orange-500/50',
+  user: 'inset-ring-[3px] inset-ring-blue-500 inset-shadow-[0_0_16px] inset-shadow-blue-500/25',
+  privacy: 'inset-ring-[3px] inset-ring-blue-500 inset-shadow-[0_0_16px] inset-shadow-blue-500/25',
+  disconnected: 'inset-ring-[3px] inset-ring-blue-500 inset-shadow-[0_0_16px] inset-shadow-blue-500/25',
 };
 
 /**
@@ -966,12 +978,16 @@ function AgentControlMenu({ status, busy, onMode, onCloseAutoFocus }: {
   );
 }
 
-/** A change of who drives the browser, said once over the picture: small, closable, and gone after a few seconds. */
-function AgentNotice({ state, onDismiss }: { state: AgentState; onDismiss: () => void }) {
+/**
+ * A change of who drives the browser, said once over the picture: small, closable, and gone after
+ * a few seconds. It sits at the bottom, away from Chrome's tabs and address bar, which the user
+ * often reaches for right after taking over; above the maximized view's controls when they show.
+ */
+function AgentNotice({ state, raised, onDismiss }: { state: AgentState; raised: boolean; onDismiss: () => void }) {
   const { t } = useI18n();
   return (
-    <div role="status" data-testid="agent-notice" className="absolute top-3 left-1/2 z-20 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-2 border border-zinc-700 bg-zinc-950/90 py-1 pr-1 pl-3 text-xs text-zinc-100 shadow-pop backdrop-blur">
-      <Bot className="size-3.5 shrink-0 text-zinc-300" aria-hidden />
+    <div role="status" data-testid="agent-notice" className={cn('absolute left-1/2 z-20 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-2 border border-l-2 border-zinc-700 bg-zinc-950/90 py-1 pr-1 pl-3 text-xs text-zinc-100 shadow-pop backdrop-blur', raised ? 'bottom-16' : 'bottom-3', AGENT_SIDE[state] === 'agent' ? 'border-l-orange-500' : 'border-l-blue-500')}>
+      <Bot className={cn('size-3.5 shrink-0', AGENT_SIDE[state] === 'agent' ? 'text-orange-400' : 'text-blue-400')} aria-hidden />
       <span className="min-w-0">{t(`agents.banner.${state}`)}</span>
       <button type="button" className="grid size-6 shrink-0 place-items-center text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={t('agents.notice.dismiss')} onClick={onDismiss}>
         <X className="size-3.5" />
