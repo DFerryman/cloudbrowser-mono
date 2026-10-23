@@ -97,9 +97,9 @@ app.use('/api/auth/*', requireTurnstile, limitSignIn);
 
 /**
  * "Sign out everywhere" (and "sign out other devices") also revokes the user's coding-agent keys
- * (docs/agent-access.md): a session the user is ending may have created one. This wraps the two
- * Better Auth endpoints instead of using an auth hook, because the user is only known before the
- * endpoint deletes the sessions, and the keys are revoked only once that succeeded.
+ * (docs/agent-access.md): a session the user is ending may have created one. The two Better Auth
+ * endpoints are wrapped here, next to the rest of the request plumbing: the user is read from the
+ * session before the endpoint ends it, and the keys are revoked only when it succeeded.
  */
 app.post('/api/auth/revoke-sessions', revokeAgentKeysToo);
 app.post('/api/auth/revoke-other-sessions', revokeAgentKeysToo);
