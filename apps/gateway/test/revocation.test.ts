@@ -35,7 +35,8 @@ beforeEach(() => {
       agentMessage: vi.fn().mockResolvedValue(null),
       redeemViewerToken: vi.fn().mockResolvedValue(true),
       archiveKey: vi.fn().mockResolvedValue('private-archive-key'),
-      authenticateAutomation: vi.fn().mockResolvedValue({ ok: false, reason: 'invalid_token' }),
+      authenticateMcp: vi.fn().mockResolvedValue({ ok: false, reason: 'invalid_token' }),
+      openAutomationSession: vi.fn().mockResolvedValue({ sessionId: 'mcp1' }),
       endAutomationSession: vi.fn().mockResolvedValue(undefined),
     },
     INSTANCE_GATEWAY: {
@@ -213,6 +214,8 @@ describe('gateway revocation', () => {
       VALUES ('cmd1', 'browser1', 'ip_check', '{}', 'pending', 0)`);
     await frame(agent.socket, { t: 'event', kind: 'heartbeat', data: {} });
     expect(env.API.agentMessage).toHaveBeenCalledWith('browser1', 1, { t: 'event', kind: 'heartbeat', data: {} });
+    // Delivery runs beside the agent's frames, not in their queue.
+    await ctx.settle();
     expect(agent.socket.sent.at(-1)).toMatchObject({ t: 'command', id: 'cmd1' });
     expect(d1.sqlite.prepare(`SELECT status FROM agent_commands WHERE id = 'cmd1'`).get()).toEqual({ status: 'delivered' });
   });
@@ -670,7 +673,7 @@ describe('gateway revocation', () => {
     const privateKey = await crypto.subtle.exportKey('jwk', pair.privateKey);
     env.VIEWER_TOKEN_PUBLIC_KEY = JSON.stringify(await crypto.subtle.exportKey('jwk', pair.publicKey));
     const signed = await signViewerToken(privateKey, { iid: 'browser1', uid: 'owner1', sid: 'viewer1', jti: 'newtoken', exp: Math.floor(Date.now() / 1000) + 60 });
-    const agentRequest = new Request('https://connect.test/v1/agent', { headers: { upgrade: 'websocket', 'x-instance-id': 'browser1', authorization: 'Bearer old-credential' } });
+    const agentRequest = new Request('https://connect.test/v1/agent', { headers: { upgrade: 'websocket', 'x-instance-id': 'browser1', authorization: `Bearer ${'c'.repeat(64)}` } });
     expect((await worker.fetch!(agentRequest, env, {} as ExecutionContext)).status).toBe(101);
     expect((await worker.fetch!(new Request(`https://connect.test/v1/stream/browser1?token=${signed}`, { headers: { upgrade: 'websocket' } }), env, {} as ExecutionContext)).status).toBe(101);
     d1.sqlite.exec(`UPDATE browser_instances SET desired_state = 'deleted' WHERE id = 'browser1'`);
