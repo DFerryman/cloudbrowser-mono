@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"net/url"
 	"os"
 	"path"
@@ -116,7 +118,7 @@ func (a *Agent) fileFrame(ctx context.Context, sessionID, relayID string, f prot
 }
 
 func (a *Agent) beginTransfer(sessionID, relayID string, f protocol.ViewerFrame) string {
-	if a.cfg.UploadDir == "" || a.cfg.UploadBrowserDir == "" {
+	if !a.uploadsConfigured() {
 		return "unsupported"
 	}
 	if !transferID.MatchString(f.ID) || len(f.Files) == 0 || len(f.Files) > maxTransferFiles {
@@ -156,6 +158,9 @@ func (a *Agent) beginTransfer(sessionID, relayID string, f protocol.ViewerFrame)
 	}
 	if active >= maxTransfers {
 		return "busy"
+	}
+	if reason := a.checkUploadDir(); reason != "" {
+		return reason
 	}
 	a.pruneUploads()
 	t := &transfer{sessionID: sessionID, relayID: relayID, id: f.ID, action: f.Action, files: f.Files}
@@ -368,7 +373,56 @@ func (a *Agent) fileStatus(ctx context.Context, sessionID, relayID, id, status s
 	_ = a.write(ctx, protocol.ViewerFile{T: "viewer_file", SessionID: sessionID, RelayID: relayID, ID: id, Status: status, Received: received, Reason: reason})
 }
 
-// pruneUploads removes uploads older than uploadMaxAge (all of them with maxAge 0).
+// uploadsConfigured is whether files can be received at all: an upload directory is configured
+// and has not been refused (checkUploadDir).
+func (a *Agent) uploadsConfigured() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfg.UploadDir != "" && a.cfg.UploadBrowserDir != "" && !a.uploadsRefused
+}
+
+// checkUploadDir makes sure UploadDir is still the directory the agent made, before anything is
+// written into it or removed from it: "" when it is, "unsupported" when transfers are off. The
+// agent runs as root, and the upload directory lies on the data volume inside a directory the
+// browser's own user owns, so a compromised browser could put a symlink in its place and have the
+// agent write files elsewhere or prune another directory. A symlink, anything but a directory, or
+// a directory the agent's user does not own turns transfers off until the agent restarts. A
+// missing directory is made.
+func (a *Agent) checkUploadDir() string {
+	if !a.uploadsConfigured() {
+		return "unsupported"
+	}
+	info, err := os.Lstat(a.cfg.UploadDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		if err = os.Mkdir(a.cfg.UploadDir, 0o755); err == nil || errors.Is(err, fs.ErrExist) {
+			info, err = os.Lstat(a.cfg.UploadDir)
+		}
+	}
+	problem := ""
+	switch {
+	case err != nil:
+		a.log.Warn("upload directory", "err", err)
+		return "write_failed" // nothing suspicious, and the next transfer looks again
+	case info.Mode()&fs.ModeSymlink != 0:
+		problem = "a symbolic link"
+	case !info.IsDir():
+		problem = "not a directory"
+	case !ownedByAgent(info):
+		problem = "owned by another user"
+	}
+	if problem == "" {
+		return ""
+	}
+	a.mu.Lock()
+	a.uploadsRefused = true
+	a.mu.Unlock()
+	a.log.Error("upload directory refused; file transfers are off", "dir", a.cfg.UploadDir, "problem", problem)
+	return "unsupported"
+}
+
+// pruneUploads removes uploads older than uploadMaxAge (all of them with maxAge 0). Callers check
+// the directory first (checkUploadDir); entries are removed without following symlinks, so a link
+// in the directory goes, never what it points to.
 func (a *Agent) pruneUploads(maxAge ...time.Duration) {
 	age := uploadMaxAge
 	if len(maxAge) > 0 {
@@ -385,7 +439,7 @@ func (a *Agent) pruneUploads(maxAge ...time.Duration) {
 	}
 	a.mu.Unlock()
 	for _, e := range entries {
-		info, err := e.Info()
+		info, err := e.Info() // Lstat: a symlink's own time
 		if err != nil || active[e.Name()] || time.Since(info.ModTime()) < age {
 			continue
 		}

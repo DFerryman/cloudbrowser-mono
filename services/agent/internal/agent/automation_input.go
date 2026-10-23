@@ -23,6 +23,9 @@ const (
 	typeGap     = 8 * time.Millisecond
 	maxSteps    = 32
 	maxTypeText = 4000
+	// sendCost bounds what one input event costs besides its pacing (a write to neko on the
+	// loopback interface): with the pacing it makes step.cost's estimate of an action's length.
+	sendCost = time.Millisecond
 )
 
 type step struct {
@@ -46,27 +49,46 @@ type point struct {
 	Y int `json:"y"`
 }
 
-func parseSteps(raw []json.RawMessage) ([]step, error) {
+// stepError is a refused step: why ("invalid" or "unknown_key") and which one.
+type stepError struct {
+	reason string
+	index  int
+	err    error
+}
+
+func (e *stepError) Error() string { return fmt.Sprintf("step %d: %v", e.index, e.err) }
+
+var errUnknownKey = errors.New("unknown key")
+
+// parseSteps validates the steps and estimates how long they take to run, pacing included, so
+// an action that cannot finish within maxActDuration is refused before any of it runs.
+func parseSteps(raw []json.RawMessage) ([]step, time.Duration, error) {
 	if len(raw) == 0 || len(raw) > maxSteps {
-		return nil, errors.New("step count")
+		return nil, 0, errors.New("step count")
 	}
 	steps := make([]step, 0, len(raw))
-	for _, r := range raw {
+	var cost time.Duration
+	for i, r := range raw {
 		var s step
 		var xy struct {
 			X *int `json:"x"`
 			Y *int `json:"y"`
 		}
 		if json.Unmarshal(r, &s) != nil || json.Unmarshal(r, &xy) != nil {
-			return nil, errors.New("step")
+			return nil, 0, &stepError{reason: "invalid", index: i, err: errors.New("step")}
 		}
 		s.X, s.Y = xy.X, xy.Y
 		if err := s.validate(); err != nil {
-			return nil, err
+			reason := "invalid"
+			if errors.Is(err, errUnknownKey) {
+				reason = "unknown_key"
+			}
+			return nil, 0, &stepError{reason: reason, index: i, err: err}
 		}
 		steps = append(steps, s)
+		cost += s.cost()
 	}
-	return steps, nil
+	return steps, cost, nil
 }
 
 func (s *step) validate() error {
@@ -81,7 +103,10 @@ func (s *step) validate() error {
 		return errors.New("button")
 	}
 	for _, m := range s.Modifiers {
-		if _, ok := keysymForName(m); !ok || !isModifier(m) {
+		if _, ok := keysymForName(m); !ok {
+			return fmt.Errorf("modifier %q: %w", m, errUnknownKey)
+		}
+		if !isModifier(m) {
 			return errors.New("modifier")
 		}
 	}
@@ -120,7 +145,7 @@ func (s *step) validate() error {
 		}
 		for _, k := range s.Keys {
 			if _, ok := keysymForName(k); !ok {
-				return fmt.Errorf("key %q", k)
+				return fmt.Errorf("key %q: %w", k, errUnknownKey)
 			}
 		}
 	case "keyhold":
@@ -128,7 +153,7 @@ func (s *step) validate() error {
 			return errors.New("keyhold needs down")
 		}
 		if _, ok := keysymForName(s.Key); !ok {
-			return errors.New("key")
+			return fmt.Errorf("key %q: %w", s.Key, errUnknownKey)
 		}
 	case "type", "paste":
 		if s.Text == "" || len(s.Text) > maxTypeText*4 || utf8.RuneCountInString(s.Text) > maxTypeText || !utf8.ValidString(s.Text) {
@@ -142,6 +167,54 @@ func (s *step) validate() error {
 		return errors.New("type")
 	}
 	return nil
+}
+
+// cost is how long runSteps takes for the step: its input events, its pacing and waits, and the
+// pause after every step.
+func (s *step) cost() time.Duration {
+	d := pressGap
+	if len(s.Modifiers) > 0 {
+		d += time.Duration(2*len(s.Modifiers))*sendCost + pressGap
+	}
+	if s.X != nil && s.Type != "move" {
+		d += sendCost + pressGap // the move to the point first
+	}
+	switch s.Type {
+	case "move", "button", "scroll", "keyhold", "paste":
+		d += sendCost
+	case "click":
+		d += time.Duration(s.Count)*(2*sendCost+pressGap) + time.Duration(s.Count-1)*clickGap
+	case "drag":
+		d += 3*sendCost + pressGap + 2*clickGap + time.Duration(len(s.Path)-1)*(sendCost+dragGap)
+	case "key":
+		d += time.Duration(2*len(s.Keys)) * (sendCost + pressGap)
+	case "type":
+		d += typeCost(s.Text)
+	case "wait":
+		d += time.Duration(s.Ms) * time.Millisecond
+	}
+	return d
+}
+
+// typeCost follows typeText: a printable ASCII character, Enter or Tab is up to four key events
+// and a typeGap; each run of other characters is one paste and a clickGap.
+func typeCost(text string) time.Duration {
+	var d time.Duration
+	pasting := false
+	for _, r := range text {
+		if r >= 0x80 {
+			if !pasting {
+				d += sendCost + clickGap
+			}
+			pasting = true
+			continue
+		}
+		pasting = false
+		if r == '\n' || r == '\r' || r == '\t' || (r >= 0x20 && r <= 0x7e) {
+			d += 4*sendCost + typeGap
+		}
+	}
+	return d
 }
 
 var x11Buttons = map[string]int64{"left": 1, "middle": 2, "right": 3, "back": 8, "forward": 9}
@@ -234,50 +307,61 @@ func pace(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// key presses or releases one key and keeps the list of keys the bridge holds. The context
+// check, the list and the send happen under s.mu, so releaseHeld (a takeover) either sees a
+// press and releases it, or the stopped action never sends it. A release ignores the context: a
+// stopped chord must still let go of its keys. It is sent only for a key the bridge still holds,
+// since releaseHeld may have released it already and by then the same key can be the user's own.
 func (a *Agent) key(ctx context.Context, s *automation, n NekoSession, down bool, sym int64) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	ev := "control/keyup"
-	if down {
-		ev = "control/keydown"
-	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if down {
-		s.heldKeys = append(s.heldKeys, sym)
-	} else {
-		for i := len(s.heldKeys) - 1; i >= 0; i-- {
-			if s.heldKeys[i] == sym {
-				s.heldKeys = append(s.heldKeys[:i], s.heldKeys[i+1:]...)
-				break
-			}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
+		if err := n.Send(nekoEvent("control/keydown", map[string]any{"keysym": sym})); err != nil {
+			return err
+		}
+		s.heldKeys = append(s.heldKeys, sym)
+		return nil
 	}
-	s.mu.Unlock()
-	return n.Send(nekoEvent(ev, map[string]any{"keysym": sym}))
+	i := lastIndex(s.heldKeys, sym)
+	if i < 0 {
+		return nil
+	}
+	s.heldKeys = append(s.heldKeys[:i], s.heldKeys[i+1:]...)
+	return n.Send(nekoEvent("control/keyup", map[string]any{"keysym": sym}))
 }
 
+// button is key for mouse buttons.
 func (a *Agent) button(ctx context.Context, s *automation, n NekoSession, down bool, code int64) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	ev := "control/buttonup"
-	if down {
-		ev = "control/buttondown"
-	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if down {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := n.Send(nekoEvent("control/buttondown", map[string]any{"code": code})); err != nil {
+			return err
+		}
 		s.heldBtns = append(s.heldBtns, code)
-	} else {
-		for i := len(s.heldBtns) - 1; i >= 0; i-- {
-			if s.heldBtns[i] == code {
-				s.heldBtns = append(s.heldBtns[:i], s.heldBtns[i+1:]...)
-				break
-			}
+		return nil
+	}
+	i := lastIndex(s.heldBtns, code)
+	if i < 0 {
+		return nil
+	}
+	s.heldBtns = append(s.heldBtns[:i], s.heldBtns[i+1:]...)
+	return n.Send(nekoEvent("control/buttonup", map[string]any{"code": code}))
+}
+
+func lastIndex(held []int64, v int64) int {
+	for i := len(held) - 1; i >= 0; i-- {
+		if held[i] == v {
+			return i
 		}
 	}
-	s.mu.Unlock()
-	return n.Send(nekoEvent(ev, map[string]any{"code": code}))
+	return -1
 }
 
 func (a *Agent) move(ctx context.Context, n NekoSession, x, y int) error {
@@ -288,7 +372,8 @@ func (a *Agent) move(ctx context.Context, n NekoSession, x, y int) error {
 }
 
 // sendChord presses the keys in order and releases them in reverse; a letter under Shift is
-// sent as its shifted symbol.
+// sent as its shifted symbol. Every key it pressed is released, also when it is stopped halfway:
+// an interrupted Control+Alt+Delete must not leave Control and Alt held for the user.
 func (a *Agent) sendChord(ctx context.Context, s *automation, n NekoSession, names []string) error {
 	shift := false
 	for _, name := range names {
@@ -307,42 +392,47 @@ func (a *Agent) sendChord(ctx context.Context, s *automation, n NekoSession, nam
 		}
 		syms = append(syms, sym)
 	}
+	pressed := 0
+	var err error
 	for _, sym := range syms {
-		if err := a.key(ctx, s, n, true, sym); err != nil {
-			return err
+		if err = a.key(ctx, s, n, true, sym); err != nil {
+			break
 		}
-		if err := pace(ctx, pressGap); err != nil {
-			return err
-		}
-	}
-	for i := len(syms) - 1; i >= 0; i-- {
-		if err := a.key(ctx, s, n, false, syms[i]); err != nil {
-			return err
-		}
-		if err := pace(ctx, pressGap); err != nil {
-			return err
+		pressed++
+		if err = pace(ctx, pressGap); err != nil {
+			break
 		}
 	}
-	return nil
+	for i := pressed - 1; i >= 0; i-- {
+		if e := a.key(ctx, s, n, false, syms[i]); e != nil && err == nil {
+			err = e
+		}
+		if err == nil {
+			err = pace(ctx, pressGap)
+		}
+	}
+	return err
 }
 
+// withModifiers holds the modifiers around body and releases them whatever happens to it.
 func (a *Agent) withModifiers(ctx context.Context, s *automation, n NekoSession, mods []string, body func() error) error {
 	var syms []int64
+	var err error
 	for _, m := range mods {
 		sym, _ := keysymForName(m)
+		if err = a.key(ctx, s, n, true, sym); err != nil {
+			break
+		}
 		syms = append(syms, sym)
-		if err := a.key(ctx, s, n, true, sym); err != nil {
-			return err
-		}
 	}
-	if len(syms) > 0 {
-		if err := pace(ctx, pressGap); err != nil {
-			return err
-		}
+	if err == nil && len(syms) > 0 {
+		err = pace(ctx, pressGap)
 	}
-	err := body()
+	if err == nil {
+		err = body()
+	}
 	for i := len(syms) - 1; i >= 0; i-- {
-		if e := a.key(context.WithoutCancel(ctx), s, n, false, syms[i]); err == nil {
+		if e := a.key(ctx, s, n, false, syms[i]); err == nil {
 			err = e
 		}
 	}
@@ -351,11 +441,15 @@ func (a *Agent) withModifiers(ctx context.Context, s *automation, n NekoSession,
 
 // typeText types like the live view's software keyboard: ASCII as key strokes (Shift where the
 // US layout needs it), anything else through neko's paste, with no Enter unless the text has one.
+// A character whose key went down always comes up again, also when the action is stopped.
 func (a *Agent) typeText(ctx context.Context, s *automation, n NekoSession, text string) error {
 	var pending strings.Builder
 	flush := func() error {
 		if pending.Len() == 0 {
 			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		err := n.Send(nekoEvent("control/paste", map[string]any{"text": pending.String()}))
 		pending.Reset()
@@ -391,16 +485,17 @@ func (a *Agent) typeText(ctx context.Context, s *automation, n NekoSession, text
 				return err
 			}
 		}
-		if err := a.key(ctx, s, n, true, sym); err != nil {
-			return err
-		}
-		if err := a.key(ctx, s, n, false, sym); err != nil {
-			return err
+		err := a.key(ctx, s, n, true, sym)
+		if err == nil {
+			err = a.key(ctx, s, n, false, sym)
 		}
 		if shift {
-			if err := a.key(ctx, s, n, false, symShift); err != nil {
-				return err
+			if e := a.key(ctx, s, n, false, symShift); err == nil {
+				err = e
 			}
+		}
+		if err != nil {
+			return err
 		}
 		if err := pace(ctx, typeGap); err != nil {
 			return err
@@ -409,23 +504,35 @@ func (a *Agent) typeText(ctx context.Context, s *automation, n NekoSession, text
 	return flush()
 }
 
+// offScreen is the index of the first step with a point outside the screen, or -1. Nothing is
+// checked while the screen is unknown (neither neko's init nor a screenshot told it yet).
+func offScreen(steps []step, screen screenState) int {
+	if screen.width == 0 {
+		return -1
+	}
+	inside := func(x, y int) bool { return x < screen.width && y < screen.height }
+	for i, st := range steps {
+		if st.X != nil && !inside(*st.X, *st.Y) {
+			return i
+		}
+		if st.Type == "drag" {
+			for _, p := range st.Path {
+				if !inside(p.X, p.Y) {
+					return i
+				}
+			}
+		}
+	}
+	return -1
+}
+
 // runSteps executes the steps; it returns the index of the first step that did not complete.
-func (a *Agent) runSteps(ctx context.Context, s *automation, steps []step, screen screenState) (int, error) {
-	s.mu.Lock()
-	n := s.neko
-	s.mu.Unlock()
-	if n == nil {
-		return 0, errors.New("no desktop session")
-	}
-	inScreen := func(x, y int) bool {
-		return screen.width == 0 || (x < screen.width && y < screen.height)
-	}
+// Their points were checked against the screen (offScreen) when the action began; a screen
+// change since stops the action.
+func (a *Agent) runSteps(ctx context.Context, s *automation, n NekoSession, steps []step) (int, error) {
 	for i, st := range steps {
 		if ctx.Err() != nil {
 			return i, ctx.Err()
-		}
-		if st.X != nil && !inScreen(*st.X, *st.Y) {
-			return i, errors.New("off screen")
 		}
 		var err error
 		switch st.Type {
@@ -451,10 +558,12 @@ func (a *Agent) runSteps(ctx context.Context, s *automation, steps []step, scree
 					if err := a.button(ctx, s, n, true, code); err != nil {
 						return err
 					}
-					if err := pace(ctx, pressGap); err != nil {
-						return err
+					err := pace(ctx, pressGap)
+					// The button comes up even when the action stops between press and release.
+					if e := a.button(ctx, s, n, false, code); err == nil {
+						err = e
 					}
-					if err := a.button(ctx, s, n, false, code); err != nil {
+					if err != nil {
 						return err
 					}
 				}
@@ -471,11 +580,6 @@ func (a *Agent) runSteps(ctx context.Context, s *automation, steps []step, scree
 			}
 			err = a.button(ctx, s, n, *st.Down, x11Buttons[st.Button])
 		case "drag":
-			for _, p := range st.Path {
-				if !inScreen(p.X, p.Y) {
-					return i, errors.New("off screen")
-				}
-			}
 			err = a.withModifiers(ctx, s, n, st.Modifiers, func() error {
 				code := x11Buttons[st.Button]
 				first := st.Path[0]
@@ -488,21 +592,24 @@ func (a *Agent) runSteps(ctx context.Context, s *automation, steps []step, scree
 				if err := a.button(ctx, s, n, true, code); err != nil {
 					return err
 				}
-				if err := pace(ctx, clickGap); err != nil {
-					return err
-				}
+				err := pace(ctx, clickGap)
 				for _, p := range st.Path[1:] {
-					if err := a.move(ctx, n, p.X, p.Y); err != nil {
-						return err
+					if err != nil {
+						break
 					}
-					if err := pace(ctx, dragGap); err != nil {
-						return err
+					if err = a.move(ctx, n, p.X, p.Y); err == nil {
+						err = pace(ctx, dragGap)
 					}
 				}
-				if err := pace(ctx, clickGap); err != nil {
-					return err
+				if err == nil {
+					err = pace(ctx, clickGap)
 				}
-				return a.button(ctx, s, n, false, code)
+				// Released where the drag stopped if it was stopped: a button left down would
+				// turn the user's next pointer movement into a drag.
+				if e := a.button(ctx, s, n, false, code); err == nil {
+					err = e
+				}
+				return err
 			})
 		case "scroll":
 			err = a.withModifiers(ctx, s, n, st.Modifiers, func() error {
@@ -520,6 +627,9 @@ func (a *Agent) runSteps(ctx context.Context, s *automation, steps []step, scree
 						control = true
 					}
 				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				// neko's deltas are signed X11 wheel clicks: positive delta_y scrolls up.
 				return n.Send(nekoEvent("control/scroll", map[string]any{"delta_x": -st.DeltaX, "delta_y": -st.DeltaY, "control_key": control}))
 			})
@@ -531,7 +641,9 @@ func (a *Agent) runSteps(ctx context.Context, s *automation, steps []step, scree
 		case "type":
 			err = a.typeText(ctx, s, n, st.Text)
 		case "paste":
-			err = n.Send(nekoEvent("control/paste", map[string]any{"text": st.Text}))
+			if err = ctx.Err(); err == nil {
+				err = n.Send(nekoEvent("control/paste", map[string]any{"text": st.Text}))
+			}
 		case "wait":
 			err = pace(ctx, time.Duration(st.Ms)*time.Millisecond)
 		}

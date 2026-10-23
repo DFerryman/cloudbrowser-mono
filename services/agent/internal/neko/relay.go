@@ -10,11 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +42,9 @@ type OpenError struct{ Code string }
 func (e *OpenError) Error() string       { return "neko: " + e.Code }
 func (e *OpenError) FailureCode() string { return e.Code }
 
+// logoutLimit bounds the logout of a session that ended.
+const logoutLimit = 5 * time.Second
+
 func stageLimit(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 10 * time.Second
@@ -67,7 +67,8 @@ type Session struct {
 	conn   *websocket.Conn
 	cancel context.CancelFunc
 	ctx    context.Context
-	// The session token (BaseURL mode) for neko's HTTP API: screenshots and the upload dialog.
+	// The session token (BaseURL mode) for neko's HTTP API: screenshots, and the logout when
+	// the session ends.
 	token string
 	relay *Relay
 }
@@ -122,6 +123,30 @@ func (r *Relay) login(ctx context.Context, sessionID string) (string, error) {
 	return "", &OpenError{Code: "login_unavailable"}
 }
 
+// logout ends the neko session a login created (POST /api/logout). neko keeps every session it
+// signed in, connected or not, and lists them all in each new connection's system/init: without
+// logouts every viewer, readiness probe and bridge left one behind, until system/init outgrew the
+// gateway's 256 KiB frame limit and closed the agent's tunnel. It has its own bound, since it runs
+// when the session's context has already ended; a failure leaves only that one entry behind.
+func (r *Relay) logout(token string) {
+	if token == "" || r.BaseURL == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), logoutLimit)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(r.BaseURL, "/")+"/api/logout", nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := r.httpClient().Do(req)
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	resp.Body.Close()
+}
+
 func (r *Relay) wsURL(ctx context.Context, sessionID string, progress func(string, string)) (string, string, error) {
 	if r.BaseURL == "" {
 		return r.URL, "", nil
@@ -150,13 +175,17 @@ func (r *Relay) Open(ctx context.Context, sessionID string, toViewer func(json.R
 // OpenWithProgress completes only once the local desktop has sent system/init. Stage callbacks
 // contain no URLs, credentials, or desktop payloads. Startup frames are bounded and delivered in
 // order by the session reader after admission, so a viewer never loses the initial desktop state.
+// The session lasts until ctx ends or Close; a session that signed in is logged out when it ends,
+// also when it fails before it was admitted.
 func (r *Relay) OpenWithProgress(ctx context.Context, sessionID string, toViewer func(json.RawMessage), progress func(stage, code string)) (*Session, error) {
 	if progress == nil {
 		progress = func(string, string) {}
 	}
 	sctx, cancel := context.WithCancel(ctx)
+	token := ""
 	fail := func(err error) (*Session, error) {
 		cancel()
+		go r.logout(token) // the failure is reported now, not after neko answered
 		progress("failed", err.(interface{ FailureCode() string }).FailureCode())
 		return nil, err
 	}
@@ -206,8 +235,11 @@ func (r *Relay) OpenWithProgress(ctx context.Context, sessionID string, toViewer
 	progress("desktop_ready", "")
 	s := &Session{conn: conn, cancel: cancel, ctx: sctx, token: token, relay: r}
 	go func() {
-		defer cancel()
-		defer conn.CloseNow()
+		defer func() {
+			cancel()
+			_ = conn.CloseNow()
+			r.logout(token)
+		}()
 		for _, data := range startup {
 			if sctx.Err() != nil {
 				return
@@ -297,42 +329,6 @@ func (s *Session) Screenshot(ctx context.Context, quality int) ([]byte, error) {
 		return nil, errors.New("screenshot: not a jpeg")
 	}
 	return data, nil
-}
-
-// UploadDialog hands files to Chrome's open file-chooser dialog (`POST /api/room/upload/dialog`),
-// which neko fills in and confirms. False means no dialog is open.
-func (s *Session) UploadDialog(ctx context.Context, paths []string) (bool, error) {
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
-	for _, p := range paths {
-		f, err := os.Open(p)
-		if err != nil {
-			return false, err
-		}
-		part, err := w.CreateFormFile("files", filepath.Base(p))
-		if err == nil {
-			_, err = io.Copy(part, f)
-		}
-		f.Close()
-		if err != nil {
-			return false, err
-		}
-	}
-	if err := w.Close(); err != nil {
-		return false, err
-	}
-	resp, err := s.api(ctx, http.MethodPost, "/room/upload/dialog", w.FormDataContentType(), &buf)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent:
-		return true, nil
-	case resp.StatusCode == http.StatusUnprocessableEntity || resp.StatusCode == http.StatusBadRequest:
-		return false, nil // no file dialog is open
-	}
-	return false, fmt.Errorf("upload dialog: status %d", resp.StatusCode)
 }
 
 // OpenAutomation is the bridge's own neko session: its input and screen events, separate from

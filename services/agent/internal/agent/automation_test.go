@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,12 +31,23 @@ type bridgeNeko struct {
 	shot   []byte
 	width  int
 	height int
+	// Chrome's file chooser (FileChooser): open, whether Enter makes it take the typed path, and
+	// the paths it took.
 	dialog bool
-	fed    [][]string
-	done   chan struct{}
+	stuck  bool
+	fed    []string
+	typed  strings.Builder
+	// onChooser runs when the agent asks whether the file chooser is open.
+	onChooser func()
+	// Each desktop session's end; while gate is set, opening one waits for it.
+	dones []chan struct{}
+	gate  chan struct{}
 }
 
-type bridgeSession struct{ n *bridgeNeko }
+type bridgeSession struct {
+	n    *bridgeNeko
+	done chan struct{}
+}
 
 func protocolIncoming(raw string) protocol.Incoming {
 	var in protocol.Incoming
@@ -51,20 +63,47 @@ func newBridgeNeko(width, height int) *bridgeNeko {
 	img.Set(0, 0, color.RGBA{255, 0, 0, 255})
 	var buf bytes.Buffer
 	_ = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80})
-	return &bridgeNeko{viewer: &inputSession{done: make(chan struct{}), got: make(chan json.RawMessage, 64)}, shot: buf.Bytes(), width: width, height: height, dialog: true, done: make(chan struct{})}
+	return &bridgeNeko{viewer: &inputSession{done: make(chan struct{}), got: make(chan json.RawMessage, 64)}, shot: buf.Bytes(), width: width, height: height, dialog: true}
 }
 
 func (n *bridgeNeko) Open(context.Context, string, func(json.RawMessage)) (NekoSession, error) {
 	return n.viewer, nil
 }
 
-func (n *bridgeNeko) OpenAutomation(_ context.Context, onEvent func(json.RawMessage)) (AutomationSession, error) {
+func (n *bridgeNeko) OpenAutomation(ctx context.Context, onEvent func(json.RawMessage)) (AutomationSession, error) {
+	n.mu.Lock()
+	gate := n.gate
+	n.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	n.mu.Lock()
 	n.events = append(n.events, onEvent)
+	done := make(chan struct{})
+	n.dones = append(n.dones, done)
+	width, height := n.width, n.height
 	n.mu.Unlock()
-	init, _ := json.Marshal(map[string]any{"event": "system/init", "payload": map[string]any{"screen_size": map[string]any{"width": n.width, "height": n.height, "rate": 30}}})
+	init, _ := json.Marshal(map[string]any{"event": "system/init", "payload": map[string]any{"screen_size": map[string]any{"width": width, "height": height, "rate": 30}}})
 	go onEvent(init)
-	return bridgeSession{n}, nil
+	return bridgeSession{n, done}, nil
+}
+
+// endDesktop ends the latest desktop session, as a neko restart would; it returns how many were opened.
+func (n *bridgeNeko) endDesktop() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	close(n.dones[len(n.dones)-1])
+	return len(n.dones)
+}
+
+func (n *bridgeNeko) opened() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.dones)
 }
 
 func (n *bridgeNeko) resize(width, height int) {
@@ -102,27 +141,61 @@ func (s bridgeSession) Send(m json.RawMessage) error {
 	var v map[string]any
 	_ = json.Unmarshal(m, &v)
 	s.n.mu.Lock()
+	defer s.n.mu.Unlock()
 	s.n.sent = append(s.n.sent, v)
-	s.n.mu.Unlock()
+	// The file chooser: Ctrl+L clears its location field, typed keys and pastes fill it, Enter
+	// picks the file and closes it.
+	payload, _ := v["payload"].(map[string]any)
+	switch v["event"] {
+	case "control/keydown":
+		sym := int64(payload["keysym"].(float64))
+		switch {
+		case sym == 'l' && s.n.holding(0xffe3):
+			s.n.typed.Reset()
+		case sym == 0xff0d:
+			if s.n.dialog && !s.n.stuck {
+				s.n.fed = append(s.n.fed, s.n.typed.String())
+				s.n.dialog = false
+			}
+		case sym < 0x80 && sym >= 0x20:
+			s.n.typed.WriteRune(rune(sym))
+		}
+	case "control/paste":
+		s.n.typed.WriteString(payload["text"].(string))
+	}
 	return nil
 }
+
+// holding is whether the key is down after the events sent so far (callers hold n.mu).
+func (n *bridgeNeko) holding(sym int64) bool {
+	down := false
+	for _, m := range n.sent[:len(n.sent)-1] {
+		p, _ := m["payload"].(map[string]any)
+		if k, ok := p["keysym"].(float64); ok && int64(k) == sym {
+			down = m["event"] == "control/keydown"
+		}
+	}
+	return down
+}
+
+func (n *bridgeNeko) FileChooserOpen(context.Context) (bool, error) {
+	n.mu.Lock()
+	hook := n.onChooser
+	n.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.dialog, nil
+}
 func (s bridgeSession) Close()                {}
-func (s bridgeSession) Done() <-chan struct{} { return s.n.done }
+func (s bridgeSession) Done() <-chan struct{} { return s.done }
 func (s bridgeSession) Screenshot(context.Context, int) ([]byte, error) {
 	s.n.mu.Lock()
 	defer s.n.mu.Unlock()
 	return s.n.shot, nil
 }
-func (s bridgeSession) UploadDialog(_ context.Context, paths []string) (bool, error) {
-	s.n.mu.Lock()
-	defer s.n.mu.Unlock()
-	if !s.n.dialog {
-		return false, nil
-	}
-	s.n.fed = append(s.n.fed, paths)
-	return true, nil
-}
-
 func bridgeAgent(t *testing.T, n *bridgeNeko) (*Agent, *websocket.Conn, *fakeClipboard, string) {
 	t.Helper()
 	g, srv := newGateway(t)
@@ -134,9 +207,10 @@ func bridgeAgent(t *testing.T, n *bridgeNeko) (*Agent, *websocket.Conn, *fakeCli
 	}
 	t.Cleanup(func() { c.CloseNow() })
 	remote := <-g.conns
+	remote.SetReadLimit(1 << 20) // screenshot blobs
 	dir := t.TempDir()
 	clip := &fakeClipboard{}
-	a := New(Config{UploadDir: dir, UploadBrowserDir: "/data/uploads", Clipboard: clip}, &fakeBrowser{}, n, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a := New(Config{UploadDir: dir, UploadBrowserDir: "/data/uploads", Clipboard: clip, FileChooser: n}, &fakeBrowser{}, n, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	a.conn = c
 	return a, remote, clip, dir
 }
@@ -363,9 +437,15 @@ func TestScreenChangeVoidsOldCoordinatesAndPrivacyWithholdsScreenshots(t *testin
 	if r, _ := bridgeResult(t, remote, "old"); r["status"] != "rejected" || r["reason"] != "screen_changed" {
 		t.Fatalf("stale screen %v", r)
 	}
-	request(a, ctx, "b1", map[string]any{"t": "act", "id": "off", "screenVersion": 2, "steps": []map[string]any{{"type": "click", "x": 500, "y": 1}}})
-	if r, _ := bridgeResult(t, remote, "off"); r["status"] != "error" {
+	// A point off the screen is refused before anything runs, naming the step.
+	request(a, ctx, "b1", map[string]any{"t": "act", "id": "off", "screenVersion": 2, "steps": []map[string]any{
+		{"type": "move", "x": 1, "y": 1}, {"type": "click", "x": 80, "y": 1},
+	}})
+	if r, _ := bridgeResult(t, remote, "off"); r["status"] != "rejected" || r["reason"] != "off_screen" || r["stoppedAt"].(float64) != 1 {
 		t.Fatalf("off-screen click %v", r)
+	}
+	if moves := n.events_("control/move"); len(moves) != 0 {
+		t.Fatalf("a refused act moved the pointer: %v", moves)
 	}
 
 	a.applyControl(ctx, modePrivacy, nil, "privacy")
@@ -426,15 +506,22 @@ func TestStoredFilesAreAttachedOnlyUnderBridgeControl(t *testing.T) {
 		t.Fatal("stored file removed by a refused attach")
 	}
 	a.applyControl(ctx, modeAgent, nil, "resumed")
-	request(a, ctx, "b1", map[string]any{"t": "attach", "id": "at2", "handles": []string{handle}, "method": "picker", "screenshot": false})
-	if r, _ := bridgeResult(t, remote, "at2"); r["status"] != "executed" {
+	// The picker types the file's path as Chrome sees it into the open file chooser.
+	request(a, ctx, "b1", map[string]any{"t": "attach", "id": "at2", "handles": []string{handle}, "method": "picker"})
+	r, blobs := bridgeResult(t, remote, "at2")
+	if r["status"] != "executed" || len(blobs) != 1 {
 		t.Fatalf("picker attach %v", r)
 	}
 	n.mu.Lock()
-	fed := n.fed
+	fed := append([]string{}, n.fed...)
 	n.mu.Unlock()
-	if len(fed) != 1 || fed[0][0] != matches[0] {
-		t.Fatalf("dialog fed %v", fed)
+	rel, _ := filepath.Rel(dir, matches[0])
+	if len(fed) != 1 || fed[0] != "/data/uploads/"+filepath.ToSlash(rel) {
+		t.Fatalf("file chooser took %q, want /data/uploads/%s", fed, rel)
+	}
+	s := a.automations["b1"]
+	if k, b := s.held(); k != 0 || b != 0 {
+		t.Fatalf("held after the picker: keys=%d buttons=%d", k, b)
 	}
 	n.mu.Lock()
 	n.dialog = false

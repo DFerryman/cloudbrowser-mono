@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -30,8 +31,14 @@ import (
 // visible one when Chrome has no window yet (the check at every wake). 0.3.0 receives files a viewer
 // pastes or drops (files.go). 0.3.1 bounds desktop admission and verifies local desktop readiness.
 // 0.4.0 admits coding-agent bridges (docs/agent-access.md): full-display screenshots, input
-// steps, stored files, and one arbiter for input between the bridge and the live view.
-const Version = "0.4.0"
+// steps, stored files, and one arbiter for input between the bridge and the live view. 0.5.0 speaks
+// automation protocol 2 for the gateway's hosted MCP endpoint (protocol.AutomationProtocol):
+// sessions that are opened again or outlive a short tunnel gap, requests that wait for the desktop,
+// scaled screenshots, and refusals that name the step. It keeps the bridge's desktop session open
+// (it was closed right after opening), logs neko sessions out, drops neko messages too large for
+// the gateway, refuses a symlinked upload directory, and closes the firewall only on a real IP
+// mismatch or repeated failed checks, opening it again after a check passes.
+const Version = "0.5.0"
 
 // Browser is Chrome as the agent controls it through CDP.
 type Browser interface {
@@ -81,12 +88,17 @@ type Config struct {
 	Host           Host   // optional: disk and network reports, file system growth
 	// Files viewers paste or drop (files.go): written to UploadDir, which Chrome sees as
 	// UploadBrowserDir; both empty disables them. Clipboard is needed for pastes.
-	UploadDir         string
-	UploadBrowserDir  string
-	Clipboard         Clipboard
-	EchoURLs          []string
-	ExpectedIP        string // optional; reported with checks
-	Generation        int    // placement generation, from user data
+	UploadDir        string
+	UploadBrowserDir string
+	Clipboard        Clipboard
+	// FileChooser tells whether Chrome's file chooser is open, for picker attaches (optional).
+	FileChooser FileChooser
+	EchoURLs    []string
+	ExpectedIP  string // optional; reported with checks
+	// PublicIP reads the VM's public address from the instance metadata (optional): the address
+	// periodic checks expect until the engine names one in an ip_check command.
+	PublicIP          func(ctx context.Context) (string, error)
+	Generation        int // placement generation, from user data
 	Heartbeat         time.Duration
 	IPCheckEvery      time.Duration
 	ViewerOpenTimeout time.Duration // total bound, in addition to the relay's stage deadlines
@@ -117,6 +129,19 @@ type Agent struct {
 	automations map[string]*automation
 	control     controlState
 	screen      screenState
+	// Bridge timings: constants in production, shorter in tests.
+	readyWait, suspendGrace, openLimit time.Duration
+	reopenDelays                       []time.Duration
+	// uploadsRefused: UploadDir turned out not to be the agent's own directory (checkUploadDir).
+	uploadsRefused bool
+	// IP checks (selfCheck): one periodic check at a time, the address the engine last named, how
+	// many checks in a row failed to observe an address, and who closed the firewall.
+	checking   atomic.Bool
+	engineIP   string // protected by mu
+	firewallMu sync.Mutex
+	ipFailures int // protected by firewallMu
+	// Who closed the firewall: "" (open), "check" or "engine"; protected by firewallMu.
+	firewallClosedBy string
 }
 
 func New(cfg Config, b Browser, n Neko, f Firewall, log *slog.Logger) *Agent {
@@ -133,7 +158,8 @@ func New(cfg Config, b Browser, n Neko, f Firewall, log *slog.Logger) *Agent {
 		cfg.DesktopProbeRetry = 10 * time.Second
 	}
 	return &Agent{cfg: cfg, browser: b, neko: n, firewall: f, log: log, sessions: map[string]NekoSession{}, relayIDs: map[string]string{}, viewerOpens: map[string]*viewerOpen{}, desktopProbeRequests: make(chan struct{}, 1), transfers: map[string]*transfer{},
-		automations: map[string]*automation{}, control: controlState{controller: ctlNone, mode: modeAgent, access: true}}
+		automations: map[string]*automation{}, control: controlState{controller: ctlNone, mode: modeAgent, access: true},
+		readyWait: automationReadyWait, suspendGrace: automationSuspendGrace, openLimit: automationOpenLimit, reopenDelays: automationReopen}
 }
 
 func (a *Agent) credentialPath() string { return filepath.Join(a.cfg.StateDir, "credential") }
@@ -158,7 +184,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		cancel()
 	}
-	if a.cfg.UploadDir != "" {
+	if a.cfg.UploadDir != "" && a.checkUploadDir() == "" {
 		a.pruneUploads(0) // pages that could still read them did not survive the sleep
 	}
 	chromeMajor, err := a.browser.Start(ctx)
@@ -211,7 +237,16 @@ func (a *Agent) session(ctx context.Context, chromeMajor int) error {
 	a.viewerStages = false
 	a.mu.Unlock()
 	defer a.closeSessions()
-	defer a.closeAutomations()
+	// A coding agent's sessions outlive a lost tunnel for a short grace (protocol 2), so the
+	// gateway can open them again on the next one with their desktop session and stored files.
+	// Shutting down ends them.
+	defer func() {
+		if ctx.Err() != nil {
+			a.closeAutomations()
+		} else {
+			a.suspendAutomations()
+		}
+	}()
 
 	if err := a.write(sctx, protocol.Hello{T: "hello", AgentVersion: Version, Generation: a.cfg.Generation}); err != nil {
 		return err
@@ -245,7 +280,8 @@ func (a *Agent) loops(ctx context.Context) {
 	ip := time.NewTicker(a.cfg.IPCheckEvery)
 	defer hb.Stop()
 	defer ip.Stop()
-	go a.selfCheck(ctx) // IP checks must not delay heartbeats or desktop readiness.
+	// IP checks must not delay heartbeats or desktop readiness: each runs on its own goroutine.
+	go a.selfCheck(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -268,7 +304,7 @@ func (a *Agent) loops(ctx context.Context) {
 			a.hostReport(data)
 			_ = a.event(ctx, "heartbeat", data)
 		case <-ip.C:
-			a.selfCheck(ctx)
+			go a.selfCheck(ctx)
 		}
 	}
 }
@@ -310,15 +346,98 @@ func (a *Agent) checkIP(ctx context.Context, expected string) map[string]any {
 	return res
 }
 
-// selfCheck runs the periodic IP check and fails closed on a mismatch (page 3).
+// ipFailuresToClose is how many IP checks in a row may fail to observe any address before the
+// firewall closes anyway: one echo request that timed out, or a Chrome that was still starting,
+// says nothing about the address websites see.
+const ipFailuresToClose = 3
+
+// expectedIP is the address Chrome must be seen with: the one the engine last named in an
+// ip_check command (the placement's static IP), else the configured one, else the public address
+// in the instance metadata. Empty means only that every echo must agree.
+func (a *Agent) expectedIP(ctx context.Context) string {
+	a.mu.Lock()
+	ip := a.engineIP
+	a.mu.Unlock()
+	if ip == "" {
+		ip = a.cfg.ExpectedIP
+	}
+	if ip == "" && a.cfg.PublicIP != nil {
+		mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		got, err := a.cfg.PublicIP(mctx)
+		if err != nil {
+			a.log.Warn("public address from the instance metadata", "err", err)
+		}
+		ip = got
+	}
+	return ip
+}
+
+// selfCheck runs the periodic IP check (page 3). Callers start it on its own goroutine, since a
+// check can take its full 20 s; a check that finds another one running does nothing.
 func (a *Agent) selfCheck(ctx context.Context) {
-	res := a.checkIP(ctx, a.cfg.ExpectedIP)
-	if ok, _ := res["ok"].(bool); !ok && a.firewall != nil {
-		if err := a.firewall.SetMode("closed"); err != nil {
-			a.log.Error("fail-closed firewall", "err", err)
+	if !a.checking.CompareAndSwap(false, true) {
+		return
+	}
+	defer a.checking.Store(false)
+	res := a.checkIP(ctx, a.expectedIP(ctx))
+	if ctx.Err() != nil {
+		return // the tunnel ended meanwhile: the failure may be the check's own cancellation
+	}
+	a.judgeIPCheck(res)
+	_ = a.event(ctx, "ip_check", res)
+}
+
+// judgeIPCheck fails closed on evidence (page 3): an address other than the expected one, or
+// echoes that disagree, closes the firewall at once; checks that observe nothing close it only
+// after ipFailuresToClose of them in a row. A check that passes opens a firewall that a check
+// closed, so a passing "Check again" also restores browsing; one the engine closed (set_firewall)
+// stays closed.
+func (a *Agent) judgeIPCheck(res map[string]any) {
+	if a.firewall == nil {
+		return
+	}
+	ok, _ := res["ok"].(bool)
+	observed, _ := res["observed"].([]string)
+	expected, _ := res["expected"].(string)
+	a.firewallMu.Lock()
+	defer a.firewallMu.Unlock()
+	mode := ""
+	switch {
+	case ok:
+		a.ipFailures = 0
+		if a.firewallClosedBy == "check" {
+			mode = "normal"
+		}
+	case ipMismatch(observed, expected):
+		a.ipFailures = 0
+		mode = "closed"
+	default:
+		a.ipFailures++
+		if a.ipFailures >= ipFailuresToClose {
+			mode = "closed"
 		}
 	}
-	_ = a.event(ctx, "ip_check", res)
+	if mode == "" || (mode == "closed" && a.firewallClosedBy != "") {
+		return
+	}
+	if err := a.firewall.SetMode(mode); err != nil {
+		a.log.Error("firewall after an IP check", "mode", mode, "err", err)
+		return
+	}
+	a.firewallClosedBy = map[string]string{"closed": "check", "normal": ""}[mode]
+	a.log.Warn("firewall after an IP check", "mode", mode, "observed", observed, "expected", expected)
+}
+
+// ipMismatch is whether the observed addresses prove that websites see Chrome with the wrong
+// address: they disagree, or one differs from the expected address.
+func ipMismatch(observed []string, expected string) bool {
+	for _, o := range observed {
+		if o != observed[0] || (expected != "" && o != expected) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Agent) handle(ctx context.Context, in protocol.Incoming) {
@@ -332,10 +451,10 @@ func (a *Agent) handle(ctx context.Context, in protocol.Incoming) {
 				a.log.Error("save credential", "err", err)
 			}
 		}
-		// The persisted control mode: a manual takeover outlives agent restarts and reconnects.
+		// The persisted control mode: a manual takeover outlives agent restarts and reconnects,
+		// and one the gateway has not heard of yet outlives the welcome (restoreControl).
 		if in.Automation != nil {
-			access := in.Automation.Access
-			a.applyControl(ctx, in.Automation.Mode, &access, "restored")
+			a.restoreControl(ctx, in.Automation.Mode, in.Automation.Access)
 		}
 	case "turn":
 		a.log.Info("turn credentials received", "servers", len(in.IceServers))
@@ -384,8 +503,17 @@ func (a *Agent) command(ctx context.Context, in protocol.Incoming) {
 	reply := protocol.Reply{T: "reply", CommandID: in.ID, OK: true}
 	switch in.Kind {
 	case protocol.CmdIPCheck:
+		// The engine names the placement's static IP: periodic checks expect it from now on.
 		expected, _ := in.Payload["expected"].(string)
+		if expected != "" {
+			a.mu.Lock()
+			a.engineIP = expected
+			a.mu.Unlock()
+		} else {
+			expected = a.expectedIP(ctx)
+		}
 		reply.Result = a.checkIP(ctx, expected)
+		a.judgeIPCheck(reply.Result)
 	case protocol.CmdPrepareShutdown:
 		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		err := a.browser.Close(cctx)
@@ -433,9 +561,17 @@ func (a *Agent) command(ctx context.Context, in protocol.Incoming) {
 		mode, _ := in.Payload["mode"].(string)
 		if a.firewall == nil {
 			reply.OK, reply.Error = false, "no firewall"
-		} else if err := a.firewall.SetMode(mode); err != nil {
-			reply.OK, reply.Error = false, err.Error()
+			break
 		}
+		// The engine's own choice: no later IP check undoes it.
+		a.firewallMu.Lock()
+		if err := a.firewall.SetMode(mode); err != nil {
+			reply.OK, reply.Error = false, err.Error()
+		} else {
+			a.firewallClosedBy = map[string]string{"closed": "engine", "normal": ""}[mode]
+			a.ipFailures = 0
+		}
+		a.firewallMu.Unlock()
 	default:
 		reply.OK, reply.Error = false, "unknown command "+in.Kind
 	}
@@ -610,13 +746,20 @@ func (a *Agent) write(ctx context.Context, v any) error {
 	if err != nil {
 		return err
 	}
+	// The caller's cancellation never reaches the connection: coder/websocket closes the whole
+	// tunnel when a write's context ends mid-write, and the tunnel may by then be a newer one than
+	// the caller's context belonged to (a viewer that closed, a tunnel that was replaced). A caller
+	// whose context already ended writes nothing; a write that started is bounded on its own.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	conn := a.conn
 	a.mu.Unlock()
 	if conn == nil {
 		return errors.New("not connected")
 	}
-	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	return conn.Write(wctx, websocket.MessageText, b)
 }

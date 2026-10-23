@@ -76,11 +76,85 @@ type Incoming struct {
 }
 
 // AutomationWelcome is the control state the gateway persisted: a manual takeover survives an
-// agent restart because the welcome carries it back.
+// agent restart because the welcome carries it back. The VM keeps the stricter of this mode and
+// its own (privacy > user > agent) and answers with a control_state: a takeover the gateway has
+// not persisted yet (made while the tunnel was down) is reported with reason "user_input" so the
+// api records it. Only an explicit automation_control relaxes user or privacy.
 type AutomationWelcome struct {
 	Mode   string `json:"mode"` // agent | user | privacy
 	Access bool   `json:"access"`
 }
+
+// AutomationProtocol is the automation protocol version the VM speaks (capabilities.protocol).
+//
+// Protocol 2 serves the gateway's hosted MCP endpoint, which opens VM automation sessions lazily,
+// speaks request/response to its clients, and may open a session again after a tunnel blip.
+// Frames are those of protocol 1 (packages/contracts automation.ts) with the additions below;
+// every addition is optional, so a protocol 1 gateway keeps working. Session data travels as
+// {t:"automation", sessionId, data} (gateway → VM) and {t:"automation_result", sessionId, data}
+// (VM → gateway), as in protocol 1.
+//
+// Sessions:
+//   - {t:"automation_open", sessionId, clientId} is idempotent. For a session id the VM already
+//     has, open or suspended (below), with the same clientId, the session is kept with its desktop
+//     session, its running action and its stored files, and the VM pushes
+//     {t:"control", control, reason:"restored"} and, when the screen is known,
+//     {t:"screen", screen:{version, width, height}}. A new id, or another clientId for a known
+//     one, opens a new session as in protocol 1 (closing the old one and its files).
+//   - When the agent's tunnel drops, its sessions are suspended for 60 s rather than closed: the
+//     running act or attach ends ("interrupted", reason "relay_unavailable"; its result is not
+//     delivered), every held key and button is released, and the desktop session and stored files
+//     stay. Nothing is pushed for a suspended session and requests for it are ignored. An
+//     automation_open for it within 60 s resumes it on the new tunnel; after that it is closed
+//     silently, as protocol 1 closed it at once. automation_close, agent access turned off and the
+//     agent shutting down still close sessions at once.
+//
+// Requests (`automation` data):
+//   - screenshot, act and attach that arrive before the session's desktop session is ready (just
+//     opened, or opened again after neko restarted) wait up to 15 s for it, instead of failing at
+//     once with "desktop_unavailable". An act or attach is the session's running action from the
+//     moment it arrives: while it waits, a second one is refused ("busy"), status reports it as
+//     activeActionId, and a cancel (or a takeover, or a lost tunnel) ends it with status
+//     "interrupted", stoppedAt 0, nothing executed.
+//   - screenshot, act and attach may carry maxWidth and maxHeight, integers 320..4096, either or
+//     both; any other value rejects the request with reason "invalid". When the screen exceeds
+//     them, the screenshot is scaled down to fit (area-averaged, aspect kept, never enlarged) and
+//     encoded as JPEG at the request's quality; otherwise it is neko's own image. Coordinates in
+//     act steps and attach stay native screen pixels.
+//   - The basis of act and attach: screenVersion must equal the current one ("screen_changed"
+//     otherwise); controlEpoch is refused ("control_changed") only when it is older than the
+//     epoch at which control last left the agent (a user takeover, the mode becoming user or
+//     privacy, access turned off) or was handed back to it, since a screenshot from before the
+//     hand-back may predate the user's last input. The agent's own claim of control advances the
+//     epoch without voiding its screenshots, so several acts may be decided on one screenshot. A
+//     request that names only screenshotId uses the screenVersion and controlEpoch that screenshot
+//     was taken under, when it is one of the session's last 16.
+//   - The screenshot that finishes an act or attach waits out the 150 ms screenshot interval
+//     instead of failing with "too_fast".
+//
+// Results (`automation_result` data):
+//   - The screenshot meta gains screenWidth and screenHeight, the native screen size, next to
+//     width and height, the image's size.
+//   - New reasons, all with status "rejected" and nothing executed:
+//     "off_screen": a point outside the current screen (stoppedAt: that step's index; an attach
+//     "drop" point has no stoppedAt);
+//     "unknown_key": a key or modifier name the VM does not know (stoppedAt: that step's index);
+//     "too_long": the steps with their pacing and waits, and settleMs, cannot finish within the
+//     act's 30 s (half a second is kept free for scheduling); a typed character counts about
+//     12 ms;
+//     "user_active": the user holds control and gave a real input in the last 10 s (they took it
+//     while no session was open, so no pause was persisted); also for attach.
+//   - Any act or attach that does not end "executed" releases every held key and button. Keys
+//     and buttons held explicitly (keyhold, button down) last across acts only while each act ends
+//     normally.
+//   - attach with method "picker" takes exactly one handle ("unsupported" for more). It types the
+//     stored file's path, as Chrome sees it, into Chrome's own file chooser, the GTK dialog an
+//     upload button opens (Ctrl+L, the path, Delete, Enter), and returns a screenshot. When the
+//     VM can tell (it asks xdotool), a chooser that is not open is "rejected" with "no_dialog" and
+//     one that stays open is status "error" with reason "dialog_open". neko's own upload dialog
+//     stays disabled.
+//   - Capabilities gain scaledShots: true and resume: true; protocol is 2, agentVersion "0.5.0".
+const AutomationProtocol = 2
 
 // ControlState is who may drive the browser (contracts ControlState).
 type ControlState struct {

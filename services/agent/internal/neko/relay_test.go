@@ -100,6 +100,9 @@ func TestOpenStageDeadlinesAndSafeFailures(t *testing.T) {
 					_, _ = w.Write([]byte(`{"token":"secret-neko-token"}`))
 					return
 				}
+				if req.URL.Path == "/api/logout" {
+					return
+				}
 				if tc.name == "upgrade_stall" {
 					<-req.Context().Done()
 					return
@@ -175,6 +178,9 @@ func TestCancelPendingUpgrade(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path == "/api/login" {
 			_, _ = w.Write([]byte(`{"token":"secret-neko-token"}`))
+			return
+		}
+		if req.URL.Path == "/api/logout" {
 			return
 		}
 		close(entered)
