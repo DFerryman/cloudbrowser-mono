@@ -13,6 +13,19 @@ export function money(micros: number, locale: string) {
 
 export const cents = (c: number) => c * (MICROS_PER_USD / 100);
 
+/**
+ * A balance in a narrow space (the collapsed sidebar): cents below $100, whole dollars from there.
+ * Cut, never rounded up, so it never shows more than there is; cutting the formatted text instead
+ * turned $0.5000 into "$0".
+ */
+export function moneyShort(micros: number, locale: string) {
+  const whole = Math.abs(micros) >= 100 * MICROS_PER_USD;
+  const unit = whole ? MICROS_PER_USD : MICROS_PER_USD / 100;
+  const usd = (Math.trunc(micros / unit) * unit) / MICROS_PER_USD;
+  const digits = whole ? 0 : 2;
+  return new Intl.NumberFormat(locale, { style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits }).format(usd);
+}
+
 /** A quantity with up to two decimals, for usage tables. */
 export function quantity(n: number, locale: string) {
   return new Intl.NumberFormat(locale, { maximumFractionDigits: n < 10 ? 2 : 1 }).format(n);

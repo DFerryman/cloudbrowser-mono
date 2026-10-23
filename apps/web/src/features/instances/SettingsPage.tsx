@@ -90,7 +90,8 @@ export function SettingsPage() {
           >
             {t('settings.verify')}
           </Button>
-          {i.status !== 'running' ? <span className="text-xs text-subtle">{t('settings.verifyRunningOnly')}</span> : null}
+          {/* needs_attention can be checked too: a passing check returns a browser paused for its IP to running. */}
+          {i.status !== 'running' && i.status !== 'needs_attention' ? <span className="text-xs text-subtle">{t('settings.verifyRunningOnly')}</span> : null}
         </div>
       </Section>
 
@@ -140,7 +141,7 @@ export function SettingsPage() {
                   <span>{fmt(s.startedAt)}</span>
                   <span className="text-muted">
                     {s.country ?? '—'} ·{' '}
-                    {s.endedAt ? `${Math.max(1, Math.round((Date.parse(s.endedAt) - Date.parse(s.startedAt)) / 60_000))} min` : t('settings.ongoing')}
+                    {s.endedAt ? t('settings.minutes', { n: Math.max(1, Math.round((Date.parse(s.endedAt) - Date.parse(s.startedAt)) / 60_000)) }) : t('settings.ongoing')}
                   </span>
                 </li>
               ))}
