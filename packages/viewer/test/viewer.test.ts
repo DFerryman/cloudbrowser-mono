@@ -1,8 +1,20 @@
+import { TIERS } from '@cloudbrowser/contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { keysymFor, keysymForName } from '../src/keyboard.js';
-import { decode, encode, fitScreen } from '../src/neko.js';
+import { decode, encode, fitScreen, squarePixels } from '../src/neko.js';
 import { RemoteBrowser, type RemoteBrowserOptions } from '../src/remote-browser.js';
 import { qualityLevel } from '../src/stats.js';
+
+// What neko advertises on the browser image: its xorg.conf modes and the VESA and CVT modes Xorg
+// adds itself (validateAllDefaultModes), at the rates neko lists (≤ 30 Hz, or tens up to 60).
+const NEKO_MODES = ([
+  [1024, 576, 30], [1024, 576, 60], [1024, 768, 60], [1152, 648, 30], [1152, 648, 60],
+  [1280, 720, 30], [1280, 720, 60], [1280, 800, 60], [1280, 960, 60], [1280, 1024, 60],
+  [1368, 768, 25], [1368, 768, 30], [1368, 768, 60], [1400, 900, 60], [1400, 1050, 60],
+  [1600, 900, 25], [1600, 900, 60], [1600, 1200, 60], [1680, 1050, 60], [1920, 1080, 25],
+  [1920, 1080, 30], [1920, 1080, 60], [1920, 1200, 60], [2048, 1152, 60], [2560, 1440, 25],
+  [2560, 1440, 30], [3840, 2160, 25],
+] as const).map(([width, height, rate]) => ({ width, height, rate }));
 
 describe('neko data channel encoding', () => {
   it('encodes move, scroll, key and button frames big-endian', () => {
@@ -49,8 +61,54 @@ describe('neko data channel encoding', () => {
     expect(fitScreen(1600, 900, [])).toBeNull();
   });
 
+  it('only picks desktops that neko streams with square pixels', () => {
+    // iPad Pro 12.9" in landscape: a 1366×829 box fitted 1280×800 at 60 Hz, which Safari painted at 11:10.
+    expect(fitScreen(1366, 829, NEKO_MODES)).toEqual({ width: 1368, height: 768, rate: 30 });
+    expect(fitScreen(1300, 985, NEKO_MODES)).toEqual({ width: 1280, height: 720, rate: 30 }); // not 1280×960
+    expect(fitScreen(1400, 1000, NEKO_MODES)).toEqual({ width: 1368, height: 768, rate: 30 }); // not 1400×900
+    expect(fitScreen(1700, 1250, NEKO_MODES)).toEqual({ width: 1600, height: 900, rate: 25 }); // not 1600×1200
+    expect(fitScreen(1500, 950)).toEqual({ width: 1366, height: 768 }); // the fallback list has no 1440×900
+    for (const [width, height] of [[1280, 720], [1360, 768], [1366, 768], [1368, 768], [1600, 900], [2560, 1440]] as const) {
+      expect(squarePixels({ width, height })).toBe(true);
+    }
+    for (const [width, height] of [[1280, 800], [1440, 900], [1280, 960], [1280, 1024], [1400, 900], [800, 1600], [0, 0]] as const) {
+      expect(squarePixels({ width, height })).toBe(false);
+    }
+  });
+
+  it('takes a mode Xorg rounded up to a multiple of 8, such as 1368×768 for a 1366 px wide view', () => {
+    const configurations = [{ width: 1280, height: 720, rate: 30 }, { width: 1368, height: 768, rate: 30 }];
+    expect(fitScreen(1366, 829, configurations)).toEqual({ width: 1368, height: 768, rate: 30 });
+    expect(fitScreen(1360, 829, configurations)).toEqual({ width: 1280, height: 720, rate: 30 });
+    expect(fitScreen(1279.6, 719.6, configurations)).toEqual({ width: 1280, height: 720, rate: 30 });
+  });
+
+  it('keeps the desktop within a tier\'s pixel budget', () => {
+    const configurations = [
+      { width: 1368, height: 768, rate: 30 },
+      { width: 1920, height: 1080, rate: 30 },
+      { width: 2560, height: 1440, rate: 30 },
+    ];
+    expect(fitScreen(2560, 1440, configurations, 30, 1920 * 1080)).toEqual({ width: 1920, height: 1080, rate: 30 });
+    expect(fitScreen(2560, 1440, configurations, 30, 2560 * 1440)).toEqual({ width: 2560, height: 1440, rate: 30 });
+    expect(fitScreen(1440, 860, configurations, 30, 1920 * 1080)).toEqual({ width: 1368, height: 768, rate: 30 });
+    // A budget below every mode is ignored rather than leaving no desktop at all.
+    expect(fitScreen(2560, 1440, configurations, 30, 1000)).toEqual({ width: 2560, height: 1440, rate: 30 });
+    // With neko's full list: Basic stops at 1080p, Premium takes 1440p, both at a bounded rate.
+    expect(fitScreen(2600, 1500, NEKO_MODES, 30, TIERS.basic.maxScreenPixels)).toEqual({ width: 1920, height: 1080, rate: 30 });
+    expect(fitScreen(2600, 1500, NEKO_MODES, 30, TIERS.premium.maxScreenPixels)).toEqual({ width: 2560, height: 1440, rate: 30 });
+  });
+
   it('uses the supported rate when a screen has no mode at or below 30 Hz', () => {
     expect(fitScreen(1600, 1000, [{ width: 1440, height: 900, rate: 60 }])).toEqual({ width: 1440, height: 900, rate: 60 });
+  });
+
+  it('prefers a size offered at a bounded refresh rate over a larger one offered only faster', () => {
+    // neko offers 2048×1152 only at 60 Hz: Chrome would draw twice the frames the stream carries.
+    expect(fitScreen(2100, 1200, NEKO_MODES)).toEqual({ width: 1920, height: 1080, rate: 30 });
+    expect(fitScreen(1700, 1000, [{ width: 1600, height: 900, rate: 60 }, { width: 1366, height: 768, rate: 30 }])).toEqual({ width: 1366, height: 768, rate: 30 });
+    // Premium allows 60 Hz, so the larger desktop is the better fit there.
+    expect(fitScreen(2100, 1200, NEKO_MODES, 60)).toEqual({ width: 2048, height: 1152, rate: 60 });
   });
 
   it('gives Premium the 60 Hz desktop where neko has one, and the same size as Basic', () => {
@@ -193,7 +251,7 @@ describe('RemoteBrowser', () => {
 
   function setup(
     iceServers: { urls: string[]; username?: string; credential?: string }[] = [],
-    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'maxConnectionAttempts' | 'requireFirstFrame' | 'onDiagnostic' | 'getPlaybackState' | 'onStream' | 'onStats' | 'onInputError' | 'video' | 'onVideo'> = {},
+    options: Partial<Omit<RemoteBrowserOptions, 'getConnectInfo' | 'onState' | 'WebSocketImpl' | 'RTCPeerConnectionImpl'>> = {},
   ) {
     FakeWS.all = [];
     const getConnectInfo = vi.fn(async () => ({ gatewayUrl: 'wss://gw/v1/stream/i1', token: `tok${getConnectInfo.mock.calls.length}`, iceServers }));
@@ -297,6 +355,30 @@ describe('RemoteBrowser', () => {
       ['control/keydown', { keysym: 0x74 }],
       ['control/keyup', { keysym: 0x74 }],
       ['control/keyup', { keysym: 0xffe3 }],
+    ]);
+    b.disconnect();
+  });
+
+  it('lifts held modifiers an exact combination does not name, all but Shift', async () => {
+    const { b } = setup([], { macToPc: true });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    await readyInput(ws);
+    // A Mac's Shift+Option+←, sent as Ctrl+Shift+←; then Cmd+→ (Control on the remote) as End.
+    b.key(true, { key: 'Shift', code: 'ShiftLeft' });
+    b.key(true, { key: 'Alt', code: 'AltLeft' });
+    b.sendCombo(['Control', 'ArrowLeft'], true);
+    b.key(false, { key: 'Alt', code: 'AltLeft' });
+    b.key(true, { key: 'Meta', code: 'MetaLeft' });
+    b.sendCombo(['End'], true);
+    b.key(false, { key: 'Meta', code: 'MetaLeft' });
+    b.key(false, { key: 'Shift', code: 'ShiftLeft' });
+    expect(ws.sent.map((frame: any) => `${frame.data.event.slice(8)} ${frame.data.payload.keysym.toString(16)}`)).toEqual([
+      'keydown ffe1', 'keydown ffe9',
+      'keyup ffe9', 'keydown ffe3', 'keydown ff51', 'keyup ff51', 'keyup ffe3', 'keydown ffe9',
+      'keyup ffe9', 'keydown ffe3',
+      'keyup ffe3', 'keydown ff57', 'keyup ff57', 'keydown ffe3',
+      'keyup ffe3', 'keyup ffe1',
     ]);
     b.disconnect();
   });
@@ -443,6 +525,94 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
+  it('ends the connection when input may have been lost, instead of staying live behind the notice', async () => {
+    vi.useFakeTimers();
+    const onInputError = vi.fn();
+    const { b, states } = setup([], { onInputError });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    const pc = FakePC.last;
+    pc.connect();
+    expect(b.currentState).toBe('live');
+    b.move(10, 10);
+    // An ICE drop right after input: the click may not have arrived.
+    pc.connectionState = 'failed';
+    pc.onconnectionstatechange();
+    expect(onInputError).toHaveBeenCalledExactlyOnceWith('disconnected');
+    expect(states.at(-1)).toBe('closed');
+    expect(b.currentState).toBe('closed');
+    expect(ws.readyState).toBe(3);
+    expect(pc.closed).toBe(true);
+    // Nothing reconnects by itself: the page asks the user first.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(FakeWS.all).toHaveLength(1);
+    expect(b.currentState).toBe('closed');
+    // An explicit reconnect starts over.
+    await b.connect();
+    expect(FakeWS.all).toHaveLength(2);
+    b.disconnect();
+  });
+
+  it('ends the connection when the agent leaves right after input', async () => {
+    const onInputError = vi.fn();
+    const { b, states } = setup([], { onInputError });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    await readyInput(ws);
+    b.typeSoftwareText('a');
+    ws.push({ t: 'agent_offline' });
+    expect(onInputError).toHaveBeenCalledExactlyOnceWith('disconnected');
+    expect(states.at(-1)).toBe('closed');
+    expect(ws.readyState).toBe(3);
+  });
+
+  it('gives a returning agent a whole connection deadline', async () => {
+    vi.useFakeTimers();
+    const { b, states } = setup([], { connectionTimeoutMs: 20_000 });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init' } });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    expect(states.at(-1)).toBe('live');
+    ws.push({ t: 'agent_offline' });
+    await vi.advanceTimersByTimeAsync(15_000);
+    // Back after 15 s: it renegotiates within its own 20 s, not the 5 s the outage left.
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init' } });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(FakeWS.all).toHaveLength(1);
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    expect(states.at(-1)).toBe('live');
+    expect(FakeWS.all).toHaveLength(1);
+    b.disconnect();
+  });
+
+  it('frees the cursor image when the view goes away', async () => {
+    const cursors: string[] = [];
+    const revoke = vi.spyOn(URL, 'revokeObjectURL');
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:cursor');
+    const { b } = setup([], { onCursor: (css) => cursors.push(css) });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    await readyInput(ws);
+    const channel = { binaryType: '', onmessage: null as null | ((m: { data: ArrayBuffer }) => void) };
+    FakePC.last.ondatachannel({ channel });
+    const image = new ArrayBuffer(12);
+    new DataView(image).setUint8(0, 2);
+    channel.onmessage!({ data: image });
+    expect(cursors).toEqual(['url(blob:cursor) 0 0, default']);
+    b.disconnect();
+    expect(revoke).toHaveBeenCalledExactlyOnceWith('blob:cursor');
+    expect(cursors.at(-1)).toBe('default');
+  });
+
   it('uses Neko screen capabilities for both dimensions and rate, ignoring malformed entries', async () => {
     vi.useFakeTimers();
     const { b } = setup();
@@ -540,6 +710,38 @@ describe('RemoteBrowser', () => {
     b.setViewport(2000, 1200);
     await vi.advanceTimersByTimeAsync(5000);
     expect(ws.neko('screen/set').at(-1)).toEqual({ width: 1920, height: 1080, rate: 30 });
+    b.disconnect();
+  });
+
+  it('moves an iPad off a 16:10 desktop and forgets a screen that a new relay does not report', async () => {
+    vi.useFakeTimers();
+    const { b } = setup();
+    b.setViewport(1366, 829);
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init', payload: { screen_size: { width: 1280, height: 800, rate: 60 } } } });
+    ws.push({ t: 'neko', data: { event: 'system/admin', payload: { screen_sizes_list: NEKO_MODES } } });
+    expect(ws.neko('screen/set')).toEqual([{ width: 1368, height: 768, rate: 30 }]);
+    ws.push({ t: 'neko', data: { event: 'screen/updated', payload: { id: 'a', width: 1368, height: 768, rate: 30 } } });
+    expect(b.screenMode).toEqual({ width: 1368, height: 768, rate: 30 });
+    // The agent's relay restarts on the same socket; its init says nothing about the screen.
+    ws.push({ t: 'agent_offline' });
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init' } });
+    expect(b.screenSize).toBeNull();
+    b.disconnect();
+  });
+
+  it('asks for no more desktop than the tier\'s pixel budget', async () => {
+    vi.useFakeTimers();
+    const { b } = setup([], { maxScreenPixels: TIERS.basic.maxScreenPixels });
+    b.setViewport(2600, 1500);
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'neko', data: { event: 'system/init', payload: { screen_size: { width: 1280, height: 720, rate: 30 } } } });
+    ws.push({ t: 'neko', data: { event: 'system/admin', payload: { screen_sizes_list: NEKO_MODES } } });
+    expect(ws.neko('screen/set')).toEqual([{ width: 1920, height: 1080, rate: 30 }]);
     b.disconnect();
   });
 

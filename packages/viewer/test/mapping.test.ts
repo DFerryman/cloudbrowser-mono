@@ -1,5 +1,34 @@
 import { describe, expect, it } from 'vitest';
-import { elementPoint, pictureRect, toRemotePoint } from '../src/mapping.js';
+import { elementPoint, pictureRect, remoteSpace, toRemotePoint } from '../src/mapping.js';
+
+describe('the iPad report: box 1366×829, frame and screen 1280×800, a tap at box point 561,60', () => {
+  const box = { left: 0, top: 0, width: 1366, height: 829 };
+  const frame = { width: 1280, height: 800 };
+
+  it('maps the tap as the diagnostics showed', () => {
+    const point = toRemotePoint(561, 60, box, frame, frame)!;
+    expect([Math.round(point.x), Math.round(point.y)]).toEqual([522, 58]);
+  });
+
+  it('was painted 11:10 inside the rectangle input used, as measured in the screenshot', () => {
+    // object-fit: contain sized the layer from videoWidth×videoHeight; Safari's display layer then
+    // fitted the frame again at its tagged display aspect, 1408×800.
+    const painted = pictureRect(pictureRect(box, frame), { width: 1408, height: 800 });
+    expect(painted.width).toBeCloseTo(1326.4, 1); // measured 1325
+    expect(painted.height).toBeCloseTo(753.6, 1); // measured 752.5, bars of the page's own colour
+    expect(painted.top).toBeCloseTo(37.7, 1); // measured 38.3; a 1280×720 frame would give 41.4
+    // The finger touched remote y ≈ 24 (the tab strip); input went to y = 58 (the address bar).
+    expect(((60 - painted.top) / painted.height) * 800).toBeCloseTo(23.7, 0);
+  });
+});
+
+describe('remoteSpace', () => {
+  it('maps to neko\'s screen when the frame has its shape, and to the frame otherwise', () => {
+    expect(remoteSpace({ width: 960, height: 540 }, { width: 1920, height: 1080 })).toEqual({ width: 1920, height: 1080, source: 'screen' });
+    expect(remoteSpace({ width: 1280, height: 720 }, { width: 1280, height: 800 })).toEqual({ width: 1280, height: 720, source: 'frame' });
+    expect(remoteSpace({ width: 1280, height: 720 }, null)).toEqual({ width: 1280, height: 720, source: 'frame' });
+  });
+});
 
 describe('picture layout and input share the same rectangle', () => {
   it.each([

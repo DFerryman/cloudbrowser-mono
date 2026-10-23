@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type CSSProperties } from 'react';
 import { isMac } from './keyboard.js';
-import { elementPoint, pictureRect, toRemotePoint, unrotate, type PositionedEvent } from './mapping.js';
+import { elementPoint, pictureRect, remoteSpace, toRemotePoint, unrotate, type PositionedEvent } from './mapping.js';
+import { squarePixels } from './neko.js';
 import type { ConnectionDiagnostic, VideoQuality } from '@cloudbrowser/contracts';
 import type { VideoPreference } from './quality.js';
 import { RemoteBrowser, type AutomationStatus, type ConnectInfo, type ViewerState } from './remote-browser.js';
@@ -10,7 +11,7 @@ import { TextInputController } from './text-input.js';
 import type { InputFailure } from './input-queue.js';
 import { pastedFiles, type TransferUpdate } from './file-transfer.js';
 import { observeFirstFrame } from './first-frame.js';
-import { isDisplaying, playbackFailure, readPlayback, type PlaybackState } from './playback.js';
+import { isDisplaying, readPlayback, startPlayback, type PlaybackState } from './playback.js';
 
 /** Image types Chrome cannot paste from the X clipboard; one is pasted as a PNG instead. */
 const CONVERTED_IMAGES = ['image/jpeg', 'image/webp', 'image/bmp', 'image/avif'];
@@ -72,7 +73,14 @@ export interface RemoteBrowserViewProps {
   video?: VideoPreference;
   /** The level being streamed now. */
   onVideo?: (quality: VideoQuality) => void;
+  /** The most desktop pixels to ask for (TIERS[tier].maxScreenPixels), read once per viewer. */
+  maxScreenPixels?: number;
   muted?: boolean;
+  /**
+   * The viewer muted itself: the browser refused to play the stream with sound before a user
+   * gesture (WebKit, when the view mounts again unmuted). The page shows sound as off.
+   */
+  onMutedChange?: (muted: boolean) => void;
   className?: string;
   style?: CSSProperties;
 }
@@ -82,7 +90,7 @@ export interface RemoteBrowserViewProps {
  * textarea that owns the keyboard (so IME composition works), and the remote cursor drawn locally.
  */
 export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserViewProps>(function RemoteBrowserView(
-  { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onTransfer, onAutomation, rotated = false, debug = false, video, onVideo, muted = true, className, style },
+  { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onTransfer, onAutomation, rotated = false, debug = false, video, onVideo, maxScreenPixels, muted = true, onMutedChange, className, style },
   ref,
 ) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -96,7 +104,12 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   const [cursor, setCursor] = useState('default');
   const [dragging, setDragging] = useState(false);
   const [boxSize, setBoxSize] = useState<{ width: number; height: number } | null>(null);
-  const [pictureSize, setPictureSize] = useState({ width: 0, height: 0 });
+  /**
+   * The one frame size behind the painted rectangle and the input mapping: the decoded frame's
+   * pixels, from the frame being presented where the browser reports it (requestVideoFrameCallback)
+   * and from the element's resize events otherwise. `source` is whichever saw the last change.
+   */
+  const [pictureSize, setPictureSize] = useState<{ width: number; height: number; source: 'none' | 'frame' | 'element' }>({ width: 0, height: 0, source: 'none' });
   const pictureSizeRef = useRef(pictureSize);
   pictureSizeRef.current = pictureSize;
   const rotatedRef = useRef(rotated);
@@ -104,8 +117,11 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   const debugRef = useRef(debug);
   debugRef.current = debug;
   const [debugInfo, setDebugInfo] = useState<{ x: number; y: number; lines: string[] } | null>(null);
-  const callbacks = useRef({ getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation });
-  callbacks.current = { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation };
+  const statsRef = useRef<ViewerStats | null>(null);
+  const callbacks = useRef({ getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation, onMutedChange });
+  callbacks.current = { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation, onMutedChange };
+  /** Plays the current stream again if it is paused; a pointer press calls it, as a user gesture. */
+  const resumePlayback = useRef<(() => void) | null>(null);
   const initialVideo = useRef(video);
 
   const updateKeyboard = (open: boolean) => {
@@ -147,7 +163,11 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         });
       },
       requireFirstFrame: true,
-      onStats: (s) => callbacks.current.onStats?.(s),
+      ...(maxScreenPixels ? { maxScreenPixels } : {}),
+      onStats: (s) => {
+        statsRef.current = s;
+        callbacks.current.onStats?.(s);
+      },
       onInputError: (reason) => {
         textInputRef.current?.reset();
         callbacks.current.onInputError?.(reason);
@@ -164,18 +184,20 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
             playState = 'unknown';
             stopFirstFrame = observeFirstFrame(element, stream, () => browser.reportFirstFrame(attemptId, frameSequence));
           }
-          const request = ++playSequence;
-          playState = 'unknown';
-          const current = () => active && videoRef.current === element && element.srcObject === stream
-            && observedAttemptId === attemptId && observedFrameSequence === frameSequence && request === playSequence;
-          try {
-            void element.play().then(
-              () => { if (current()) playState = 'resolved'; },
-              (error: unknown) => { if (current()) playState = playbackFailure(error); },
-            );
-          } catch (error) {
-            if (current()) playState = playbackFailure(error);
-          }
+          const shown = () => active && videoRef.current === element && element.srcObject === stream
+            && observedAttemptId === attemptId && observedFrameSequence === frameSequence;
+          const play = () => {
+            const request = ++playSequence;
+            playState = 'unknown';
+            startPlayback(element, {
+              current: () => shown() && request === playSequence,
+              report: (state) => { playState = state; },
+              muted: () => callbacks.current.onMutedChange?.(true),
+            });
+          };
+          play();
+          // Playback refused even muted (iOS Low Power Mode blocks autoplay) is allowed in a gesture.
+          resumePlayback.current = () => { if (shown() && element.paused) play(); };
         }
       },
       onCursor: setCursor,
@@ -183,8 +205,9 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         // Unicode software input can use the remote clipboard; do not replace the user's
         // local clipboard with each IME commit while the keyboard is open.
         if (keyboardRequested.current) return;
-        // Remote → local clipboard; allowed while this document has focus.
-        void navigator.clipboard?.writeText(text).catch(() => {});
+        // Remote → local clipboard; allowed while this document has focus. Until it succeeds a
+        // local paste uses the remote clipboard (pasteClipboard).
+        void navigator.clipboard?.writeText(text).then(() => browser.clipboardCopied(text), () => {});
       },
       macToPc: isMac(),
       ...(initialVideo.current ? { video: initialVideo.current } : {}),
@@ -197,14 +220,16 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       mode: () => keyboardRequested.current ? 'software' : 'desktop',
       key: (down, event) => keyboardRequested.current ? browser.softwareKey(down, event) : browser.key(down, event),
       typeText: (text) => keyboardRequested.current ? browser.typeSoftwareText(text) : browser.typeText(text),
-      sendCombo: (names) => keyboardRequested.current ? browser.sendSoftwareCombo(names) : browser.sendCombo(names),
+      sendCombo: (names, exact) => keyboardRequested.current ? browser.sendSoftwareCombo(names) : browser.sendCombo(names, exact),
       releaseAllKeys: () => browser.releaseAllKeys(),
       activity: () => callbacks.current.onInput?.(),
+      mac: isMac(),
     });
     void browser.connect();
     return () => {
       active = false;
       playSequence++;
+      resumePlayback.current = null;
       stopFirstFrame?.();
       keyboardRequested.current = false;
       callbacks.current.onKeyboardChange?.(false);
@@ -221,12 +246,21 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   useEffect(() => {
     const element = videoRef.current;
     if (!element) return;
-    const update = () => setPictureSize((previous) => previous.width === element.videoWidth && previous.height === element.videoHeight
-      ? previous : { width: element.videoWidth, height: element.videoHeight });
+    const set = (width: number, height: number, source: 'frame' | 'element') => setPictureSize((previous) =>
+      previous.width === width && previous.height === height ? previous : { width, height, source });
+    const update = () => set(element.videoWidth, element.videoHeight, 'element');
+    // Each presented frame confirms its size, so the rectangle never waits on a resize event.
+    let frame: number | undefined;
+    const presented = (_now: number, metadata: VideoFrameCallbackMetadata) => {
+      if (metadata.width > 0 && metadata.height > 0) set(metadata.width, metadata.height, 'frame');
+      frame = element.requestVideoFrameCallback(presented);
+    };
+    if (typeof element.requestVideoFrameCallback === 'function') frame = element.requestVideoFrameCallback(presented);
     update();
     element.addEventListener('resize', update);
     element.addEventListener('loadedmetadata', update);
     return () => {
+      if (frame !== undefined && typeof element.cancelVideoFrameCallback === 'function') element.cancelVideoFrameCallback(frame);
       element.removeEventListener('resize', update);
       element.removeEventListener('loadedmetadata', update);
     };
@@ -312,16 +346,20 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       const remote = remoteAt(local.x, local.y, local.frame);
       const rect = box.getBoundingClientRect();
       const video = videoRef.current!;
-      const screen = browserRef.current?.screenSize;
+      const mode = browserRef.current?.screenMode ?? null;
+      const frame = pictureSizeRef.current;
+      const space = remoteSpace({ width: frame.width || local.frame.width, height: frame.height || local.frame.height }, mode);
+      const picture = pictureRect(local.frame, frame);
+      const stats = statsRef.current;
       const vv = window.visualViewport;
-      const painted = video.getBoundingClientRect();
       const n = (value: number) => value.toFixed(0);
       setDebugInfo({ x: point.x, y: point.y, lines: [
         `${kind} ${e.pointerType} client ${n(e.clientX)},${n(e.clientY)} offset ${n(e.offsetX)},${n(e.offsetY)} page ${n(e.pageX)},${n(e.pageY)} target ${e.target === box ? 'box' : 'other'}`,
-        `box point ${n(point.x)},${n(point.y)} → remote ${remote ? `${n(remote.x)},${n(remote.y)}` : 'outside the picture'}`,
+        `box point ${n(point.x)},${n(point.y)} → remote ${remote ? `${n(remote.x)},${n(remote.y)}` : 'outside the picture'} of ${space.width}×${space.height} (${space.source})`,
         `box ${box.clientWidth}×${box.clientHeight} rect ${n(rect.left)},${n(rect.top)} ${n(rect.width)}×${n(rect.height)} rotated ${rotatedRef.current}`,
-        `video ${video.videoWidth}×${video.videoHeight} screen ${screen ? `${screen.width}×${screen.height}` : '?'}`,
-        `picture rect ${n(painted.left)},${n(painted.top)} ${n(painted.width)}×${n(painted.height)} fit fill`,
+        `frame ${frame.width}×${frame.height} from ${frame.source} · element ${video.videoWidth}×${video.videoHeight} · rtp ${stats?.width ?? '?'}×${stats?.height ?? '?'}`,
+        `screen ${mode ? `${mode.width}×${mode.height}@${mode.rate}${squarePixels(mode) ? '' : ' (not 16:9: the stream is tagged with 11:10 pixels)'}` : '?'}`,
+        `picture ${n(picture.left)},${n(picture.top)} ${n(picture.width)}×${n(picture.height)} · laid out ${video.offsetLeft},${video.offsetTop} ${video.offsetWidth}×${video.offsetHeight} fit ${getComputedStyle(video).objectFit}`,
         `viewport ${vv ? `offset ${n(vv.offsetLeft)},${n(vv.offsetTop)} page ${n(vv.pageLeft)},${n(vv.pageTop)} ${n(vv.width)}×${n(vv.height)} scale ${vv.scale.toFixed(2)}` : 'none'}`,
         `scroll ${window.scrollX},${window.scrollY} inner ${window.innerWidth}×${window.innerHeight} client ${document.documentElement.clientWidth}×${document.documentElement.clientHeight}`,
       ] });
@@ -348,6 +386,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         e.preventDefault();
         return;
       }
+      // A press is a user gesture: playback the browser refused without one can start now.
+      resumePlayback.current?.();
       const p = toRemote(e);
       if (!p) return;
       keysRef.current?.focus({ preventScroll: true });
@@ -360,6 +400,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     const onUp = (e: PointerEvent) => {
       trace('up', e);
       if (e.pointerType === 'touch') {
+        // A touch becomes a user gesture only when the finger lifts; a mouse press already is one.
+        resumePlayback.current?.();
         touch.pointerUp(touchEvent(e));
         browserRef.current?.finishScroll();
         e.preventDefault();
@@ -385,6 +427,10 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       }
     };
     const onHidden = () => { if (document.hidden) reset(); };
+    const onBlur = () => {
+      browserRef.current?.pageBlurred();
+      reset();
+    };
     const onWheel = (e: WheelEvent) => {
       // The entire viewer owns scrolling, including its letterbox. Never scroll the local page.
       e.preventDefault();
@@ -411,7 +457,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     box.addEventListener('touchstart', noTouchScroll, { passive: false });
     box.addEventListener('touchmove', noTouchScroll, { passive: false });
     box.addEventListener('contextmenu', noMenu);
-    window.addEventListener('blur', reset);
+    window.addEventListener('blur', onBlur);
     document.addEventListener('visibilitychange', onHidden);
     return () => {
       reset();
@@ -424,7 +470,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       box.removeEventListener('touchstart', noTouchScroll);
       box.removeEventListener('touchmove', noTouchScroll);
       box.removeEventListener('contextmenu', noMenu);
-      window.removeEventListener('blur', reset);
+      window.removeEventListener('blur', onBlur);
       document.removeEventListener('visibilitychange', onHidden);
     };
   }, []);
@@ -565,6 +611,9 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         {/* Share the input mapping's fit instead of letting the video compositor choose a
             separate intrinsic fit during a WebRTC resize. */}
         <video ref={videoRef} autoPlay playsInline muted={muted} style={{ position: 'absolute', display: 'block', ...(fitted ? { left: fitted.left, top: fitted.top, width: fitted.width, height: fitted.height } : { inset: 0, width: '100%', height: '100%' }), maxWidth: 'none', objectFit: 'fill', pointerEvents: 'none' }} />
+        {/* Input diagnostics: the rectangle input is mapped to. A picture painted smaller than it
+            (bars inside the outline) means the compositor fitted the frame a second time. */}
+        {debug && fitted ? <div aria-hidden data-testid="input-picture" style={{ position: 'absolute', left: fitted.left, top: fitted.top, width: fitted.width, height: fitted.height, boxSizing: 'border-box', border: '1px dashed #ff2fd0', pointerEvents: 'none' }} /> : null}
       </div>
       {dragging ? <div aria-hidden style={{ position: 'absolute', inset: 0, pointerEvents: 'none', outline: '2px dashed currentColor', outlineOffset: -6, opacity: 0.6 }} /> : null}
       {debug && debugInfo ? (

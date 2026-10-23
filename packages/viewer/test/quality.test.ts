@@ -140,6 +140,28 @@ describe('picture quality controller', () => {
     expect(run(current, 10_000, 40, (at) => ({ ...bad(at), scale: 1 })).map(([, q]) => q)).toEqual(['high', 'medium', 'low']);
   });
 
+  it('does not take frames of the old size after a resize for a downscaled level', () => {
+    // At medium, the desktop grows from 1600 to 1920 wide: neko says so at once, while 1600-wide
+    // frames keep arriving for two readings. That once ruled out medium and low for good.
+    const c = new QualityController('full', 0, 'medium');
+    let t = 10_000;
+    const advance = (seconds: number, sample: (at: number) => QualitySample) => { const s = run(c, t, seconds, sample); t += seconds * 1000; return s; };
+    expect(advance(6, (at) => ({ ...good(at, 15), scale: 1 }))).toEqual([]);
+    c.screenChanged(t);
+    expect(advance(4, (at) => ({ ...good(at, 15), scale: 1600 / 1920 }))).toEqual([]);
+    // Then the path congests: the controller still goes down to what it carries.
+    advance(30, (at) => ({ ...bad(at), stalled: true, lossRate: 0.3, kbps: 500, scale: 1 }));
+    expect(c.quality).toBe('low');
+  });
+
+  it('still rules out a level whose picture stays small once the desktop has settled', () => {
+    const scales: Record<string, number> = { full: 1, high: 0.75, medium: 0.5, low: 0.5 };
+    const c = new QualityController('full', 0);
+    c.screenChanged(0);
+    const sample = (at: number): QualitySample => ({ ...bad(at), scale: scales[c.quality]! });
+    expect(run(c, 10_000, 60, sample).map(([, q]) => q)).toEqual(['high', 'full']);
+  });
+
   it('runs low at 10 fps on purpose', () => {
     const low = new QualityController('low', 0);
     expect(run(low, 10_000, 30, (at) => good(at, 10))).toEqual([]);

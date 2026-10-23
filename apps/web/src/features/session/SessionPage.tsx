@@ -1,5 +1,5 @@
 import { useRegionInfo } from '../instances/hooks.js';
-import { STREAM, type ConnectionDiagnostic, type ConnectInfo, type Instance, type VideoQuality, type ViewerSession } from '@cloudbrowser/contracts';
+import { STREAM, TIERS, type ConnectionDiagnostic, type ConnectInfo, type Instance, type VideoQuality, type ViewerSession } from '@cloudbrowser/contracts';
 import { Button, cn, Menu, MenuItem, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -753,7 +753,9 @@ export function SessionPage() {
             rotated={rotated}
             debug={debugInput}
             className="absolute inset-0 bg-frame"
+            maxScreenPixels={TIERS[i.tier ?? 'basic'].maxScreenPixels}
             muted={muted}
+            onMutedChange={setMuted}
             // Each viewer token works once, so every (re)connect asks the api for a fresh one.
             getConnectInfo={async () => {
               const sequence = ++connectRequestSequence.current;

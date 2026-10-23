@@ -29,6 +29,42 @@ export function playbackFailure(error: unknown): Exclude<PlaybackState, 'unknown
   return 'failed';
 }
 
+/** What startPlayback uses of a <video>. */
+export interface PlayableVideo {
+  muted: boolean;
+  play(): Promise<void>;
+}
+
+/**
+ * Plays the element and reports the outcome while `current` holds. WebKit refuses to play an
+ * unmuted <video> that mounts again (or gets a new stream) without a user gesture; the picture
+ * then stayed black until the connection deadline replaced the connection, which met the same
+ * refusal, again and again. Muted playback needs no gesture: the element is muted, `muted` tells
+ * the page, and it plays again once.
+ */
+export function startPlayback(video: PlayableVideo, options: { current: () => boolean; report: (state: PlaybackState) => void; muted: () => void }): void {
+  const failed = (error: unknown, retry: boolean) => {
+    if (!options.current()) return;
+    const state = playbackFailure(error);
+    options.report(state);
+    if (state !== 'not_allowed' || !retry || video.muted) return;
+    video.muted = true;
+    options.muted();
+    attempt(false);
+  };
+  const attempt = (retry: boolean) => {
+    try {
+      void video.play().then(
+        () => { if (options.current()) options.report('resolved'); },
+        (error: unknown) => failed(error, retry),
+      );
+    } catch (error) {
+      failed(error, retry);
+    }
+  };
+  attempt(true);
+}
+
 function dimension(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 32_768;
 }

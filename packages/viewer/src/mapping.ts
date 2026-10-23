@@ -11,6 +11,19 @@ export function pictureRect(
 }
 
 /**
+ * The remote pixels input is mapped to. A picture level keeps the screen's shape, so it is neko's
+ * screen whenever the frame has that shape; right after a resize the old frames may still show
+ * while neko already reports the new screen, and input then follows what is on screen.
+ */
+export function remoteSpace(
+  frame: { width: number; height: number },
+  screen: { width: number; height: number } | null,
+): { width: number; height: number; source: 'screen' | 'frame' } {
+  const sameShape = screen && frame.width > 0 && frame.height > 0 && Math.abs(screen.width / screen.height - frame.width / frame.height) < 0.02;
+  return sameShape ? { width: screen.width, height: screen.height, source: 'screen' } : { width: frame.width, height: frame.height, source: 'frame' };
+}
+
+/**
  * Box coordinates → remote pixels, accounting for the explicit picture rectangle. A lower
  * picture level is a downscaled video of the same desktop, so positions are scaled to the remote
  * screen when it is known, not to the video's own pixels.
@@ -26,11 +39,7 @@ export function toRemotePoint(
   const vh = video.height || box.height;
   const picture = pictureRect(box, video);
   if (picture.width <= 0 || picture.height <= 0 || clientX < picture.left || clientY < picture.top || clientX >= picture.left + picture.width || clientY >= picture.top + picture.height) return null;
-  // A picture level keeps the screen's shape. Right after a resize the old frames may still
-  // show while neko already reports the new screen: map to what is on screen then.
-  const sameShape = screen && Math.abs(screen.width / screen.height - vw / vh) < 0.02;
-  const width = sameShape ? screen.width : vw;
-  const height = sameShape ? screen.height : vh;
+  const { width, height } = remoteSpace({ width: vw, height: vh }, screen);
   return {
     x: Math.min(((clientX - picture.left) / picture.width) * width, width - 1),
     y: Math.min(((clientY - picture.top) / picture.height) * height, height - 1),

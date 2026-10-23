@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { isDisplaying, playbackFailure, readPlayback } from '../src/playback.js';
+import { isDisplaying, playbackFailure, readPlayback, startPlayback } from '../src/playback.js';
 
 const video = () => ({ paused: false, readyState: 4, videoWidth: 1920, videoHeight: 1080 });
 
@@ -146,5 +146,57 @@ describe('current video display', () => {
 
   it.each([undefined, null, false, 1, 'video'])('returns false for absent/non-element %s', (source) => {
     expect(isDisplaying(source)).toBe(false);
+  });
+});
+
+describe('starting playback', () => {
+  /** WebKit without a user gesture: only muted playback is allowed. */
+  const webkit = (muted = false) => {
+    const element = {
+      muted,
+      play: vi.fn(() => element.muted ? Promise.resolve() : Promise.reject(Object.assign(new Error('gesture required'), { name: 'NotAllowedError' }))),
+    };
+    return element;
+  };
+  const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+
+  it('mutes a stream WebKit refuses to play with sound, says so, and plays it again', async () => {
+    const element = webkit();
+    const states: string[] = [];
+    const muted = vi.fn();
+    startPlayback(element, { current: () => true, report: (state) => states.push(state), muted });
+    await flush();
+    expect(element.play).toHaveBeenCalledTimes(2);
+    expect(element.muted).toBe(true);
+    expect(muted).toHaveBeenCalledOnce();
+    expect(states).toEqual(['not_allowed', 'resolved']);
+  });
+
+  it('retries only once, and leaves an already muted or replaced stream alone', async () => {
+    const refused = { muted: true, play: vi.fn(() => Promise.reject(Object.assign(new Error(), { name: 'NotAllowedError' }))) };
+    const states: string[] = [];
+    startPlayback(refused, { current: () => true, report: (state) => states.push(state), muted: () => {} });
+    await flush();
+    expect(refused.play).toHaveBeenCalledOnce();
+    expect(states).toEqual(['not_allowed']);
+
+    const element = webkit();
+    let current = true;
+    const muted = vi.fn();
+    startPlayback(element, { current: () => current, report: () => {}, muted });
+    current = false;
+    await flush();
+    expect(element.play).toHaveBeenCalledOnce();
+    expect(element.muted).toBe(false);
+    expect(muted).not.toHaveBeenCalled();
+  });
+
+  it('does not mute for other failures', async () => {
+    const element = { muted: false, play: vi.fn(() => Promise.reject(Object.assign(new Error(), { name: 'AbortError' }))) };
+    const states: string[] = [];
+    startPlayback(element, { current: () => true, report: (state) => states.push(state), muted: () => {} });
+    await flush();
+    expect(element.muted).toBe(false);
+    expect(states).toEqual(['aborted']);
   });
 });
