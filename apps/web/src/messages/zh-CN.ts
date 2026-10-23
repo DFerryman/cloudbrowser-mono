@@ -891,6 +891,8 @@ export const zhCN: Messages = {
   'agents.banner.user': '由你控制；编程智能体已暂停。',
   'agents.banner.privacy': '隐私暂停：编程智能体不接受输入，也不会收到截图。',
   'agents.banner.disconnected': '编程智能体已暂停，直到你交还控制权。',
+  'agents.chip': '编程智能体',
+  'agents.notice.dismiss': '关闭',
   'home.f.agents.title': '支持编程智能体',
   'home.f.agents.body': '无需安装任何东西，就能把 Claude Code、Cursor 或任何 MCP 智能体连接到浏览器：它看截图并操作，你全程旁观，点一下即可接管。',
   'error.agent_access_off': '此浏览器已关闭编程智能体访问。',

@@ -1,5 +1,5 @@
 import { useRegionInfo } from '../instances/hooks.js';
-import { STREAM, TIERS, type ConnectionDiagnostic, type ConnectInfo, type Instance, type VideoQuality, type ViewerSession } from '@cloudbrowser/contracts';
+import { STREAM, TIERS, type AgentControlMode, type ConnectionDiagnostic, type ConnectInfo, type Instance, type VideoQuality, type ViewerSession } from '@cloudbrowser/contracts';
 import { Button, cn, Menu, MenuItem, MenuLabel, MenuSeparator, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -9,12 +9,16 @@ import {
   ClipboardCopy,
   Command,
   Download,
+  Eye,
+  EyeOff,
   Gauge,
+  Hand,
   Keyboard,
   Maximize,
   Minimize,
   Moon,
   MoreHorizontal,
+  Play,
   RefreshCw,
   RotateCw,
   RotateCwSquare,
@@ -22,6 +26,7 @@ import {
   Upload,
   Volume2,
   VolumeX,
+  X,
 } from 'lucide-react';
 import { COMBOS, qualityLevel, type AutomationStatus, type TransferUpdate, type ViewerState, type ViewerStats } from '@cloudbrowser/viewer';
 import { RemoteBrowserView, type RemoteBrowserHandle } from '@cloudbrowser/viewer/react';
@@ -48,6 +53,8 @@ const decodesH264 = (() => {
 })();
 
 const IDLE_WARNING_MS = 60_000;
+/** How long a change of who drives the browser is announced over the picture. */
+const AGENT_NOTICE_MS = 5_000;
 /** iOS can leave the page panned after the on-screen keyboard closes; the page is put back once more after its closing animation. */
 const KEYBOARD_CLOSE_SETTLE_MS = 500;
 /** iPhone and iPad, including an iPad presenting itself as a Mac. */
@@ -550,6 +557,26 @@ export function SessionPage() {
   }
 
   const live = i?.status === 'running' && connect.data?.mode === 'webrtc' && viewer.state === 'live';
+  const agentShown = live && automation !== null && (automation.connected || automation.control.mode !== 'agent');
+  const agentKey = agentShown && automation ? agentState(automation) : null;
+  const [agentNotice, setAgentNotice] = useState<AgentState | null>(null);
+  const lastAgentKey = useRef<AgentState | null>(null);
+  // Who drives the browser lives in a toolbar chip; a change while the user watches is also said
+  // once, briefly. A pause found on arrival is not news (it persists until handed back), so only
+  // an agent already driving is announced then.
+  useEffect(() => {
+    if (!agentKey) { lastAgentKey.current = null; return; }
+    if (agentKey === lastAgentKey.current) return;
+    const first = lastAgentKey.current === null;
+    lastAgentKey.current = agentKey;
+    if (!first || agentKey === 'agent') setAgentNotice(agentKey);
+  }, [agentKey]);
+  useEffect(() => {
+    if (!agentNotice) return;
+    const timer = setTimeout(() => setAgentNotice(null), AGENT_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [agentNotice]);
+  const setAgentMode = (mode: AgentControlMode) => setControl.mutate({ id, mode }, { onError: (e) => toast(errorMessage(e), 'error') });
 
   const toggleRotated = () => {
     const next = !rotated;
@@ -657,6 +684,7 @@ export function SessionPage() {
               <span className="size-2 rounded-full bg-starting" aria-hidden /> {t('session.simulated')}
             </span>
           ) : null}
+          {agentShown && automation ? <AgentControlMenu status={automation} busy={setControl.isPending} onMode={setAgentMode} onCloseAutoFocus={refocusViewer} /> : null}
           {rotateButton}
           {keyboardButton}
           <div className="hidden items-center gap-0.5 sm:flex">
@@ -860,18 +888,17 @@ export function SessionPage() {
         {maximized ? (
           // The way out of the maximized view, with the keyboard still a tap away (it needs the toolbar's gesture, not the picture's).
           <div role="toolbar" aria-label={t('session.maximizedTools')} className="absolute right-3 bottom-3 z-30 flex items-center gap-0.5 border border-zinc-700 bg-zinc-950/85 p-1 backdrop-blur">
+            {agentShown && automation ? <AgentControlMenu status={automation} busy={setControl.isPending} onMode={setAgentMode} onCloseAutoFocus={refocusViewer} /> : null}
             {keyboardButton}
             {rotateButton}
             {sizeButton}
           </div>
         ) : null}
-        {live && automation && (automation.connected || automation.control.mode !== 'agent') ? (
-          <AgentBanner
-            status={automation}
-            busy={setControl.isPending}
-            onMode={(mode) => setControl.mutate({ id, mode }, { onError: (e) => toast(errorMessage(e), 'error') })}
-          />
+        {agentKey === 'agent' ? (
+          // The agent is driving: said by the frame's edge, which covers nothing of the page.
+          <div aria-hidden data-testid="agent-driving" className="pointer-events-none absolute inset-0 z-10 ring-2 ring-inset ring-accent/70" />
         ) : null}
+        {agentShown && agentNotice ? <AgentNotice state={agentNotice} onDismiss={() => setAgentNotice(null)} /> : null}
         {session && !takenOver && i?.status === 'running' && sleepReason === 'idle' && idleLeft < IDLE_WARNING_MS ? (
           <div role="status" className="absolute inset-x-4 bottom-4 z-20 flex flex-wrap items-center justify-center gap-3 border border-amber-500/50 bg-zinc-950 p-4 text-sm text-zinc-100">
             <span>{t('overlay.idle', { seconds: Math.max(0, Math.ceil(idleLeft / 1000)) })}</span>
@@ -883,26 +910,72 @@ export function SessionPage() {
   );
 }
 
-/**
- * Who drives the browser while a coding agent is paired. While the agent controls, any click or
- * key of the user's takes over at once (the VM does that, not this banner); the banner then offers
- * to hand control back, and a privacy pause that also withholds screenshots.
- */
-function AgentBanner({ status, busy, onMode }: { status: AutomationStatus; busy: boolean; onMode: (mode: 'agent' | 'user' | 'privacy') => void }) {
-  const { t } = useI18n();
+type AgentState = 'agent' | 'idle' | 'user' | 'privacy' | 'disconnected';
+
+/** What the user is told about a coding agent (docs/agent-access.md), from the VM's control report. */
+function agentState(status: AutomationStatus): AgentState {
   const { mode, controller } = status.control;
-  const message = !status.connected ? t('agents.banner.disconnected')
-    : mode === 'privacy' ? t('agents.banner.privacy')
-      : mode === 'user' ? t('agents.banner.user')
-        : controller === 'agent' ? t('agents.banner.agent') : t('agents.banner.idle');
+  if (!status.connected) return 'disconnected';
+  if (mode === 'privacy' || mode === 'user') return mode;
+  return controller === 'agent' ? 'agent' : 'idle';
+}
+
+const AGENT_DOT: Record<AgentState, string> = {
+  agent: 'bg-accent animate-pulse',
+  idle: 'bg-running',
+  user: 'bg-starting',
+  privacy: 'bg-sleeping',
+  disconnected: 'bg-starting',
+};
+
+/**
+ * Who drives the browser while a coding agent is connected or paused, as a toolbar button: a
+ * banner over the picture covered the page the user had just taken over and could not be closed.
+ * Any click or key of the user's takes control from the agent (the VM does that, not this menu);
+ * the menu is where control is handed back, the agent paused, or a privacy pause (no screenshots
+ * either) turned on and off.
+ */
+function AgentControlMenu({ status, busy, onMode, onCloseAutoFocus }: {
+  status: AutomationStatus;
+  busy: boolean;
+  onMode: (mode: AgentControlMode) => void;
+  onCloseAutoFocus: (event: Event) => void;
+}) {
+  const { t } = useI18n();
+  const state = agentState(status);
+  const { mode } = status.control;
+  const message = t(`agents.banner.${state}`);
   return (
-    <div role="status" className={cn('absolute inset-x-4 top-3 z-20 flex flex-wrap items-center justify-center gap-x-3 gap-y-2 border bg-zinc-950/95 px-4 py-2.5 text-sm text-zinc-100',
-      mode === 'agent' && controller === 'agent' ? 'border-accent/60' : 'border-zinc-700')}>
-      <Bot className="size-4 shrink-0 text-zinc-300" aria-hidden />
-      <span>{message}</span>
-      {mode !== 'agent' ? <Button size="sm" variant="primary" disabled={busy} onClick={() => onMode('agent')}>{t('agents.handBack')}</Button> : null}
-      {mode === 'agent' && status.connected ? <Button size="sm" disabled={busy} onClick={() => onMode('user')}>{t('agents.pause')}</Button> : null}
-      {mode !== 'privacy' && status.connected ? <Button size="sm" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" disabled={busy} onClick={() => onMode('privacy')}>{t('agents.privacy')}</Button> : null}
+    <Menu
+      onCloseAutoFocus={onCloseAutoFocus}
+      trigger={
+        <Button size="icon" variant="ghost" className="relative text-zinc-300 hover:bg-zinc-800" aria-label={`${t('agents.chip')}: ${message}`} title={message} data-testid="agent-control">
+          <Bot />
+          <span aria-hidden className={cn('absolute top-1.5 right-1.5 size-2 rounded-full ring-2 ring-zinc-950', AGENT_DOT[state])} />
+        </Button>
+      }
+    >
+      <p role="status" className="max-w-72 px-2.5 py-2 text-sm leading-snug">{message}</p>
+      <MenuSeparator />
+      {mode !== 'agent' ? <MenuItem disabled={busy} onSelect={() => onMode('agent')}><Play /> {t('agents.handBack')}</MenuItem> : null}
+      {mode === 'agent' && status.connected ? <MenuItem disabled={busy} onSelect={() => onMode('user')}><Hand /> {t('agents.pause')}</MenuItem> : null}
+      {mode === 'privacy'
+        ? <MenuItem disabled={busy} onSelect={() => onMode('user')}><Eye /> {t('agents.privacyOff')}</MenuItem>
+        : status.connected ? <MenuItem disabled={busy} onSelect={() => onMode('privacy')}><EyeOff /> {t('agents.privacy')}</MenuItem> : null}
+    </Menu>
+  );
+}
+
+/** A change of who drives the browser, said once over the picture: small, closable, and gone after a few seconds. */
+function AgentNotice({ state, onDismiss }: { state: AgentState; onDismiss: () => void }) {
+  const { t } = useI18n();
+  return (
+    <div role="status" data-testid="agent-notice" className="absolute top-3 left-1/2 z-20 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-2 border border-zinc-700 bg-zinc-950/90 py-1 pr-1 pl-3 text-xs text-zinc-100 shadow-pop backdrop-blur">
+      <Bot className="size-3.5 shrink-0 text-zinc-300" aria-hidden />
+      <span className="min-w-0">{t(`agents.banner.${state}`)}</span>
+      <button type="button" className="grid size-6 shrink-0 place-items-center text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={t('agents.notice.dismiss')} onClick={onDismiss}>
+        <X className="size-3.5" />
+      </button>
     </div>
   );
 }

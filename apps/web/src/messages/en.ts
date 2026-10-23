@@ -889,6 +889,8 @@ export const en = {
   'agents.banner.user': 'You have control; the coding agent is paused.',
   'agents.banner.privacy': 'Privacy pause: the coding agent gets no input and no screenshots.',
   'agents.banner.disconnected': 'The coding agent is paused until you hand control back.',
+  'agents.chip': 'Coding agent',
+  'agents.notice.dismiss': 'Dismiss',
   'home.f.agents.title': 'Works with coding agents',
   'home.f.agents.body': 'Connect Claude Code, Cursor or any MCP agent to a browser with nothing to install: it sees screenshots and acts while you watch, and you take over with a click.',
   'error.agent_access_off': 'Coding agent access is turned off for this browser.',
