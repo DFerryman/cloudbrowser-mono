@@ -13,7 +13,7 @@ const CREEM_SECRET = 'whsec_test';
 const STRIPE_CONFIG = {
   STRIPE_SECRET_KEY: STRIPE_KEY,
   STRIPE_WEBHOOK_SECRET: STRIPE_SECRET,
-  STRIPE_TOPUP_PRICES: 'price_25usd00001, price_10usd00001, price_anyusd0001, price_monthly001, price_eur0000001',
+  STRIPE_TOPUP_PRICES: 'price_25usd00001, price_10usd00001, price_anyusd0001, price_monthly001, price_eur0000001, price_usdgbp0001',
 };
 
 const hmacHex = async (secret: string, text: string) => {
@@ -43,7 +43,11 @@ class FakeStripe {
     price_anyusd0001: { id: 'price_anyusd0001', object: 'price', active: true, type: 'one_time', currency: 'usd', unit_amount: null, custom_unit_amount: { minimum: 500, maximum: 100000, preset: 2000 }, product: 'prod_any' },
     price_monthly001: { id: 'price_monthly001', object: 'price', active: true, type: 'recurring', currency: 'usd', unit_amount: 900, custom_unit_amount: null, product: 'prod_sub' },
     price_eur0000001: { id: 'price_eur0000001', object: 'price', active: true, type: 'one_time', currency: 'eur', unit_amount: 1000, custom_unit_amount: null, product: 'prod_eur' },
+    // USD with a GBP option: Checkout would charge a UK buyer in GBP.
+    price_usdgbp0001: { id: 'price_usdgbp0001', object: 'price', active: true, type: 'one_time', currency: 'usd', unit_amount: 1000, custom_unit_amount: null, product: 'prod_10', currency_options: { usd: { unit_amount: 1000 }, gbp: { unit_amount: 800 } } },
   };
+  /** Customers that exist in this account and mode; Checkout makes `cus_new1` for a new buyer. */
+  customers = new Set(['cus_new1']);
   sessions = new Map<string, Json>();
   intents = new Map<string, Json>();
   charges = new Map<string, Json>();
@@ -101,13 +105,16 @@ class FakeStripe {
     if (method === 'GET' && kind === 'prices') {
       const p = this.prices[id!];
       if (!p) return fail(404, 'No such price');
-      const expand = url.searchParams.getAll('expand[0]');
-      return ok({ ...p, product: expand.includes('product') ? this.products[String(p.product)] : p.product });
+      // `currency_options` is includable: only returned when expanded.
+      const { currency_options: options, ...price } = p;
+      return ok({ ...price, product: this.expand(url).includes('product') ? this.products[String(p.product)] : p.product, ...(this.expand(url).includes('currency_options') && options ? { currency_options: options } : {}) });
     }
     if (method === 'POST' && url.pathname === '/v1/checkout/sessions') {
       if (params.get('consent_collection[terms_of_service]') && !this.termsUrl) {
         return fail(400, 'You cannot collect consent to your terms of service unless a URL is set in the Stripe Dashboard.', 'consent_collection[terms_of_service]');
       }
+      const customer = params.get('customer');
+      if (customer && !this.customers.has(customer)) return fail(400, `No such customer: '${customer}'; a similar object exists in test mode`, 'customer');
       const sid = `cs_test_${this.sessions.size + 1}`;
       const price = params.get('line_items[0][price]')!;
       this.sessions.set(sid, {
@@ -122,7 +129,7 @@ class FakeStripe {
     if (method === 'GET' && kind === 'checkout' && id === 'sessions') {
       const s = this.sessions.get(sub!);
       if (!s) return fail(404, 'No such checkout.session');
-      const expanded = url.searchParams.getAll('expand[0]').includes('line_items');
+      const expanded = this.expand(url).includes('line_items');
       const { price, intent_metadata: _, ...rest } = s;
       return ok({ ...rest, ...(expanded ? { line_items: { object: 'list', data: [{ price: this.prices[String(price)] }], has_more: false } } : {}) });
     }
@@ -134,9 +141,16 @@ class FakeStripe {
     }
     if (method === 'GET' && kind === 'refunds') return ok({ object: 'list', data: this.refunds.filter((r) => r.payment_intent === url.searchParams.get('payment_intent')), has_more: false });
     if (method === 'GET' && kind === 'disputes') return this.disputes.has(id!) ? ok(this.disputes.get(id!)) : fail(404, 'No such dispute');
-    if (method === 'POST' && url.pathname === '/v1/billing_portal/sessions') return ok({ id: 'bps_1', url: `https://billing.stripe.test/p/session/${params.get('customer')}` });
+    if (method === 'POST' && url.pathname === '/v1/billing_portal/sessions') {
+      const customer = params.get('customer')!;
+      return this.customers.has(customer) ? ok({ id: 'bps_1', url: `https://billing.stripe.test/p/session/${customer}` }) : fail(400, `No such customer: '${customer}'`, 'customer');
+    }
     return fail(500, `unexpected ${method} ${url.pathname}`);
   };
+
+  private expand(url: URL) {
+    return [...url.searchParams].filter(([k]) => /^expand\[\d*\]$/.test(k)).map(([, v]) => v);
+  }
 
   /** The last Checkout Session created, as Stripe received it. */
   lastCheckout() {
@@ -251,7 +265,7 @@ describe('choosing the payment provider', () => {
       { productId: 'price_25usd00001', name: '$25 credit', amountCents: 2500, currency: 'USD' },
     ]);
     // Recurring and non-USD prices, and Creem's products, are not offered while Stripe takes top-ups.
-    for (const productId of ['price_monthly001', 'price_eur0000001', 'prod_creem10']) {
+    for (const productId of ['price_monthly001', 'price_eur0000001', 'price_usdgbp0001', 'prod_creem10']) {
       expect((await t.call('POST', '/api/v1/billing/checkout', { productId })).body.type).toBe('validation_failed');
     }
   });
@@ -366,6 +380,20 @@ describe('Stripe top-ups', () => {
     expect(stripe.lastCheckout().has('customer_email')).toBe(false);
   });
 
+  it('forgets a stored customer Stripe no longer has, for checkout and receipts', async () => {
+    t.d1.sqlite.prepare('INSERT INTO stripe_customers (user_id, stripe_customer_id, created_at) VALUES (?, ?, ?)').run(userId, 'cus_testmode', Date.now());
+    expect((await t.call('POST', '/api/v1/billing/portal')).body.type).toBe('invalid_state');
+    t.d1.sqlite.prepare('INSERT INTO stripe_customers (user_id, stripe_customer_id, created_at) VALUES (?, ?, ?)').run(userId, 'cus_testmode', Date.now());
+    const id = await checkout();
+    expect(stripe.lastCheckout().get('customer_email')).toBe('buyer@example.com');
+    expect(stripe.lastCheckout().has('customer_update[address]')).toBe(false);
+    expect(sql('SELECT count(*) AS n FROM stripe_customers')).toEqual({ n: 0 });
+    stripe.pay(id);
+    await stripeWebhook(event('checkout.session.completed', { id }));
+    expect(await balance()).toBe(10_000_000);
+    expect(sql('SELECT stripe_customer_id AS id FROM stripe_customers')).toEqual({ id: 'cus_new1' });
+  });
+
   it('credits the amount a buyer chose on a "customer chooses" price', async () => {
     await paidTopUp('price_anyusd0001', { amount: 4200, tax: 840 });
     expect(await balance()).toBe(42_000_000);
@@ -423,7 +451,8 @@ describe('Stripe top-ups', () => {
     for (const changed of [
       { ...paid, id: 'cs_test_other' },
       { ...paid, client_reference_id: 'unrelated-request' },
-      { ...paid, metadata: { userId: 'other-user' } },
+      { ...paid, metadata: { ...(paid.metadata as Json), userId: 'other-user' } },
+      { ...paid, metadata: { ...(paid.metadata as Json), attemptId: 'another-attempt' } },
       { ...paid, price: 'price_25usd00001' },
       { ...paid, currency: 'gbp' },
       { ...paid, amount_total: 0 },
@@ -440,6 +469,8 @@ describe('Stripe top-ups', () => {
   it('leaves alone sessions, refunds and disputes of sales this app did not start', async () => {
     stripe.sessions.set('cs_test_link', { id: 'cs_test_link', status: 'complete', payment_status: 'paid', client_reference_id: null, metadata: {}, price: 'price_10usd00001', currency: 'usd', amount_total: 1000, total_details: { amount_tax: 0 }, payment_intent: 'pi_link' });
     await stripeWebhook(event('checkout.session.completed', { id: 'cs_test_link' }));
+    stripe.sessions.set('cs_test_crm', { ...stripe.sessions.get('cs_test_link')!, id: 'cs_test_crm', client_reference_id: 'crm-lead-123' });
+    await stripeWebhook(event('checkout.session.completed', { id: 'cs_test_crm' }));
     const pi = stripe.foreignPayment();
     stripe.refund(pi, 500);
     await stripeWebhook(event('charge.refunded', { id: `ch_${pi.slice(3)}` }));
@@ -470,7 +501,7 @@ describe('Stripe refunds and disputes', () => {
     expect((await t.call('GET', '/api/v1/billing/transactions')).body.map((x: { kind: string }) => x.kind)).toEqual(['refund', 'refund', 'topup']);
   });
 
-  it('waits for a pending refund, and tells operators when a refund fails after it was taken', async () => {
+  it('waits for a pending refund, and gives the credit back when a refund fails after it was taken', async () => {
     const { pi, charge } = await paidTopUp();
     const id = stripe.refund(pi, 1200, 'pending');
     await stripeWebhook(event('charge.refunded', { id: charge }));
@@ -481,7 +512,13 @@ describe('Stripe refunds and disputes', () => {
     expect(await balance()).toBe(0);
     stripe.refunds[0]!.status = 'failed';
     await stripeWebhook(event('refund.failed', { id }));
-    expect(String(sql("SELECT title FROM alerts WHERE dedupe_key = ?", `stripe-refund-failed:${id}`).title)).toMatch(/failed after it was taken off the balance/);
+    await stripeWebhook(event('refund.updated', { id })); // once only
+    expect(await balance()).toBe(10_000_000);
+    expect(t.d1.sqlite.prepare("SELECT title FROM alerts WHERE title LIKE 'Stripe refund%'").all()).toEqual([{ title: expect.stringMatching(/failed after it was taken off the balance; the credit was given back/) }]);
+    // The failed refund no longer counts: refunding half of the payment again takes half the credit.
+    stripe.refund(pi, 600);
+    await stripeWebhook(event('refund.created', { id: stripe.refunds[0]!.id }));
+    expect(await balance()).toBe(5_000_000);
   });
 
   it('keeps a refund that arrives before the credit until the credit is recorded', async () => {
@@ -502,11 +539,17 @@ describe('Stripe refunds and disputes', () => {
     const inquiry = stripe.dispute(pi, 1200, 'warning_needs_response');
     await stripeWebhook(event('charge.dispute.created', { id: inquiry }));
     expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ frozen: true, balanceMicros: 10_000_000 });
-    // It becomes a chargeback.
+    const frozenAt = sql('SELECT frozen_at AS at FROM billing_accounts WHERE user_id = ?', userId).at;
+    // It becomes a chargeback, later: the hold keeps the time it began.
     stripe.disputes.get(inquiry)!.status = 'needs_response';
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + 86_400_000);
+    const withdrawn = event('charge.dispute.funds_withdrawn', { id: inquiry });
+    await stripeWebhook(withdrawn, await stripeSignature(JSON.stringify(withdrawn)));
     await stripeWebhook(event('charge.dispute.funds_withdrawn', { id: inquiry }));
-    await stripeWebhook(event('charge.dispute.funds_withdrawn', { id: inquiry }));
+    vi.useRealTimers();
     expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ frozen: true, balanceMicros: 0 });
+    expect(sql('SELECT frozen_at AS at FROM billing_accounts WHERE user_id = ?', userId).at).toBe(frozenAt);
     expect(t.d1.sqlite.prepare("SELECT title FROM alerts WHERE source = 'billing' AND severity = 'critical'").all()).toEqual([{ title: `Stripe dispute by user ${userId}: account frozen` }]);
     const priceVersion = (await t.call('GET', '/api/v1/pricing')).body.find((p: { regionId: string }) => p.regionId === 'tyo1').version;
     expect((await t.call('POST', '/api/v1/instances', { name: 'a', regionId: 'tyo1', storageGb: 10, priceVersion }, { 'idempotency-key': 'a' })).body.type).toBe('account_frozen');
@@ -588,6 +631,8 @@ describe('Stripe client details', () => {
     expect(parsePrice({ id: 'price_x', type: 'one_time', currency: 'usd', unit_amount: null, custom_unit_amount: { minimum: null, preset: null } }).priceCents).toBe(50);
     expect(parsePrice({ id: 'price_x', active: false, type: 'one_time', currency: 'usd', unit_amount: 1500 }).billingType).toBe('archived');
     expect(parsePrice({ id: 'price_x', type: 'one_time', currency: 'usd', unit_amount: 1500, product: { name: 'Old', active: false } }).billingType).toBe('archived');
+    expect(parsePrice({ id: 'price_x', type: 'one_time', currency: 'usd', unit_amount: 1500, currency_options: { usd: {}, eur: {} } }).billingType).toBe('multi_currency');
+    expect(parsePrice({ id: 'price_x', type: 'one_time', currency: 'usd', unit_amount: 1500, currency_options: { usd: {} } }).billingType).toBe('onetime');
   });
 
   it('verifies signatures over the timestamp and the raw body', async () => {

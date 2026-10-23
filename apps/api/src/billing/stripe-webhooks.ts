@@ -21,7 +21,7 @@ import { BillingError } from './creem.js';
 import { applyBalance, centsToMicros, freezeAccount, notifyHub } from './ledger.js';
 import { stripeWebhookSecret, verifyStripeSignature, type Stripe } from './stripe.js';
 
-const { webhookEvents, topupCheckouts, topupPacks, stripeCustomers, balanceTransactions, auditLog } = schema;
+const { webhookEvents, topupCheckouts, topupPacks, stripeCustomers, balanceTransactions, billingAccounts, auditLog } = schema;
 
 /** Stored Stripe events are keyed `stripe:<event id>`, apart from Creem's ids. */
 export const STRIPE_EVENT_PREFIX = 'stripe:';
@@ -60,14 +60,15 @@ export async function receiveStripeWebhook(env: Env, db: Db, raw: string, signat
 export async function creditStripeCheckout(db: Db, stripe: Stripe, sessionId: string, now: Date): Promise<string | null> {
   const c = await stripe.getCheckout(sessionId);
   if (c.id !== sessionId) throw new BillingError('Checkout identity mismatch');
-  const attemptId = c.clientReferenceId ?? str(c.metadata.attemptId);
-  if (!attemptId) return null; // a payment link or another sale on the same account
+  // Every top-up session carries its attempt id in its own metadata. Without it the session is
+  // another sale on the same account (a payment link, another integration), even with a
+  // client_reference_id of its own.
+  const attemptId = str(c.metadata.attemptId);
+  if (!attemptId) return null;
   const [attempt] = await db.select().from(topupCheckouts).where(eq(topupCheckouts.id, attemptId));
   if (!attempt || attempt.provider !== 'stripe' || (attempt.checkoutId && attempt.checkoutId !== sessionId)) throw new BillingError(`Cannot match checkout ${c.id} to a local request`);
   const userId = attempt.userId;
-  if ((c.clientReferenceId && c.clientReferenceId !== attempt.id) || (c.metadata.userId && c.metadata.userId !== userId) || (c.metadata.attemptId && c.metadata.attemptId !== attempt.id)) {
-    throw new BillingError('Checkout metadata mismatch');
-  }
+  if (c.clientReferenceId !== attempt.id || c.metadata.userId !== userId) throw new BillingError('Checkout metadata mismatch');
   // Open or expired, or paid with a delayed method whose money has not arrived yet
   // (`checkout.session.async_payment_succeeded` follows).
   if (c.status !== 'complete' || c.paymentStatus === 'unpaid') return null;
@@ -119,7 +120,9 @@ async function creditedPayment(db: Db, stripe: Stripe, paymentIntentId: string) 
  * Takes every succeeded refund of a payment off the balance, once per refund. A refund still
  * pending keeps the event pending (it is retried) until Stripe settles it; failed and canceled
  * refunds take nothing. A card refund can still fail weeks after it succeeded: the money stays
- * with us, so operators are told to give the credit back (the ledger never re-credits a reversal).
+ * with us, so a `refund-failed:` row gives the credit back and takes the refund out of the
+ * payment's refunded total (its gross is negative), so a later refund of the same payment is
+ * still measured correctly. Operators are told.
  */
 async function applyRefunds(db: Db, stripe: Stripe, paymentIntentId: string, now: Date): Promise<string | null> {
   const payment = await creditedPayment(db, stripe, paymentIntentId);
@@ -128,13 +131,19 @@ async function applyRefunds(db: Db, stripe: Stripe, paymentIntentId: string, now
   for (const r of await stripe.listRefunds(paymentIntentId)) {
     if (r.status === 'pending' || r.status === 'requires_action') waiting = r.id;
     if (r.status === 'failed' || r.status === 'canceled') {
-      const [taken] = await db.select({ amountMicros: balanceTransactions.amountMicros }).from(balanceTransactions).where(eq(balanceTransactions.reference, `refund:${r.id}`));
-      if (taken) {
-        await raiseAlert(db, {
-          source: 'billing', severity: 'warning', dedupeKey: `stripe-refund-failed:${r.id}`,
-          title: `Stripe refund ${r.id} for user ${payment.userId} ${r.status} after it was taken off the balance: add the credit back in the console`,
-          detail: { userId: payment.userId, refundId: r.id, paymentIntentId, amountMicros: taken.amountMicros },
+      const [taken] = await db.select().from(balanceTransactions).where(eq(balanceTransactions.reference, `refund:${r.id}`));
+      if (taken?.appliedAt && taken.grossAmountCents) {
+        const restored = await applyBalance(db, {
+          userId: payment.userId, kind: 'refund', amountMicros: -taken.amountMicros, reference: `refund-failed:${r.id}`, description: 'Refund failed: credit restored', actor: 'stripe',
+          orderId: paymentIntentId, grossAmountCents: -taken.grossAmountCents, currency: payment.currency ?? undefined,
         }, now);
+        if (restored) {
+          await raiseAlert(db, {
+            source: 'billing', severity: 'warning',
+            title: `Stripe refund ${r.id} for user ${payment.userId} ${r.status} after it was taken off the balance; the credit was given back`,
+            detail: { userId: payment.userId, refundId: r.id, paymentIntentId, amountMicros: -taken.amountMicros },
+          }, now);
+        }
       }
     }
     if (r.status !== 'succeeded') continue;
@@ -180,7 +189,10 @@ export async function processStripeWebhook(env: Env, db: Db, stripe: Stripe, eve
           if (!payment) break;
           userId = payment.userId;
           if (d.amountCents === null || d.amountCents <= 0 || d.currency !== payment.currency) throw new BillingError('Dispute has invalid amount or currency');
-          await freezeAccount(db, userId, 'dispute', now);
+          // Frozen once: a second freeze (the inquiry becoming a chargeback) would move frozen_at
+          // and lose the deletion time unfreezeAccount gives back.
+          const [account] = await db.select({ frozenAt: billingAccounts.frozenAt }).from(billingAccounts).where(eq(billingAccounts.userId, userId));
+          if (!account?.frozenAt) await freezeAccount(db, userId, 'dispute', now);
           // An inquiry (`warning_…`) takes no money yet, and a prevented dispute is refunded (the
           // refund events debit it). The amount is taken when the bank actually withdraws it;
           // funds_withdrawn follows an inquiry that becomes a chargeback.

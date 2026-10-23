@@ -73,7 +73,12 @@ export interface Stripe {
    */
   topupProductIds: string[];
   getProduct(id: string): Promise<CreemProduct>;
-  createCheckout(input: { priceId: string; attemptId: string; userId: string; email: string; customerId: string | null; appUrl: string }): Promise<{ id: string; url: string; termsCheckbox: boolean }>;
+  /**
+   * `termsCheckbox` is false when the dashboard has no Terms URL (the terms are then shown above
+   * the pay button); `staleCustomer` when the stored customer no longer exists in this account
+   * and mode (Checkout then made a new one).
+   */
+  createCheckout(input: { priceId: string; attemptId: string; userId: string; email: string; customerId: string | null; appUrl: string }): Promise<{ id: string; url: string; termsCheckbox: boolean; staleCustomer: boolean }>;
   getCheckout(id: string): Promise<StripeCheckout>;
   /** The PaymentIntent a charge or a refund belongs to. */
   paymentIntentOf(object: 'charges' | 'refunds', id: string): Promise<string | null>;
@@ -128,19 +133,24 @@ export function formEncode(params: Record<string, unknown>): string {
   return out.toString();
 }
 
-/** Normalizes a price (with its product expanded) into a top-up product, as ./creem.ts reads Creem's. */
+/**
+ * Normalizes a price (with its product and currency options expanded) into a top-up product, as
+ * ./creem.ts reads Creem's. Archived prices are never offered, nor are prices with other
+ * currencies: Checkout would charge a buyer in theirs, and the balance is kept in USD.
+ */
 export function parsePrice(o: Record<string, unknown>): CreemProduct {
   const product = obj(o.product);
   const custom = o.custom_unit_amount ? obj(o.custom_unit_amount) : null;
   const cents = int(o.unit_amount) ?? (custom ? (int(custom.preset) ?? int(custom.minimum) ?? USD_MINIMUM_CHARGE_CENTS) : 0);
-  const usable = o.active !== false && product.active !== false;
+  const currency = upper(o.currency) ?? '';
+  const archived = o.active === false || product.active === false;
+  const otherCurrencies = Object.keys(obj(o.currency_options)).some((c) => c.toUpperCase() !== currency);
   return {
     id: String(o.id),
     name: str(product.name) ?? str(o.nickname) ?? String(o.id),
     priceCents: cents,
-    currency: upper(o.currency) ?? '',
-    // Archived prices and products are never offered.
-    billingType: !usable ? 'archived' : o.type === 'one_time' ? 'onetime' : (str(o.type) ?? 'unknown'),
+    currency,
+    billingType: archived ? 'archived' : otherCurrencies ? 'multi_currency' : o.type === 'one_time' ? 'onetime' : (str(o.type) ?? 'unknown'),
   };
 }
 
@@ -213,11 +223,14 @@ export function stripeFrom(env: Env): Stripe | null {
     livemode: key.includes('_live_'),
     topupProductIds: prices,
     async getProduct(id) {
-      return parsePrice(await call('GET', `/v1/prices/${at(id)}`, { expand: ['product'] }));
+      return parsePrice(await call('GET', `/v1/prices/${at(id)}`, { expand: ['product', 'currency_options'] }));
     },
     async createCheckout(input) {
       const ids = { userId: input.userId, attemptId: input.attemptId };
-      const params: Record<string, unknown> = {
+      const message = termsMessage(input.appUrl);
+      let customerId = input.customerId;
+      let termsCheckbox = true;
+      const session = (): Record<string, unknown> => ({
         mode: 'payment',
         line_items: [{ price: input.priceId, quantity: 1 }],
         client_reference_id: input.attemptId,
@@ -227,8 +240,8 @@ export function stripeFrom(env: Env): Stripe | null {
         payment_intent_data: { metadata: ids },
         // A returning buyer keeps one customer (one portal); Checkout saves the address and name
         // they enter on it, which automatic tax and tax id collection need.
-        ...(input.customerId
-          ? { customer: input.customerId, customer_update: { address: 'auto', name: 'auto' } }
+        ...(customerId
+          ? { customer: customerId, customer_update: { address: 'auto', name: 'auto' } }
           : { customer_email: input.email, customer_creation: 'always' }),
         billing_address_collection: 'required',
         automatic_tax: { enabled: automaticTax },
@@ -237,27 +250,32 @@ export function stripeFrom(env: Env): Stripe | null {
         // The balance is kept in USD: the buyer is charged the price's own USD amount, which is
         // what is credited and what refunds are measured against, whatever the dashboard default.
         adaptive_pricing: { enabled: false },
-      };
-      const message = termsMessage(input.appUrl);
-      let out: Record<string, unknown>;
-      let termsCheckbox = true;
-      try {
-        out = await call('POST', '/v1/checkout/sessions', {
-          ...params,
-          consent_collection: { terms_of_service: 'required' },
-          custom_text: { terms_of_service_acceptance: { message } },
-        }, `checkout:${input.attemptId}`);
-      } catch (e) {
-        // The checkbox needs a Terms of Service URL in the Stripe dashboard (Settings → Business →
-        // Public details). Until one is set, the same words sit above the pay button instead.
-        // Stripe names the refused field in `param`; its message wording is not documented.
-        if (!(e instanceof StripeError) || e.status !== 400 || !/^(consent_collection|custom_text\[terms_of_service_acceptance)/.test(e.param ?? '')) throw e;
-        termsCheckbox = false;
-        out = await call('POST', '/v1/checkout/sessions', { ...params, custom_text: { submit: { message } } }, `checkout:${input.attemptId}:submit`);
+        ...(termsCheckbox
+          ? { consent_collection: { terms_of_service: 'required' }, custom_text: { terms_of_service_acceptance: { message } } }
+          : { custom_text: { submit: { message } } }),
+      });
+      // Each refusal below is fixed by changing the request, so a retry gets its own idempotency key.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const out = await call('POST', '/v1/checkout/sessions', session(), attempt ? `checkout:${input.attemptId}:${attempt}` : `checkout:${input.attemptId}`);
+          const url = str(out.url);
+          if (!url) throw new BillingError('Stripe returned no checkout url');
+          return { id: str(out.id) ?? '', url, termsCheckbox, staleCustomer: customerId !== input.customerId };
+        } catch (e) {
+          if (!(e instanceof StripeError) || e.status !== 400 || attempt >= 2) throw e;
+          // Stripe names the refused field in `param`; its message wording is not documented.
+          if (customerId && e.param === 'customer') {
+            // Deleted, or from the other mode or another account: Checkout makes a new customer.
+            customerId = null;
+          } else if (termsCheckbox && /^(consent_collection|custom_text\[terms_of_service_acceptance)/.test(e.param ?? '')) {
+            // The checkbox needs a Terms of Service URL in the Stripe dashboard (Settings → Business
+            // → Public details). Until one is set, the same words sit above the pay button instead.
+            termsCheckbox = false;
+          } else {
+            throw e;
+          }
+        }
       }
-      const url = str(out.url);
-      if (!url) throw new BillingError('Stripe returned no checkout url');
-      return { id: str(out.id) ?? '', url, termsCheckbox };
     },
     async getCheckout(id) {
       return parseCheckout(await call('GET', `/v1/checkout/sessions/${at(id)}`, { expand: ['line_items'] }));

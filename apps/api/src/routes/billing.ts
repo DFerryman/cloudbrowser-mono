@@ -19,6 +19,7 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { offeredTopupPacks } from '../billing/ledger.js';
 import { checkoutProvider, paymentProviders, type PaymentProvider } from '../billing/providers.js';
+import { StripeError } from '../billing/stripe.js';
 import { retentionState } from '../billing/retention.js';
 import type { AppEnv } from '../env.js';
 import { billingAccount, entitlementsFor } from '../limits.js';
@@ -171,6 +172,7 @@ billingRoute.openapi(
         customerId: customer?.stripeCustomerId ?? null,
         appUrl: c.env.APP_URL,
       });
+      if (stripe.staleCustomer && customer) await db.delete(stripeCustomers).where(eq(stripeCustomers.stripeCustomerId, customer.stripeCustomerId));
       if (!stripe.termsCheckbox) {
         await raiseAlert(db, {
           source: 'billing',
@@ -211,11 +213,22 @@ billingRoute.openapi(
     const [creemCustomer] = creem ? await db.select().from(billingCustomers).where(eq(billingCustomers.userId, userId)) : [];
     // The provider taking top-ups first; someone who only ever paid the other one still gets its receipts.
     const portals = [
-      stripe && stripeCustomer ? () => stripe.portalUrl(stripeCustomer.stripeCustomerId, `${c.env.APP_URL}/billing`) : null,
+      stripe && stripeCustomer ? async () => {
+        try {
+          return await stripe.portalUrl(stripeCustomer.stripeCustomerId, `${c.env.APP_URL}/billing`);
+        } catch (e) {
+          // A customer deleted in Stripe, or from the other mode: forget it, the next paid checkout links a new one.
+          if (!(e instanceof StripeError) || e.status !== 400 || e.param !== 'customer') throw e;
+          await db.delete(stripeCustomers).where(eq(stripeCustomers.stripeCustomerId, stripeCustomer.stripeCustomerId));
+          return null;
+        }
+      } : null,
       creem && creemCustomer ? () => creem.portalUrl(creemCustomer.creemCustomerId) : null,
     ];
-    const portal = (active.id === 'stripe' ? portals : [...portals].reverse()).find((p) => p !== null);
-    if (!portal) throw problem(409, 'invalid_state', 'You have not bought credit yet.');
-    return c.json({ url: await portal() }, 200);
+    for (const portal of active.id === 'stripe' ? portals : [...portals].reverse()) {
+      const url = portal ? await portal() : null;
+      if (url) return c.json({ url }, 200);
+    }
+    throw problem(409, 'invalid_state', 'You have not bought credit yet.');
   },
 );
