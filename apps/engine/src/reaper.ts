@@ -163,9 +163,9 @@ export function expiredBackups(
   const out: string[] = [];
   // A recover's snapshot only carries the data to the new zone. Once the recover ended, the data
   // is on the browser's current volume (the new one, or the old one after a failure), so the
-  // snapshot goes; after the retention period at the latest. It is never the newest kept below.
+  // snapshot goes; after 7 days at the latest. It is never the newest kept below.
   const recovery = list.filter((b) => b.kind === 'snapshot' && b.reason === 'recover');
-  out.push(...recovery.filter((b) => b.recoverEnded || now.getTime() - b.createdAt.getTime() > snapshotDays * 86_400_000).map((b) => b.id));
+  out.push(...recovery.filter((b) => b.recoverEnded || now.getTime() - b.createdAt.getTime() > SNAPSHOT_KEEP_DAYS * 86_400_000).map((b) => b.id));
   list = list.filter((b) => !recovery.includes(b));
   if (!snapshotsEnabled) {
     // Snapshots were turned off: every daily or manual one goes, so they stop being billed.

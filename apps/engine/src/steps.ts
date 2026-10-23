@@ -647,12 +647,14 @@ async function issueBootstrapFor(env: StepEnv, generation: number): Promise<Step
   }
   // A recover replaces the identity of an agent whose VM stays current until the recover
   // finishes. Keep what it replaces (before replacing it, so a retried step cannot lose it):
-  // an abandoned recover gives that agent its credential back.
-  if (env.op.kind === 'recover' && !env.op.params?.previousAgent && existing?.generation !== generation) {
+  // an abandoned recover gives that agent its credential back (abandonRecover).
+  if (env.op.kind === 'recover' && !env.op.params?.previousAgent && existing && existing.generation !== generation) {
     await saveParams(env, { previousAgent: {
-      generation: existing?.generation ?? env.placement?.generation ?? 1,
-      credentialHash: existing?.credentialHash ?? null,
-      activatedAt: existing?.activatedAt?.getTime() ?? null,
+      generation: existing.generation,
+      credentialHash: existing.credentialHash,
+      activatedAt: existing.activatedAt?.getTime() ?? null,
+      bootstrapHash: existing.bootstrapHash,
+      bootstrapExpiresAt: existing.bootstrapExpiresAt?.getTime() ?? null,
     } });
   }
   const at = env.deps.now();
@@ -1156,45 +1158,51 @@ async function finishRecover(env: StepEnv): Promise<StepOutcome> {
 }
 
 /**
- * What an unfinished recover leaves when it fails or a stop supersedes it, undone: the volume
- * restored from its snapshot, the new interface and the VM it built are released at once, its
- * placement is set aside, and the current VM's agent gets back the credential the recover
- * replaced. The dedicated IP is never released. It may still be associated with the new
- * interface; the next start's binding check moves it back to the current one. The recover's
- * snapshot follows backup retention. Statements for the caller's batch, fenced by `env`.
+ * What an unfinished recover leaves when it fails or a stop or delete supersedes it, undone: the
+ * volume restored from its snapshot, the new interface and the VM it built are released at once
+ * (also one whose create response was lost: the reaper looks it up by its token), its placement
+ * is set aside, and the current VM's agent gets back the identity the recover replaced. The
+ * dedicated IP is never released. It may still be associated with the new interface; the next
+ * start's binding check moves it back to the current one. The recover's snapshot goes with
+ * backup retention once the recover ended. Statements for the caller's batch, fenced by `env`.
  */
 export async function abandonRecover(env: StepEnv, recover: { id: string; params: Record<string, unknown> | null }, at: Date) {
   const { db } = env.deps;
   const p = await currentPlacement(env);
   const keep = new Set([p?.vmId, p?.networkId, p?.volumeId, p?.ipAllocationId].filter((x): x is string => !!x));
-  const leftovers = (await db.select().from(resources).where(and(eq(resources.instanceId, env.instance.id), eq(resources.createdByOp, recover.id), eq(resources.state, 'active'))))
-    .filter((r) => r.providerId && !keep.has(r.providerId) && r.kind !== 'snapshot' && r.tags['cb:kind'] !== 'root_volume');
-  const previous = recover.params?.previousAgent as { generation?: unknown; credentialHash?: unknown; activatedAt?: unknown } | undefined;
+  const leftovers = (await db.select().from(resources).where(and(eq(resources.instanceId, env.instance.id), eq(resources.createdByOp, recover.id), inArray(resources.state, ['active', 'pending']))))
+    .filter((r) => !(r.providerId && keep.has(r.providerId)) && r.kind !== 'snapshot' && r.kind !== 'ip' && r.tags['cb:kind'] !== 'root_volume');
+  const previous = recover.params?.previousAgent as Record<string, unknown> | undefined;
+  const time = (v: unknown) => (typeof v === 'number' ? new Date(v) : null);
+  const text = (v: unknown) => (typeof v === 'string' ? v : null);
   return [
-    ...leftovers.map((r) => db.update(resources).set({ state: r.kind === 'ip' ? 'rejected' : 'superseded', releaseAfter: at })
+    ...leftovers.map((r) => db.update(resources).set({ state: 'superseded', releaseAfter: at })
       .where(and(eq(resources.id, r.id), operationFence(env)))),
     db.update(placements).set({ status: 'superseded' })
       .where(and(eq(placements.instanceId, env.instance.id), eq(placements.status, 'building'), operationFence(env))),
-    // Only while the VM the credential belongs to is still current.
+    // Only while the VM the identity belongs to is still current, and the recover's is in place.
     ...(typeof previous?.generation === 'number' && p?.generation === previous.generation ? [db.update(agentCredentials).set({
       generation: previous.generation,
-      credentialHash: typeof previous.credentialHash === 'string' ? previous.credentialHash : null,
-      activatedAt: typeof previous.activatedAt === 'number' ? new Date(previous.activatedAt) : null,
-      bootstrapHash: null,
-      bootstrapExpiresAt: null,
+      credentialHash: text(previous.credentialHash),
+      activatedAt: time(previous.activatedAt),
+      bootstrapHash: text(previous.bootstrapHash),
+      bootstrapExpiresAt: time(previous.bootstrapExpiresAt),
     }).where(and(eq(agentCredentials.instanceId, env.instance.id), ne(agentCredentials.generation, previous.generation), operationFence(env)))] : []),
   ];
 }
 
-/** Canceled recovery work must not leave unused paid assets allocated indefinitely. */
-async function finishStop(env: StepEnv): Promise<StepOutcome> {
+/** Canceled recovery work must not leave unused paid assets allocated, nor its agent locked out. */
+async function abandonInterruptedRecover(env: StepEnv) {
   const oldId = env.op.params?.preemptedOperationId;
-  const [interrupted] = typeof oldId === 'string' ? await env.deps.db.select({ id: schema.operations.id, kind: schema.operations.kind, params: schema.operations.params }).from(schema.operations).where(eq(schema.operations.id, oldId)) : [];
-  if (interrupted?.kind === 'recover') {
-    await discoverInstanceResources(env, env.instance.id);
-    const undo = await abandonRecover(env, interrupted, env.deps.now());
-    await env.deps.db.batch([undo[0]!, ...undo.slice(1)]);
-  }
+  const [interrupted] = typeof oldId === 'string' ? await env.deps.db.select({ id: operations.id, kind: operations.kind, params: operations.params }).from(operations).where(eq(operations.id, oldId)) : [];
+  if (interrupted?.kind !== 'recover') return;
+  await discoverInstanceResources(env, env.instance.id);
+  const undo = await abandonRecover(env, interrupted, env.deps.now());
+  await env.deps.db.batch([undo[0]!, ...undo.slice(1)]);
+}
+
+async function finishStop(env: StepEnv): Promise<StepOutcome> {
+  await abandonInterruptedRecover(env);
   // The VM ran from this stop's start (running time was settled then) until ensure_stopped; a
   // stop that found no VM to shut down (skipped) adds nothing.
   const shutDown = env.results.prepare_shutdown && 'acked' in env.results.prepare_shutdown ? env.op.createdAt.getTime() : null;
@@ -1296,10 +1304,12 @@ export const HANDLERS: Record<string, Record<string, Handler>> = {
   delete: {
     prepare_shutdown: prepareShutdown,
     ensure_stopped: ensureStopped,
-    finish: (env) => {
+    finish: async (env) => {
       const at = env.deps.now();
-      // Explicit immediate cleanup is purged at once; a deleted browser is restorable for 7 days.
+      // Explicit immediate cleanup is purged at once; a deleted browser is restorable for 7 days,
+      // with its agent's identity (a purge releases everything a recover left anyway).
       const purgeNow = (env.op.params as { purgeNow?: boolean } | null)?.purgeNow === true;
+      if (!purgeNow) await abandonInterruptedRecover(env);
       return finishWithStatus(env, 'deleting', {
         deletedAt: at,
         purgeAfter: purgeNow ? at : new Date(at.getTime() + 7 * 86_400_000),

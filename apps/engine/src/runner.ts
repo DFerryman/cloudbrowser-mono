@@ -41,6 +41,8 @@ const LEASE_MS = 3 * 60_000;
 /** Provider errors in a row before an operation fails; waits for capacity or an outage do not count. */
 const MAX_RETRYABLE_ATTEMPTS = 8;
 const CAPACITY_RETRY_MS = 60_000;
+/** Parameters the engine writes while it runs one operation (see steps.ts); never a request's. */
+const RUN_STATE = ['retries', 'ipCheckTry', 'bootStartedAt', 'restartStoppedAt', 'resumedVm', 'previousAgent'];
 
 /** Status shown while an operation of each kind runs (page 2, "Instance lifecycle"). */
 const TRANSITIONAL_STATUS: Partial<Record<OperationKind, string>> = {
@@ -135,6 +137,12 @@ async function runOwnedOperation(deps: EngineDeps, operationId: string): Promise
   if (!handlers || steps.length === 0) return fail(deps, op, null, 'invalid', 'This action is no longer available.');
 
   await env.assertActive();
+  // An operator's retry copies the failed operation's parameters, with what the engine kept while
+  // running it: the retry starts with its own error count, boot clock and restart state.
+  if (op.step === null && op.attempt === 0 && RUN_STATE.some((k) => op.params?.[k] !== undefined)) {
+    op.params = Object.fromEntries(Object.entries(op.params ?? {}).filter(([k]) => !RUN_STATE.includes(k)));
+    await db.update(operations).set({ params: op.params }).where(and(eq(operations.id, op.id), operationFence(env)));
+  }
   const transitional = TRANSITIONAL_STATUS[op.kind as OperationKind];
   if (op.kind === 'stop' && op.params?.reason === 'idle' && op.attempt === 0 && ['running', 'needs_attention'].includes(env.instance.status)) {
     if (!(await beginIdleStop(deps, env))) return { state: 'canceled' };
