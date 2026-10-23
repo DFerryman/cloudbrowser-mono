@@ -8,6 +8,7 @@ import type { MessageKey } from '../messages/en.js';
 import { useI18n } from '../lib/i18n.js';
 import { money } from '../lib/money.js';
 import { usePublicPricing, useSignedIn } from './hooks.js';
+import { LiveSlot } from './LiveSlot.js';
 import { container, PublicHero } from './PublicShell.js';
 
 type RegionPrice = PublicPricing['regions'][number];
@@ -53,7 +54,8 @@ export function PricingPage() {
 
       <section className={`${container} pb-12`}>
         {pricing.isPending ? (
-          <Skeleton className="h-72" />
+          // Prerendered for search engines and AI assistants: the api Worker fills in current prices.
+          import.meta.env.SSR ? <LiveSlot name="prices" text={t('seo.prices.fallback')} link={{ href: '/pricing.md', label: 'nevazu.com/pricing.md' }} /> : <Skeleton className="h-72" />
         ) : pricing.isError || !regions.length ? (
           <Card className="p-6 text-sm text-muted">{t('pricing.unavailable')}</Card>
         ) : (

@@ -15,3 +15,44 @@
 
 /build-info.json
   Cache-Control: no-store
+
+# The app's private pages are not for search indexes. Rules match the requested path, so they also
+# apply where the app shell (index.html) is served as the single-page-application fallback; the
+# shell itself carries <meta name="robots" content="noindex"> for any other unknown path.
+/b/*
+  X-Robots-Tag: noindex
+/browsers*
+  X-Robots-Tag: noindex
+/account*
+  X-Robots-Tag: noindex
+/billing*
+  X-Robots-Tag: noindex
+/promotions*
+  X-Robots-Tag: noindex
+/sign-in*
+  X-Robots-Tag: noindex
+/sign-up*
+  X-Robots-Tag: noindex
+
+# Public pages (prerendered, src/prerender) point to the plain-text guide for language models.
+# The api Worker serves / from /home (apps/api/src/site.ts), so /home carries the root's headers.
+/
+  Link: </llms.txt>; rel="alternate"; type="text/plain"
+/home
+  Link: </llms.txt>; rel="alternate"; type="text/plain"
+/pricing
+  Link: </llms.txt>; rel="alternate"; type="text/plain"
+/docs
+  Link: </llms.txt>; rel="alternate"; type="text/plain"
+/docs/*
+  Link: </llms.txt>; rel="alternate"; type="text/plain"
+/terms
+  Link: </llms.txt>; rel="alternate"; type="text/plain"
+/privacy
+  Link: </llms.txt>; rel="alternate"; type="text/plain"
+/refunds
+  Link: </llms.txt>; rel="alternate"; type="text/plain"
+/contact
+  Link: </llms.txt>; rel="alternate"; type="text/plain"
+/status
+  Link: </llms.txt>; rel="alternate"; type="text/plain"

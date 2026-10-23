@@ -7,6 +7,7 @@ import { regionPlace } from '../features/instances/region-names.js';
 import { useI18n } from '../lib/i18n.js';
 import type { MessageKey } from '../messages/en.js';
 import { usePublicPricing, useSignedIn } from './hooks.js';
+import { LiveSlot } from './LiveSlot.js';
 import { container } from './PublicShell.js';
 
 /** The three promises in the slogan. */
@@ -146,7 +147,33 @@ export function HomePage() {
             ))}
           </ul>
         </section>
+      ) : import.meta.env.SSR ? (
+        // Prerendered for search engines and AI assistants: the api Worker fills in the open regions and prices.
+        <section className={`${container} py-14 md:py-24`}>
+          <Eyebrow>{t('home.regions.eyebrow')}</Eyebrow>
+          <h2 className="mt-3 text-[28px] leading-tight font-semibold tracking-[-0.03em] md:text-[40px]">{t('home.regions.title')}</h2>
+          <p className="mt-4 mb-6 max-w-xl text-sm leading-relaxed text-muted">{t('home.regions.body')}</p>
+          <LiveSlot name="summary" text={t('seo.summary.fallback')} link={{ href: '/pricing', label: 'nevazu.com/pricing' }} />
+        </section>
       ) : null}
+
+      <section className="border-t border-border">
+        <div className={`${container} py-14 md:py-24`}>
+          <Eyebrow>{t('home.faq.eyebrow')}</Eyebrow>
+          <h2 className="mt-3 text-[28px] leading-tight font-semibold tracking-[-0.03em] md:text-[40px]">{t('home.faq.title')}</h2>
+          <dl className="mt-8 grid gap-px border border-border bg-border md:mt-12 md:grid-cols-2">
+            {([1, 2, 3, 4] as const).map((n) => (
+              <div key={n} className="bg-bg p-6 md:p-8">
+                <dt className="text-base font-semibold tracking-tight md:text-lg">{t(`home.faq.${n}.q`)}</dt>
+                <dd className="mt-2 text-sm leading-relaxed text-muted">{t(`home.faq.${n}.a`)}</dd>
+              </div>
+            ))}
+          </dl>
+          <Link to="/docs/faq" className="group mt-6 inline-flex items-center gap-1 text-sm font-medium text-accent underline-offset-4 hover:underline">
+            {t('home.faq.more')} <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
+          </Link>
+        </div>
+      </section>
 
       <section className="relative isolate overflow-hidden bg-frame text-white">
         <div className="pointer-events-none absolute inset-0 -z-10 bg-[linear-gradient(to_right,rgb(255_255_255/0.06)_1px,transparent_1px),linear-gradient(to_bottom,rgb(255_255_255/0.06)_1px,transparent_1px)] bg-[size:56px_56px] [mask-image:radial-gradient(ellipse_at_top_right,black_10%,transparent_65%)]" aria-hidden />

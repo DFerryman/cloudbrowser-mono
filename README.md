@@ -48,6 +48,16 @@ and takes control back with a single input. Nothing is installed: the agent adds
 remote MCP server URL on the session gateway with a per-browser access key. Access is on by default
 and can be turned off per browser. See [`docs/agent-access.md`](docs/agent-access.md).
 
+## Search and AI discoverability
+
+The web build prerenders the public pages (home, pricing, docs, policies, contact, status) into
+real HTML with titles, descriptions, canonical URLs, Open Graph tags and schema.org JSON-LD, and
+writes `robots.txt`, `sitemap.xml`, `llms.txt`, `llms-full.txt` and a markdown version of each page
+(`apps/web/src/prerender`, `apps/web/src/site/seo`). The api Worker serves `/` from the prerendered
+home page and fills current prices into the pricing page, its markdown and the llms files
+(`apps/api/src/site.ts`). Check a build with `node apps/web/e2e/seo.mjs`; the Cloudflare and
+search-console settings are in [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md#5b-ai-crawlers-and-search).
+
 ## Local development
 
 Requirements: Node 22.13+ and pnpm 10.

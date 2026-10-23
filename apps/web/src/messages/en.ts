@@ -892,6 +892,33 @@ export const en = {
   'home.f.agents.title': 'Works with coding agents',
   'home.f.agents.body': 'Connect Claude Code, Cursor or any MCP agent to a browser with nothing to install: it sees screenshots and acts while you watch, and you take over with a click.',
   'error.agent_access_off': 'Coding agent access is turned off for this browser.',
+  // Search engines and AI assistants: page titles and descriptions of the prerendered public pages
+  // (src/prerender), and the text shown there before live data is filled in.
+  'seo.home.title': 'Nevazu: persistent cloud browsers on a dedicated static IP',
+  'seo.home.description': 'A real Chrome on its own cloud computer, with a dedicated static IP and encrypted storage that keeps your sign-ins. Prepaid, billed per minute.',
+  'seo.pricing.title': 'Pricing: prepaid cloud browsers billed per minute | Nevazu',
+  'seo.pricing.description': 'What a Nevazu cloud browser costs in each region: running and asleep prices per hour, data sent per GB, and how prepaid, per-minute billing works.',
+  'seo.docs.title': 'Nevazu documentation',
+  'seo.docs.description': 'Guides to Nevazu cloud browsers: getting started, regions and dedicated IPs, the live view, coding agents over MCP, storage, billing and account security.',
+  'seo.doc.title': '{title} | Nevazu docs',
+  'seo.policy.title': '{title} | Nevazu',
+  'seo.status.title': 'System status | Nevazu',
+  'seo.status.description': 'Live status of the Nevazu service and each region, from automated checks refreshed every minute.',
+  'seo.contact.title': 'Contact | Nevazu',
+  'seo.contact.description': 'Email Nevazu support, billing or security. We usually reply within one business day.',
+  'seo.prices.fallback': 'The prices for each region appear here. They are also published as plain text at {link}.',
+  'seo.summary.fallback': 'The regions open for new browsers and their prices are listed on {link}.',
+  'home.faq.eyebrow': 'Questions',
+  'home.faq.title': 'Nevazu in short',
+  'home.faq.1.q': 'What is Nevazu?',
+  'home.faq.1.a': 'Nevazu is a persistent cloud browser service. Each browser is a real Chrome running on its own computer in the cloud, with a dedicated IPv4 address that no one else uses and encrypted storage that keeps your profile, cookies, extensions and sign-ins between sessions. You open it in a live view from a desktop, tablet or phone.',
+  'home.faq.2.q': 'How is it different from a VPN or a proxy?',
+  'home.faq.2.a': 'A VPN or a proxy changes the address your own browser connects from, while the browser and its data stay on your device. With Nevazu the whole browser runs in the cloud: websites see its own dedicated IP, and its profile is stored, encrypted, with it, so it is the same browser at the same address from every device.',
+  'home.faq.3.q': 'Can a coding agent use it?',
+  'home.faq.3.a': 'Yes, with nothing to install. Each browser has its own MCP server address: Claude Code, Cursor, Codex or any MCP client connects over HTTPS with an access key you create in the browser’s settings. You watch in the live view and take control back with any click or key.',
+  'home.faq.4.q': 'How does billing work?',
+  'home.faq.4.a': 'Prepaid, with no subscription. Running time is metered per minute while a browser is awake; its dedicated IP and storage are charged for as long as it exists. Prices are the public AWS list prices for the region times a published multiplier.',
+  'home.faq.more': 'All questions and answers',
 } as const;
 
 export type MessageKey = keyof typeof en;

@@ -81,7 +81,9 @@ only send to verified destination addresses in your account, which is enough for
 Nevazu's edge security rules are recorded in `deploy/cloudflare-auth-security.json`. The
 `nevazu_require_human` full-page Managed Challenge rule is disabled. Login, sign-up and registration
 completion pages skip Browser Integrity Check and Security Level challenges so visitors are not
-challenged once before the app and again by Turnstile. Managed WAF and DDoS protections still apply.
+challenged once before the app and again by Turnstile. The public pages and the texts for crawlers
+(robots.txt, sitemap.xml, llms.txt, markdown) skip them too, so search engines and AI assistants
+can read them (section 5b). Managed WAF and DDoS protections still apply.
 The app checks Turnstile only when requesting an email; method lookup, passkeys, code entry and
 TOTP do not start another challenge. On `connect.<domain>` the same skip covers the authenticated
 protocols, none of which is a browser that could answer a challenge: `/health`, the agent tunnel,
@@ -372,6 +374,76 @@ other only through stable RPC methods, and the engine reaches the gateway only t
 Workers → `cloudbrowser` → Settings → Domains & Routes → add your custom domain. Make sure
 `APP_URL` matches it, then redeploy the api. Add `connect.example.com` to `cloudbrowser-gateway` the
 same way. The engine, reaper and reconciler have `workers_dev: false` and no routes.
+
+## 5b. AI crawlers and search
+
+The public site is built so that search engines and AI assistants (ChatGPT search, Claude,
+Perplexity, Gemini and Google AI Overviews, Copilot and Bing) can read, cite and recommend it
+without running JavaScript.
+
+**What is built and how it is served.** `pnpm --filter @cloudbrowser/web build` runs
+`apps/web/scripts/prerender.mjs` after `vite build`. It renders the real public page components
+(`src/prerender/entry.tsx`, English, no network) into the built `index.html` and writes:
+
+| File in `apps/web/dist` | Served at | How |
+|---|---|---|
+| `home.html` | `/` | api Worker (`run_worker_first`), from the assets, with live regions, prices and JSON-LD offers (`apps/api/src/site.ts`) |
+| `pricing.html` | `/pricing` | api Worker, with the live price table and offers |
+| `docs.html`, `docs/<slug>.html`, `terms.html`, `privacy.html`, `refunds.html`, `contact.html`, `status.html` | `/docs`, `/docs/<slug>`, … | static assets (`html_handling` *auto-trailing-slash* serves `x.html` at `/x`; `/x/` and `/x.html` redirect there) |
+| `index.md`, `pricing.md`, `llms.txt`, `llms-full.txt` | the same paths | api Worker, with live prices in markdown |
+| `docs.md`, `docs/<slug>.md`, `terms.md`, … , `robots.txt`, `sitemap.xml` | the same paths | static assets (`text/markdown`, `text/plain`, `application/xml`) |
+
+Each page has its own title, description, canonical URL (`https://nevazu.com/...`), Open Graph and
+Twitter tags, a `rel="alternate"` link to its markdown and schema.org JSON-LD (Organization,
+WebSite, WebApplication with an AggregateOffer of live hourly prices, TechArticle and
+BreadcrumbList on docs, FAQPage on `/docs/faq`). The page text sits inside `#root`; the app's first
+render replaces it (`createRoot`, not hydration). `index.html` stays the empty, `noindex` app shell
+for private routes and unknown paths, so signed-in pages never show marketing content.
+`/home` redirects to `/`. Prices are read once per Worker isolate for ten minutes; when they cannot
+be read the built fallback text stays. `_headers` applies to responses the Worker passes on from
+the assets binding, so `/` and `/pricing` keep the CSP and HSTS; private paths get
+`X-Robots-Tag: noindex`. A JSON-LD block is data, not script: the CSP needs no change.
+
+**Cloudflare settings (operator, once per zone):**
+
+1. **Security → Settings → filter "Bot traffic" → Configure AI bot policies**: set the Search,
+   Agent and Training policies to *Allow (do not block)*, and turn **Bot Preference Sync** off (or
+   leave every policy on Allow). Otherwise Cloudflare's *managed robots.txt* is prepended to ours
+   with `Disallow: /` for GPTBot, ClaudeBot, Google-Extended, CCBot and others. The legacy
+   *Block AI bots* switch, where it is still shown, must be off.
+2. **AI Crawl Control → Crawlers**: every crawler on *Allow*. A *Block* creates a WAF custom rule
+   on the zone; delete such rules if any were created earlier.
+3. **Bot Fight Mode** (Security → Settings → Bot traffic) cannot be skipped by WAF rules. Leave it
+   off; with Super Bot Fight Mode, keep *Verified bots* on Allow and do not challenge *Definitely
+   automated* traffic on the public paths.
+4. Re-apply `deploy/cloudflare-auth-security.json`: its skip rule (no Browser Integrity Check or
+   Security Level challenge) now also covers `/llms.txt`, `/llms-full.txt`, `/home` and every path
+   ending in `.md`, besides the public pages, `/robots.txt` and `/sitemap.xml`.
+
+**Search consoles (operator):**
+
+- **Google Search Console**: add the `nevazu.com` domain property (DNS TXT record in Cloudflare),
+  then Sitemaps → submit `https://nevazu.com/sitemap.xml`. Google-Extended (Gemini) follows the
+  same robots.txt.
+- **Bing Webmaster Tools**: import the site from Search Console or verify it, then submit the
+  sitemap. Bing's index also feeds ChatGPT search and Copilot.
+- Optional: turn on **Crawler Hints** (Caching → Configuration), which notifies IndexNow search
+  engines when pages change.
+
+**Checking** after a deploy:
+
+```bash
+curl -sA "GPTBot" https://nevazu.com/ | grep -o '<title>[^<]*'            # the home page's own title
+curl -sA "ClaudeBot" https://nevazu.com/pricing | grep -c 'AggregateOffer'  # 1 when prices are live
+curl -sA "PerplexityBot" https://nevazu.com/docs/faq | grep -o '<h1[^>]*>[^<]*'
+curl -s https://nevazu.com/robots.txt | head -8                           # ours, no managed Disallow lines first
+curl -sI https://nevazu.com/llms.txt | grep -i content-type                # text/plain; charset=utf-8
+curl -s https://nevazu.com/pricing.md | head -20                          # the live price table
+curl -sI https://nevazu.com/browsers | grep -i x-robots-tag                # noindex
+```
+
+A `403`, a challenge page or `Disallow` lines for AI crawlers at the top of `robots.txt` mean one
+of the settings above still blocks them. Locally, `node apps/web/e2e/seo.mjs` checks the build.
 
 ## 6. Invite pilot users
 
