@@ -8,8 +8,9 @@ import { money } from '../../lib/money.js';
 import { useBilling, useTransactions } from './hooks.js';
 
 /**
- * Creem's success redirect lands here. Credit is never added from the redirect (page 6): the page
- * waits for the top-up that Creem's webhook records, which arrives over SSE.
+ * The payment provider's success redirect (Stripe or Creem) lands here. Credit is never added from
+ * the redirect (page 6): the page waits for the top-up that the provider's webhook records, which
+ * arrives over SSE.
  */
 export function BillingSuccessPage() {
   const { t, locale } = useI18n();

@@ -1,6 +1,7 @@
 import { createDb } from '@cloudbrowser/db';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { billingSweep } from '../src/billing/sweep.js';
+import { NO_PAYMENT_PROVIDERS } from '../src/billing/providers.js';
 import { INVENTORY_ALERT_GRACE_MS, alertRecipients, deliverAlerts, inventoryAlerts, promotionBudgetAlerts, userMilestoneAlerts } from '../src/notifications/admin.js';
 import { LOW_BALANCE_COOLDOWN_MS, REWARD_BATCH_MS, REWARD_COOLDOWN_MS, rewardNotices } from '../src/notifications/user.js';
 import { setup, signIn } from './helpers.js';
@@ -25,7 +26,7 @@ describe('user notifications', () => {
     t.d1.sqlite.exec(`INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', 'true', ${Date.now()}) ON CONFLICT(key) DO UPDATE SET value = 'true'`);
     t.d1.sqlite.exec(`INSERT INTO billing_accounts (user_id, balance_micros, updated_at) VALUES ('${userId}', 1500000, ${Date.now()})`);
     const start = Date.now();
-    const sweep = async (at: number) => (await billingSweep(t.env as never, db(), null, new Date(at), { nightly: false })).lowBalance;
+    const sweep = async (at: number) => (await billingSweep(t.env as never, db(), NO_PAYMENT_PROVIDERS, new Date(at), { nightly: false })).lowBalance;
     const setBalance = (micros: number) => t.d1.sqlite.exec(`UPDATE billing_accounts SET balance_micros = ${micros} WHERE user_id = '${userId}'`);
     expect(await sweep(start)).toBe(1);
     expect(await sweep(start + 60_000)).toBe(0);

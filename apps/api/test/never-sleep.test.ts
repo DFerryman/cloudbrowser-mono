@@ -3,6 +3,7 @@ import { meterUsage } from '@cloudbrowser/engine';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyBalance } from '../src/billing/ledger.js';
 import { billingSweep } from '../src/billing/sweep.js';
+import { NO_PAYMENT_PROVIDERS } from '../src/billing/providers.js';
 import { setup, signIn } from './helpers.js';
 
 const START = Date.parse('2026-10-18T00:00:00Z');
@@ -13,7 +14,7 @@ let userId: string;
 let seq = 0;
 const db = () => createDb(t.d1);
 const meter = () => meterUsage({ db: db(), now: () => new Date(), notify() {} } as never);
-const sweep = () => billingSweep(t.env as never, db(), null, new Date(), { nightly: false });
+const sweep = () => billingSweep(t.env as never, db(), NO_PAYMENT_PROVIDERS, new Date(), { nightly: false });
 const change = (kind: 'topup' | 'adjustment', amountMicros: number) =>
   applyBalance(db(), { userId, kind, amountMicros, actor: 'test', reference: `never-sleep:${++seq}` }, new Date());
 /** Sets available credit to exactly `micros` with an adjustment (not a top-up). */

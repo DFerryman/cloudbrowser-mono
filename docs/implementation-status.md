@@ -53,11 +53,16 @@ Cloudflare deployment.
   `pricing_settings` and set in the console (default 120%). Every price the user is shown before
   an action (create, more storage, snapshots) carries a version; the API refuses the
   action with `price_changed` if prices moved in between.
-- **Prepaid balance with Creem** (page 6): users buy one-time top-up products through Creem's
-  hosted checkout; the amount credited is the verified checkout's actual paid USD amount
-  excluding tax, not a later catalogue price, and each order is credited once. Webhooks are HMAC-verified, stored by event id and
+- **Prepaid balance with Stripe or Creem** (page 6): users buy one-time top-up prices through
+  Stripe Checkout when Stripe's settings are valid, otherwise top-up products through Creem's
+  hosted checkout (`apps/api/src/billing/providers.ts`). Each provider keeps processing its own
+  webhooks, refunds and disputes whenever it is configured, so switching never strands a payment.
+  The amount credited is the verified checkout's actual paid USD amount
+  excluding tax, not a later catalogue price, and each order (Stripe: PaymentIntent) is credited once. Webhooks are HMAC-verified, stored by event id and
   processed from a queue; refunds and disputes debit the balance and a dispute freezes the
-  account. The engine meters every browser per minute into `usage_records` (compute while
+  account. Stripe, unlike Creem, is not a merchant of record, so its checkouts add Stripe Tax,
+  collect the billing address and tax ids, issue invoices and ask the buyer to accept the Terms
+  (UK seller obligations). The engine meters every browser per minute into `usage_records` (compute while
   running; IP and provisioned disks while held; data out from the agent's counter). Storage
   GB-months use actual UTC calendar-month fractions; 730 hours is a display projection only.
   Seven days of fixed IP/disk costs are reserved from the total balance but remain unspent.
@@ -107,7 +112,7 @@ Cloudflare deployment.
   resource deposit; available and frozen amounts are listed separately. Freezing is not a debit.
   Billing & usage shows top-ups, transactions and this month's spend by item, by browser and in
   a date-labelled UTC daily charge table. It has no regional price catalogue. The top-up button
-  opens Creem to choose the payment amount. Each browser's Usage tab shows its own charges.
+  opens Stripe's (or Creem's) payment page to choose the payment amount. Each browser's Usage tab shows its own charges.
 - **Operator console** (page 10): `/admin` (code-split, English-only) on `/api/v1/admin/*`, behind
   the `admins` table, an IP allowlist (plus a recommended WAF rule) and a passkey step-up that lasts
   30 minutes per session. Overview (browsers by status, unfinished and failed operations, findings,
@@ -388,8 +393,8 @@ Cloudflare does not offer VMs with a dedicated static egress IP.
 | `agent.v1` / `viewer.v1` protobuf with Buf | JSON text frames, zod in `packages/contracts/src/protocol.ts`, mirrored in Go | The payload the gateway relays most (neko v3 signaling) is JSON already; no codegen toolchain for two languages. |
 | Engine → gateway via `agent_commands` + `NOTIFY` | `agent_commands` + a `cloudbrowser-agent-commands` queue message | No binding from engine to gateway, so no deploy-order cycle; heartbeats are a delivery backstop. |
 | S3 archives with per-instance keys wrapped by KMS | **R2** (presigned PUT/GET via the S3 API) with per-instance keys wrapped by a Worker secret (`ARCHIVE_MASTER_KEY`, AES-256-GCM) | Same envelope scheme without a KMS: the plain key exists only in the gateway's frame to the agent, never in D1. Presigned URLs keep archive bytes off the Workers. |
-| Subscription plans (Personal, Pro) with an hours allowance | A prepaid balance topped up with Creem one-time products, charged per minute at AWS cost times a markup | Costs depend on the region and on what a browser keeps while asleep (IP, disks); a balance charges exactly that, with no plan maths, and signup credit uses the same balance. |
-| pg-boss job for Creem webhooks; nightly reconciliation job | `cloudbrowser-billing` queue consumed by the api Worker; cron retries lost events and expires seven-day prepaid retention, plus a nightly paid-order backstop | Same asynchronous, idempotent processing with Cloudflare primitives. |
+| Subscription plans (Personal, Pro) with an hours allowance | A prepaid balance topped up with Stripe one-time prices (Creem one-time products when Stripe is not configured), charged per minute at AWS cost times a markup | Costs depend on the region and on what a browser keeps while asleep (IP, disks); a balance charges exactly that, with no plan maths, and signup credit uses the same balance. |
+| pg-boss job for Creem webhooks; nightly reconciliation job (Stripe added later, same path) | `cloudbrowser-billing` queue consumed by the api Worker; cron retries lost events and expires seven-day prepaid retention, plus a nightly paid-order backstop | Same asynchronous, idempotent processing with Cloudflare primitives. |
 | Running-hours cap enforced by the engine | Elapsed-time metering, available credit after a seven-day fixed-resource reserve, and immediate exhaustion stop intent | Gateway alarms expire input access; paid starts require sufficient available credit and a funded reserve. |
 | `/admin` limited by source IP at the load balancer | Dedicated `admin.console.nevazu.com` behind Cloudflare Access email OTP; API verifies signed JWT and exact email allowlist | No IP restriction; main-site cookies, the legacy admin table, and preview URLs cannot grant admin access. |
 | Alerts through CloudWatch alarms | `alerts` table written by every Worker, delivered by the api cron to Email Service and a chat webhook, acknowledged in the console | One place to see and acknowledge alerts; no extra service. |
@@ -417,9 +422,9 @@ Considered and **not** used:
 - Agent: browser container supervision through containerd, neko credentials per wake.
 - Manual backups ("Back up now") and pre-upgrade snapshots; showing a `restore` in progress as its
   own browser state.
-- Landing and public pricing pages; automatic top-up; taxes shown before checkout (Creem adds them
+- Landing and public pricing pages; automatic top-up; taxes shown before checkout (Stripe Tax or Creem adds them
   at checkout); growing the file system of browsers created before agent 0.2.0 (they need to be
-  recreated, or the agent updated, before the Storage tab allows growth); confirming every Creem
+  recreated, or the agent updated, before the Storage tab allows growth); confirming every Creem and Stripe
   payload against recorded test-mode fixtures.
 - Passkey sign-in (passkeys are registered and used for the admin step-up; sign-in with them is a
   small UI addition), OAuth; time-limited support share codes (page 4); dashboard

@@ -194,7 +194,7 @@ const en: Article[] = [
     summary: 'Prepaid balance, per-minute metering, held credit and what happens when credit runs out.',
     blocks: [
       { h: 'Prepaid balance', id: 'prepaid' },
-      { p: 'Nevazu is prepaid, with no subscription. Add credit from Billing & usage; you choose the amount on the payment page. Payments, receipts and sales tax are handled by Creem, our merchant of record. Unused credit stays on your balance.' },
+      { p: 'Nevazu is prepaid, with no subscription. Add credit from Billing & usage; you choose the amount on the payment page. Payments are processed by Stripe, or by Creem as our merchant of record (the payment page shows which), with receipts and any VAT or sales tax. Unused credit stays on your balance.' },
       { h: 'What is charged', id: 'items' },
       { ul: [
         'Compute: per minute while the browser is awake, including the minute or so it takes to start Chrome when it wakes and to save your profile and shut down when it sleeps (AWS charges for the machine then too).',
@@ -294,7 +294,7 @@ const en: Article[] = [
       { h: 'What does a sleeping browser cost?', id: 'sleep' },
       { p: 'Only its IP and storage. An idle browser goes to sleep after the time set in its settings (10 minutes by default): its computer stops, and its data and IP are kept. Deleting a browser stops all charges.' },
       { h: 'How are my account and data protected?', id: 'security' },
-      { p: 'You sign in with a one-time code sent to your email, so there is no password to leak; passkeys and two-step verification with an authenticator app are optional. Each browser runs on its own machine with encrypted storage, and every few minutes it checks from inside Chrome which IP websites see, pausing its network at once if the address is ever different. Payments are handled by Creem, our merchant of record, so card details never reach us.' },
+      { p: 'You sign in with a one-time code sent to your email, so there is no password to leak; passkeys and two-step verification with an authenticator app are optional. Each browser runs on its own machine with encrypted storage, and every few minutes it checks from inside Chrome which IP websites see, pausing its network at once if the address is ever different. Payments are handled by Stripe or by Creem, our merchant of record, so card details never reach us.' },
       { h: 'How do I start?', id: 'start' },
       { p: 'Create an account with just your email and make sure you have available credit (Billing & usage), then create a browser: give it a name, choose a region and review the estimated cost. Setting up usually takes 3–8 minutes, and the browser opens automatically once its IP check passes.' },
     ],
@@ -478,7 +478,7 @@ const zh: Article[] = [
     summary: '预付余额、按分钟计量、冻结金额，以及余额用完时会发生什么。',
     blocks: [
       { h: '预付余额', id: 'prepaid' },
-      { p: 'Nevazu 采用预付费，无需订阅。在“账单与用量”中充值，并在支付页面选择金额。支付、收据和销售税由我们的记录商户 Creem 处理。未用完的余额会一直保留。' },
+      { p: 'Nevazu 采用预付费，无需订阅。在“账单与用量”中充值，并在支付页面选择金额。支付由 Stripe 或我们的记录商户 Creem 处理（支付页面会显示是哪一家），并提供收据及适用的增值税或销售税。未用完的余额会一直保留。' },
       { h: '收费项目', id: 'items' },
       { ul: [
         '计算：浏览器运行时按分钟计费，包括唤醒时启动 Chrome、休眠时保存配置档案并关机的大约一分钟（这段时间 AWS 同样对机器计费）。',
@@ -578,7 +578,7 @@ const zh: Article[] = [
       { h: '休眠的浏览器怎么收费？', id: 'sleep' },
       { p: '只收取 IP 和存储费用。空闲的浏览器会在设置的时间后休眠（默认 10 分钟）：其计算机停止运行，数据和 IP 保留。删除浏览器即停止所有收费。' },
       { h: '我的账号和数据如何受到保护？', id: 'security' },
-      { p: '你通过发送到邮箱的一次性验证码登录，没有可泄露的密码；通行密钥和使用身份验证器应用的两步验证可选。每个浏览器在独立的机器上运行并使用加密存储，每隔几分钟从 Chrome 内部检查网站看到的 IP，一旦地址不同就立即暂停网络。付款由我们的记录商户 Creem 处理，我们不会接触你的卡信息。' },
+      { p: '你通过发送到邮箱的一次性验证码登录，没有可泄露的密码；通行密钥和使用身份验证器应用的两步验证可选。每个浏览器在独立的机器上运行并使用加密存储，每隔几分钟从 Chrome 内部检查网站看到的 IP，一旦地址不同就立即暂停网络。付款由 Stripe 或我们的记录商户 Creem 处理，我们不会接触你的卡信息。' },
       { h: '如何开始？', id: 'start' },
       { p: '只需邮箱即可创建账号，并确保有可用余额（“账单与用量”），然后创建浏览器：命名、选择地区并查看预估费用。配置通常需要 3–8 分钟，IP 检查通过后浏览器会自动打开。' },
     ],

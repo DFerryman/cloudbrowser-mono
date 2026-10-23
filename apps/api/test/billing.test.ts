@@ -4,6 +4,7 @@ import { createDb, prepaidAccess, prepaidBalance, reservationQuote } from '@clou
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { billingSweep } from '../src/billing/sweep.js';
+import { NO_PAYMENT_PROVIDERS, paymentProviders } from '../src/billing/providers.js';
 import { creemFrom } from '../src/billing/creem.js';
 import { applyBalance, freezeAccount } from '../src/billing/ledger.js';
 import { accessToken, adminCall, configureAdmin, mockAccessJwks } from './admin-helpers.js';
@@ -207,7 +208,7 @@ describe('prepaid balance', () => {
     expect(await webhook(event('checkout.completed', { id }), 'deadbeef')).toBe(401);
     expect(await balance()).toBe(0);
     const db = createDb(t.d1 as never);
-    const summary = await billingSweep(t.env as never, db, creemFrom(t.env as never), new Date(), { nightly: true });
+    const summary = await billingSweep(t.env as never, db, paymentProviders(t.env as never), new Date(), { nightly: true });
     expect(summary.credited).toBe(1);
     expect(await balance()).toBe(10_000_000);
   });
@@ -257,7 +258,7 @@ describe('prepaid balance', () => {
     expect(kept.retained).toEqual([{ id: inst.id, name: 'w', regionId: 'tyo1', deletesAt: deletesAt.toISOString() }]);
     // The deposit is the whole balance now, so the minimum balance is what is missing.
     expect(kept.restoreNeededMicros).toBe(Math.max(1, kept.minBalanceMicros));
-    const sweep = (days: number) => billingSweep(t.env as never, db, creemFrom(t.env as never), new Date(start + days * 86_400_000), { nightly: false });
+    const sweep = (days: number) => billingSweep(t.env as never, db, paymentProviders(t.env as never), new Date(start + days * 86_400_000), { nightly: false });
     expect((await sweep(1)).notices).toBe(1);
     expect((await sweep(1)).notices).toBe(0);
     const notice = t.emails.at(-1)!;
@@ -281,8 +282,8 @@ describe('prepaid balance', () => {
     prepaid();
     t.d1.sqlite.exec(`INSERT INTO billing_accounts (user_id, balance_micros, updated_at) VALUES ('${userId}', 1500000, ${Date.now()})`);
     const db = createDb(t.d1 as never);
-    expect((await billingSweep(t.env as never, db, null, new Date(), { nightly: false })).lowBalance).toBe(1);
-    expect((await billingSweep(t.env as never, db, null, new Date(), { nightly: false })).lowBalance).toBe(0);
+    expect((await billingSweep(t.env as never, db, NO_PAYMENT_PROVIDERS, new Date(), { nightly: false })).lowBalance).toBe(1);
+    expect((await billingSweep(t.env as never, db, NO_PAYMENT_PROVIDERS, new Date(), { nightly: false })).lowBalance).toBe(0);
     expect(t.emails.at(-1)?.text).toMatch(/running low/);
   });
 
@@ -297,7 +298,7 @@ describe('payment dispute hold', () => {
   const DAY = 86_400_000;
   const db = () => createDb(t.d1 as never);
   const engineDeps = (at: number) => ({ db: db(), now: () => new Date(at), notify: () => {} }) as never;
-  const sweep = (at: number) => billingSweep(t.env as never, db(), creemFrom(t.env as never), new Date(at), { nightly: false });
+  const sweep = (at: number) => billingSweep(t.env as never, db(), paymentProviders(t.env as never), new Date(at), { nightly: false });
   const hold = (id: string) => t.d1.sqlite.prepare('SELECT retention_started_at AS started, retention_ends_at AS ends FROM browser_reservations WHERE instance_id = ?').get(id) as { started: number | null; ends: number | null };
   const deletions = () => (t.d1.sqlite.prepare("SELECT count(*) AS n FROM operations WHERE kind = 'delete'").get() as { n: number }).n;
   async function runStops() {
@@ -592,7 +593,7 @@ describe('billing failure and concurrency regressions', () => {
       return original(statements);
     }) as typeof t.d1.batch;
     try {
-      expect((await billingSweep(t.env as never, db(), null, new Date(now + 7 * 86_400_000), { nightly: false })).deleted).toBe(0);
+      expect((await billingSweep(t.env as never, db(), NO_PAYMENT_PROVIDERS, new Date(now + 7 * 86_400_000), { nightly: false })).deleted).toBe(0);
     } finally {
       t.d1.batch = original;
     }
@@ -647,7 +648,7 @@ describe('payment reconciliation regressions', () => {
     const later = new Date(Date.now() + 120_000);
     expect(await pendingWebhooks(db, later)).toEqual(expect.arrayContaining([refund.id, dispute.id]));
     await webhook(event('checkout.completed', { id }));
-    await billingSweep(t.env as never, db, creemFrom(t.env as never), later, { nightly: false });
+    await billingSweep(t.env as never, db, paymentProviders(t.env as never), later, { nightly: false });
     expect(await balance()).toBe(0);
     expect((await t.call('GET', '/api/v1/billing')).body.frozen).toBe(true);
     expect(t.d1.sqlite.prepare('SELECT count(*) AS n FROM webhook_events WHERE processed_at IS NULL').get()).toEqual({ n: 0 });

@@ -5,8 +5,8 @@
  * allowlist), and all severities to the chat webhook, batched per 5-minute sweep.
  *
  * Raised by other Workers: circuit breaker and drift (reconciler), projected spend at 80% / 100% of
- * the budget (reconciler), missing prices (engine), failed launches and purges (engine), Creem
- * disputes (billing webhooks). Raised here, from the api's cron:
+ * the budget (reconciler), missing prices (engine), failed launches and purges (engine), Stripe
+ * and Creem disputes and failed Stripe refunds (billing webhooks). Raised here, from the api's cron:
  *
  * | Alert                         | When                                           | How often                         |
  * |-------------------------------|------------------------------------------------|-----------------------------------|

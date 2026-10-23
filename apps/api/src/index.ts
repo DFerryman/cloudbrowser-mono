@@ -7,9 +7,10 @@ import type { ViewerTokenClaims } from '@cloudbrowser/contracts';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { createDb } from '@cloudbrowser/db';
 import { adminOrigin, isAdminOrigin, isAdminPath, requireAdmin } from './admin/access.js';
-import { creemFrom } from './billing/creem.js';
+import { paymentProviders, processStoredWebhook } from './billing/providers.js';
+import { receiveStripeWebhook } from './billing/stripe-webhooks.js';
 import { billingSweep } from './billing/sweep.js';
-import { processWebhook, receiveWebhook } from './billing/webhooks.js';
+import { receiveWebhook } from './billing/webhooks.js';
 import type { Context, MiddlewareHandler, Next } from 'hono';
 import { createAuth } from './auth.js';
 import type { AppEnv, Env } from './env.js';
@@ -152,6 +153,12 @@ app.post('/api/webhooks/creem', async (c) => {
   return c.text(status === 200 ? 'ok' : 'rejected', status as 200 | 400 | 401);
 });
 
+/** Stripe webhooks, the same way: `Stripe-Signature` over the raw body, then the billing queue. */
+app.post('/api/webhooks/stripe', async (c) => {
+  const status = await receiveStripeWebhook(c.env, c.get('db'), await c.req.text(), c.req.header('stripe-signature'));
+  return c.text(status === 200 ? 'ok' : 'rejected', status as 200 | 400 | 401);
+});
+
 /** State-changing requests must come from our own origin (page 1, "Security"). */
 const sameOrigin: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
@@ -201,17 +208,14 @@ app.route('/api/v1', v1);
 export default {
   fetch: app.fetch,
 
-  /** `cloudbrowser-billing`: one message per new Creem webhook event. */
+  /** `cloudbrowser-billing`: one message per new Stripe or Creem webhook event. */
   async queue(batch: MessageBatch<{ eventId: string }>, env: Env) {
-    const creem = creemFrom(env);
+    const providers = paymentProviders(env);
     const db = createDb(env.DB);
     for (const msg of batch.messages) {
-      if (!creem) {
-        msg.ack(); // billing not configured; the stored event waits for the cron once it is
-        continue;
-      }
       try {
-        await processWebhook(env, db, creem, msg.body.eventId);
+        // An event whose provider is not configured waits in webhook_events for the cron once it is.
+        await processStoredWebhook(env, db, providers, msg.body.eventId);
         msg.ack();
       } catch (e) {
         console.error('billing webhook failed', msg.body.eventId, e);
@@ -220,12 +224,12 @@ export default {
     }
   },
 
-  /** Every 5 minutes: billing sweep (the 03:00–03:04 UTC run also reconciles with Creem), alert delivery and promotion rewards. */
+  /** Every 5 minutes: billing sweep (the 03:00–03:04 UTC run also reconciles with Stripe and Creem), alert delivery and promotion rewards. */
   async scheduled(controller: ScheduledController, env: Env) {
     const at = new Date(controller.scheduledTime);
     const nightly = at.getUTCHours() === 3 && at.getUTCMinutes() < 5;
     const db = createDb(env.DB);
-    console.log('billing sweep', JSON.stringify(await billingSweep(env, db, creemFrom(env), new Date(), { nightly })));
+    console.log('billing sweep', JSON.stringify(await billingSweep(env, db, paymentProviders(env), new Date(), { nightly })));
     console.log('promotions', JSON.stringify(await promotionSweep(env, db, new Date()).catch((e) => ({ error: String(e) }))));
     console.log('reward emails', await rewardNotices(env, db, new Date()).catch((e) => String(e)));
     // Admin watchers raise alerts; deliver afterwards so they go out in the same run.

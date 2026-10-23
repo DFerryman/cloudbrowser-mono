@@ -73,7 +73,9 @@ alerts skipped by email when no webhook is configured, so they do not stay queue
 | **Promotion budget used up** (new) | api cron | Once per budget; again if the operator changes the limit |
 | Circuit breaker, drift findings, spend 80% / 100% of budget | reconciler | Deduplicated while open |
 | Missing price, failed IP check, launch/provider errors, purge failures | engine | Deduplicated while open |
-| Creem dispute (account frozen) | api billing webhooks | Once per dispute |
+| Stripe or Creem dispute (account frozen) | api billing webhooks | Once per dispute |
+| Stripe refund failed after it was taken off the balance | api billing webhooks | Once per refund |
+| Stripe checkout cannot show the Terms checkbox (no Terms URL in Stripe) | api billing | Deduplicated while open |
 
 ## Suggested next notifications
 
@@ -82,7 +84,7 @@ User-facing (keep these few and quiet):
 1. **Security notices** — new passkey added, 2FA turned on/off, backup codes regenerated. Send always
    (one per change); they protect the account and users expect them.
 2. **Sign-in from a new device/location** — once per new device, never for repeat sign-ins.
-3. **Top-up confirmation** — only if Creem's own receipt is not enough; otherwise skip to avoid two
+3. **Top-up confirmation** — only if the provider's own receipt (Stripe's or Creem's) is not enough; otherwise skip to avoid two
    emails per payment.
 4. **Refund processed** — once per refund.
 5. **Notification preferences** — a Settings switch to turn off advisory emails (low balance,
@@ -94,7 +96,7 @@ Administrator:
    open alerts — replaces many small info alerts.
 2. **First top-up by a user** and **large top-up** (e.g. ≥ $100) — revenue signals.
 3. **Region inventory low** (e.g. 1–2 left) before it reaches 0, so quota can be raised in time.
-4. **Webhook backlog** — Creem events failing for more than an hour.
+4. **Webhook backlog** — Stripe or Creem events failing for more than an hour.
 5. **Email delivery failures** — sends failing repeatedly (Email Service quota or domain issue).
 6. **Launch failure rate** — many failed creates in a region in an hour.
 7. **Sign-up spike / abuse** — unusual sign-ups or code requests from one network.

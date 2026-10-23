@@ -3,6 +3,7 @@ import { meterUsage } from '@cloudbrowser/engine';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { applyBalance } from '../src/billing/ledger.js';
 import { billingSweep } from '../src/billing/sweep.js';
+import { NO_PAYMENT_PROVIDERS } from '../src/billing/providers.js';
 import { setup, signIn } from './helpers.js';
 
 const DAY = 86_400_000;
@@ -229,11 +230,11 @@ describe('seven-day prepaid resource deposits', () => {
     await credit(1);
     expect(hold(id).ends).toBe(start + 7 * DAY);
     expect(await prepaidAccess(db(), userId, id)).toMatchObject({ allowed: false, reason: 'balance' });
-    expect((await billingSweep(t.env as never, db(), null, new Date(start + 7 * DAY - 1), { nightly: false })).deleted).toBe(0);
+    expect((await billingSweep(t.env as never, db(), NO_PAYMENT_PROVIDERS, new Date(start + 7 * DAY - 1), { nightly: false })).deleted).toBe(0);
     const beforeDeadline = await state();
     await meterUsage(at(start + 7 * DAY));
     expect(await state()).toMatchObject({ balanceMicros: beforeDeadline.balanceMicros, reservedMicros: beforeDeadline.reservedMicros });
-    expect((await billingSweep(t.env as never, db(), null, new Date(start + 7 * DAY), { nightly: false })).deleted).toBe(1);
+    expect((await billingSweep(t.env as never, db(), NO_PAYMENT_PROVIDERS, new Date(start + 7 * DAY), { nightly: false })).deleted).toBe(1);
     await t.settle();
     expect(one('SELECT desired_state AS desired FROM browser_instances WHERE id = ?', id).desired).toBe('deleted');
     expect(JSON.parse(String(one("SELECT params FROM operations WHERE instance_id = ? AND kind = 'delete'", id).params))).toMatchObject({ reason: 'billing', purgeNow: true });
@@ -259,7 +260,7 @@ describe('seven-day prepaid resource deposits', () => {
       if (first) { first = false; ready(); await held; }
       return original(statements);
     }) as typeof t.d1.batch;
-    const sweep = billingSweep(t.env as never, db(), null, new Date(start + 7 * DAY), { nightly: false });
+    const sweep = billingSweep(t.env as never, db(), NO_PAYMENT_PROVIDERS, new Date(start + 7 * DAY), { nightly: false });
     await reached;
     try {
       await credit(2_000_000 + depositShortfall);

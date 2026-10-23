@@ -74,7 +74,7 @@ async function shoot({ path, name, width, height = 900, signedIn = true, locale 
       else if (p === '/api/v1/pricing') body = pricing;
       else if (p === '/api/public/pricing') body = publicPricing;
       else if (p === '/api/public/status') body = { status: 'operational', checkedAt: new Date().toISOString(), components: [], regions: [], creationPaused: false };
-      else if (p === '/api/v1/billing') body = { mode: 'prepaid', enabled: true, balanceMicros: 42_500_000, reservedMicros: 3_100_000, availableMicros: 39_400_000, retentionDays: 7, exhaustedAt: null, dataKeptUntil: null, frozen: false,
+      else if (p === '/api/v1/billing') body = { mode: 'prepaid', enabled: true, provider: 'stripe', balanceMicros: 42_500_000, reservedMicros: 3_100_000, availableMicros: 39_400_000, retentionDays: 7, exhaustedAt: null, dataKeptUntil: null, frozen: false,
         minBalanceMicros: 1_000_000, lowBalanceMicros: 2_000_000, burnHourMicros: 310_000, topUps: [], month: { totalMicros: 18_420_000, byItem: { compute: 12_000_000, ip: 3_000_000, storage: 2_000_000, snapshot: 0, transfer: 1_420_000 }, month },
         fundedUntil: new Date(Date.now() + 127 * 3_600_000).toISOString(), retained: [], restoreNeededMicros: null };
       else if (p === '/api/v1/instances') body = empty ? [] : instances;

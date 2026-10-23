@@ -3,8 +3,9 @@ import { RegionId } from './regions.js';
 import { UsageItem } from './pricing.js';
 
 /**
- * Prepaid, usage-based billing (page 6). Users top up a balance through Creem (one-time payments of
- * the top-up products configured in Creem); browsers draw from it per minute at the prices in
+ * Prepaid, usage-based billing (page 6). Users top up a balance through Stripe, or through Creem
+ * when Stripe is not configured (one-time payments of the top-up prices or products configured
+ * there); browsers draw from it per minute at the prices in
  * `pricing.ts`. When the balance runs out, access stops immediately. Seven days of fixed IP/disk/snapshot charges are reserved before a
  * paid browser can be used. Only available credit pays active usage; the deposit pays fixed
  * charges during the seven-day stopped retention window, then the browser is permanently deleted.
@@ -26,6 +27,10 @@ export const DATA_KEPT_DAYS = 7;
  */
 export const RUNWAY_WARNING_HOURS = [24, 6, 1] as const;
 
+/** Who takes top-ups: Stripe when it is configured, else Creem (the merchant of record). */
+export const PaymentProviderId = z.enum(['stripe', 'creem']);
+export type PaymentProviderId = z.infer<typeof PaymentProviderId>;
+
 export const TopUpPack = z.object({
   productId: z.string(),
   name: z.string(),
@@ -43,8 +48,10 @@ export type UsageTotals = z.infer<typeof UsageTotals>;
 
 export const BillingState = z.object({
   mode: BillingMode,
-  /** False when Creem is not configured on this deployment: no top-ups. */
+  /** False when no payment provider is configured on this deployment: no top-ups. */
   enabled: z.boolean(),
+  /** The provider top-ups go to; null when `enabled` is false. */
+  provider: PaymentProviderId.nullable(),
   /** Total unspent prepaid credit, including the fixed-resource deposit. */
   balanceMicros: z.number().int(),
   reservedMicros: z.number().int().nonnegative(),

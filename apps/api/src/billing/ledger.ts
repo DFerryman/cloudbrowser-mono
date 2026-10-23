@@ -3,11 +3,11 @@
  * (top-ups, refunds, disputes, operator credits) is a `balance_transactions` row with a unique
  * reference, applied in one D1 batch so a retried webhook or click never changes a balance twice.
  */
-import { MICROS_PER_USD, type TopUpPack } from '@cloudbrowser/contracts';
+import { MICROS_PER_USD, type PaymentProviderId, type TopUpPack } from '@cloudbrowser/contracts';
 import { eventRow, newId, pricingSettings, reservedTotalSql, schema, type Db } from '@cloudbrowser/db';
 import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import type { Env } from '../env.js';
-import type { Creem } from './creem.js';
+import type { PaymentProvider } from './providers.js';
 
 const { balanceTransactions, billingAccounts, events, topupPacks, auditLog, browserInstances, browserReservations } = schema;
 
@@ -137,41 +137,46 @@ export async function unfreezeAccount(db: Db, userId: string, now: Date) {
 }
 
 /**
- * Reads the configured top-up products from Creem (name, price, currency) into `topup_packs`.
- * Only one-time USD products are offered: the balance is kept in USD.
+ * Reads a provider's configured top-up products (Creem products or Stripe prices: name, price,
+ * currency) into `topup_packs`. Only one-time USD products are offered: the balance is kept in USD.
  */
-export async function refreshTopupPacks(db: Db, creem: Creem, now: Date) {
+export async function refreshTopupPacks(db: Db, provider: PaymentProvider, now: Date) {
+  const { client } = provider;
   const seen: string[] = [];
-  for (const id of creem.topupProductIds) {
+  for (const id of client.topupProductIds) {
     try {
-      const p = await creem.getProduct(id);
+      const p = await client.getProduct(id);
       const usable = p.billingType === 'onetime' && p.currency === 'USD' && p.priceCents > 0;
-      if (!usable) console.error('top-up product skipped (needs a one-time USD price)', id, p);
-      const values = { name: p.name, amountCents: p.priceCents, currency: p.currency, active: usable, fetchedAt: now };
+      if (!usable) console.error('top-up product skipped (needs a one-time USD price)', provider.id, id, p);
+      const values = { provider: provider.id, name: p.name, amountCents: p.priceCents, currency: p.currency, active: usable, fetchedAt: now };
       await db.insert(topupPacks).values({ productId: id, ...values }).onConflictDoUpdate({ target: topupPacks.productId, set: values });
       seen.push(id);
     } catch (e) {
-      console.error('top-up product refresh failed', id, e);
+      console.error('top-up product refresh failed', provider.id, id, e);
     }
   }
-  // Products removed from CREEM_TOPUP_PRODUCTS are no longer offered.
-  for (const row of await db.select().from(topupPacks)) {
-    if (!creem.topupProductIds.includes(row.productId) && row.active) {
+  // Products removed from CREEM_TOPUP_PRODUCTS or STRIPE_TOPUP_PRICES are no longer offered.
+  for (const row of await db.select().from(topupPacks).where(eq(topupPacks.provider, provider.id))) {
+    if (!client.topupProductIds.includes(row.productId) && row.active) {
       await db.update(topupPacks).set({ active: false }).where(eq(topupPacks.productId, row.productId));
     }
   }
   return seen.length;
 }
 
-/** The top-ups on offer; read from Creem the first time (afterwards the billing cron refreshes them hourly). */
-export async function offeredTopupPacks(db: Db, creem: Creem | null, now = new Date()): Promise<TopUpPack[]> {
-  if (creem && (await db.select({ id: topupPacks.productId }).from(topupPacks).limit(1)).length === 0) {
-    await refreshTopupPacks(db, creem, now).catch((e) => console.error('top-up refresh failed', e));
+/**
+ * The top-ups on offer from the provider taking top-ups; read from it the first time (afterwards
+ * the billing cron refreshes them hourly). None when no provider is configured.
+ */
+export async function offeredTopupPacks(db: Db, provider: PaymentProvider | null, now = new Date()): Promise<TopUpPack[]> {
+  if (!provider) return [];
+  if ((await db.select({ id: topupPacks.productId }).from(topupPacks).where(eq(topupPacks.provider, provider.id)).limit(1)).length === 0) {
+    await refreshTopupPacks(db, provider, now).catch((e) => console.error('top-up refresh failed', e));
   }
-  return activeTopupPacks(db);
+  return activeTopupPacks(db, provider.id);
 }
 
-export async function activeTopupPacks(db: Db): Promise<TopUpPack[]> {
-  const rows = await db.select().from(topupPacks).where(eq(topupPacks.active, true)).orderBy(asc(topupPacks.amountCents));
+export async function activeTopupPacks(db: Db, provider: PaymentProviderId): Promise<TopUpPack[]> {
+  const rows = await db.select().from(topupPacks).where(and(eq(topupPacks.provider, provider), eq(topupPacks.active, true))).orderBy(asc(topupPacks.amountCents));
   return rows.map((r) => ({ productId: r.productId, name: r.name, amountCents: r.amountCents, currency: r.currency }));
 }

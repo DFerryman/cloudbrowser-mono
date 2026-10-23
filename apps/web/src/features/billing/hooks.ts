@@ -23,7 +23,7 @@ export function useTransactions(page: number, size: number) {
 export const useAccountUsage = (month: string) =>
   useQuery({ queryKey: keys.usage(month), queryFn: () => api<AccountUsage>('GET', `/usage?month=${month}`) });
 
-/** Checkout and the receipts portal are Creem-hosted pages: the app only redirects to them. */
+/** Checkout and the receipts portal are pages hosted by the payment provider (Stripe or Creem): the app only redirects to them. */
 export function useCheckout() {
   return useMutation({
     mutationFn: (productId: string) => api<{ url: string }>('POST', '/billing/checkout', { body: { productId } }),

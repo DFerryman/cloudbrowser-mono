@@ -451,6 +451,7 @@ export const zhCN: Messages = {
   'billing.frozen': '由于付款争议，你的账户已被暂停。请联系客服。',
   'billing.topUp': '充值',
   'billing.topUpHint': '通过 Creem 支付，可能加收税费。除退款政策及法律规定的情况外，余额不予退款。',
+  'billing.topUpHintStripe': '通过 Stripe 支付，按适用规定加收增值税或销售税，并开具发票。除退款政策及法律规定的情况外，余额不予退款。',
   'billing.noTopUps': '暂未提供充值。',
   'billing.unavailable': '此部署尚未开通支付。',
   'billing.receipts': '收据',
@@ -695,7 +696,7 @@ export const zhCN: Messages = {
   'pricing.faq.4.q': '可以退款吗？',
   'pricing.faq.4.a': '余额不予退款，请只充值你预计会用到的金额。重复或错误扣款会退还；法律赋予你权利时也会退款，例如欧盟和英国消费者 14 天内的撤回权（仅限未使用的余额）。',
   'pricing.faq.5.q': '由谁处理支付？',
-  'pricing.faq.5.a': '由我们的记录商户 Creem 处理支付、收据和销售税。我们不会看到你的银行卡信息。',
+  'pricing.faq.5.a': '由 Stripe 或我们的记录商户 Creem 处理，支付页面会显示是哪一家。它们负责处理支付、开具收据，并按适用规定加收增值税或销售税。我们不会看到你的银行卡信息。',
   'pricing.more': '阅读计费指南',
 
   'status.title': '服务状态',

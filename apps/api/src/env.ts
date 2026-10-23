@@ -45,8 +45,21 @@ export interface Env {
   TURN_KEY_API_TOKEN?: string;
   /** `on` returns WebRTC connect info even for `fake` placements (local runs with a real agent and neko). */
   LIVE_VIEW?: string;
-  /** Creem billing webhooks are processed asynchronously through this queue (page 6). */
+  /** Stripe and Creem billing webhooks are processed asynchronously through this queue (page 6). */
   BILLING?: Queue<{ eventId: string }>;
+  /**
+   * Stripe (page 6; src/billing/stripe.ts). Takes every new top-up when the key, the webhook
+   * secret and at least one price id are all valid; otherwise Creem does. Set as secrets, never
+   * in wrangler.jsonc `vars` (those override values kept from the dashboard on every deploy).
+   * `sk_live_…` / `rk_live_…` (or `_test_` for test mode).
+   */
+  STRIPE_SECRET_KEY?: string;
+  /** Signing secret of the `/api/webhooks/stripe` endpoint, `whsec_…`. */
+  STRIPE_WEBHOOK_SECRET?: string;
+  /** Comma-separated ids of one-time USD Prices (`price_…`), one per top-up amount, or one whose customer chooses the amount. */
+  STRIPE_TOPUP_PRICES?: string;
+  /** Stripe Tax on checkouts; on unless `off` (only for a test account without Stripe Tax). */
+  STRIPE_AUTOMATIC_TAX?: string;
   /** Creem (page 6): https://test-api.creem.io or https://api.creem.io. Top-ups are off until all are set. */
   CREEM_API_BASE?: string;
   CREEM_API_KEY?: string;

@@ -449,6 +449,7 @@ export const en = {
   'billing.frozen': 'Your account is on hold because of a payment dispute. Contact support.',
   'billing.topUp': 'Top up',
   'billing.topUpHint': 'Paid via Creem; tax may apply. Credit is non-refundable except as the Refund Policy and the law provide.',
+  'billing.topUpHintStripe': 'Paid via Stripe; VAT or sales tax is added where it applies, and you get an invoice. Credit is non-refundable except as the Refund Policy and the law provide.',
   'billing.noTopUps': 'No top-ups are available yet.',
   'billing.unavailable': 'Payments are not set up on this deployment yet.',
   'billing.receipts': 'Receipts',
@@ -693,7 +694,7 @@ export const en = {
   'pricing.faq.4.q': 'Can I get a refund?',
   'pricing.faq.4.a': 'Credit is non-refundable, so top up only what you expect to use. We refund duplicate or mistaken charges, and wherever the law gives you the right, such as the 14-day withdrawal for consumers in the EU and the UK (unused credit only).',
   'pricing.faq.5.q': 'Who handles payments?',
-  'pricing.faq.5.a': 'Creem, our merchant of record, processes payments, receipts and sales tax. We never see your card details.',
+  'pricing.faq.5.a': 'Stripe, or Creem as our merchant of record; the payment page shows which. They process the payment, issue receipts and add VAT or sales tax where it applies. We never see your card details.',
   'pricing.more': 'Read the billing guide',
 
   'status.title': 'System status',

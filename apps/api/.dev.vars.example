@@ -4,3 +4,10 @@ BETTER_AUTH_SECRET=change-me-to-a-long-random-string
 APP_URL=http://localhost:8787
 # Prints each sign-in code to the wrangler log.
 ENVIRONMENT=development
+# Optional: Stripe test mode (docs/deploy-cloudflare.md, "3b"). With all three valid, Stripe takes
+# top-ups; otherwise Creem does, if its CREEM_* values are set. `stripe listen --forward-to
+# localhost:8787/api/webhooks/stripe` prints the webhook secret.
+# STRIPE_SECRET_KEY=sk_test_...
+# STRIPE_WEBHOOK_SECRET=whsec_...
+# STRIPE_TOPUP_PRICES=price_...
+# STRIPE_AUTOMATIC_TAX=off   # only if Stripe Tax is not set up in the test account

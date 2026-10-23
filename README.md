@@ -87,8 +87,12 @@ Billing: browsers draw per minute from a prepaid balance, at the AWS list price 
 simulator's price sheet is used. Paid browsers also reserve seven days of fixed IP/disk costs;
 the reserve remains unspent balance, and only available credit can fund use. At exhaustion,
 access stops immediately and the reserve funds seven days of retention before permanent deletion.
-The one free trial (30 minutes by default; operator setting `trial_minutes`) is exempt. Missing Creem settings disable top-ups, not prepaid checks.
-An explicit `billing_required=false` is only a local test/pilot override. To try Creem test mode locally, put
+The one free trial (30 minutes by default; operator setting `trial_minutes`) is exempt. Top-ups go to Stripe when its
+settings are valid and to Creem otherwise; missing payment settings disable top-ups, not prepaid checks.
+An explicit `billing_required=false` is only a local test/pilot override. To try Stripe test mode locally, put
+`STRIPE_SECRET_KEY` (`sk_test_…`), `STRIPE_TOPUP_PRICES` (one-time USD price ids) and the `whsec_…` secret that
+`stripe listen --forward-to localhost:8787/api/webhooks/stripe` prints as `STRIPE_WEBHOOK_SECRET` in
+`apps/api/.dev.vars`. To try Creem test mode locally instead, put
 `CREEM_API_BASE=https://test-api.creem.io`, `CREEM_API_KEY`, `CREEM_WEBHOOK_SECRET` and
 `CREEM_TOPUP_PRODUCTS` (one-time product ids, comma-separated) in `apps/api/.dev.vars`, and expose
 the webhook with `cloudflared tunnel --url http://localhost:8787` (webhook URL:

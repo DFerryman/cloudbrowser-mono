@@ -30,7 +30,8 @@ directory or bypass this command with a direct `wrangler deploy`.
 The deploy command keeps additional runtime variables configured in the Cloudflare dashboard.
 Variables declared in `apps/api/wrangler.jsonc` still take precedence, so keep its Creem API
 base and top-up product IDs set to the live values; use `.dev.vars` for local test-mode values.
-Existing secrets are retained by deployments.
+Existing secrets are retained by deployments. Stripe's settings are secrets only (section 3b), so
+deployments never overwrite them.
 
 The API's Custom Domains (`nevazu.com`, `www.nevazu.com`, and `admin.console.nevazu.com`) are
 declared in `apps/api/wrangler.jsonc`, including managed DNS and HTTPS certificates. The zone's
@@ -146,7 +147,7 @@ Optional:
 - `ENV_NAME` (`prod`/`staging`) in the engine, reaper and reconciler configs: the `cb:env` tag on
   provider resources, same value in all three.
 
-## 3b. Prices and billing with Creem
+## 3b. Prices and billing with Stripe or Creem
 
 **Prices** come from the AWS Price List API; nothing is configured here. The engine refreshes
 each AWS region's sheet every 12 hours (the runtime IAM user needs `pricing:GetProducts`, in the
@@ -156,8 +157,84 @@ operator console → *Pricing & margin*, which also shows each region's cost and
 refresh prices now.
 
 **Billing** is a prepaid balance. New registrations receive configurable signup credit (default $2); there is no timed trial.
-Missing payment-provider settings do not grant free paid-browser use. Top-ups turn on when every value below is set; until then
-`/v1/billing/checkout` answers 503.
+Missing payment-provider settings do not grant free paid-browser use. Top-ups turn on when one payment provider below is
+fully configured; until then `/v1/billing/checkout` answers 503.
+
+**Which provider takes payments.** Stripe and Creem are configured independently
+(`apps/api/src/billing/providers.ts`):
+
+- When `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` and `STRIPE_TOPUP_PRICES` are all set and valid
+  (`sk_live_…` or `rk_live_…`, `whsec_…`, `price_…` ids), **Stripe** takes every new top-up and the
+  *Receipts* button opens Stripe's customer portal (Creem's, for someone who only ever paid through Creem).
+- Otherwise **Creem** takes them, as before, when its four settings are set.
+- Each provider processes its own webhooks, refunds and disputes whenever it is configured, also while
+  the other one takes top-ups. Keep Creem configured after Stripe takes over: Creem payments can
+  still be refunded or disputed months later. Deleting or breaking any one Stripe secret switches new
+  top-ups back to Creem at once; Stripe events that arrive meanwhile are kept and applied once Stripe
+  is configured again (with `STRIPE_WEBHOOK_SECRET` gone, Stripe's deliveries are refused and Stripe
+  retries them for three days).
+- `GET /api/v1/billing` reports the active one in `provider` (`stripe`, `creem` or `null`).
+
+### Stripe (UK account)
+
+Stripe processes payments but, unlike Creem, is **not a merchant of record**: with Stripe the UK
+company itself sells the credit, so VAT and sales tax, invoices and consumer law are its own
+obligations. The integration (`apps/api/src/billing/stripe.ts`) therefore creates each Checkout
+Session with Stripe Tax (`automatic_tax`), the full billing address (evidence of the buyer's
+country), business tax-id collection (VAT numbers; reverse charge for EU businesses), a post-payment
+invoice (shown in the customer portal), a required tick-box accepting the Terms and Refund Policy
+and asking for the credit to be added at once (Consumer Contracts Regulations 2013; the Refund
+Policy refunds unused credit to UK and EU consumers who withdraw within 14 days), and Adaptive
+Pricing off, so buyers are charged and refunded the price's USD amount. Strong Customer
+Authentication (3D Secure) is handled by Checkout. The credit is `amount_total` minus tax, read
+from Stripe's own record of the session, once per PaymentIntent; delayed payment methods are
+credited on `checkout.session.async_payment_succeeded`. Requests pin Stripe API version
+`2026-09-30.endive`.
+
+1. **Business details** (sandbox and live): Settings → Business → *Public details*: business name,
+   support email and phone, statement descriptor, and the **Terms of service URL**
+   `https://<your app domain>/terms` (the Terms tick-box needs it; until it is set the same words
+   appear above the pay button instead and the console shows an alert) and privacy policy URL.
+   Settings → Payouts: add a **USD bank account** if USD payments should be paid out without
+   conversion to GBP.
+2. **Stripe Tax:** Settings → Tax → activate; head office (origin) address in the UK; default tax
+   behaviour *Exclusive* (tax is added on top of the price, as with Creem; or set it on each
+   price); a default product tax code (see below); and a **registration** for every place you must
+   collect in: the UK once VAT-registered, the EU (One Stop Shop, non-Union scheme) for EU
+   consumers, and others as Stripe Tax's threshold monitoring reports them. Stripe Tax collects only
+   where a registration is added. In a sandbox without Stripe Tax, set `STRIPE_AUTOMATIC_TAX=off`.
+3. **Prices:** Product catalogue → one product per top-up, each with a **one-time USD price**
+   (e.g. *Credit $10*, *$25*, *$50*), or a single product whose price is *Customer chooses price*
+   (`custom_unit_amount`, like the current Creem product) with a minimum and maximum. Note the
+   `price_…` ids. Archived prices and products are not offered.
+4. **Customer portal:** Settings → Billing → *Customer portal*: keep *Invoice history* on and save
+   it, once in the sandbox and once in live mode (portal sessions fail until it is saved).
+5. **Webhook:** Developers → Webhooks (*Event destinations*) → add an endpoint
+   `https://<your app domain>/api/webhooks/stripe` (payload *Snapshot* or *Thin*, both are
+   accepted) for `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+   `charge.refunded`, `refund.created`, `refund.updated`, `refund.failed`,
+   `charge.dispute.created` and `charge.dispute.funds_withdrawn`, and copy its signing secret. Other
+   events are stored and ignored; payments the app did not start (no `attemptId`) are left alone.
+6. **API key:** Developers → API keys: the secret key, or a restricted key with *Checkout Sessions*
+   write, *Prices* (plans) read, *Products* read, *Charges and Refunds* read, *Disputes* read,
+   *PaymentIntents* read, *Customer portal* write and *Customers* read.
+7. **Secrets** (never `vars` in `apps/api/wrangler.jsonc`, which override the dashboard on every deploy):
+
+```bash
+cd apps/api
+pnpm exec wrangler secret put STRIPE_SECRET_KEY        # sk_live_… or rk_live_…
+pnpm exec wrangler secret put STRIPE_WEBHOOK_SECRET    # whsec_… of the endpoint above
+pnpm exec wrangler secret put STRIPE_TOPUP_PRICES      # price_…,price_… (comma-separated)
+```
+
+8. **Console:** *Pricing & margin* → payment fee: replace Creem's 3.9% + $0.40 with what Stripe
+   charges this account (see below), so the margin estimate and minimum markup stay right.
+9. **Policies:** the Terms, Privacy and Refund pages name both providers. As the seller, also
+   publish the company's legal name, registered number, registered office and VAT number.
+
+To return to Creem, delete one Stripe secret (`pnpm exec wrangler secret delete STRIPE_TOPUP_PRICES`).
+
+### Creem
 
 1. **Creem dashboard (test mode first):** create one **one-time** product in **USD** per top-up
    amount, e.g. *Credit $10*, *Credit $25*, *Credit $50*, and note their ids. The amount credited
@@ -187,8 +264,8 @@ INSERT INTO control_flags (key, value, updated_at) VALUES ('billing_required', '
 ```
 
 What happens automatically: webhooks are verified, stored by event id and processed from the
-`cloudbrowser-billing` queue; a completed checkout is re-fetched from Creem and credited once per
-order. The engine records usage every minute using elapsed time and the AWS unit prices times
+`cloudbrowser-billing` queue; a completed checkout is re-fetched from the provider that took it
+and credited once per order (Stripe: per PaymentIntent). The engine records usage every minute using elapsed time and the AWS unit prices times
 the markup. Compute and IPv4 use hours with fractional seconds; provisioned storage uses
 GB-month fractions of the actual UTC billing month, split across day/month boundaries. The
 730-hour convention is only a display projection, not the storage debit divisor.
@@ -196,7 +273,7 @@ Available credit excludes the refundable seven-day IP/disk reserve. At exhaustio
 access is revoked and the VM is stopped without a ten-minute grace period. The reserve then
 funds seven days of fixed-resource retention, after which data and the IP are permanently deleted.
 An early manual deletion or funded resumption releases unused retention credit. The api's
-five-minute cron retries lost events, refreshes products and sends balance notices; a nightly run
+five-minute cron retries lost events, refreshes both providers' products and sends balance notices; a nightly run
 credits any paid order a lost webhook missed. Credit can also be added by hand in the console
 (*Users* → Credit), which is recorded as an adjustment.
 
@@ -364,6 +441,11 @@ disconnected for good (their route is gone). The gateway's `ratelimits` binding 
 deploy. Update the zone's security rule (`deploy/cloudflare-auth-security.json`) so
 `connect.<domain>` skips Browser Integrity Check and Security Level for `/mcp/` and `/u/`.
 
+Migration `0036` adds Stripe beside Creem (section 3b): a `provider` column on `topup_packs`,
+`topup_checkouts` and `webhook_events` (every existing row is Creem's) and the `stripe_customers`
+table. It is additive; apply it before deploying, as always: the new api reads the new columns.
+Until the three Stripe secrets are set, top-ups keep going to Creem exactly as before.
+
 The api deploys last: it binds to the gateway's `Internal` entrypoint (to revoke live connections),
 to the engine as a service and to its `EventHub` Durable Object. The gateway and the api call each
 other only through stable RPC methods, and the engine reaches the gateway only through the
@@ -504,7 +586,7 @@ UPDATE control_flags SET value = 'false' WHERE key = 'creation_freeze';   -- cle
 SELECT * FROM drift_findings WHERE status = 'open';
 SELECT * FROM billing_accounts;                                -- balances, when they ran out
 SELECT * FROM balance_transactions ORDER BY created_at DESC;   -- top-ups, refunds, disputes, adjustments
-SELECT * FROM webhook_events WHERE processed_at IS NULL;      -- Creem events not applied yet (with error)
+SELECT * FROM webhook_events WHERE processed_at IS NULL;      -- Stripe/Creem events not applied yet (provider, error)
 SELECT user_id, SUM(amount_micros) / 1e6 AS usd, SUM(cost_micros) / 1e6 AS aws_usd
   FROM usage_records WHERE day >= strftime('%Y-%m-01', 'now') GROUP BY user_id;   -- this month
 SELECT region_id, fetched_at, sheet FROM provider_prices;      -- AWS prices per region

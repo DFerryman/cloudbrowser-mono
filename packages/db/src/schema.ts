@@ -668,7 +668,7 @@ export const archiveKeys = sqliteTable('archive_keys', {
 
 // ---------------------------------------------------------------------------------------------
 // Prices and billing (page 6). Provider prices come from the provider's price list; customers pay
-// them times the markup from a prepaid balance topped up through Creem. Owner: api, except
+// them times the markup from a prepaid balance topped up through Stripe or Creem. Owner: api, except
 // `provider_prices` and `usage_records` (engine).
 // ---------------------------------------------------------------------------------------------
 
@@ -796,7 +796,8 @@ export const browserReservations = sqliteTable('browser_reservations', {
 
 /**
  * Credits and other non-usage changes to a balance. `reference` makes each one idempotent, e.g.
- * `order:<creem order id>`, `refund:<creem refund id>`. Owner: api.
+ * `order:<creem order id>`, `refund:<creem refund id>`; for Stripe, `order:<PaymentIntent id>`,
+ * `refund:<refund id>` and `dispute:<dispute id>`. Owner: api.
  */
 export const balanceTransactions = sqliteTable(
   'balance_transactions',
@@ -861,9 +862,23 @@ export const billingCustomers = sqliteTable('billing_customers', {
   createdAt: ts('created_at').notNull(),
 });
 
-/** Top-up products configured in Creem (CREEM_TOPUP_PRODUCTS); name and price are read from Creem. */
+/** The Stripe customer of each user, linked on the first paid Stripe checkout and reused afterwards. */
+export const stripeCustomers = sqliteTable('stripe_customers', {
+  userId: text('user_id')
+    .primaryKey()
+    .references(() => user.id),
+  stripeCustomerId: text('stripe_customer_id').notNull().unique(),
+  createdAt: ts('created_at').notNull(),
+});
+
+/**
+ * Top-up products: Creem products (CREEM_TOPUP_PRODUCTS) or Stripe prices (STRIPE_TOPUP_PRICES);
+ * name and price are read from that provider. Only the provider taking top-ups offers its own.
+ */
 export const topupPacks = sqliteTable('topup_packs', {
   productId: text('product_id').primaryKey(),
+  /** `stripe` | `creem` */
+  provider: text('provider').notNull().default('creem'),
   name: text('name').notNull(),
   amountCents: integer('amount_cents').notNull(),
   currency: text('currency').notNull(),
@@ -871,21 +886,32 @@ export const topupPacks = sqliteTable('topup_packs', {
   fetchedAt: ts('fetched_at').notNull(),
 });
 
-/** One row per top-up checkout we start; its id is Creem's `request_id`, echoed back for correlation. */
+/**
+ * One row per top-up checkout we start; its id is echoed back for correlation (Creem's
+ * `request_id`, Stripe's `client_reference_id`). `checkout_id` is the Creem checkout or Stripe
+ * Checkout Session.
+ */
 export const topupCheckouts = sqliteTable('topup_checkouts', {
   id: text('id').primaryKey(),
   userId: text('user_id')
     .notNull()
     .references(() => user.id),
   productId: text('product_id').notNull(),
+  /** `stripe` | `creem`: who took the payment, and so who is asked about it later. */
+  provider: text('provider').notNull().default('creem'),
   checkoutId: text('checkout_id'),
   creditedAt: ts('credited_at'),
   createdAt: ts('created_at').notNull(),
 });
 
-/** Every Creem webhook, keyed by its event id: duplicates are ignored (page 6). */
+/**
+ * Every payment webhook, keyed by its event id (Stripe's prefixed `stripe:`): duplicates are
+ * ignored (page 6). Each is processed by its own provider.
+ */
 export const webhookEvents = sqliteTable('webhook_events', {
   id: text('id').primaryKey(),
+  /** `stripe` | `creem` */
+  provider: text('provider').notNull().default('creem'),
   type: text('type').notNull(),
   payload: json<Record<string, unknown>>('payload').notNull(),
   receivedAt: ts('received_at').notNull(),

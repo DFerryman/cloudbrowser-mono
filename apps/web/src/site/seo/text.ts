@@ -106,7 +106,7 @@ const keyFacts = () => [
   `- Coding agents (Claude Code, Codex, Cursor, VS Code, Windsurf, Gemini CLI, OpenCode or any MCP client) connect to a browser's own hosted MCP server over HTTPS with an access key the user keeps in an environment variable; nothing is installed, and the agent adds the server to its own configuration (${mdUrl('/docs/agent-setup.md')}). The user watches and takes control back with any click or key.`,
   `- Two machine tiers: ${tiers()}`,
   `- Prepaid, no subscription: running time per minute while awake; the dedicated IP per hour and storage per GB-month while the browser exists; data sent per GB. Prices are public AWS list prices for the region times a published multiplier.`,
-  `- Sign-in with one-time email codes (no password), optional passkeys and two-step verification; payments through Creem, the merchant of record.`,
+  `- Sign-in with one-time email codes (no password), optional passkeys and two-step verification; payments through Stripe, or Creem as merchant of record.`,
 ];
 
 const SUMMARY_FALLBACK = `The regions open for new browsers and current prices are listed at ${mdUrl('/pricing')} and ${mdUrl('/pricing.md')}.`;

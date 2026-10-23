@@ -1,6 +1,7 @@
 /**
- * Prices, prepaid billing and usage (page 6). A balance is credited only from Creem's own record
- * of a paid checkout (webhook, or a re-read of the checkout), never from the success redirect.
+ * Prices, prepaid billing and usage (page 6). Top-ups go to Stripe when it is configured, else to
+ * Creem (../billing/providers.ts). A balance is credited only from the provider's own record of a
+ * paid checkout (webhook, or a re-read of the checkout), never from the success redirect.
  */
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import {
@@ -13,11 +14,11 @@ import {
   RedirectResult,
   RegionPricing,
 } from '@cloudbrowser/contracts';
-import { accountRunway, newId, pricingSettings, schema } from '@cloudbrowser/db';
+import { accountRunway, newId, pricingSettings, raiseAlert, schema } from '@cloudbrowser/db';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
-import { creemFrom, type Creem } from '../billing/creem.js';
 import { offeredTopupPacks } from '../billing/ledger.js';
+import { checkoutProvider, paymentProviders, type PaymentProvider } from '../billing/providers.js';
 import { retentionState } from '../billing/retention.js';
 import type { AppEnv } from '../env.js';
 import { billingAccount, entitlementsFor } from '../limits.js';
@@ -25,7 +26,7 @@ import { allRegionPricing, regionPrice } from '../pricing.js';
 import { problem } from '../problem.js';
 import { accountUsage, monthOf, monthTotals } from '../usage.js';
 
-const { billingCustomers, topupCheckouts, balanceTransactions, browserReservations } = schema;
+const { billingCustomers, stripeCustomers, topupCheckouts, balanceTransactions, browserReservations } = schema;
 
 export const billingRoute = new OpenAPIHono<AppEnv>({
   defaultHook: (result) => {
@@ -48,10 +49,10 @@ export const PageQuery = z.object({
   offset: z.coerce.number().int().min(0).max(100_000).optional(),
 });
 
-function requireCreem(c: Context<AppEnv>): Creem {
-  const creem = creemFrom(c.env);
-  if (!creem) throw problem(503, 'billing_unavailable', 'Billing is not set up on this deployment.');
-  return creem;
+function requireProvider(c: Context<AppEnv>): PaymentProvider {
+  const provider = checkoutProvider(paymentProviders(c.env));
+  if (!provider) throw problem(503, 'billing_unavailable', 'Billing is not set up on this deployment.');
+  return provider;
 }
 
 billingRoute.openapi(
@@ -71,8 +72,8 @@ billingRoute.openapi(
     const db = c.get('db');
     const user = c.get('user');
     const now = new Date();
-    const creem = creemFrom(c.env);
-    const topUps = await offeredTopupPacks(db, creem, now);
+    const provider = checkoutProvider(paymentProviders(c.env));
+    const topUps = await offeredTopupPacks(db, provider, now);
     const account = await billingAccount(db, user.id);
     const settings = await pricingSettings(db);
     // One projection for the balance warnings and this page: the account's combined spending rate.
@@ -81,7 +82,8 @@ billingRoute.openapi(
     const month = monthOf(undefined, now);
     const out: BillingState = {
       mode: (await entitlementsFor(db, user.id)).billing,
-      enabled: creem !== null,
+      enabled: provider !== null,
+      provider: provider?.id ?? null,
       balanceMicros: account.balanceMicros,
       reservedMicros: account.reservedMicros,
       availableMicros: account.availableMicros,
@@ -145,26 +147,48 @@ billingRoute.openapi(
     method: 'post',
     path: '/billing/checkout',
     tags: ['billing'],
-    description: 'Starts a Creem hosted checkout for a top-up. The balance is credited from Creem’s record of the paid checkout, never from the redirect.',
+    description: 'Starts a hosted checkout for a top-up with the payment provider taking top-ups (Stripe, else Creem). The balance is credited from the provider’s record of the paid checkout, never from the redirect.',
     request: { body: { content: { 'application/json': { schema: CheckoutBody } }, required: true } },
-    responses: { 200: json(RedirectResult, 'Creem checkout URL'), ...problems },
+    responses: { 200: json(RedirectResult, 'Hosted checkout URL'), ...problems },
   }),
   async (c) => {
-    const creem = requireCreem(c);
+    const provider = requireProvider(c);
     const db = c.get('db');
     const user = c.get('user');
     const { productId } = c.req.valid('json');
-    const packs = await offeredTopupPacks(db, creem);
+    const packs = await offeredTopupPacks(db, provider);
     if (!packs.some((p) => p.productId === productId)) throw problem(400, 'validation_failed', 'Unknown top-up.');
     const attemptId = newId();
-    await db.insert(topupCheckouts).values({ id: attemptId, userId: user.id, productId, createdAt: new Date() });
-    const out = await creem.createCheckout({
-      productId,
-      requestId: attemptId,
-      successUrl: `${c.env.APP_URL}/billing/success`,
-      email: user.email,
-      metadata: { userId: user.id, attemptId },
-    });
+    await db.insert(topupCheckouts).values({ id: attemptId, userId: user.id, productId, provider: provider.id, createdAt: new Date() });
+    let out: { id: string; url: string };
+    if (provider.id === 'stripe') {
+      const [customer] = await db.select().from(stripeCustomers).where(eq(stripeCustomers.userId, user.id));
+      const stripe = await provider.client.createCheckout({
+        priceId: productId,
+        attemptId,
+        userId: user.id,
+        email: user.email,
+        customerId: customer?.stripeCustomerId ?? null,
+        appUrl: c.env.APP_URL,
+      });
+      if (!stripe.termsCheckbox) {
+        await raiseAlert(db, {
+          source: 'billing',
+          severity: 'warning',
+          title: 'Stripe checkout cannot ask buyers to accept the Terms: set the Terms of Service URL in Stripe (Settings → Public details)',
+          dedupeKey: 'stripe-terms-url',
+        });
+      }
+      out = stripe;
+    } else {
+      out = await provider.client.createCheckout({
+        productId,
+        requestId: attemptId,
+        successUrl: `${c.env.APP_URL}/billing/success`,
+        email: user.email,
+        metadata: { userId: user.id, attemptId },
+      });
+    }
     if (out.id) await db.update(topupCheckouts).set({ checkoutId: out.id }).where(eq(topupCheckouts.id, attemptId));
     return c.json({ url: out.url }, 200);
   },
@@ -175,13 +199,23 @@ billingRoute.openapi(
     method: 'post',
     path: '/billing/portal',
     tags: ['billing'],
-    description: 'Creem customer portal: receipts and invoices for top-ups.',
-    responses: { 200: json(RedirectResult, 'Creem customer portal URL'), ...problems },
+    description: 'The payment provider’s customer portal: receipts and invoices for top-ups. Stripe’s when it takes top-ups and the user has paid through it, else Creem’s.',
+    responses: { 200: json(RedirectResult, 'Customer portal URL'), ...problems },
   }),
   async (c) => {
-    const creem = requireCreem(c);
-    const [cust] = await c.get('db').select().from(billingCustomers).where(eq(billingCustomers.userId, c.get('user').id));
-    if (!cust) throw problem(409, 'invalid_state', 'You have not bought credit yet.');
-    return c.json({ url: await creem.portalUrl(cust.creemCustomerId) }, 200);
+    const active = requireProvider(c);
+    const { stripe, creem } = paymentProviders(c.env);
+    const db = c.get('db');
+    const userId = c.get('user').id;
+    const [stripeCustomer] = stripe ? await db.select().from(stripeCustomers).where(eq(stripeCustomers.userId, userId)) : [];
+    const [creemCustomer] = creem ? await db.select().from(billingCustomers).where(eq(billingCustomers.userId, userId)) : [];
+    // The provider taking top-ups first; someone who only ever paid the other one still gets its receipts.
+    const portals = [
+      stripe && stripeCustomer ? () => stripe.portalUrl(stripeCustomer.stripeCustomerId, `${c.env.APP_URL}/billing`) : null,
+      creem && creemCustomer ? () => creem.portalUrl(creemCustomer.creemCustomerId) : null,
+    ];
+    const portal = (active.id === 'stripe' ? portals : [...portals].reverse()).find((p) => p !== null);
+    if (!portal) throw problem(409, 'invalid_state', 'You have not bought credit yet.');
+    return c.json({ url: await portal() }, 200);
   },
 );

@@ -142,7 +142,7 @@ function BalanceCard({ state }: { state: BillingState }) {
             ))}
           </div>
         )}
-        {state.enabled && state.topUps.length ? <Hint className="mt-2">{t('billing.topUpHint')}</Hint> : null}
+        {state.enabled && state.topUps.length ? <Hint className="mt-2">{t(state.provider === 'stripe' ? 'billing.topUpHintStripe' : 'billing.topUpHint')}</Hint> : null}
       </div>
 
       {alert ? (

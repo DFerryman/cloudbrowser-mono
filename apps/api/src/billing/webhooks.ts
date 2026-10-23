@@ -1,7 +1,9 @@
 /**
- * Creem webhooks (page 6). The receiver checks the signature over the raw body, stores the event
- * by its id (duplicates are ignored) and answers at once; processing runs from the
- * `cloudbrowser-billing` queue, with the api's cron as a backstop for lost messages.
+ * Creem webhooks (page 6); Stripe's are in ./stripe-webhooks.ts. The receiver checks the signature
+ * over the raw body, stores the event by its id (duplicates are ignored) and answers at once;
+ * processing runs from the `cloudbrowser-billing` queue, with the api's cron as a backstop for
+ * lost messages. Creem's events are processed whenever Creem is configured, also while Stripe
+ * takes new top-ups (./providers.ts).
  *
  * A top-up is credited only from Creem's own record of the checkout (re-fetched, never from the
  * webhook body or the success redirect), once per order.
@@ -97,7 +99,8 @@ async function paymentFor(db: Db, o: Record<string, unknown>) {
 /** Applies one stored event. Idempotent: re-running it gives the same final state. */
 export async function processWebhook(env: Env, db: Db, creem: Creem, eventId: string, now = new Date()): Promise<void> {
   const [row] = await db.select().from(webhookEvents).where(eq(webhookEvents.id, eventId));
-  if (!row || row.processedAt) return;
+  // Stripe's events are applied by ./stripe-webhooks.ts.
+  if (!row || row.processedAt || row.provider !== 'creem') return;
   const o = obj(row.payload.object);
   let userId: string | null = null;
   try {

@@ -1,39 +1,48 @@
 /**
  * The api Worker's billing cron (every 5 minutes; page 6):
- *  - processes webhook events whose queue message was lost or failed;
- *  - refreshes the top-up products from Creem once an hour;
+ *  - processes webhook events whose queue message was lost or failed, each with its own provider;
+ *  - refreshes the top-up products from every configured provider (Stripe, Creem) once an hour;
  *  - sends the credit emails (funded-time and low-balance warnings, credit ran out / deletion
  *    reminders) and the notices the engine queues; see ../notifications/user.ts for each one's rule;
  *  - permanently deletes each browser at its seven-day reservation deadline after usable credit
  *    runs out; unused held credit is released. Never while a dispute hold is on: the clock is
  *    paused until an operator lifts it (unfreezeAccount);
- *  - once a night, credits top-ups whose webhook never arrived (Creem's checkout is re-read).
+ *  - once a night, credits top-ups whose webhook never arrived (the provider that took each one
+ *    re-reads its checkout).
  */
 import { billingRequired, operationRow, schema, type Db } from '@cloudbrowser/db';
 import { and, eq, gte, isNotNull, isNull, lte, notInArray, sql, type Column } from 'drizzle-orm';
 import type { Env } from '../env.js';
 import { lowBalanceNotices, retentionNotices, runwayWarnings, sendUserNotices } from '../notifications/user.js';
-import type { Creem } from './creem.js';
 import { notifyHub, refreshTopupPacks } from './ledger.js';
-import { creditCheckout, pendingWebhooks, processWebhook } from './webhooks.js';
+import { configuredProviders, processStoredWebhook, type PaymentProvider, type PaymentProviders } from './providers.js';
+import { creditStripeCheckout } from './stripe-webhooks.js';
+import { creditCheckout, pendingWebhooks } from './webhooks.js';
 
 const { auditLog, billingAccounts, browserInstances, topupCheckouts, topupPacks, operations, events, browserReservations } = schema;
 const DAY = 86_400_000;
 const notFrozen = (userId: Column | string) => sql`NOT EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${userId} AND ${billingAccounts.frozenAt} IS NOT NULL)`;
 
-export async function billingSweep(env: Env, db: Db, creem: Creem | null, now: Date, opts: { nightly: boolean }) {
+/** Re-reads one checkout with the provider that took it and credits it if it is paid. */
+const creditWith = (db: Db, p: PaymentProvider, checkoutId: string, now: Date) =>
+  p.id === 'stripe' ? creditStripeCheckout(db, p.client, checkoutId, now) : creditCheckout(db, p.client, checkoutId, now);
+
+export async function billingSweep(env: Env, db: Db, payments: PaymentProviders, now: Date, opts: { nightly: boolean }) {
   const summary = { webhooks: 0, packs: 0, runway: 0, lowBalance: 0, notices: 0, deleted: 0, credited: 0, userNotices: 0 };
-  if (creem) {
+  const providers = configuredProviders(payments);
+  if (providers.length) {
+    // An event whose provider is not configured stays pending until it is.
     for (const id of await pendingWebhooks(db, now)) {
       try {
-        await processWebhook(env, db, creem, id, now);
-        summary.webhooks++;
+        if (await processStoredWebhook(env, db, payments, id, now)) summary.webhooks++;
       } catch (e) {
         console.error('webhook retry failed', id, e);
       }
     }
-    const [anyPack] = await db.select({ id: topupPacks.productId }).from(topupPacks).limit(1);
-    if (!anyPack || now.getUTCMinutes() < 5) summary.packs = await refreshTopupPacks(db, creem, now);
+  }
+  for (const p of providers) {
+    const [anyPack] = await db.select({ id: topupPacks.productId }).from(topupPacks).where(eq(topupPacks.provider, p.id)).limit(1);
+    if (!anyPack || now.getUTCMinutes() < 5) summary.packs += await refreshTopupPacks(db, p, now);
   }
 
   if (await billingRequired(db)) {
@@ -50,15 +59,15 @@ export async function billingSweep(env: Env, db: Db, creem: Creem | null, now: D
     for (const a of due) summary.deleted += await deleteBrowsers(env, db, a.userId, now);
   }
 
-  if (opts.nightly && creem) {
+  for (const p of opts.nightly ? providers : []) {
     // Top-ups paid in the last 3 days whose webhook never arrived. Checkouts never opened have no id.
     const open = await db
       .select()
       .from(topupCheckouts)
-      .where(and(isNull(topupCheckouts.creditedAt), isNotNull(topupCheckouts.checkoutId), gte(topupCheckouts.createdAt, new Date(now.getTime() - 3 * DAY))));
+      .where(and(eq(topupCheckouts.provider, p.id), isNull(topupCheckouts.creditedAt), isNotNull(topupCheckouts.checkoutId), gte(topupCheckouts.createdAt, new Date(now.getTime() - 3 * DAY))));
     for (const c of open) {
       try {
-        const userId = await creditCheckout(db, creem, c.checkoutId!, now);
+        const userId = await creditWith(db, p, c.checkoutId!, now);
         if (userId) {
           summary.credited++;
           await notifyHub(env, userId);
