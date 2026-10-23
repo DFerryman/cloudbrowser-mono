@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { pendingMigrations } from './d1-migrations.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const api = fileURLToPath(new URL('../apps/api/', import.meta.url));
@@ -23,10 +24,34 @@ function verifyMain() {
   return commit;
 }
 
+/**
+ * Workers that read new tables or columns fail until the D1 migrations adding them are applied, so
+ * every Worker deploy waits for them (docs/deploy-cloudflare.md, "Deploying"). Only an explicit
+ * ALLOW_PENDING_D1_MIGRATIONS=1 goes ahead without them.
+ */
+function verifyMigrations() {
+  if (process.env.ALLOW_PENDING_D1_MIGRATIONS === '1') {
+    console.warn('ALLOW_PENDING_D1_MIGRATIONS=1: not checking for pending D1 migrations.');
+    return;
+  }
+  const result = spawnSync('pnpm', ['exec', 'wrangler', 'd1', 'migrations', 'list', 'cloudbrowser', '--remote'], {
+    cwd: api, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' },
+  });
+  if (result.error) throw result.error;
+  const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+  if (result.status !== 0) throw new Error(`Listing the D1 migrations failed (status ${result.status}):\n${output.trim()}`);
+  const pending = pendingMigrations(output);
+  if (pending.length) {
+    throw new Error(`D1 migrations are not applied yet: ${pending.join(', ')}. Run pnpm db:migrate:remote first, then deploy.`);
+  }
+  console.log('No pending D1 migrations.');
+}
+
 try {
   if (process.argv.slice(2).some((arg) => arg !== '--check')) throw new Error('Usage: deploy-api-main.mjs [--check]');
   const commit = verifyMain();
   console.log(`Verified clean origin/main: ${commit}`);
+  verifyMigrations();
   if (!process.argv.includes('--check')) {
     // Build here, even if another command already built: dist may belong to a different checkout.
     // Commit identity is not part of Turbo's cache key; never restore another commit's dist.
