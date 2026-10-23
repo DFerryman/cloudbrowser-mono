@@ -128,6 +128,8 @@ export class FakeVm {
   readonly held: Req[] = [];
   readonly opened: string[] = [];
   readonly closed: string[] = [];
+  /** Requests a result was sent for; a held act without one is running. */
+  readonly answered = new Set<string>();
   readonly hold = new Set<string>();
   sessionId: string | null = null;
   protocol = 2;
@@ -157,12 +159,17 @@ export class FakeVm {
     };
   }
 
+  get running() {
+    return this.held.find((r) => r.t === 'act' && !this.answered.has(r.id));
+  }
+
   /** The last request of a type, once it arrived. */
   last<T extends Req['t']>(t: T): Extract<Req, { t: T }> | undefined {
     return this.requests.filter((r) => r.t === t).at(-1) as Extract<Req, { t: T }> | undefined;
   }
 
   reply(data: unknown, sessionId = this.sessionId) {
+    if ((data as { t: string }).t === 'result') this.answered.add((data as { id: string }).id);
     return this.fx.frame(this.socket, { t: 'automation_result', sessionId, data });
   }
 
@@ -201,6 +208,7 @@ export class FakeVm {
       case 'status':
         return this.reply(this.result(req.id, 'status', {
           capabilities: { protocol: this.protocol, agentVersion: '0.5.0', screenshot: true, files: true, picker: true, paste: true, drop: true, touch: false },
+          ...(this.running ? { activeActionId: this.running.id } : {}),
         }), sessionId);
       case 'cancel': return this.reply(this.result(req.id, 'cancel'), sessionId);
       case 'file_begin': {
