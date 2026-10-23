@@ -5,6 +5,11 @@
  * boots (every wake) only run the systemd units. A pre-built golden image (images/vm, Packer)
  * replaces the install part later; the units are the same.
  *
+ * A VM can stop before the script finishes: a create put to sleep during its first boot, which
+ * resumes by starting the same VM. cloud-init would not run the script again, and the VM would
+ * never get its agent. So the script also runs at every boot until it has finished, which a
+ * marker written at its end records; every step can run again.
+ *
  * The only secret is the single-use bootstrap token, which the agent swaps for its credential on
  * first connect.
  */
@@ -22,6 +27,11 @@ export interface BootstrapInput {
 
 const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
+/** Written when the first-boot script has finished; until then it runs at every boot. */
+const PROVISIONED_MARKER = '/var/lib/cloudbrowser/provisioned';
+/** cloud-init runs the scripts in this directory at every boot. */
+const PER_BOOT_HOOK = '/var/lib/cloud/scripts/per-boot/cloudbrowser-provision';
+
 export function bootstrapScript(input: BootstrapInput): string {
   const agentJson = JSON.stringify({ instanceId: input.instanceId, gatewayUrl: input.gatewayUrl, bootstrapToken: input.bootstrapToken });
   const echo = `${input.appUrl.replace(/\/$/, '')}/api/echo/ip`;
@@ -30,6 +40,11 @@ export function bootstrapScript(input: BootstrapInput): string {
   return `#!/bin/bash
 # Nevazu first boot. Also on the serial console (EC2: Actions → Monitor → Get system log).
 set -euo pipefail
+# Until it has finished, this script runs at every boot (cloud-init runs user data only once).
+provisioned=${PROVISIONED_MARKER}
+[ -e "$provisioned" ] && exit 0
+per_boot=${PER_BOOT_HOOK}
+[ "$(readlink -f "$0")" = "$per_boot" ] || install -D -m 0700 "$0" "$per_boot"
 exec > >(tee -a /var/log/cloudbrowser-bootstrap.log | sed 's/^/cloudbrowser: /' >/dev/console) 2>&1
 echo "bootstrap start $(date -Is)"
 
@@ -46,11 +61,13 @@ umask 022
 
 # The VM has 4 GB (Basic) or 8 GB (Premium), enough for the browser; a small swap file absorbs
 # the odd spike so the kernel does not have to kill Chrome. Swappiness 10: only used under memory pressure.
-if [ ! -f /swapfile ]; then fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && echo '/swapfile none swap sw 0 0' >>/etc/fstab; fi
+if ! grep -q '^/swapfile ' /etc/fstab; then rm -f /swapfile && fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && echo '/swapfile none swap sw 0 0' >>/etc/fstab; fi
 swapon /swapfile 2>/dev/null || true
 echo 'vm.swappiness=10' >/etc/sysctl.d/90-cloudbrowser.conf && sysctl -q -p /etc/sysctl.d/90-cloudbrowser.conf
 
 export DEBIAN_FRONTEND=noninteractive
+# A package installation the VM's stop interrupted is finished first.
+dpkg --configure -a || true
 for i in 1 2 3 4 5; do apt-get update -q && apt-get install -y -q --no-install-recommends docker.io nftables && break; sleep 15; done
 # The browser shares the host network (WebRTC advertises the static IP); Docker must not touch
 # the firewall or create a bridge.
@@ -65,10 +82,11 @@ for i in 1 2 3 4 5 6; do docker pull "$AGENT_IMAGE" && docker pull "$BROWSER_IMA
 
 # Agent binary and VM files ship in the agent image.
 cid=$(docker create "$AGENT_IMAGE")
-docker cp "$cid:/cloudbrowser-agent" /usr/local/bin/cloudbrowser-agent
+# Renamed into place: a run after an interrupted one may find the agent running.
+docker cp "$cid:/cloudbrowser-agent" /usr/local/bin/cloudbrowser-agent.new
 rm -rf /tmp/cbvm && docker cp "$cid:/vm" /tmp/cbvm
 docker rm "$cid" >/dev/null
-chmod 0755 /usr/local/bin/cloudbrowser-agent
+chmod 0755 /usr/local/bin/cloudbrowser-agent.new && mv -f /usr/local/bin/cloudbrowser-agent.new /usr/local/bin/cloudbrowser-agent
 install -d /usr/local/lib/cloudbrowser /etc/cloudbrowser/nft
 install -m 0755 /tmp/cbvm/bin/* /usr/local/lib/cloudbrowser/
 install -m 0644 /tmp/cbvm/systemd/*.service /etc/systemd/system/
@@ -114,6 +132,8 @@ systemctl daemon-reload
 systemctl enable nftables cloudbrowser-data cloudbrowser-browser cloudbrowser-agent
 systemctl restart nftables
 systemctl start cloudbrowser-data cloudbrowser-browser cloudbrowser-agent
+touch "$provisioned"
+rm -f "$per_boot"
 echo "bootstrap done $(date -Is)"
 `;
 }

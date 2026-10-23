@@ -15,6 +15,7 @@
 import {
   BYTES_PER_GB,
   BrowserTier,
+  billedVmHour,
   splitUsagePeriod,
   tierSheet,
   costRates,
@@ -37,6 +38,11 @@ const MAX_METER_STEP_MS = 5 * 60_000;
 const MAX_TRANSITION_MS = 20 * 60_000;
 /** States in which a browser holds its IP and volume and is charged for them. */
 const NOT_BILLED = ['creating', 'failed', 'purged'];
+/**
+ * A create waiting for capacity or for its provider has not run yet (a browser's first run sets
+ * last_active_at): like one still creating, it is not charged.
+ */
+const CREATE_WAITING = sql`${browserInstances.status} IN ('waiting_capacity', 'provider_issue') AND ${browserInstances.lastActiveAt} IS NULL`;
 
 export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: number } = {}) {
   const { db } = deps;
@@ -48,7 +54,7 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
   const sheets = await priceSheets(db);
   const rows = await db.select({ inst: browserInstances, health: instanceHealth }).from(browserInstances)
     .leftJoin(instanceHealth, eq(instanceHealth.instanceId, browserInstances.id))
-    .where(notInArray(browserInstances.status, NOT_BILLED));
+    .where(and(notInArray(browserInstances.status, NOT_BILLED), sql`NOT (${CREATE_WAITING})`));
   const actual = new Map((await db.select().from(placements).where(eq(placements.status, 'current'))).map((p) => [p.instanceId, p]));
   const holds = new Map((await db.select().from(browserReservations)).map((h) => [h.instanceId, h]));
   const ids = rows.map((r) => r.inst.id);
@@ -88,14 +94,17 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
       continue;
     }
     // The machine's own price; a placement that has not recorded its type yet uses its tier's.
-    const cost = costRates(tierSheet(priced.sheet, BrowserTier.catch('basic').parse(inst.tier)) ?? priced.sheet, settings.relayGbMicros);
+    const tierPrices = tierSheet(priced.sheet, BrowserTier.catch('basic').parse(inst.tier));
+    const cost = costRates(tierPrices ?? priced.sheet, settings.relayGbMicros);
+    // A capacity fallback that costs a little more than the tier's machine is charged at the tier's price.
+    const tierCompute = tierPrices ? cost.compute : undefined;
     if (placement?.instanceType) cost.compute = Math.round(priced.sheet.instanceTypes[placement.instanceType]! * 1_000_000);
     const removed = inst.status === 'deleting';
     const hold = holds.get(inst.id);
     const retaining = !!hold?.retentionStartedAt;
     const free: Rates = { compute: 0, ip: 0, storage: 0, snapshot: 0, transfer: 0 };
     const quoted = removed ? free : retaining ? { ...hold.rates, compute: 0, transfer: 0, snapshot: 0 } : { ...customerRates(priced.sheet, settings), snapshot: 0 };
-    if (!removed && !retaining) quoted.compute = Math.round(cost.compute * settings.markupPercent / 100);
+    if (!removed && !retaining) quoted.compute = Math.round(billedVmHour(cost.compute, tierCompute) * settings.markupPercent / 100);
     const rootGb = placement?.rootVolumeGb ?? priced.sheet.rootVolumeGb;
     const ledger = retained.filter((r) => r.instanceId === inst.id);
     const live = ledger.filter((r) => r.state !== 'deleted' && r.providerId !== null);

@@ -32,14 +32,14 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 export default {
-  /** Service binding from the api: synchronous IP checks, and a price refresh from the operator console. */
+  /** Service binding from the api: the user's IP checks, and a price refresh from the operator console. */
   async fetch(req, env, ctx) {
     const deps = makeDeps(env, (p) => ctx.waitUntil(p));
     const url = new URL(req.url);
     if (deps.mode !== 'worker') return json({ error: 'not found' }, 404);
     const ipCheck = url.pathname.match(/^\/instances\/([^/]+)\/ip-check$/);
     if (req.method === 'POST' && ipCheck) {
-      const result = await checkInstanceIp(deps, ipCheck[1]!);
+      const result = await checkInstanceIp(deps, ipCheck[1]!, { requestedByUser: true });
       return result ? json(result) : json({ error: 'not running' }, 409);
     }
     if (req.method === 'POST' && url.pathname === '/prices/refresh') return json(await refreshPrices(deps, { force: true }));

@@ -7,7 +7,7 @@
  * repeated call (or a call whose response was lost) finds the resource by lookup instead of
  * creating a second one. AllocateAddress and CreateSnapshot have no ClientToken: lookup only.
  */
-import type { BrowserTier } from '@cloudbrowser/contracts';
+import { FALLBACK_PRICE_TOLERANCE, type BrowserTier } from '@cloudbrowser/contracts';
 import {
   ExecutorError,
   LaunchFailed,
@@ -83,7 +83,8 @@ export interface AwsExecutorOptions extends ClientOptions {
  * Basic, 2 vCPU / 4 GB: Chrome plus neko's VP8 encoding at 1080p25 (about 2.5 GB in use with a
  * handful of tabs; while the screen moves the encoder takes most of a vCPU and the VM is about
  * 85% busy). `c7i-flex` has the same CPU as the `m7i-flex` the first real browsers ran on, with
- * half the memory; the fallbacks are 2 vCPU / 4 GB at the same price.
+ * half the memory; the fallbacks are 2 vCPU / 4 GB at about the same price (a fraction of a
+ * percent more in most regions).
  *
  * Premium, 4 vCPU / 8 GB: the same live view, with twice the CPU and memory for heavier pages and
  * more tabs. Full-performance `c7i` rather than `c7i-flex`, whose 40% baseline is not sized for a
@@ -518,7 +519,11 @@ export class AwsExecutor implements Executor {
             throw new ExecutorError('invalid', `A current provider price is required for launch candidate ${type}.`);
           }
         }
-        types = types.filter(({ type }) => spec.instanceTypePrices![type]! <= cap);
+        // A fallback for a capacity shortage may cost up to 5% more: Basic's are priced a fraction
+        // of a percent above its first machine in most regions and were otherwise never tried.
+        // The user still pays the tier's price for it (contracts billedVmHour). The first machine
+        // itself must fit: costing more means prices rose after the user confirmed them.
+        types = types.filter(({ type, index }) => spec.instanceTypePrices![type]! <= (index === 0 ? cap : cap * (1 + FALLBACK_PRICE_TOLERANCE)));
         if (!types.length) throw new NoLaunchCandidate('price', 'No launch candidate fits the confirmed VM hourly price.');
       }
       // A type this zone does not offer fails with Unsupported; skip it instead of asking.

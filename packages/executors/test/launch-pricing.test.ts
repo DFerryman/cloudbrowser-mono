@@ -30,16 +30,31 @@ async function parts(ex: Executor): Promise<VmSpec> {
 }
 
 describe('new launches respect the confirmed compute price', () => {
-  it('never tries more expensive fallback machines after the quoted type has no capacity', async () => {
+  it('tries fallback machines up to 5% above the quoted price after the quoted type has no capacity, never more', async () => {
     const { ex, ec2 } = setup();
     const spec = await parts(ex);
     ec2.fail = (action) => action === 'RunInstances' ? { code: 'InsufficientInstanceCapacity', status: 500 } : null;
+    // Basic's fallbacks cost a fraction of a percent more than its first machine.
     await expect(ex.ensureVm(ctx('vm'), REGION, spec)).rejects.toMatchObject({ errorClass: 'capacity' });
+    expect(ec2.calls.filter((c) => c.action === 'RunInstances').map((c) => c.params.InstanceType)).toEqual(['c7i-flex.large', 'c6i.large', 'c5.large']);
+    ec2.calls.length = 0;
+    spec.instanceTypePrices!['c6i.large'] = 0.11072 * 1.05 + 0.0001;
+    spec.instanceTypePrices!['c5.large'] = 0.2;
+    await expect(ex.ensureVm(ctx('vm2'), REGION, spec)).rejects.toMatchObject({ errorClass: 'capacity' });
     expect(ec2.calls.filter((c) => c.action === 'RunInstances').map((c) => c.params.InstanceType)).toEqual(['c7i-flex.large']);
     expect(ec2.instances.size).toBe(0);
   });
 
-  it.each([0.11072, 0.1])('allows a fallback costing %s USD/hour within the confirmed cap', async (fallbackPrice) => {
+  it('launches nothing when the quoted machine itself costs more than confirmed: prices rose since', async () => {
+    const { ex, ec2 } = setup();
+    const spec = await parts(ex);
+    spec.maxVmHour = 0.11;
+    spec.instanceTypePrices = { 'c7i-flex.large': 0.11072, 'c6i.large': 0.2, 'c5.large': 0.2 };
+    await expect(ex.ensureVm(ctx('vm'), REGION, spec)).rejects.toMatchObject({ errorClass: 'capacity', reason: 'price' });
+    expect(ec2.calls.some((c) => c.action === 'RunInstances')).toBe(false);
+  });
+
+  it.each([0.11072, 0.1, 0.111])('allows a fallback costing %s USD/hour within the confirmed cap', async (fallbackPrice) => {
     const { ex, ec2 } = setup();
     const spec = await parts(ex);
     spec.instanceTypePrices!['c6i.large'] = fallbackPrice;

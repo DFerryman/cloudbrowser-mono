@@ -1,4 +1,4 @@
-import { browserEstimate, BrowserTier, customerRates, retentionReserve, tierSheet, BYTES_PER_GB, DEFAULT_PRICING_SETTINGS, ProviderPriceSheet, type PriceFactors, type Rates } from '@cloudbrowser/contracts';
+import { billedVmHour, browserEstimate, BrowserTier, customerRates, retentionReserve, tierSheet, BYTES_PER_GB, DEFAULT_PRICING_SETTINGS, ProviderPriceSheet, type PriceFactors, type Rates } from '@cloudbrowser/contracts';
 import { and, eq, notInArray, sql, type SQL } from 'drizzle-orm';
 import type { Db } from './index.js';
 import { priceSheets, pricingSettings } from './pricing.js';
@@ -121,8 +121,10 @@ function spendProjection({ all, holds, prices, settings, placementRows }: SpendI
     const sheet = sheets.get(inst.regionId);
     if (!sheet) return null;
     const machine = machines.get(inst.id);
-    // The machine's own price; before its VM exists, its tier's.
-    const vmPrice = machine?.instanceType ? sheet.instanceTypes[machine.instanceType] : tierSheet(sheet, BrowserTier.catch('basic').parse(inst.tier))?.vmHour;
+    // The machine's own price (as billed: billedVmHour); before its VM exists, its tier's.
+    const tierPrice = tierSheet(sheet, BrowserTier.catch('basic').parse(inst.tier))?.vmHour;
+    const ownPrice = machine?.instanceType ? sheet.instanceTypes[machine.instanceType] : tierPrice;
+    const vmPrice = ownPrice === undefined ? undefined : billedVmHour(ownPrice, tierPrice);
     if (vmPrice === undefined) return null;
     // The same rounding as metering: the cost to a micro-dollar first, then the markup.
     const rates = customerRates({ ...sheet, vmHour: vmPrice }, settings);

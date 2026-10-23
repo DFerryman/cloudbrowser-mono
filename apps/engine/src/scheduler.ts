@@ -3,7 +3,7 @@ import { settleRunningStatements, eventRow, operationRow, raiseAlert, reservedTo
 import type { ExecutorKind } from '@cloudbrowser/executors';
 import { and, asc, eq, inArray, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
 import { placementRef, readContext, type EngineDeps } from './context.js';
-import { runOperation } from './runner.js';
+import { attentionSince, attentionStarted, idleTimeoutS, NEEDS_ATTENTION_IDLE_S, runOperation, sleepsWhenIdle } from './runner.js';
 
 const { operations, browserInstances, instanceHealth, viewerSessions, placements, events, auditLog, billingAccounts, browserReservations, userNotices } = schema;
 
@@ -44,9 +44,8 @@ export async function requestStop(deps: EngineDeps, inst: { id: string; userId: 
   // top-up. Aborting the batch also prevents a stray unfinished operation.
   const reasonStillApplies = reason === 'intent_reconcile' ? sql`${browserInstances.desiredState} = 'stopped'`
     : reason === 'idle' ? sql`EXISTS (SELECT 1 FROM browser_instances b LEFT JOIN instance_health h ON h.instance_id = b.id
-      WHERE b.id = ${inst.id} AND b.status = 'running' AND b.desired_state = 'running'
-      AND b.idle_timeout_s <> ${NEVER_SLEEP_TIMEOUT_S}
-      AND max(coalesce(b.last_active_at, 0), coalesce(h.last_input_at, 0)) + b.idle_timeout_s * 1000 <= ${now.getTime()})`
+      WHERE b.id = ${inst.id} AND b.desired_state = 'running' AND ${sleepsWhenIdle}
+      AND max(coalesce(b.last_active_at, 0), coalesce(h.last_input_at, 0), ${attentionSince}) + ${idleTimeoutS} * 1000 <= ${now.getTime()})`
     : reason === 'frozen' ? sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${inst.userId} AND ${billingAccounts.frozenAt} IS NOT NULL)`
     : reason === 'balance' ? sql`(
       NOT EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${inst.userId} AND ${billingAccounts.balanceMicros} - ${reservedTotalSql(inst.userId)} > 0)
@@ -86,7 +85,9 @@ export async function requestStop(deps: EngineDeps, inst: { id: string; userId: 
 
 /**
  * Puts running browsers to sleep after `idle_timeout` without input (page 2, flow C). Viewer
- * heartbeats carry whether there was input since the last one.
+ * heartbeats carry whether there was input since the last one. Browsers that need attention
+ * sleep too, counting from when they began to, Never sleep ones after an hour; one with an
+ * operation under way is left to it.
  */
 export async function idleStops(deps: EngineDeps): Promise<string[]> {
   const { db } = deps;
@@ -95,13 +96,18 @@ export async function idleStops(deps: EngineDeps): Promise<string[]> {
     .select({
       id: browserInstances.id,
       userId: browserInstances.userId,
+      status: browserInstances.status,
       idleTimeoutS: browserInstances.idleTimeoutS,
       lastActiveAt: browserInstances.lastActiveAt,
       lastInputAt: instanceHealth.lastInputAt,
+      attentionSince: sql<number>`CASE WHEN ${browserInstances.status} = 'needs_attention' THEN ${attentionStarted(browserInstances.id)} ELSE 0 END`,
     })
     .from(browserInstances)
     .leftJoin(instanceHealth, eq(instanceHealth.instanceId, browserInstances.id))
-    .where(and(eq(browserInstances.status, 'running'), ne(browserInstances.idleTimeoutS, NEVER_SLEEP_TIMEOUT_S)));
+    .where(or(
+      and(eq(browserInstances.status, 'running'), ne(browserInstances.idleTimeoutS, NEVER_SLEEP_TIMEOUT_S)),
+      eq(browserInstances.status, 'needs_attention'),
+    ));
 
   const busy = new Set(
     (
@@ -115,8 +121,9 @@ export async function idleStops(deps: EngineDeps): Promise<string[]> {
   const stopped: string[] = [];
   for (const inst of running) {
     if (busy.has(inst.id)) continue;
-    const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, inst.lastInputAt?.getTime() ?? 0);
-    if (now.getTime() - last < inst.idleTimeoutS * 1000) continue;
+    const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, inst.lastInputAt?.getTime() ?? 0, Number(inst.attentionSince));
+    const timeoutS = inst.status === 'needs_attention' && inst.idleTimeoutS === NEVER_SLEEP_TIMEOUT_S ? NEEDS_ATTENTION_IDLE_S : inst.idleTimeoutS;
+    if (now.getTime() - last < timeoutS * 1000) continue;
     if (await requestStop(deps, inst, 'idle')) stopped.push(inst.id);
   }
   // End viewer sessions that stopped sending heartbeats.
@@ -165,12 +172,15 @@ function ipAlert(deps: EngineDeps, instanceId: string, detail: Record<string, un
   );
 }
 
+/** The reason a browser paused by an IP check shows; only this pause ends with a passing check. */
+const NETWORK_PAUSED = 'Network paused while we check your dedicated IP.';
+
 function pauseNetwork(deps: EngineDeps, instanceId: string, detail: Record<string, unknown>, at: Date) {
   const { db } = deps;
   return [
     db
       .update(browserInstances)
-      .set({ status: 'needs_attention', statusReason: 'Network paused while we check your dedicated IP.', updatedAt: at })
+      .set({ status: 'needs_attention', statusReason: NETWORK_PAUSED, updatedAt: at })
       .where(and(eq(browserInstances.id, instanceId), eq(browserInstances.desiredState, 'running'), eq(browserInstances.status, 'running'))),
     db.insert(auditLog).values({ actor: 'engine', action: 'ip.check_failed', target: `instance:${instanceId}`, detail, createdAt: at }),
     // Only when this batch paused it: the user is emailed, and it stays paused until they check again.
@@ -181,9 +191,10 @@ function pauseNetwork(deps: EngineDeps, instanceId: string, detail: Record<strin
 
 /**
  * On-demand IP check for one running instance: provider binding plus the address Chrome sees
- * (page 3). Waits up to 15 s for the agent's answer.
+ * (page 3). Waits up to 15 s for the agent's answer. Only a check the user asked for (Check
+ * again) can end a pause; a passing check never resumes the network by itself.
  */
-export async function checkInstanceIp(deps: EngineDeps, instanceId: string): Promise<IpCheckRecord | null> {
+export async function checkInstanceIp(deps: EngineDeps, instanceId: string, opts: { requestedByUser?: boolean } = {}): Promise<IpCheckRecord | null> {
   const { db } = deps;
   const [p] = await db
     .select()
@@ -213,7 +224,46 @@ export async function checkInstanceIp(deps: EngineDeps, instanceId: string): Pro
       : undefined;
   const check: IpCheckRecord = { ok, expected: p.ipAddress, observed, checkedAt: deps.now().toISOString(), ...(detail ? { detail } : {}) };
   await recordIpCheck(deps, inst, check);
+  if (ok && opts.requestedByUser && inst.status === 'needs_attention' && inst.statusReason === NETWORK_PAUSED) await resumeNetwork(deps, inst, kind);
   return check;
+}
+
+/**
+ * A passing check (the user's Check again) ends the pause an IP check caused: the agent opens
+ * the VM firewall again, which it closes itself when one of its own checks fails, and the
+ * browser shows Running. Without the agent's confirmation the browser stays paused, and Restart
+ * reboots the VM, which resets the firewall too. Never while an operation is under way.
+ */
+async function resumeNetwork(deps: EngineDeps, inst: { id: string; userId: string }, kind: ExecutorKind) {
+  const { db } = deps;
+  const agent = deps.agent(kind);
+  // The `ipcheck:` prefix keeps this command independent of any operation, like the check itself.
+  const commandId = `ipcheck:${inst.id}:${deps.now().getTime()}:firewall`;
+  await agent.send({ id: commandId, instanceId: inst.id, kind: 'set_firewall', payload: { mode: 'normal' } });
+  const started = Date.now();
+  let reply = await agent.reply(commandId);
+  while (reply.status === 'pending' && Date.now() - started < ON_DEMAND_TIMEOUT_MS) {
+    await deps.sleep(500);
+    reply = await agent.reply(commandId);
+  }
+  if (reply.status !== 'succeeded') return;
+  const at = deps.now();
+  const paused = sql`EXISTS (SELECT 1 FROM browser_instances WHERE id = ${inst.id} AND status = 'needs_attention'
+    AND status_reason = ${NETWORK_PAUSED} AND desired_state = 'running')
+    AND NOT EXISTS (SELECT 1 FROM operations WHERE instance_id = ${inst.id} AND finished_at IS NULL)`;
+  const [, resumed] = await db.batch([
+    // Running time is metered from now, as after a wake.
+    db.insert(instanceHealth).values({ instanceId: inst.id, meteredAt: sql`CASE WHEN ${paused} THEN ${at.getTime()} ELSE NULL END` })
+      .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { meteredAt: at }, setWhere: paused }),
+    db.update(browserInstances).set({ status: 'running', statusReason: null, lastActiveAt: at, updatedAt: at })
+      .where(and(eq(browserInstances.id, inst.id), paused)).returning({ id: browserInstances.id }),
+  ]);
+  if (!resumed.length) return;
+  await db.batch([
+    db.insert(auditLog).values({ actor: 'engine', action: 'ip.network_resumed', target: `instance:${inst.id}`, detail: { commandId }, createdAt: at }),
+    db.insert(events).values(eventRow(inst.userId, 'instance.updated', { instanceId: inst.id }, at)),
+  ]);
+  deps.notify(inst.userId);
 }
 
 /**

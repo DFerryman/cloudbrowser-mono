@@ -1,7 +1,7 @@
 import { NEVER_SLEEP_TIMEOUT_S, OPERATION_STEPS, type OperationKind } from '@cloudbrowser/contracts';
 import { eventRow, operationRow, raiseAlert, schema } from '@cloudbrowser/db';
 import { ExecutorError, isRegionDenial, ProviderFailed, type ErrorClass, type ResourceKind } from '@cloudbrowser/executors';
-import { and, eq, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, lte, or, sql, type SQLWrapper } from 'drizzle-orm';
 import {
   RestartFrom,
   OperationSuperseded,
@@ -12,7 +12,7 @@ import {
   type StepOutcome,
   type StepWait,
 } from './context.js';
-import { HANDLERS } from './steps.js';
+import { abandonRecover, discoverInstanceResources, HANDLERS, saveParams } from './steps.js';
 import { operationFence } from './fencing.js';
 import { assertOperationFunded } from './prepaid.js';
 
@@ -22,10 +22,35 @@ const { operations, operationSteps, browserInstances, regions, placements, event
 const NOTIFIED_STOP_REASONS = new Set(['operator', 'suspended', 'frozen']);
 const IDLE_STOP_CANCELED = 'The browser is no longer idle under its current sleep setting.';
 
+/**
+ * A browser that needs attention cannot be used, so it sleeps after its idle timeout like a
+ * running one, and even with Never sleep after this long: its VM would otherwise keep running,
+ * unused, until someone noticed.
+ */
+export const NEEDS_ATTENTION_IDLE_S = 3600;
+
+/**
+ * SQL over `browser_instances b`: the browser sleeps when idle, the idle timeout in seconds that
+ * applies to it now, and when it began to need attention (0 otherwise). Its idle time counts from
+ * then at the earliest, so the user has the whole timeout to see why and act on it.
+ */
+export const sleepsWhenIdle = sql`(b.status = 'needs_attention' OR (b.status = 'running' AND b.idle_timeout_s <> ${NEVER_SLEEP_TIMEOUT_S}))`;
+export const idleTimeoutS = sql`(CASE WHEN b.status = 'needs_attention' AND b.idle_timeout_s = ${NEVER_SLEEP_TIMEOUT_S} THEN ${NEEDS_ATTENTION_IDLE_S} ELSE b.idle_timeout_s END)`;
+export const attentionSince = sql`(CASE WHEN b.status = 'needs_attention' THEN ${attentionStarted(sql`b.id`)} ELSE 0 END)`;
+
+/** When a browser last failed in a way that leaves it needing attention: an operation, or an IP check. */
+export function attentionStarted(instanceId: SQLWrapper) {
+  return sql<number>`coalesce((SELECT max(a.created_at) FROM audit_log a WHERE a.target = 'instance:' || ${instanceId}
+    AND (a.action = 'ip.check_failed' OR a.action LIKE 'operation.%.failed')), 0)`;
+}
+
 // Provider calls can last two minutes. A shorter lease lets a second worker overlap them.
 const LEASE_MS = 3 * 60_000;
+/** Provider errors in a row before an operation fails; waits for capacity or an outage do not count. */
 const MAX_RETRYABLE_ATTEMPTS = 8;
 const CAPACITY_RETRY_MS = 60_000;
+/** Parameters the engine writes while it runs one operation (see steps.ts); never a request's. */
+const RUN_STATE = ['retries', 'ipCheckTry', 'bootStartedAt', 'restartStoppedAt', 'resumedVm', 'previousAgent'];
 
 /** Status shown while an operation of each kind runs (page 2, "Instance lifecycle"). */
 const TRANSITIONAL_STATUS: Partial<Record<OperationKind, string>> = {
@@ -106,6 +131,11 @@ async function runOwnedOperation(deps: EngineDeps, operationId: string): Promise
   if (now > op.deadlineAt) {
     // A start that ran out of time waiting for capacity moves the browser to another zone instead of failing.
     if (op.kind === 'start' && env.instance.status === 'waiting_capacity') return handOverToRecover(deps, op, env);
+    // The reason tells the user we have been alerted (a failed purge alerts on its own).
+    if (op.kind !== 'create' && op.kind !== 'purge') await raiseAlert(deps.db, {
+      source: deps.mode, severity: 'critical', title: `${op.kind} ran out of time (${env.region.id})`,
+      detail: { operationId: op.id, instanceId: op.instanceId, step: op.step }, dedupeKey: `op:deadline:${op.kind}:${env.region.id}`,
+    }, now);
     return fail(deps, op, env, 'deadline', deadlineReason(op.kind as OperationKind));
   }
 
@@ -115,10 +145,19 @@ async function runOwnedOperation(deps: EngineDeps, operationId: string): Promise
   if (!handlers || steps.length === 0) return fail(deps, op, null, 'invalid', 'This action is no longer available.');
 
   await env.assertActive();
+  // An operator's retry copies the failed operation's parameters, with what the engine kept while
+  // running it: the retry starts with its own error count, boot clock and restart state.
+  if (op.step === null && op.attempt === 0 && RUN_STATE.some((k) => op.params?.[k] !== undefined)) {
+    op.params = Object.fromEntries(Object.entries(op.params ?? {}).filter(([k]) => !RUN_STATE.includes(k)));
+    await db.update(operations).set({ params: op.params }).where(and(eq(operations.id, op.id), operationFence(env)));
+  }
   const transitional = TRANSITIONAL_STATUS[op.kind as OperationKind];
-  if (op.kind === 'stop' && op.params?.reason === 'idle' && op.attempt === 0 && env.instance.status === 'running') {
+  if (op.kind === 'stop' && op.params?.reason === 'idle' && op.attempt === 0 && ['running', 'needs_attention'].includes(env.instance.status)) {
     if (!(await beginIdleStop(deps, env))) return { state: 'canceled' };
   } else if (transitional && env.instance.status !== transitional && op.attempt === 0) {
+    // A start from Needs attention is a restart, also when an operator retries one: its VM may
+    // still run, with an agent that will not report ready again (see ensure_running).
+    if (op.kind === 'start' && env.instance.status === 'needs_attention' && op.params?.restart !== true) await saveParams(env, { restart: true });
     await setInstanceStatus(deps, env, transitional, null);
   }
 
@@ -152,24 +191,29 @@ async function runOwnedOperation(deps: EngineDeps, operationId: string): Promise
       continue;
     }
 
-    const token = env.ctx(step).token;
-    const at = deps.now();
-    try { await db.batch([
-      db
-        .insert(operationSteps)
-        .values({ operationId: op.id, step, status: 'started', requestToken: token, attempts: 1, updatedAt: at })
-        .onConflictDoUpdate({
-          target: [operationSteps.operationId, operationSteps.step],
-          set: { status: 'started', attempts: (entry?.attempts ?? 0) + 1, updatedAt: at },
-        }),
-      db
-        .update(operations)
-        .set({ step, updatedAt: at, leaseExpiresAt: new Date(at.getTime() + LEASE_MS), kind: sql`case when ${operationFence(env)} then ${op.kind} else null end` })
-        .where(eq(operations.id, op.id)),
-      db.insert(events).values(eventRow(env.instance.userId, 'operation.updated', { operationId: op.id, instanceId: op.instanceId }, at)),
-    ]); } catch (e) { await env.assertActive(); throw e; }
-    deps.notify(env.instance.userId);
-    op.step = step;
+    // A step that asked to be called again (waiting for the agent, a reply, a volume) is already
+    // journaled as started: polling it again changes nothing the user or the journal shows, so it
+    // writes nothing (assertActive above keeps the lease).
+    if (entry?.status !== 'started' || op.step !== step) {
+      const token = env.ctx(step).token;
+      const at = deps.now();
+      try { await db.batch([
+        db
+          .insert(operationSteps)
+          .values({ operationId: op.id, step, status: 'started', requestToken: token, attempts: 1, updatedAt: at })
+          .onConflictDoUpdate({
+            target: [operationSteps.operationId, operationSteps.step],
+            set: { status: 'started', attempts: (entry?.attempts ?? 0) + 1, updatedAt: at },
+          }),
+        db
+          .update(operations)
+          .set({ step, updatedAt: at, leaseExpiresAt: new Date(at.getTime() + LEASE_MS), kind: sql`case when ${operationFence(env)} then ${op.kind} else null end` })
+          .where(eq(operations.id, op.id)),
+        db.insert(events).values(eventRow(env.instance.userId, 'operation.updated', { operationId: op.id, instanceId: op.instanceId }, at)),
+      ]); } catch (e) { await env.assertActive(); throw e; }
+      deps.notify(env.instance.userId);
+      op.step = step;
+    }
 
     let outcome: StepOutcome;
     try {
@@ -207,6 +251,12 @@ async function runOwnedOperation(deps: EngineDeps, operationId: string): Promise
       .update(operationSteps)
       .set({ status: 'succeeded', result: stepResult, updatedAt: deps.now() })
       .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.step, step), operationFence(env)));
+    // The step got through: provider errors count from zero again, and after a wait for capacity
+    // or a provider the browser shows what the operation is doing (the last step sets the final status).
+    if (Number(op.params?.retries ?? 0) > 0) await saveParams(env, { retries: 0 });
+    if (transitional && i < steps.length - 1 && ['waiting_capacity', 'provider_issue'].includes(env.instance.status)) {
+      await setInstanceStatus(deps, env, transitional, null);
+    }
   }
 
   await env.assertActive();
@@ -326,9 +376,9 @@ async function beginIdleStop(deps: EngineDeps, env: StepEnv): Promise<boolean> {
   // activity normally. Old queued jobs lack this proof, so cancel them and let a fresh cron decide.
   const lastActive = sql`CASE WHEN b.last_active_at = ${op.createdAt.getTime()} THEN ${captured ? baseline ?? 0 : 0} ELSE coalesce(b.last_active_at, 0) END`;
   const stillIdle = sql`EXISTS (SELECT 1 FROM browser_instances b LEFT JOIN instance_health h ON h.instance_id = b.id
-    WHERE b.id = ${instance.id} AND b.status = 'running' AND b.desired_state = 'stopped' AND b.idle_timeout_s <> ${NEVER_SLEEP_TIMEOUT_S}
+    WHERE b.id = ${instance.id} AND b.desired_state = 'stopped' AND ${sleepsWhenIdle}
     AND ${captured ? 1 : 0} = 1
-    AND max(${lastActive}, coalesce(h.last_input_at, 0)) + b.idle_timeout_s * 1000 <= ${at.getTime()})`;
+    AND max(${lastActive}, coalesce(h.last_input_at, 0), ${attentionSince}) + ${idleTimeoutS} * 1000 <= ${at.getTime()})`;
   const canceledHere = sql`EXISTS (SELECT 1 FROM operations WHERE id = ${op.id} AND status = 'canceled' AND finished_at = ${at.getTime()} AND error = ${IDLE_STOP_CANCELED})`;
   const [, started] = await db.batch([
     db.update(operations).set({ status: 'canceled', finishedAt: at, updatedAt: at, leaseOwner: null, leaseExpiresAt: null, errorClass: 'superseded', error: IDLE_STOP_CANCELED })
@@ -359,12 +409,13 @@ async function setInstanceStatus(deps: EngineDeps, env: StepEnv, status: string,
   env.instance.status = status;
 }
 
-async function defer(deps: EngineDeps, op: OperationRow, waitMs: number, attempt: number): Promise<RunResult> {
+async function defer(deps: EngineDeps, op: OperationRow, waitMs: number, attempt: number, params?: Record<string, unknown>): Promise<RunResult> {
   const at = deps.now();
   const notBefore = new Date(at.getTime() + waitMs);
+  if (params) op.params = { ...(op.params ?? {}), ...params };
   await deps.db
     .update(operations)
-    .set({ status: 'waiting', notBefore, attempt, leaseOwner: null, leaseExpiresAt: null, updatedAt: at })
+    .set({ status: 'waiting', notBefore, attempt, ...(params ? { params: op.params } : {}), leaseOwner: null, leaseExpiresAt: null, updatedAt: at })
     .where(and(eq(operations.id, op.id), operationFence({ deps, op }))).returning({ id: operations.id });
   const [current] = await deps.db.select({ finishedAt: operations.finishedAt }).from(operations).where(eq(operations.id, op.id));
   if (!current || current.finishedAt) return { state: 'canceled' };
@@ -387,9 +438,16 @@ async function handleError(deps: EngineDeps, op: OperationRow, env: StepEnv, ste
     case 'unknown_outcome': {
       // An unknown outcome is resolved by lookup: the retried step calls an idempotent ensure*
       // method with the same token, which finds the resource instead of creating another.
-      const attempt = op.attempt + 1;
-      if (attempt > MAX_RETRYABLE_ATTEMPTS) return fail(deps, op, env, cls, 'Too many provider errors. We have been alerted.');
-      return defer(deps, op, backoffMs(attempt), attempt);
+      // Only errors in a row count: a step that gets through starts the count again.
+      const retries = Number(op.params?.retries ?? 0) + 1;
+      if (retries > MAX_RETRYABLE_ATTEMPTS) {
+        await raiseAlert(deps.db, {
+          source: deps.mode, severity: 'critical', title: `Repeated provider errors in ${op.kind} (${env.region.id})`,
+          detail: { operationId: op.id, instanceId: op.instanceId, step, message }, dedupeKey: `op:retries:${op.kind}:${env.region.id}`,
+        }, deps.now());
+        return fail(deps, op, env, cls, 'Too many provider errors. We have been alerted.');
+      }
+      return defer(deps, op, backoffMs(retries), op.attempt + 1, { retries });
     }
     case 'capacity': {
       // Honest state, never "Running" (page 10, rule 6). After 30 minutes the start ends and
@@ -507,8 +565,14 @@ async function fail(
     }),
   ] as const;
   if (env) {
+    if (op.kind === 'recover') {
+      // A lost create response would leave its resource out of the cleanup; the listing is best
+      // effort, since the operation must end even while the provider is failing.
+      await discoverInstanceResources(env, op.instanceId).catch((e: unknown) => console.error('recover cleanup could not list provider resources', op.id, e));
+    }
     const extra = [
       ...(op.kind === 'create' ? [db.update(schema.browserReservations).set({ reservedMicros: 0, updatedAt: at }).where(and(eq(schema.browserReservations.instanceId, op.instanceId), operationFence(env)))] : []),
+      ...(op.kind === 'recover' ? await abandonRecover(env, op, at) : []),
       db.insert(events).values(eventRow(env.instance.userId, 'operation.updated', { operationId: op.id, instanceId: op.instanceId }, at)),
       ...(instanceStatus
         ? [

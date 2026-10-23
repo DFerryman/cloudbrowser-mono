@@ -4,6 +4,7 @@
  * was shown; if prices changed meanwhile, the action is refused with `price_changed`.
  */
 import {
+  billedVmHour,
   browserEstimate,
   BrowserTier,
   customerRates,
@@ -50,7 +51,8 @@ export async function instancePrice(db: Db, inst: { id: string; regionId: string
   const p = tierPrice ?? (await regionPrice(db, inst.regionId));
   if (!p) return null;
   const [placement] = await db.select().from(schema.placements).where(and(eq(schema.placements.instanceId, inst.id), eq(schema.placements.status, 'current')));
-  const actual = placement?.instanceType ? p.sheet.instanceTypes[placement.instanceType] : tierPrice?.sheet.vmHour;
+  const machine = placement?.instanceType ? p.sheet.instanceTypes[placement.instanceType] : tierPrice?.sheet.vmHour;
+  const actual = machine === undefined ? undefined : billedVmHour(machine, tierPrice?.sheet.vmHour);
   if (actual === undefined) return null;
   const sheet = { ...p.sheet, vmHour: actual, rootVolumeGb: placement?.rootVolumeGb ?? p.sheet.rootVolumeGb };
   return { ...p, sheet, rates: { ...customerRates(sheet, await pricingSettings(db)), snapshot: 0 } };

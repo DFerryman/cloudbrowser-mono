@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -451,6 +451,37 @@ describe('first-boot script', () => {
     // The browser container receives it as TZ, which Chrome uses for its clock.
     const env = readFileSync(new URL('../../../images/vm/files/bin/cloudbrowser-browser-env', import.meta.url), 'utf8');
     expect(env).toContain('TZ=${BROWSER_TZ:-UTC}');
+  });
+
+  it('runs at every boot until it has finished, so a VM stopped during its first boot still gets its agent', () => {
+    const script = bootstrapScript({ instanceId: 'i', gatewayUrl: 'wss://g', bootstrapToken: 't', appUrl: 'https://a', agentImage: 'a', browserImage: 'b' });
+    // Finished only once everything started; an interrupted package installation is completed first.
+    const done = script.indexOf('touch "$provisioned"');
+    expect(done).toBeGreaterThan(script.lastIndexOf('systemctl start '));
+    expect(script.indexOf('rm -f "$per_boot"')).toBeGreaterThan(done);
+    expect(script.indexOf('dpkg --configure -a')).toBeLessThan(script.indexOf('apt-get install'));
+    expect(script).toContain("if ! grep -q '^/swapfile ' /etc/fstab; then rm -f /swapfile");
+
+    // The guard at the top, run against a scratch directory in place of the VM's paths.
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cloudbrowser-per-boot-')));
+    try {
+      const hook = join(dir, 'per-boot', 'cloudbrowser-provision');
+      const guard = `${script.slice(0, script.indexOf('exec > >(tee'))
+        .replace('/var/lib/cloudbrowser/provisioned', join(dir, 'provisioned'))
+        .replace('/var/lib/cloud/scripts/per-boot/cloudbrowser-provision', hook)}echo provisioning\n`;
+      const userData = join(dir, 'part-001');
+      writeFileSync(userData, guard);
+      // First boot (cloud-init's once-per-VM run): provisions, and installs itself for the next boots.
+      expect(execFileSync('bash', [userData]).toString()).toBe('provisioning\n');
+      expect(readFileSync(hook, 'utf8')).toBe(guard);
+      // The VM stopped before the end: the next boot runs it again, from the hook.
+      expect(execFileSync('bash', [hook]).toString()).toBe('provisioning\n');
+      // Once finished, a boot only starts the units.
+      writeFileSync(join(dir, 'provisioned'), '');
+      expect(execFileSync('bash', [hook]).toString()).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it.each(['legacy', 'current'])('starts supervisor as root with the %s browser unit while Chrome remains unprivileged', (version) => {
