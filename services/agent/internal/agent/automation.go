@@ -114,11 +114,14 @@ type automation struct {
 }
 
 type activeAction struct {
-	id     string
+	id string
+	// From admission, ctx is canceled by cancel (a cancel request, a takeover, a lost tunnel);
+	// once the action may run, it is bounded by maxActDuration as well, which stop releases.
 	ctx    context.Context
 	cancel context.CancelFunc
+	stop   context.CancelFunc
 	neko   AutomationSession // the desktop session the action was admitted on
-	reason string
+	reason string           // what interrupted it, protected by automation.mu
 }
 
 // shotBasis is what a screenshot was taken under, for a request that names only its screenshotId.
@@ -311,11 +314,13 @@ func (a *Agent) keepAutomationDesktop(ctx context.Context, s *automation) {
 
 // openAutomationDesktop opens the session's desktop session once. Only the opening is bounded
 // (automationOpenLimit): the relay derives the session's lifetime from the context it is opened
-// with, so a deadline on that context would end the session the moment it passed. It returns the
-// session and the function that ends it, or nil when it could not be opened.
+// with, so a deadline on that context, or canceling it once the open returned, would end the
+// session at once and every request would find the desktop unavailable. A timer cancels a
+// context that otherwise lives until the session ends. It returns the session and the function
+// that ends it, or nil when it could not be opened.
 func (a *Agent) openAutomationDesktop(ctx context.Context, n AutomationNeko, s *automation) (AutomationSession, func()) {
 	octx, cancel := context.WithCancel(ctx)
-	timer := time.AfterFunc(automationOpenLimit, cancel)
+	timer := time.AfterFunc(a.openLimit, cancel)
 	session, err := n.OpenAutomation(octx, func(msg json.RawMessage) { a.automationEvent(ctx, s, msg) })
 	inTime := timer.Stop()
 	a.mu.Lock()
@@ -544,6 +549,12 @@ func (a *Agent) expireAutomation(s *automation, suspension int) {
 	}
 }
 
+func (s *automation) isSuspended() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.suspended
+}
+
 // push sends one response frame to the bridge through the gateway.
 func (s *automation) push(ctx context.Context, data any) {
 	// Serialize with the agent's writer through the session, so blob chunks and their result keep their order.
@@ -747,7 +758,7 @@ func (a *Agent) serveScreenshot(ctx context.Context, s *automation, req automati
 		s.push(ctx, a.result(s, req.ID, "screenshot", "rejected", refused, nil))
 		return
 	}
-	shot, reason := a.captureScreenshot(ctx, s, req.Quality, box, a.readyWait)
+	shot, reason := a.captureScreenshot(ctx, s, req.Quality, box, a.readyWait, false)
 	if shot == nil {
 		s.push(ctx, a.result(s, req.ID, "screenshot", "rejected", reason, nil))
 		return
@@ -762,19 +773,25 @@ type capturedShot struct {
 
 // captureScreenshot takes the display as it is now and makes sure its size and the screen
 // version agree; a change during capture is retried, then refused, never returned inconsistent.
-// The image is scaled down to the box the request asked for, if the screen is larger.
-func (a *Agent) captureScreenshot(ctx context.Context, s *automation, quality int, box shotBox, wait time.Duration) (*capturedShot, string) {
+// The image is scaled down to the box the request asked for, if the screen is larger. Requests
+// for screenshots alone are refused when they come faster than minScreenshotGap; the screenshot
+// that finishes an action waits out the gap instead, since the action already ran.
+func (a *Agent) captureScreenshot(ctx context.Context, s *automation, quality int, box shotBox, wait time.Duration, finishing bool) (*capturedShot, string) {
 	n := a.waitDesktop(ctx, s, wait)
 	if n == nil {
 		return nil, "desktop_unavailable"
 	}
 	s.mu.Lock()
-	if time.Since(s.lastShot) < minScreenshotGap {
+	gap := minScreenshotGap - time.Since(s.lastShot)
+	if gap > 0 && !finishing {
 		s.mu.Unlock()
 		return nil, "too_fast"
 	}
-	s.lastShot = time.Now()
+	s.lastShot = time.Now().Add(max(gap, 0))
 	s.mu.Unlock()
+	if pace(ctx, gap) != nil {
+		return nil, "desktop_unavailable"
+	}
 	if quality <= 0 {
 		quality = defaultJPEGQuality
 	}
@@ -846,50 +863,62 @@ func (a *Agent) deliverShot(ctx context.Context, s *automation, id, kind, status
 	s.pushLocked(ctx, r)
 }
 
-// beginAction claims input for the bridge and registers the action. It waits for the desktop
-// session first (a request may arrive while it is still being opened), then refuses a request
-// decided on a stale screenshot or with a step off the screen, so a refused request never takes
-// control. On refusal it returns the reason and, for a step, its index.
-func (a *Agent) beginAction(ctx context.Context, s *automation, req automationRequest, steps []step) (*activeAction, string, *int) {
-	if a.waitDesktop(ctx, s, a.readyWait) == nil {
-		return nil, "desktop_unavailable", nil
+// admitAction registers a request that drives input as the session's one action from the moment
+// it arrives, so a second one is refused as busy and a cancel reaches it while it still waits for
+// the desktop. Nil when another action is running.
+func (s *automation) admitAction(ctx context.Context, id string) *activeAction {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active != nil {
+		return nil
+	}
+	actx, cancel := context.WithCancel(ctx)
+	act := &activeAction{id: id, ctx: actx, cancel: cancel}
+	s.active = act
+	return act
+}
+
+// beginAction makes an admitted action ready to run. It waits for the desktop session (a request
+// may arrive while it is still being opened), refuses a request decided on a stale screenshot or
+// with a point off the screen, then claims input for the agent, so a refused request never takes
+// control. It returns why the action may not run and, for a step, its index; the caller ends the
+// action either way (endAction), which also tells whether something interrupted it meanwhile. On
+// success the action runs on act.ctx, bounded by maxActDuration, through act.neko.
+func (a *Agent) beginAction(ctx context.Context, s *automation, act *activeAction, req automationRequest, steps []step) (string, *int) {
+	n := a.waitDesktop(act.ctx, s, a.readyWait)
+	if n == nil {
+		return "desktop_unavailable", nil
 	}
 	if reason := a.checkBasis(s, req); reason != "" {
-		return nil, reason, nil
+		return reason, nil
 	}
 	s.mu.Lock()
-	if s.active != nil {
+	if !s.ready || s.neko != n || act.ctx.Err() != nil {
 		s.mu.Unlock()
-		return nil, "busy", nil
-	}
-	n := s.neko
-	if !s.ready || n == nil {
-		s.mu.Unlock()
-		return nil, "desktop_unavailable", nil
+		return "desktop_unavailable", nil
 	}
 	a.mu.Lock()
 	if i := offScreen(steps, a.screen); i >= 0 {
 		a.mu.Unlock()
 		s.mu.Unlock()
-		return nil, "off_screen", &i
+		return "off_screen", &i
 	}
 	changed, reason := a.claimForBridge()
 	if reason != "" {
 		a.mu.Unlock()
 		s.mu.Unlock()
-		return nil, reason, nil
+		return reason, nil
 	}
 	state := a.controlSnapshot()
 	a.lastInputAt = time.Now()
 	a.mu.Unlock()
-	actx, cancel := context.WithTimeout(ctx, maxActDuration)
-	act := &activeAction{id: req.ID, ctx: actx, cancel: cancel, neko: n}
-	s.active = act
+	act.ctx, act.stop = context.WithTimeout(act.ctx, maxActDuration)
+	act.neko = n
 	s.mu.Unlock()
 	if changed {
 		a.publishControl(ctx, state, "agent_input")
 	}
-	return act, "", nil
+	return "", nil
 }
 
 // endAction unregisters the action and returns what interrupted it, if anything. An action that
@@ -898,11 +927,32 @@ func (a *Agent) endAction(s *automation, act *activeAction) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	act.cancel()
+	if act.stop != nil {
+		act.stop()
+	}
 	if s.active == act {
 		s.active = nil
 	}
 	return act.reason
 }
+
+// refuseAction ends an admitted action that never ran: rejected for `reason` (at `step`), or
+// interrupted at its first step when something stopped it while it waited.
+func (a *Agent) refuseAction(ctx context.Context, s *automation, act *activeAction, req automationRequest, box shotBox, kind, reason string, step *int) {
+	if interruption := a.endAction(s, act); interruption != "" {
+		s.releaseHeld()
+		zero := 0
+		a.finishWithShot(ctx, s, req, box, kind, "interrupted", interruption, &zero)
+		return
+	}
+	r := a.result(s, req.ID, kind, "rejected", reason, nil)
+	r.StoppedAt = step
+	s.push(ctx, r)
+}
+
+// actSlack is kept free of an action's 30 s: timers and writes take a little longer than their
+// nominal time, and an action refused up front is better than one cut off halfway through.
+const actSlack = 500 * time.Millisecond
 
 func (a *Agent) serveAct(ctx context.Context, s *automation, req automationRequest) {
 	box, ok := screenshotBox(req)
@@ -925,17 +975,17 @@ func (a *Agent) serveAct(ctx context.Context, s *automation, req automationReque
 		settle = time.Duration(max(0, min(*req.SettleMs, int(maxWaitStep/time.Millisecond)))) * time.Millisecond
 	}
 	// An action that cannot finish in time is refused up front, never cut off halfway through.
-	if cost+settle > maxActDuration {
+	if cost+settle > maxActDuration-actSlack {
 		s.push(ctx, a.result(s, req.ID, "act", "rejected", "too_long", nil))
 		return
 	}
-	act, reason, step := a.beginAction(ctx, s, req, steps)
-	if reason != "" {
-		if step != nil {
-			a.rejectStep(ctx, s, req, "act", reason, *step)
-		} else {
-			s.push(ctx, a.result(s, req.ID, "act", "rejected", reason, nil))
-		}
+	act := s.admitAction(ctx, req.ID)
+	if act == nil {
+		s.push(ctx, a.result(s, req.ID, "act", "rejected", "busy", nil))
+		return
+	}
+	if reason, step := a.beginAction(ctx, s, act, req, steps); reason != "" {
+		a.refuseAction(ctx, s, act, req, box, "act", reason, step)
 		return
 	}
 	stoppedAt, stepErr := a.runSteps(act.ctx, s, act.neko, steps)
@@ -945,15 +995,14 @@ func (a *Agent) serveAct(ctx context.Context, s *automation, req automationReque
 		case <-time.After(settle):
 		}
 	}
+	deadline := errors.Is(act.ctx.Err(), context.DeadlineExceeded)
 	interruption := a.endAction(s, act)
 	status, why := "executed", ""
 	var stopped *int
 	switch {
-	case interruption == "canceled":
-		status, why, stopped = "interrupted", "canceled", &stoppedAt
 	case interruption != "":
 		status, why, stopped = "interrupted", interruption, &stoppedAt
-	case errors.Is(stepErr, context.DeadlineExceeded) || errors.Is(act.ctx.Err(), context.DeadlineExceeded):
+	case errors.Is(stepErr, context.DeadlineExceeded) || deadline:
 		status, why, stopped = "timeout", "", &stoppedAt
 	case stepErr != nil:
 		status, why, stopped = "error", "relay_unavailable", &stoppedAt
@@ -969,6 +1018,9 @@ func (a *Agent) serveAct(ctx context.Context, s *automation, req automationReque
 // finishWithShot ends a request with a fresh screenshot unless the bridge asked for none or
 // control moved to the user meanwhile (the result still says so).
 func (a *Agent) finishWithShot(ctx context.Context, s *automation, req automationRequest, box shotBox, kind, status, reason string, stopped *int) {
+	if s.isSuspended() {
+		return // the gateway that asked is gone, and nobody would receive the picture
+	}
 	want := req.Screenshot == nil || *req.Screenshot
 	a.mu.Lock()
 	privacy := a.control.mode == modePrivacy || !a.control.access
@@ -981,7 +1033,7 @@ func (a *Agent) finishWithShot(ctx context.Context, s *automation, req automatio
 	}
 	// No wait for the desktop here: the request already ran, and its result must not wait for
 	// a desktop session that ended meanwhile to come back.
-	shot, shotReason := a.captureScreenshot(ctx, s, req.Quality, box, 0)
+	shot, shotReason := a.captureScreenshot(ctx, s, req.Quality, box, 0, true)
 	if shot == nil && status == "executed" && shotReason != "" {
 		// The input went in; only the picture is missing. Say which.
 		reason = shotReason
@@ -1160,9 +1212,18 @@ func (a *Agent) serveAttach(ctx context.Context, s *automation, req automationRe
 		s.push(ctx, a.result(s, req.ID, "attach", "rejected", "unsupported", nil))
 		return
 	}
-	act, reason, _ := a.beginAction(ctx, s, req, nil)
-	if reason != "" {
-		s.push(ctx, a.result(s, req.ID, "attach", "rejected", reason, nil))
+	act := s.admitAction(ctx, req.ID)
+	if act == nil {
+		s.push(ctx, a.result(s, req.ID, "attach", "rejected", "busy", nil))
+		return
+	}
+	// A drop lands at a point of the screen: refused off it, like an act's step.
+	var at []step
+	if req.Method == "drop" {
+		at = []step{{Type: "move", X: req.X, Y: req.Y}}
+	}
+	if reason, _ := a.beginAction(ctx, s, act, req, at); reason != "" {
+		a.refuseAction(ctx, s, act, req, box, "attach", reason, nil)
 		return
 	}
 	dctx, cancel := context.WithTimeout(act.ctx, attachDeliverLimit)
@@ -1260,7 +1321,7 @@ func (a *Agent) attachPicker(ctx context.Context, s *automation, n AutomationSes
 	}
 }
 
-// bridgeHeldReset is for tests: whether anything is still held.
+// held is for tests: how many keys and buttons are still held.
 func (s *automation) held() (keys, buttons int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

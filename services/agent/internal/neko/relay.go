@@ -185,7 +185,7 @@ func (r *Relay) OpenWithProgress(ctx context.Context, sessionID string, toViewer
 	token := ""
 	fail := func(err error) (*Session, error) {
 		cancel()
-		r.logout(token)
+		go r.logout(token) // the failure is reported now, not after neko answered
 		progress("failed", err.(interface{ FailureCode() string }).FailureCode())
 		return nil, err
 	}
