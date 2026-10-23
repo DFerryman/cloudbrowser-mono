@@ -1366,3 +1366,363 @@ describe.each([
     await expectConsistent();
   });
 });
+
+describe('operation lifecycle', () => {
+  const { agentCommands, agentCredentials, instanceHealth, events, alerts, operationSteps } = schema;
+
+  /** Plays the api: what it records when the agent reports `ready`. */
+  async function agentReady(generation = 1) {
+    await w.db.insert(instanceHealth).values({ instanceId: 'inst1', agentReadyGeneration: generation, agentReadyAt: w.clock })
+      .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { agentReadyGeneration: generation, agentReadyAt: w.clock } });
+  }
+
+  /** Plays the agent: answers every pending command of a kind. */
+  async function answer(kind: string, result: Record<string, unknown>, ok = true) {
+    const pending = await w.db.select().from(agentCommands).where(and(eq(agentCommands.kind, kind), eq(agentCommands.status, 'pending')));
+    for (const c of pending) {
+      await w.db.update(agentCommands).set({ status: ok ? 'succeeded' : 'failed', reply: result, completedAt: w.clock }).where(eq(agentCommands.id, c.id));
+    }
+    return pending.length;
+  }
+
+  /** Runs an operation while playing an agent that reports ready and sees only the dedicated IP. */
+  async function settleWithAgent(op: string, generation = 1) {
+    let r = await runOperation(w.deps(), op);
+    for (let i = 0; i < 100 && r.state === 'deferred'; i++) {
+      w.clock = new Date(r.notBefore.getTime() + 1);
+      await agentReady(generation);
+      await answer('ip_check', { observed: [(await w.placement())!.ipAddress!] });
+      r = await runOperation(w.deps(), op);
+    }
+    return r;
+  }
+
+  async function opRow(id: string) {
+    return (await w.db.select().from(operations).where(eq(operations.id, id)))[0]!;
+  }
+
+  /** What the api writes for Sleep (or Delete) while `old` runs: it is cancelled and the new operation takes over. */
+  async function supersede(old: string, kind: 'stop' | 'delete' = 'stop') {
+    const next = operationRow({ instanceId: 'inst1', userId: 'u1', kind, params: { reason: 'user', preemptedOperationId: old }, now: w.clock });
+    await w.db.batch([
+      w.db.update(operations).set({ status: 'canceled', finishedAt: w.clock, leaseOwner: null, leaseExpiresAt: null, errorClass: 'superseded' }).where(eq(operations.id, old)),
+      w.db.update(browserInstances).set(kind === 'stop' ? { desiredState: 'stopped', status: 'stopping' } : { desiredState: 'deleted' }).where(eq(browserInstances.id, 'inst1')),
+      w.db.insert(operations).values(next),
+    ]);
+    return next.id;
+  }
+
+  describe('Restart from Needs attention', () => {
+    beforeEach(async () => {
+      w.agentMode = 'gateway';
+      expect(await settleWithAgent(await w.newInstance())).toEqual({ state: 'succeeded' });
+    });
+
+    it('reboots a VM that still runs and waits for the ready report of the new boot', async () => {
+      // The VM and its agent keep running; that agent reported ready once, when it connected.
+      await w.db.update(browserInstances).set({ status: 'needs_attention', statusReason: 'Network paused while we check your dedicated IP.' }).where(eq(browserInstances.id, 'inst1'));
+      w.advance(60_000);
+      const calls: string[] = [];
+      w.faults = (m) => { calls.push(m); return null; };
+      // An operator's retry has no restart flag: the engine treats a start from Needs attention as one.
+      const start = await w.enqueue('inst1', 'start');
+      expect((await runOperation(w.deps(), start)).state).toBe('deferred');
+      expect(calls.indexOf('ensureStopped')).toBeGreaterThanOrEqual(0);
+      expect(calls.indexOf('ensureStopped')).toBeLessThan(calls.indexOf('ensureRunning'));
+      expect((await opRow(start)).params).toMatchObject({ restart: true, restartStoppedAt: w.clock.getTime() });
+      expect((await w.instance()).status).toBe('starting');
+
+      // Polling neither stops the VM again nor counts the old boot's report.
+      w.advance(3_000);
+      expect((await runOperation(w.deps(), start)).state).toBe('deferred');
+      expect(calls.filter((m) => m === 'ensureStopped')).toHaveLength(1);
+      expect(await w.db.select().from(agentCommands).where(eq(agentCommands.kind, 'ip_check'))).toHaveLength(1); // the create's
+      w.advance(3_000);
+      expect(await settleWithAgent(start)).toEqual({ state: 'succeeded' });
+      expect(await w.instance()).toMatchObject({ status: 'running', statusReason: null });
+    });
+
+    it('a passing Check again resumes a browser an IP check paused; a check the user did not ask for does not', async () => {
+      const { periodicIpChecks } = await import('../src/scheduler.js');
+      w.advance(16 * 60_000);
+      await periodicIpChecks(w.deps());
+      expect((await w.instance()).status).toBe('needs_attention');
+      const ip = (await w.placement())!.ipAddress!;
+      // The agent answers while the engine waits for it.
+      const deps = { ...w.deps(), sleep: async () => { await answer('ip_check', { observed: [ip] }); await answer('set_firewall', {}); } };
+      expect(await checkInstanceIp(deps, 'inst1')).toMatchObject({ ok: true });
+      expect((await w.instance()).status).toBe('needs_attention');
+      expect(await checkInstanceIp(deps, 'inst1', { requestedByUser: true })).toMatchObject({ ok: true });
+      expect(await w.instance()).toMatchObject({ status: 'running', statusReason: null });
+      const [firewall] = await w.db.select().from(agentCommands).where(eq(agentCommands.kind, 'set_firewall'));
+      expect(firewall?.payload).toEqual({ mode: 'normal' });
+
+      // A browser that needs attention for another reason (a failed operation) needs Restart.
+      await w.db.update(browserInstances).set({ status: 'needs_attention', statusReason: 'This took too long. We have been alerted.' }).where(eq(browserInstances.id, 'inst1'));
+      await checkInstanceIp(deps, 'inst1', { requestedByUser: true });
+      expect((await w.instance()).status).toBe('needs_attention');
+    });
+  });
+
+  describe('a recover that does not finish', () => {
+    beforeEach(async () => {
+      await w.settle(await w.newInstance());
+      // The agent swapped its bootstrap token for its credential (what the api records).
+      await w.db.update(agentCredentials).set({ credentialHash: 'agent-1', activatedAt: w.clock, bootstrapHash: null });
+    });
+
+    const identity = async () => (await w.db.select().from(agentCredentials))[0];
+    const recoverBackup = async () => (await w.db.select().from(backups).where(eq(backups.reason, 'recover')))[0];
+
+    it('fails with the current agent’s identity restored and what it built released, never the IP or the data', async () => {
+      const before = (await w.placement())!;
+      w.faults = (m) => (m === 'ensureVm' ? 'invalid' : null);
+      const recover = await w.enqueue('inst1', 'recover');
+      expect((await w.settle(recover)).state).toBe('failed');
+      expect(await identity()).toMatchObject({ generation: 1, credentialHash: 'agent-1', bootstrapHash: null });
+      expect((await w.instance()).status).toBe('needs_attention');
+      const built = await w.db.select().from(resources).where(and(eq(resources.createdByOp, recover), ne(resources.kind, 'snapshot')));
+      expect(built.map((r) => r.kind).sort()).toEqual(['network_interface', 'vm', 'volume']); // the VM's request got no answer
+      expect(built.every((r) => r.state === 'superseded')).toBe(true);
+
+      w.faults = () => null;
+      w.advance(16 * 60_000);
+      await reaperTick(w.deps('reaper'));
+      expect(await w.db.select().from(resources).where(and(eq(resources.createdByOp, recover), ne(resources.state, 'deleted')))).toEqual([]);
+      // The recover ended and the data is on the current volume: its snapshot goes.
+      expect((await recoverBackup())?.status).toBe('deleted');
+      const live = w.liveProvider().map((r) => r.id);
+      expect(live).toEqual(expect.arrayContaining([before.vmId, before.networkId, before.volumeId, before.ipAllocationId]));
+      expect(live).toHaveLength(4);
+      await w.expectLedgerMatchesProvider();
+
+      // A restart brings the browser back with the same IP.
+      expect(await w.settle(await w.enqueue('inst1', 'start'))).toEqual({ state: 'succeeded' });
+      expect((await w.placement())!.ipAddress).toBe(before.ipAddress);
+    });
+
+    it('keeps its snapshot while it runs or the browser has no current volume, and expires it after 7 days otherwise', async () => {
+      w.faults = (m) => (m === 'ensureVm' ? 'capacity' : null);
+      const recover = await w.enqueue('inst1', 'recover');
+      expect((await runOperation(w.deps(), recover)).state).toBe('deferred');
+      await reaperTick(w.deps('reaper'));
+      expect((await recoverBackup())?.status).toBe('complete'); // still in use
+      const { expiredBackups } = await import('../src/reaper.js');
+      const snap = { id: 's', kind: 'snapshot', reason: 'recover', createdAt: w.clock };
+      expect(expiredBackups([snap], w.clock)).toEqual([]);
+      expect(expiredBackups([{ ...snap, recoverEnded: true }], w.clock)).toEqual(['s']); // never "the newest kept"
+      expect(expiredBackups([snap], new Date(w.clock.getTime() + 8 * 86_400_000), 30)).toEqual(['s']);
+
+      await w.db.update(placements).set({ volumeId: null }).where(eq(placements.status, 'current'));
+      w.advance(8 * 86_400_000);
+      await reaperTick(w.deps('reaper'));
+      expect((await recoverBackup())?.status).toBe('complete');
+    });
+
+    it.each(['stop', 'delete'] as const)('superseded by %s, gives the agent its identity back and releases what it built', async (kind) => {
+      w.faults = (m) => (m === 'ensureVm' ? 'capacity' : null);
+      const recover = await w.enqueue('inst1', 'recover');
+      expect((await runOperation(w.deps(), recover)).state).toBe('deferred');
+      expect(await identity()).toMatchObject({ generation: 2, credentialHash: null });
+      w.faults = () => null;
+      expect(await w.settle(await supersede(recover, kind))).toEqual({ state: 'succeeded' });
+      expect(await identity()).toMatchObject({ generation: 1, credentialHash: 'agent-1' });
+      const built = await w.db.select().from(resources).where(and(eq(resources.createdByOp, recover), ne(resources.kind, 'snapshot')));
+      expect(built.length).toBeGreaterThan(0);
+      expect(built.every((r) => r.state === 'superseded')).toBe(true);
+    });
+  });
+
+  describe('a browser that needs attention', () => {
+    beforeEach(async () => {
+      await w.settle(await w.newInstance());
+      await w.settle(await w.enqueue('inst1', 'stop'));
+      w.advance(86_400_000);
+      // A wake fails: its last activity is a day old.
+      w.faults = (m) => (m === 'ensureRunning' ? 'invalid' : null);
+      expect((await w.settle(await w.enqueue('inst1', 'start'))).state).toBe('failed');
+      w.faults = () => null;
+      expect(await w.instance()).toMatchObject({ status: 'needs_attention', desiredState: 'running' });
+    });
+
+    it('goes to sleep after its idle timeout, counted from the failure', async () => {
+      expect(await idleStops(w.deps())).toEqual([]);
+      w.advance(9 * 60_000);
+      expect(await idleStops(w.deps())).toEqual([]);
+      w.advance(2 * 60_000);
+      expect(await idleStops(w.deps())).toEqual(['inst1']);
+      const [stop] = await w.db.select().from(operations).where(and(eq(operations.kind, 'stop'), isNull(operations.finishedAt)));
+      expect(await w.settle(stop!.id)).toEqual({ state: 'succeeded' });
+      expect((await w.instance()).status).toBe('sleeping');
+    });
+
+    it('with Never sleep, after an hour, and never while an operation runs', async () => {
+      await w.db.update(browserInstances).set({ idleTimeoutS: 0 }).where(eq(browserInstances.id, 'inst1'));
+      w.advance(59 * 60_000);
+      expect(await idleStops(w.deps())).toEqual([]);
+      w.advance(2 * 60_000);
+      const resize = await w.enqueue('inst1', 'resize_volume');
+      expect(await idleStops(w.deps())).toEqual([]);
+      await w.db.update(operations).set({ status: 'failed', finishedAt: w.clock }).where(eq(operations.id, resize));
+      expect(await idleStops(w.deps())).toEqual(['inst1']);
+    });
+  });
+
+  describe('provider errors and waits', () => {
+    it('counts provider errors in a row, never waits for capacity, and alerts when they run out', async () => {
+      const op = await w.newInstance();
+      w.faults = (m) => (m === 'ensureVm' ? 'capacity' : null);
+      for (let i = 0; i < 12; i++) {
+        const r = await runOperation(w.deps(), op);
+        expect(r.state).toBe('deferred');
+        w.clock = new Date((r as { notBefore: Date }).notBefore.getTime() + 1);
+      }
+      // Errors are counted apart from the waits.
+      let vmErrors = 0;
+      w.faults = (m) => (m === 'ensureVm' && ++vmErrors <= 6 ? 'retryable' : null);
+      expect((await w.settle(op)).state).toBe('succeeded');
+      expect(await w.db.select().from(alerts)).toEqual([]);
+
+      // A step that gets through starts the count again; 9 errors in a row end the operation.
+      await w.db.insert(browserInstances).values({ ...(await w.instance()), id: 'inst2', status: 'creating', lastActiveAt: null });
+      const second = operationRow({ instanceId: 'inst2', userId: 'u1', kind: 'create', now: w.clock });
+      await w.db.insert(operations).values(second);
+      let volumeErrors = 0;
+      vmErrors = 0;
+      w.faults = (m) => (m === 'ensureVolume' && ++volumeErrors <= 6 ? 'retryable' : m === 'ensureVm' ? (vmErrors++, 'retryable') : null);
+      expect(await w.settle(second.id)).toEqual({ state: 'failed', reason: 'Too many provider errors. We have been alerted.' });
+      expect(vmErrors).toBe(9);
+      expect((await w.db.select().from(alerts)).map((a) => a.dedupeKey)).toEqual(['op:retries:create:tyo1']);
+    });
+
+    it('shows Creating again once a launch gets capacity, and charges nothing while the create waits', async () => {
+      const { refreshPrices } = await import('../src/prices.js');
+      const { meterUsage } = await import('../src/metering.js');
+      await refreshPrices(w.deps());
+      w.agentMode = 'gateway';
+      const op = await w.newInstance();
+      w.faults = (m) => (m === 'ensureVm' ? 'capacity' : null);
+      let r = await runOperation(w.deps(), op);
+      expect((await w.instance()).status).toBe('waiting_capacity');
+      for (let i = 0; i < 5; i++) {
+        await meterUsage(w.deps());
+        w.clock = new Date((r as { notBefore: Date }).notBefore.getTime() + 1);
+        r = await runOperation(w.deps(), op);
+      }
+      await meterUsage(w.deps());
+      expect(await w.db.select().from(schema.usageRecords)).toEqual([]);
+      w.faults = () => null;
+      w.clock = new Date((r as { notBefore: Date }).notBefore.getTime() + 1);
+      expect((await runOperation(w.deps(), op)).state).toBe('deferred');
+      expect((await opRow(op)).step).toBe('await_agent');
+      expect(await w.instance()).toMatchObject({ status: 'creating', statusReason: null });
+    });
+
+    it('gives a first boot its whole time after the launch, however long the launch waited', async () => {
+      w.agentMode = 'gateway';
+      const op = await w.newInstance();
+      w.faults = (m) => (m === 'ensureVm' ? 'capacity' : null);
+      let r = await runOperation(w.deps(), op);
+      while (w.clock.getTime() - (await opRow(op)).createdAt.getTime() < 10 * 60_000) {
+        w.clock = new Date((r as { notBefore: Date }).notBefore.getTime() + 1);
+        r = await runOperation(w.deps(), op);
+      }
+      w.faults = () => null;
+      w.clock = new Date((r as { notBefore: Date }).notBefore.getTime() + 1);
+      r = await runOperation(w.deps(), op);
+      const launchedAt = w.clock.getTime();
+      expect((await opRow(op)).deadlineAt.getTime()).toBeGreaterThanOrEqual(launchedAt + 16 * 60_000);
+      // The agent never reports ready.
+      for (let i = 0; i < 1000 && r.state === 'deferred'; i++) {
+        w.clock = new Date(r.notBefore.getTime() + 1);
+        r = await runOperation(w.deps(), op);
+      }
+      expect(r).toEqual({ state: 'failed', reason: 'The browser did not start in time.' });
+      expect(w.clock.getTime() - launchedAt).toBeGreaterThan(16 * 60_000);
+    });
+
+    it('writes no journal entry, event or notification while it polls a waiting step', async () => {
+      w.agentMode = 'gateway';
+      const op = await w.newInstance();
+      let notified = 0;
+      const deps = { ...w.deps(), notify: () => void notified++ };
+      expect((await runOperation(deps, op)).state).toBe('deferred');
+      const eventsBefore = (await w.db.select().from(events)).length;
+      const [step] = await w.db.select().from(operationSteps).where(and(eq(operationSteps.operationId, op), eq(operationSteps.step, 'await_agent')));
+      notified = 0;
+      for (let i = 0; i < 5; i++) {
+        w.advance(3_000);
+        expect((await runOperation(deps, op)).state).toBe('deferred');
+      }
+      expect((await w.db.select().from(events)).length).toBe(eventsBefore);
+      expect(notified).toBe(0);
+      expect((await w.db.select().from(operationSteps).where(and(eq(operationSteps.operationId, op), eq(operationSteps.step, 'await_agent'))))[0]).toEqual(step);
+    });
+  });
+
+  describe('the IP check inside Chrome', () => {
+    beforeEach(() => {
+      w.agentMode = 'gateway';
+    });
+
+    async function toIpCheck() {
+      const op = await w.newInstance();
+      await runOperation(w.deps(), op);
+      await agentReady();
+      w.advance(3_000);
+      expect((await runOperation(w.deps(), op)).state).toBe('deferred');
+      return op;
+    }
+
+    it('is tried again after an answer without an address or a failed one', async () => {
+      const op = await toIpCheck();
+      const ip = (await w.placement())!.ipAddress!;
+      expect(await answer('ip_check', { observed: [] })).toBe(1);
+      w.advance(3_000);
+      expect((await runOperation(w.deps(), op)).state).toBe('deferred');
+      w.advance(3_000);
+      expect((await runOperation(w.deps(), op)).state).toBe('deferred'); // sends the second check
+      expect(await answer('ip_check', { error: 'echo endpoint unreachable' }, false)).toBe(1);
+      w.advance(3_000);
+      expect((await runOperation(w.deps(), op)).state).toBe('deferred');
+      w.advance(3_000);
+      expect((await runOperation(w.deps(), op)).state).toBe('deferred');
+      expect(await answer('ip_check', { observed: [ip] })).toBe(1);
+      w.advance(3_000);
+      expect(await runOperation(w.deps(), op)).toEqual({ state: 'succeeded' });
+    });
+
+    it('fails a create that Chrome cannot confirm three times, with a reason for a browser that never ran', async () => {
+      const op = await toIpCheck();
+      let r: Awaited<ReturnType<typeof runOperation>> = { state: 'deferred', notBefore: w.clock };
+      for (let i = 0; i < 10 && r.state === 'deferred'; i++) {
+        await answer('ip_check', { observed: [] });
+        w.advance(3_000);
+        r = await runOperation(w.deps(), op);
+      }
+      expect(r).toEqual({ state: 'failed', reason: `Chrome could not confirm the dedicated IP ${(await w.placement())!.ipAddress}.` });
+      expect(await w.db.select().from(agentCommands).where(eq(agentCommands.kind, 'ip_check'))).toHaveLength(3);
+    });
+  });
+
+  it('starts a create that Sleep interrupted during the first boot once, then only waits for its agent', async () => {
+    w.agentMode = 'gateway';
+    const create = await w.newInstance();
+    expect((await runOperation(w.deps(), create)).state).toBe('deferred'); // the VM is booting
+    expect(await w.settle(await supersede(create))).toEqual({ state: 'succeeded' });
+    expect((await w.instance()).status).toBe('sleeping');
+
+    const calls: string[] = [];
+    w.faults = (m) => { calls.push(m); return null; };
+    await w.db.update(browserInstances).set({ desiredState: 'running' }).where(eq(browserInstances.id, 'inst1'));
+    const wake = operationRow({ instanceId: 'inst1', userId: 'u1', kind: 'create', params: { resumeCreateFrom: create }, now: w.clock });
+    await w.db.insert(operations).values(wake);
+    for (let i = 0; i < 4; i++) {
+      expect((await runOperation(w.deps(), wake.id)).state).toBe('deferred');
+      w.advance(3_000);
+    }
+    expect(calls.filter((m) => m === 'ensureRunning' || m === 'describe')).toEqual(['ensureRunning']);
+    expect(await settleWithAgent(wake.id)).toEqual({ state: 'succeeded' });
+    expect(w.liveProvider().filter((r) => r.kind === 'vm')).toHaveLength(1);
+  });
+});

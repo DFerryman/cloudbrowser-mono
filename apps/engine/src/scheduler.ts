@@ -3,7 +3,7 @@ import { settleRunningStatements, eventRow, operationRow, raiseAlert, reservedTo
 import type { ExecutorKind } from '@cloudbrowser/executors';
 import { and, asc, eq, inArray, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
 import { placementRef, readContext, type EngineDeps } from './context.js';
-import { idleTimeoutS, NEEDS_ATTENTION_IDLE_S, runOperation, sleepsWhenIdle } from './runner.js';
+import { attentionSince, attentionStarted, idleTimeoutS, NEEDS_ATTENTION_IDLE_S, runOperation, sleepsWhenIdle } from './runner.js';
 
 const { operations, browserInstances, instanceHealth, viewerSessions, placements, events, auditLog, billingAccounts, browserReservations, userNotices } = schema;
 
@@ -45,7 +45,7 @@ export async function requestStop(deps: EngineDeps, inst: { id: string; userId: 
   const reasonStillApplies = reason === 'intent_reconcile' ? sql`${browserInstances.desiredState} = 'stopped'`
     : reason === 'idle' ? sql`EXISTS (SELECT 1 FROM browser_instances b LEFT JOIN instance_health h ON h.instance_id = b.id
       WHERE b.id = ${inst.id} AND b.desired_state = 'running' AND ${sleepsWhenIdle}
-      AND max(coalesce(b.last_active_at, 0), coalesce(h.last_input_at, 0)) + ${idleTimeoutS} * 1000 <= ${now.getTime()})`
+      AND max(coalesce(b.last_active_at, 0), coalesce(h.last_input_at, 0), ${attentionSince}) + ${idleTimeoutS} * 1000 <= ${now.getTime()})`
     : reason === 'frozen' ? sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${inst.userId} AND ${billingAccounts.frozenAt} IS NOT NULL)`
     : reason === 'balance' ? sql`(
       NOT EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${inst.userId} AND ${billingAccounts.balanceMicros} - ${reservedTotalSql(inst.userId)} > 0)
@@ -86,7 +86,8 @@ export async function requestStop(deps: EngineDeps, inst: { id: string; userId: 
 /**
  * Puts running browsers to sleep after `idle_timeout` without input (page 2, flow C). Viewer
  * heartbeats carry whether there was input since the last one. Browsers that need attention
- * sleep too, Never sleep ones after an hour; one with an operation under way is left to it.
+ * sleep too, counting from when they began to, Never sleep ones after an hour; one with an
+ * operation under way is left to it.
  */
 export async function idleStops(deps: EngineDeps): Promise<string[]> {
   const { db } = deps;
@@ -99,6 +100,7 @@ export async function idleStops(deps: EngineDeps): Promise<string[]> {
       idleTimeoutS: browserInstances.idleTimeoutS,
       lastActiveAt: browserInstances.lastActiveAt,
       lastInputAt: instanceHealth.lastInputAt,
+      attentionSince: sql<number>`CASE WHEN ${browserInstances.status} = 'needs_attention' THEN ${attentionStarted(browserInstances.id)} ELSE 0 END`,
     })
     .from(browserInstances)
     .leftJoin(instanceHealth, eq(instanceHealth.instanceId, browserInstances.id))
@@ -119,7 +121,7 @@ export async function idleStops(deps: EngineDeps): Promise<string[]> {
   const stopped: string[] = [];
   for (const inst of running) {
     if (busy.has(inst.id)) continue;
-    const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, inst.lastInputAt?.getTime() ?? 0);
+    const last = Math.max(inst.lastActiveAt?.getTime() ?? 0, inst.lastInputAt?.getTime() ?? 0, Number(inst.attentionSince));
     const timeoutS = inst.status === 'needs_attention' && inst.idleTimeoutS === NEVER_SLEEP_TIMEOUT_S ? NEEDS_ATTENTION_IDLE_S : inst.idleTimeoutS;
     if (now.getTime() - last < timeoutS * 1000) continue;
     if (await requestStop(deps, inst, 'idle')) stopped.push(inst.id);

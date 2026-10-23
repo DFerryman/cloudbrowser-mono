@@ -1,7 +1,7 @@
 import { NEVER_SLEEP_TIMEOUT_S, OPERATION_STEPS, type OperationKind } from '@cloudbrowser/contracts';
 import { eventRow, operationRow, raiseAlert, schema } from '@cloudbrowser/db';
 import { ExecutorError, isRegionDenial, ProviderFailed, type ErrorClass, type ResourceKind } from '@cloudbrowser/executors';
-import { and, eq, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, lte, or, sql, type SQLWrapper } from 'drizzle-orm';
 import {
   RestartFrom,
   OperationSuperseded,
@@ -30,11 +30,19 @@ const IDLE_STOP_CANCELED = 'The browser is no longer idle under its current slee
 export const NEEDS_ATTENTION_IDLE_S = 3600;
 
 /**
- * SQL over `browser_instances b`: the browser sleeps when idle, and the idle timeout in seconds
- * that applies to it now.
+ * SQL over `browser_instances b`: the browser sleeps when idle, the idle timeout in seconds that
+ * applies to it now, and when it began to need attention (0 otherwise). Its idle time counts from
+ * then at the earliest, so the user has the whole timeout to see why and act on it.
  */
 export const sleepsWhenIdle = sql`(b.status = 'needs_attention' OR (b.status = 'running' AND b.idle_timeout_s <> ${NEVER_SLEEP_TIMEOUT_S}))`;
 export const idleTimeoutS = sql`(CASE WHEN b.status = 'needs_attention' AND b.idle_timeout_s = ${NEVER_SLEEP_TIMEOUT_S} THEN ${NEEDS_ATTENTION_IDLE_S} ELSE b.idle_timeout_s END)`;
+export const attentionSince = sql`(CASE WHEN b.status = 'needs_attention' THEN ${attentionStarted(sql`b.id`)} ELSE 0 END)`;
+
+/** When a browser last failed in a way that leaves it needing attention: an operation, or an IP check. */
+export function attentionStarted(instanceId: SQLWrapper) {
+  return sql<number>`coalesce((SELECT max(a.created_at) FROM audit_log a WHERE a.target = 'instance:' || ${instanceId}
+    AND (a.action = 'ip.check_failed' OR a.action LIKE 'operation.%.failed')), 0)`;
+}
 
 // Provider calls can last two minutes. A shorter lease lets a second worker overlap them.
 const LEASE_MS = 3 * 60_000;
@@ -370,7 +378,7 @@ async function beginIdleStop(deps: EngineDeps, env: StepEnv): Promise<boolean> {
   const stillIdle = sql`EXISTS (SELECT 1 FROM browser_instances b LEFT JOIN instance_health h ON h.instance_id = b.id
     WHERE b.id = ${instance.id} AND b.desired_state = 'stopped' AND ${sleepsWhenIdle}
     AND ${captured ? 1 : 0} = 1
-    AND max(${lastActive}, coalesce(h.last_input_at, 0)) + ${idleTimeoutS} * 1000 <= ${at.getTime()})`;
+    AND max(${lastActive}, coalesce(h.last_input_at, 0), ${attentionSince}) + ${idleTimeoutS} * 1000 <= ${at.getTime()})`;
   const canceledHere = sql`EXISTS (SELECT 1 FROM operations WHERE id = ${op.id} AND status = 'canceled' AND finished_at = ${at.getTime()} AND error = ${IDLE_STOP_CANCELED})`;
   const [, started] = await db.batch([
     db.update(operations).set({ status: 'canceled', finishedAt: at, updatedAt: at, leaseOwner: null, leaseExpiresAt: null, errorClass: 'superseded', error: IDLE_STOP_CANCELED })

@@ -1176,7 +1176,9 @@ export async function abandonRecover(env: StepEnv, recover: { id: string; params
   const time = (v: unknown) => (typeof v === 'number' ? new Date(v) : null);
   const text = (v: unknown) => (typeof v === 'string' ? v : null);
   return [
-    ...leftovers.map((r) => db.update(resources).set({ state: 'superseded', releaseAfter: at })
+    // A request without an answer is looked up once its resource would be visible (see
+    // deleteLedgerResources), not before: the reaper would wait on it.
+    ...leftovers.map((r) => db.update(resources).set({ state: 'superseded', releaseAfter: r.providerId ? at : new Date(at.getTime() + UNKNOWN_RESOURCE_SETTLE_MS) })
       .where(and(eq(resources.id, r.id), operationFence(env)))),
     db.update(placements).set({ status: 'superseded' })
       .where(and(eq(placements.instanceId, env.instance.id), eq(placements.status, 'building'), operationFence(env))),
