@@ -14,7 +14,7 @@ import { BrowserCard, BrowserRow, ROW_COLUMNS } from './BrowserCard.js';
 import { CreateDialog } from './CreateDialog.js';
 import { useInstances, useMe, useRegions } from './hooks.js';
 import { regionSearchText } from './region-names.js';
-import { shownStatus } from './status.js';
+import { shownStatus, stillCreating } from './status.js';
 
 type Filter = 'all' | 'running' | 'sleeping' | 'attention';
 type Sort = 'recent' | 'name' | 'status' | 'created';
@@ -76,7 +76,7 @@ export function BrowsersPage() {
     if (!openWhenReady) return;
     const i = instances.data?.find((x) => x.id === openWhenReady);
     if (i?.status === 'running') navigate(`/b/${i.id}`);
-    else if (i && i.status !== 'creating') setOpenWhenReady(null);
+    else if (i && !stillCreating(i.status)) setOpenWhenReady(null);
   }, [instances.data, openWhenReady, navigate]);
 
   const all = instances.data ?? [];

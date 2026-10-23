@@ -186,7 +186,8 @@ async function enforce(deps: EngineDeps, prepaid: boolean, now: Date): Promise<n
   for (const userId of users) {
     const account = await prepaidBalance(db, userId);
     const paid = all.filter((r) => r.userId === userId);
-    if (prepaid && paid.length && (account.availableMicros <= 0 || account.frozenAt)) {
+    // A dispute hold stops the browsers (below) but is no reason to start their deletion clock.
+    if (prepaid && paid.length && account.availableMicros <= 0 && !account.frozenAt) {
       await beginRetention(db, userId, now);
       if (!account.exhaustedAt) {
         await db.insert(events).values(eventRow(userId, 'entitlements.updated', { balance: true }, now));

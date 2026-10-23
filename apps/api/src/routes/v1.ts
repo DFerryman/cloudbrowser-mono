@@ -265,8 +265,6 @@ v1.openapi(
     const user = c.get('user');
     const row = await ownedInstance(c, c.req.valid('param').id);
     const { priceVersion, agentAccess, ...body } = c.req.valid('json');
-    // The access switch has its own side effects (ending bridge sessions), so it is applied apart.
-    if (agentAccess !== undefined && agentAccess !== row.agentAccess) await setAccess(db, c.env, user.id, row, agentAccess);
     const idleChanged = body.idleTimeoutS !== undefined && body.idleTimeoutS !== row.idleTimeoutS;
     if (body.idleTimeoutS !== undefined) {
       if (!(IDLE_TIMEOUT_OPTIONS_S as readonly number[]).includes(body.idleTimeoutS)) {
@@ -283,6 +281,9 @@ v1.openapi(
         if (priceVersion !== quote.priceVersion) throw problem(409, 'price_changed', 'Prices changed since the cost was shown. Review the new cost and try again.');
       }
     }
+    // Nothing changes until the whole request is valid. The access switch has its own side effects
+    // (ending bridge sessions), so it is applied apart, ahead of the update and its event.
+    if (agentAccess !== undefined && agentAccess !== row.agentAccess) await setAccess(db, c.env, user.id, row, agentAccess);
     const now = new Date();
     const fingerprint = {
       ...row.fingerprint,
@@ -667,6 +668,7 @@ async function requireViewerCredit(db: import('@cloudbrowser/db').Db, userId: st
   if (access.allowed) return access;
   await db.update(viewerSessions).set({ endedAt: new Date() }).where(and(eq(viewerSessions.instanceId, instanceId), isNull(viewerSessions.endedAt)));
   if (access.reason === 'frozen') throw problem(403, 'account_frozen', 'This account is frozen.');
+  if (access.reason === 'suspended') throw problem(403, 'suspended', 'This browser is suspended. Contact support.');
   if (access.reason === 'deleted') throw problem(409, 'invalid_state', 'This browser is unavailable.');
   throw problem(402, 'insufficient_balance', 'Available prepaid credit is insufficient. Usage is stopped; data and IP are kept for seven days.');
 }
@@ -779,7 +781,7 @@ async function ownedSession(c: Vars, id: string) {
   const { session: s, inst } = row;
   if (!inst || inst.userId !== user.id) throw problem(404, 'not_found');
   if (inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) throw problem(409, 'invalid_state', 'This browser has been deleted.');
-  return s;
+  return { ...s, browserStatus: inst.status };
 }
 
 v1.openapi(
@@ -817,6 +819,10 @@ v1.openapi(
     const db = c.get('db');
     const s = await ownedSession(c, c.req.valid('param').id);
     if (s.endedAt) throw problem(409, 'invalid_state', 'This browser is open in another tab or device.');
+    // Relay credentials are only handed out for a browser that can be viewed now.
+    if (s.browserStatus !== 'running') throw problem(409, 'invalid_state', 'The live view opens once the browser is running.');
+    // GETs skip the write limiter; each connect mints TURN credentials, so it has its own budget.
+    if (c.env.API_LIMITER && !(await c.env.API_LIMITER.limit({ key: `connect:${s.userId}` })).success) throw problem(429, 'rate_limited');
     // The credit check, the placement and the TURN credentials are independent: fetch them
     // together rather than one after another, so the viewer can start its handshake sooner.
     // Nothing is returned unless every check passes.
@@ -832,7 +838,10 @@ v1.openapi(
       throw problem(503, 'viewer_unavailable', 'The live view is not configured.');
     }
     const ice = await turn;
-    if ('error' in ice) throw ice.error;
+    if ('error' in ice) {
+      console.error('TURN credentials failed', ice.error);
+      throw problem(503, 'viewer_unavailable', 'The live view relay is unavailable right now. Try again in a moment.');
+    }
     // A 60 s single-use token for the gateway, and short-lived TURN credentials (pages 2 and 5).
     const token = await signViewerToken(JSON.parse(c.env.VIEWER_TOKEN_PRIVATE_KEY) as JsonWebKey, {
       jti: newId(),

@@ -27,6 +27,8 @@ export interface ExecutorEnv {
   /** Container images the VMs run (built by .github/workflows/images.yml). */
   AGENT_IMAGE?: string;
   BROWSER_IMAGE?: string;
+  /** `development` lets real VMs launch without the configuration they need; see `refuseLaunches`. */
+  ENVIRONMENT?: string;
 }
 
 export const DEFAULT_AGENT_IMAGE = 'ghcr.io/dferryman/cloudbrowser-agent:main';
@@ -50,6 +52,24 @@ function faultsFromEnv(raw: string | undefined): FaultPlan | undefined {
     const f = cfg[method];
     return f && Math.random() < f.rate ? (f.class as ReturnType<FaultPlan>) : null;
   };
+}
+
+/** The calls that create a VM's resources or power it on. Stopping, deleting and reading are not among them. */
+const LAUNCHES: ReadonlySet<PropertyKey> = new Set<keyof Executor>(['allocateIp', 'ensureNetworkInterface', 'ensureVolume', 'ensureVolumeFromSnapshot', 'ensureVm', 'ensureRunning']);
+
+/**
+ * An executor that refuses to create or start VMs, for a deployment that lacks configuration a
+ * real VM needs; it fails before anything is created, rather than launching a VM that falls back
+ * on an unsafe default. Everything else works, so a misconfigured Worker can still clean up.
+ */
+export function refuseLaunches(executor: Executor, reason: string): Executor {
+  return new Proxy(executor, {
+    get(target, prop) {
+      if (LAUNCHES.has(prop)) return async () => { throw new ExecutorError('invalid', `${reason}; no VM is created or started`); };
+      const value: unknown = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
 }
 
 const sessions = new Map<string, AwsCredentialProvider>();
@@ -85,7 +105,7 @@ export function createExecutor(kind: ExecutorKind, mode: CredentialMode, env: Ex
       if (!env.AWS_ACCESS_KEY_ID || !env.AWS_SECRET_ACCESS_KEY) {
         throw new ExecutorError('forbidden', 'AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are not set for this Worker');
       }
-      return new AwsExecutor({
+      const executor = new AwsExecutor({
         mode,
         accessKeyId: env.AWS_ACCESS_KEY_ID,
         secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
@@ -96,6 +116,10 @@ export function createExecutor(kind: ExecutorKind, mode: CredentialMode, env: Ex
         agentImage: env.AGENT_IMAGE || DEFAULT_AGENT_IMAGE,
         browserImage: env.BROWSER_IMAGE || DEFAULT_BROWSER_IMAGE,
       });
+      // A VM checks its IP at APP_URL: launched without it, it could never pass that check.
+      return mode === 'runtime' && !env.APP_URL && env.ENVIRONMENT !== 'development'
+        ? refuseLaunches(executor, 'APP_URL is not set for this Worker')
+        : executor;
     }
     default:
       throw new ExecutorError('invalid', `unknown executor ${String(kind)}`);

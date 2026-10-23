@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { AwsExecutor, bootstrapScript, ExecutorError, FakeExecutor, LaunchFailed, isRegionDenial, launchFailureClass, MemoryFakeStore, ProviderFailed, type CredentialMode, type Executor, type OpContext, type Placement, type ResourceKind } from '../src/index.js';
+import { AwsExecutor, bootstrapScript, createExecutor, ExecutorError, FakeExecutor, LaunchFailed, isRegionDenial, launchFailureClass, MemoryFakeStore, ProviderFailed, type CredentialMode, type Executor, type OpContext, type Placement, type ResourceKind } from '../src/index.js';
 import { FakeEc2 } from './fake-ec2.js';
 
 const REGION = 'ap-northeast-1';
@@ -767,5 +767,32 @@ describe('aws-ec2 tiers', () => {
     expect(JSON.parse(none.pricingConfigKey(REGION)).premiumInstanceTypes).toEqual([]);
     expect((await none.prices(ctx('prices'), REGION)).premium).toBeUndefined();
     expect((await some.prices(ctx('prices'), REGION)).premium).toMatchObject({ instanceType: 'c7i.xlarge' });
+  });
+});
+
+describe('launch configuration', () => {
+  const env = { AWS_ACCESS_KEY_ID: 'AKIDTEST', AWS_SECRET_ACCESS_KEY: 'secret', AWS_REGIONS: JSON.stringify({ [REGION]: { subnets: { 'ap-northeast-1a': 'subnet-a' }, securityGroupId: 'sg-1' } }) };
+  const placement: Placement = { providerRegion: REGION, zone: 'ap-northeast-1a', vmId: 'i-1', volumeId: 'vol-1', nicId: 'eni-1', ipAllocationId: 'eipalloc-1', ipAddress: '203.0.113.1' };
+
+  it('creates and starts no VM without APP_URL outside development, and still cleans up', async () => {
+    const ec2 = new FakeEc2();
+    vi.stubGlobal('fetch', ec2.fetch);
+    try {
+      const ex = createExecutor('aws-ec2', 'runtime', env);
+      await expect(ex.allocateIp(ctx('allocate_ip'), REGION)).rejects.toMatchObject({ errorClass: 'invalid', message: expect.stringContaining('APP_URL is not set') });
+      await expect(ex.ensureRunning(ctx('ensure_running'), placement)).rejects.toMatchObject({ errorClass: 'invalid' });
+      expect(ec2.calls).toEqual([]);
+      expect(ex.zones(REGION)).toEqual(['ap-northeast-1a']);
+      expect(await ex.listManaged(ctx('list'), REGION)).toEqual([]);
+
+      // Processes that never launch, development, and a configured deployment are not held back.
+      expect(await createExecutor('aws-ec2', 'reaper', env).listManaged(ctx('list'), REGION)).toEqual([]);
+      for (const [n, extra] of [{ ENVIRONMENT: 'development' }, { APP_URL: 'https://app.example.com' }].entries()) {
+        const ip = await createExecutor('aws-ec2', 'runtime', { ...env, ...extra }).allocateIp(ctx('allocate_ip', `op${n}:allocate_ip:1`), REGION);
+        expect(ip.allocationId).toBeTruthy();
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

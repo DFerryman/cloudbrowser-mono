@@ -85,13 +85,16 @@ export async function enqueueOperation(
   try {
     await db.batch(stmts as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
   } catch (e) {
-    if (String(e).includes('user_browser_limit')) throw problem(403, 'plan_limit', 'Your account has reached its browser limit. Delete a browser first.', { limit: 'instances' });
-    if (String(e).includes('aws_inventory_unavailable')) throw problem(409, 'region_unavailable', 'Someone just took the last browser AWS can allocate in this region. Choose another region.', { limit: 'no_stock' });
-    // A concurrent request with the same key won the race: answer like it did.
+    // A concurrent request with the same key won the race: answer like it did, whichever of
+    // the guards below stopped this copy.
     if (input.key) {
       const again = await replayed(db, user.id, input.key, input.route);
       if (again) return again;
     }
+    if (String(e).includes('user_browser_limit')) throw problem(403, 'plan_limit', 'Your account has reached its browser limit. Delete a browser first.', { limit: 'instances' });
+    if (String(e).includes('aws_inventory_unavailable')) throw problem(409, 'region_unavailable', 'Someone just took the last browser AWS can allocate in this region. Choose another region.', { limit: 'no_stock' });
+    // Another create or wake reserved the same credit first (the funding trigger, migration 0008).
+    if (String(e).includes('insufficient_prepaid_reserve')) throw problem(402, 'insufficient_balance', 'Available credit changed. Add credit to fund this browser and its seven-day deposit.');
     const running = await unfinishedOperation(db, input.instanceId);
     if (running) throw problem(409, 'operation_in_progress', undefined, { operationId: running.id });
     const [live] = await db.select({ desiredState: browserInstances.desiredState, status: browserInstances.status, purgeAfter: browserInstances.purgeAfter }).from(browserInstances).where(eq(browserInstances.id, input.instanceId));

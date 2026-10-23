@@ -1,6 +1,7 @@
 import { REGION_INFO } from '@cloudbrowser/contracts';
 import type { Accepted, AgentControlMode, AgentKey, AutomationStatus, CreateAgentKeyBody, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, NeverSleepQuote, Region } from '@cloudbrowser/contracts';
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
+import { useRef } from 'react';
 import { api } from '../../lib/api.js';
 import { keys, queryClient } from '../../lib/query.js';
 import { refreshChangedPrices } from '../billing/hooks.js';
@@ -56,13 +57,27 @@ export function useLifecycle() {
   });
 }
 
+/**
+ * Creating sends one Idempotency-Key per attempt, not per click: a retry after a lost response (a
+ * timeout, a dropped connection) gets the browser the first request created instead of a second
+ * one. The user's choices identify an attempt; other choices, a success or `newAttempt()` (the
+ * dialog closing) start the next one.
+ */
 export function useCreateInstance() {
-  return useMutation({
-    mutationFn: (body: CreateInstanceBody) =>
-      api<Accepted>('POST', '/instances', { idempotent: true, body }),
+  const attempt = useRef<{ choices: string; key: string } | null>(null);
+  const mutation = useMutation({
+    mutationFn: (body: CreateInstanceBody) => {
+      // Not the quote: prices refreshed between a lost response and its retry are the same attempt.
+      const { priceVersion: _shown, storageGb: _included, ...chosen } = body;
+      const choices = JSON.stringify(chosen);
+      if (attempt.current?.choices !== choices) attempt.current = { choices, key: crypto.randomUUID() };
+      return api<Accepted>('POST', '/instances', { idempotencyKey: attempt.current.key, body });
+    },
+    onSuccess: () => void (attempt.current = null),
     onError: refreshChangedPrices,
     onSettled: () => refresh(),
   });
+  return { ...mutation, newAttempt: () => void (attempt.current = null) };
 }
 
 /** Rename and settings edits are reversible, so they update the cache optimistically. */

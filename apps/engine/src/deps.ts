@@ -1,6 +1,6 @@
 import { createDb, schema, type AgentCommandsMessage, type OperationMessage } from '@cloudbrowser/db';
 import { and, eq, inArray } from 'drizzle-orm';
-import { createExecutor, type Executor, type ExecutorEnv, type ExecutorKind } from '@cloudbrowser/executors';
+import { createExecutor, refuseLaunches, type Executor, type ExecutorEnv, type ExecutorKind } from '@cloudbrowser/executors';
 import { FakeAgentBridge, GatewayAgentBridge, type AgentBridge } from './agent.js';
 import { r2ArchiveStore } from './archives.js';
 import { placementRef, readContext, type EngineDeps, type EngineMode } from './context.js';
@@ -60,7 +60,14 @@ export function makeDeps(env: Env, waitUntil: (p: Promise<unknown>) => void = ()
         APP_URL: env.APP_URL,
         AGENT_IMAGE: env.AGENT_IMAGE,
         BROWSER_IMAGE: env.BROWSER_IMAGE,
+        ENVIRONMENT: env.ENVIRONMENT,
       });
+      // The fallbacks below are for local runs. A real VM would get agent tokens derived from a
+      // public secret, or a gateway it can never reach: refuse to launch one instead.
+      const missing = (['BOOTSTRAP_SECRET', 'GATEWAY_URL'] as const).filter((name) => !env[name]);
+      if (kind === 'aws-ec2' && mode === 'worker' && missing.length && env.ENVIRONMENT !== 'development') {
+        ex = refuseLaunches(ex, `${missing.join(' and ')} not set for this Worker`);
+      }
       executors.set(kind, ex);
     }
     return ex;

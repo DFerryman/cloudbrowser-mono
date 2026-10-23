@@ -36,8 +36,11 @@ export async function reconcileReservations(deps: EngineDeps) {
     const quote = await reservationQuote(db, inst.regionId, { ...inst, instanceId: inst.id, storageGb: Math.max(inst.storageGb, target) }, now);
     if (!quote) continue;
     const account = await prepaidBalance(db, inst.userId);
+    // A dispute hold pauses these decisions: no deposit is taken and no retention clock starts
+    // (a price change would otherwise start one) until an operator lifts it.
+    if (account.frozenAt) continue;
     try {
-      if (account.availableMicros + (hold?.reservedMicros ?? 0) >= quote.requiredMicros + (hold ? 1 : Math.max(1, minBalanceMicros)) && !account.frozenAt) {
+      if (account.availableMicros + (hold?.reservedMicros ?? 0) >= quote.requiredMicros + (hold ? 1 : Math.max(1, minBalanceMicros))) {
         if (!hold || hold.requiredMicros !== quote.requiredMicros || hold.reservedMicros < hold.requiredMicros) await reservationWrite(db, inst.userId, inst.id, quote, now);
       } else if (!hold) {
         await db.insert(billingAccounts).values({ userId: inst.userId, balanceMicros: 0, updatedAt: now }).onConflictDoNothing();
@@ -71,10 +74,13 @@ export async function assertOperationFunded(env: StepEnv) {
   }
 }
 
-/** Enter retention without deleting anything. The held credit can then fund only fixed assets. */
+/**
+ * Enter retention without deleting anything. The held credit can then fund only fixed assets.
+ * Only credit that is gone counts: a dispute hold stops browsers but never starts the clock.
+ */
 export async function beginRetention(db: Db, userId: string, now: Date) {
   const insufficient = sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${userId}
-    AND (${billingAccounts.frozenAt} IS NOT NULL OR ${billingAccounts.balanceMicros} - ${reservedTotalSql(userId)} <= 0))`;
+    AND ${billingAccounts.frozenAt} IS NULL AND ${billingAccounts.balanceMicros} - ${reservedTotalSql(userId)} <= 0)`;
   await db.batch([
     db.update(browserReservations).set({ retentionStartedAt: now,
       retentionEndsAt: new Date(now.getTime() + DATA_KEPT_DAYS * 86_400_000), updatedAt: now,

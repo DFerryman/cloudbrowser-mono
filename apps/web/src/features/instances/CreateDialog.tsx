@@ -54,6 +54,11 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
     }
   }, [open, initialInstance?.id]);
 
+  // Closing the dialog ends the creation attempt; what is submitted after reopening is a new one.
+  useEffect(() => {
+    if (!open) create.newAttempt();
+  }, [open]);
+
   const b = billing.data;
   const atLimit = me.data ? me.data.usage.browsers >= me.data.entitlements.maxBrowsers : false;
   const premiumOffer = !!me.data?.entitlements.premium;

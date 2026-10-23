@@ -1,11 +1,12 @@
 import { browserEstimate, costRates, customerRates, minimumMarkupPercent, priceVersion, ProviderPriceSheet, splitUsagePeriod } from '@cloudbrowser/contracts';
 import { meterUsage } from '@cloudbrowser/engine';
-import { createDb, prepaidBalance, reservationQuote } from '@cloudbrowser/db';
+import { createDb, prepaidAccess, prepaidBalance, reservationQuote } from '@cloudbrowser/db';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { billingSweep } from '../src/billing/sweep.js';
 import { creemFrom } from '../src/billing/creem.js';
-import { applyBalance } from '../src/billing/ledger.js';
+import { applyBalance, freezeAccount } from '../src/billing/ledger.js';
+import { accessToken, adminCall, configureAdmin, mockAccessJwks } from './admin-helpers.js';
 import { setup, signIn, SIMULATED_SHEET } from './helpers.js';
 
 const SECRET = 'whsec_test';
@@ -289,6 +290,111 @@ describe('prepaid balance', () => {
     Object.assign(t.env, { CREEM_API_KEY: undefined });
     expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_10' })).body.type).toBe('billing_unavailable');
     expect((await t.call('GET', '/api/v1/billing')).body.enabled).toBe(false);
+  });
+});
+
+describe('payment dispute hold', () => {
+  const DAY = 86_400_000;
+  const db = () => createDb(t.d1 as never);
+  const engineDeps = (at: number) => ({ db: db(), now: () => new Date(at), notify: () => {} }) as never;
+  const sweep = (at: number) => billingSweep(t.env as never, db(), creemFrom(t.env as never), new Date(at), { nightly: false });
+  const hold = (id: string) => t.d1.sqlite.prepare('SELECT retention_started_at AS started, retention_ends_at AS ends FROM browser_reservations WHERE instance_id = ?').get(id) as { started: number | null; ends: number | null };
+  const deletions = () => (t.d1.sqlite.prepare("SELECT count(*) AS n FROM operations WHERE kind = 'delete'").get() as { n: number }).n;
+  async function runStops() {
+    for (const op of t.d1.sqlite.prepare("SELECT id FROM operations WHERE kind = 'stop' AND finished_at IS NULL").all() as { id: string }[]) {
+      await t.env.OPERATIONS.send({ operationId: op.id });
+    }
+    await t.settle();
+  }
+  async function unfreeze() {
+    configureAdmin(t);
+    mockAccessJwks(creem.fetch);
+    return adminCall(t, await accessToken(), 'POST', `/api/v1/admin/users/${userId}/unfreeze`, { reason: 'dispute resolved' });
+  }
+  async function browser(credit: number) {
+    prepaid();
+    await applyBalance(db(), { userId, kind: 'adjustment', amountMicros: credit, reference: 'credit', actor: 'test' }, new Date());
+    const created = await t.call('POST', '/api/v1/instances', { name: 'w', regionId: 'tyo1', storageGb: 10, priceVersion: await quoteVersion('tyo1') }, { 'idempotency-key': 'w' });
+    await t.settle();
+    expect((await t.call('GET', `/api/v1/instances/${created.body.instanceId}`)).body.status).toBe('running');
+    return created.body.instanceId as string;
+  }
+
+  it('stops a disputed account that still has credit without ever starting the seven-day deletion clock', async () => {
+    const id = await browser(50_000_000);
+    const { id: checkout, paid } = await topUp();
+    await webhook(event('checkout.completed', { id: checkout }));
+    // Only the $10 top-up is disputed: the account is on hold with about $50 still available.
+    await webhook(event('dispute.created', { id: 'dsp_1', amount: 1100, currency: 'USD', order: (paid.order as { id: string }).id }));
+    expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ frozen: true, exhaustedAt: null });
+    expect((await prepaidBalance(db(), userId)).availableMicros).toBeGreaterThan(40_000_000);
+
+    const start = Date.now();
+    expect((await meterUsage(engineDeps(start))).stopped).toBe(1);
+    expect(JSON.parse(String((t.d1.sqlite.prepare("SELECT params FROM operations WHERE kind = 'stop'").get() as { params: string }).params))).toMatchObject({ reason: 'frozen' });
+    await runStops();
+    expect((await t.call('GET', `/api/v1/instances/${id}`)).body).toMatchObject({ status: 'sleeping', deletesAt: null });
+    // Well past seven days on hold: nothing is scheduled for deletion and nobody is told credit ran out.
+    for (const day of [1, 3, 6.5, 8]) {
+      await meterUsage(engineDeps(start + day * DAY));
+      expect(await sweep(start + day * DAY)).toMatchObject({ notices: 0, deleted: 0 });
+    }
+    expect(hold(id)).toEqual({ started: null, ends: null });
+    expect(deletions()).toBe(0);
+    expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ exhaustedAt: null, retained: [] });
+    expect(t.emails.filter((m) => /credit ran out|will be deleted/.test(m.subject ?? ''))).toEqual([]);
+    expect(t.emails.filter((m) => /on hold because of a payment dispute/.test(m.text))).toHaveLength(1);
+
+    // Lifting the hold leaves nothing to repair: the browser can simply be opened again.
+    expect((await unfreeze()).status).toBe(200);
+    await meterUsage(engineDeps(start + 8 * DAY + 60_000));
+    expect(hold(id)).toEqual({ started: null, ends: null });
+    expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ frozen: false, exhaustedAt: null });
+    expect((await t.call('POST', `/api/v1/instances/${id}/start`, undefined, { 'idempotency-key': 'wake' })).status).toBe(202);
+  });
+
+  it('pauses a deletion clock that was already running while the account is on hold', async () => {
+    const quote = (await reservationQuote(db(), 'tyo1', { storageGb: 10, backupsEnabled: false }))!;
+    const id = await browser(quote.requiredMicros + 1_000_000);
+    await applyBalance(db(), { userId, kind: 'adjustment', amountMicros: -(await prepaidBalance(db(), userId)).availableMicros, reference: 'spent', actor: 'test' }, new Date());
+    const start = Date.now();
+    await meterUsage(engineDeps(start));
+    await runStops();
+    expect(hold(id)).toEqual({ started: start, ends: start + 7 * DAY });
+    expect((await sweep(start + DAY)).notices).toBe(1);
+    // Two days after credit ran out, a dispute puts the account on hold.
+    await freezeAccount(db(), userId, 'dispute', new Date(start + 2 * DAY));
+
+    // No reminder and no deletion while on hold, even after the original deadline.
+    await meterUsage(engineDeps(start + 6.5 * DAY));
+    expect((await sweep(start + 6.5 * DAY)).notices).toBe(0);
+    expect((await sweep(start + 8 * DAY)).deleted).toBe(0);
+    expect(deletions()).toBe(0);
+
+    // Lifted on day ten: the five days that were left when the hold began count again from then.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(start + 10 * DAY);
+      expect((await unfreeze()).status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(hold(id)).toEqual({ started: start, ends: start + 15 * DAY });
+    expect((await sweep(start + 15 * DAY - 1)).deleted).toBe(0);
+    expect((await sweep(start + 15 * DAY)).deleted).toBe(1);
+  });
+
+  it('ends a deletion clock that an earlier version started for a disputed account with credit when the hold is lifted', async () => {
+    const id = await browser(50_000_000);
+    const now = Date.now();
+    await freezeAccount(db(), userId, 'dispute', new Date(now));
+    // What enforcement used to do to a frozen account: treat its credit as gone.
+    t.d1.sqlite.prepare('UPDATE browser_reservations SET retention_started_at = ?, retention_ends_at = ? WHERE instance_id = ?').run(now, now + 7 * DAY, id);
+    t.d1.sqlite.prepare('UPDATE billing_accounts SET exhausted_at = ? WHERE user_id = ?').run(now, userId);
+    expect((await unfreeze()).status).toBe(200);
+    expect(hold(id)).toEqual({ started: null, ends: null });
+    expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ frozen: false, exhaustedAt: null, retained: [] });
+    expect(await prepaidAccess(db(), userId, id)).toMatchObject({ allowed: true });
   });
 });
 

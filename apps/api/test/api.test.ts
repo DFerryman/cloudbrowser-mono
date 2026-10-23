@@ -140,6 +140,25 @@ describe('browsers', () => {
     expect(Date.parse(resumed.body.sleepAt)).toBeGreaterThan(Date.now() + 590_000);
   });
 
+  it('applies no part of a settings change that is refused, coding-agent access included', async () => {
+    const created = await t.call('POST', '/api/v1/instances', { name: 'Work', regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': 'settings' });
+    await t.settle();
+    const path = `/api/v1/instances/${created.body.instanceId}`;
+    const updates = () => (t.d1.sqlite.prepare(`SELECT count(*) AS n FROM events WHERE type = 'instance.updated'`).get() as { n: number }).n;
+    const accessChanges = () => (t.d1.sqlite.prepare(`SELECT count(*) AS n FROM audit_log WHERE action LIKE 'automation.access_%'`).get() as { n: number }).n;
+    const before = updates();
+    expect(await t.call('PATCH', path, { agentAccess: false, idleTimeoutS: 61 })).toMatchObject({ status: 400, body: { type: 'validation_failed' } });
+    expect(await t.call('PATCH', path, { agentAccess: false, name: 'Renamed', idleTimeoutS: 0 })).toMatchObject({ status: 400, body: { type: 'validation_failed' } });
+    expect((await t.call('GET', path)).body).toMatchObject({ name: 'Work', agentAccess: true, idleTimeoutS: 600 });
+    expect(accessChanges()).toBe(0);
+    expect(updates()).toBe(before);
+
+    // Accepted, the whole change is applied and announced.
+    expect(await t.call('PATCH', path, { agentAccess: false, idleTimeoutS: 1800 })).toMatchObject({ status: 200, body: { agentAccess: false, idleTimeoutS: 1800 } });
+    expect(accessChanges()).toBe(1);
+    expect(updates()).toBe(before + 1);
+  });
+
   it('lets a user own three browsers by default and rejects a fourth', async () => {
     for (const k of ['a', 'b', 'c']) {
       const created = await t.call('POST', '/api/v1/instances', { name: k, regionId: 'tyo1', storageGb: 10, priceVersion: await quote() }, { 'idempotency-key': k });
@@ -525,11 +544,39 @@ describe('gateway internal API and live view', () => {
 
     // A TURN outage is reported, not hidden behind a token without relay servers.
     turn.mockImplementationOnce(async () => new Response('down', { status: 503 }));
-    expect((await t.call('GET', `/api/v1/sessions/${open.body.session.id}/connect`)).status).toBeGreaterThanOrEqual(500);
+    expect(await t.call('GET', `/api/v1/sessions/${open.body.session.id}/connect`)).toMatchObject({ status: 503, body: { type: 'viewer_unavailable' } });
 
     const claims = await verifyViewerToken(keys.publicJwk, info.token);
     t.d1.sqlite.prepare('UPDATE viewer_sessions SET ended_at = ? WHERE id = ?').run(Date.now(), open.body.session.id);
     expect(await internalApi(t.env as never).redeemViewerToken(claims!)).toBe(false);
+    turn.mockRestore();
+  });
+
+  it('mints TURN credentials only while the browser runs, within a per-user budget, and gives up on a slow relay API', async () => {
+    Object.assign(t.env, { LIVE_VIEW: 'on', GATEWAY_URL: 'wss://connect.test', VIEWER_TOKEN_PRIVATE_KEY: JSON.stringify(keys.privateJwk), TURN_KEY_ID: 'k', TURN_KEY_API_TOKEN: 'secret' });
+    const turn = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({ iceServers: [
+      { urls: ['turn:turn.cloudflare.com:3478?transport=udp'], username: 'u', credential: 'c' },
+    ] }));
+    const id = await createRunning();
+    const sid = (await t.call('POST', `/api/v1/instances/${id}/sessions`)).body.session.id as string;
+    const connect = () => t.call('GET', `/api/v1/sessions/${sid}/connect`);
+    const limited: string[] = [];
+    Object.assign(t.env, { API_LIMITER: { limit: async ({ key }: { key: string }) => ({ success: limited.push(key) <= 3 }) } });
+
+    t.d1.sqlite.prepare("UPDATE browser_instances SET status = 'starting' WHERE id = ?").run(id);
+    expect(await connect()).toMatchObject({ status: 409, body: { type: 'invalid_state' } });
+    expect(turn).not.toHaveBeenCalled();
+    t.d1.sqlite.prepare("UPDATE browser_instances SET status = 'running' WHERE id = ?").run(id);
+
+    // The relay API call has a deadline; when it passes, the viewer hears the live view is unavailable.
+    turn.mockRejectedValueOnce(new DOMException('The operation timed out.', 'TimeoutError'));
+    expect(await connect()).toMatchObject({ status: 503, body: { type: 'viewer_unavailable' } });
+    expect(turn.mock.calls[0]![1]!.signal).toBeInstanceOf(AbortSignal);
+    expect((await connect()).status).toBe(200);
+    expect((await connect()).status).toBe(200);
+    expect(await connect()).toMatchObject({ status: 429, body: { type: 'rate_limited' } });
+    expect(turn).toHaveBeenCalledTimes(3);
+    expect(limited.every((key) => key.startsWith('connect:'))).toBe(true);
     turn.mockRestore();
   });
 });

@@ -123,6 +123,37 @@ describe('seven-day prepaid resource deposits', () => {
     expect(await state()).toMatchObject({ balanceMicros: quote.requiredMicros + 1_000_000, reservedMicros: quote.requiredMicros, availableMicros: 1_000_000 });
   });
 
+  it('answers 402 to the create that loses the race for credit after both passed the balance check', async () => {
+    const quote = (await reservationQuote(db(), 'tyo1', { storageGb: 10, backupsEnabled: false }))!;
+    await credit(quote.requiredMicros + 1_000_000);
+    const priceVersion = await version();
+    // Hold the first create's transaction until the second one has been admitted too, as two
+    // Workers can on D1: then only the funding trigger tells them apart.
+    const original = t.d1.batch.bind(t.d1);
+    let admitted!: () => void;
+    const both = new Promise<void>((resolve) => { admitted = resolve; });
+    let creates = 0;
+    t.d1.batch = (async (statements: D1PreparedStatement[]) => {
+      if (statements.some((s) => /insert into "browser_reservations"/.test((s as unknown as { sql: string }).sql))) {
+        if (++creates === 2) admitted();
+        await both;
+      }
+      return original(statements);
+    }) as typeof t.d1.batch;
+    try {
+      const responses = await Promise.all(['First', 'Second'].map((name) => t.call('POST', '/api/v1/instances',
+        { name, regionId: 'tyo1', storageGb: 10, priceVersion }, { 'idempotency-key': `race:${name}` })));
+      expect(creates).toBe(2);
+      expect(responses.map((r) => r.status).sort()).toEqual([202, 402]);
+      expect(responses.find((r) => r.status === 402)?.body.type).toBe('insufficient_balance');
+    } finally {
+      t.d1.batch = original;
+    }
+    await t.settle();
+    expect(one('SELECT count(*) AS n FROM browser_instances').n).toBe(1);
+    expect(one('SELECT count(*) AS n FROM browser_reservations').n).toBe(1);
+  });
+
   it('refuses waking, viewing and additional resources when only held credit remains', async () => {
     await credit(10_000_000);
     const id = await browser();

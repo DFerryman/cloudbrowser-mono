@@ -7,6 +7,7 @@ import { setup, signIn } from './helpers.js';
 
 const START = Date.parse('2026-10-18T00:00:00Z');
 const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
 let t: ReturnType<typeof setup>;
 let userId: string;
 let seq = 0;
@@ -159,6 +160,20 @@ describe('funded time', () => {
     expect(t.emails.filter((e) => e.subject?.includes('Nevazu credit'))).toHaveLength(4);
     expect(id).toBeTruthy();
   });
+
+  it('sends a warning whose email failed on the next sweep', async () => {
+    await change('topup', 50_000_000);
+    await create();
+    await meter();
+    const { burnHourMicros } = await accountRunway(db(), userId, new Date());
+    await setAvailable(Math.round(burnHourMicros * 20));
+    vi.spyOn(t.env.EMAIL, 'send').mockRejectedValueOnce(new Error('Email Service unavailable'));
+    expect((await sweep()).runway).toBe(0);
+    expect(t.d1.sqlite.prepare('SELECT runway_warned_hours AS h FROM billing_accounts WHERE user_id = ?').get(userId)).toEqual({ h: null });
+    expect((await sweep()).runway).toBe(1);
+    expect((await sweep()).runway).toBe(0);
+    expect(t.emails.filter((e) => e.subject?.includes('Nevazu credit')).map((e) => e.subject)).toEqual(['Your Nevazu credit lasts less than 24 hours']);
+  });
 });
 
 describe('when credit runs out', () => {
@@ -195,6 +210,28 @@ describe('when credit runs out', () => {
     await t.settle();
     expect((await t.call('GET', `/api/v1/instances/${id}`)).body).toMatchObject({ status: 'running', stopReason: null, idleTimeoutS: 0 });
   });
+
+  it('sends a reminder whose email failed on the next sweep, the final one too', async () => {
+    await change('topup', 50_000_000);
+    await create();
+    await meter();
+    await setAvailable(0);
+    vi.setSystemTime(START + 60_000);
+    await meter();
+    const send = vi.spyOn(t.env.EMAIL, 'send');
+    const reminders = () => t.emails.filter((e) => /credit ran out|will be deleted/.test(e.subject ?? '')).map((e) => e.subject);
+    send.mockRejectedValueOnce(new Error('Email Service unavailable'));
+    expect((await sweep()).notices).toBe(0);
+    expect((await sweep()).notices).toBe(1);
+    expect((await sweep()).notices).toBe(0);
+    // A day before deletion.
+    vi.setSystemTime(START + 60_000 + 6.5 * DAY);
+    send.mockRejectedValueOnce(new Error('Email Service unavailable'));
+    expect((await sweep()).notices).toBe(0);
+    expect((await sweep()).notices).toBe(1);
+    expect((await sweep()).notices).toBe(0);
+    expect(reminders()).toEqual(['Your Nevazu credit ran out: your browsers have stopped', 'Final reminder: your Nevazu browsers will be deleted within 24 hours']);
+  });
 });
 
 describe('notices the engine queues', () => {
@@ -208,5 +245,34 @@ describe('notices the engine queues', () => {
     expect(t.emails.at(-2)!.text).toMatch(/An administrator stopped "Work"\.[\s\S]*It will not restart by itself, even if it was set to Never sleep/);
     expect(t.emails.at(-1)!.text).toMatch(/does not resume by itself/);
     expect((await sweep()).userNotices).toBe(0);
+  });
+
+  it('sends a notice whose email failed on a later sweep, and drops one still failing after a day', async () => {
+    const add = (id: string) => t.d1.sqlite.prepare(`INSERT INTO user_notices (id, user_id, kind, instance_id, data, created_at)
+      VALUES (?, ?, 'stopped', 'i1', '{"name":"Work","reason":"suspended"}', ?)`).run(id, userId, Date.now());
+    const pending = () => (t.d1.sqlite.prepare('SELECT id FROM user_notices WHERE sent_at IS NULL').all() as { id: string }[]).map((n) => n.id);
+    const send = vi.spyOn(t.env.EMAIL, 'send');
+    add('stop:op1');
+    send.mockRejectedValueOnce(new Error('Email Service unavailable'));
+    expect((await sweep()).userNotices).toBe(0);
+    expect(pending()).toEqual(['stop:op1']);
+    expect((await sweep()).userNotices).toBe(1);
+    expect(pending()).toEqual([]);
+    expect(t.emails.at(-1)!.subject).toBe('Your Nevazu browser "Work" was stopped');
+
+    // An address that keeps failing must not hold up the queue for ever.
+    add('stop:op2');
+    send.mockRejectedValue(new Error('Recipient rejected'));
+    expect((await sweep()).userNotices).toBe(0);
+    vi.setSystemTime(Date.now() + DAY);
+    expect((await sweep()).userNotices).toBe(1);
+    expect(pending()).toEqual([]);
+
+    // Without an email binding (local development) nothing is retried.
+    send.mockRestore();
+    Object.assign(t.env, { EMAIL: undefined });
+    add('stop:op3');
+    expect((await sweep()).userNotices).toBe(1);
+    expect(pending()).toEqual([]);
   });
 });

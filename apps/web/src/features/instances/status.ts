@@ -37,5 +37,11 @@ export function regionInfo(id: Instance['regionId']) {
   return REGION_INFO[id];
 }
 
+/**
+ * Whether a new browser can still come up by itself: creation keeps retrying through a capacity
+ * shortage or a provider problem, so only another status ends the wait to open it.
+ */
+export const stillCreating = (s: InstanceStatus) => s === 'creating' || s === 'waiting_capacity' || s === 'provider_issue';
+
 /** True while an operation is moving the browser between states. */
 export const isTransitioning = (i: Instance) => ['creating', 'starting', 'stopping'].includes(i.status) || !!i.currentOperation;

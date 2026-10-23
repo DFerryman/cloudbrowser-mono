@@ -1,6 +1,9 @@
 import type { IceServer } from '@cloudbrowser/contracts';
 import type { Env } from './env.js';
 
+/** The TURN API normally answers within a second; a viewer is not kept waiting much longer. */
+const TURN_API_TIMEOUT_MS = 5_000;
+
 /**
  * Short-lived Cloudflare Realtime TURN credentials (page 5). Returns no servers when no TURN key is
  * configured, which only works on networks where direct connections succeed.
@@ -11,6 +14,7 @@ export async function turnIceServers(env: Env, ttlSeconds: number): Promise<IceS
     method: 'POST',
     headers: { authorization: `Bearer ${env.TURN_KEY_API_TOKEN}`, 'content-type': 'application/json' },
     body: JSON.stringify({ ttl: ttlSeconds }),
+    signal: AbortSignal.timeout(TURN_API_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`TURN credentials: ${res.status} ${await res.text()}`);
   const { iceServers } = (await res.json()) as { iceServers: IceServer[] };

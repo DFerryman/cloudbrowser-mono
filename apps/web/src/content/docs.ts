@@ -18,7 +18,7 @@ const en: Article[] = [
       { ul: [
         'Open Browsers and choose New browser.',
         'Give it a name and pick a region. The region and its IP stay with the browser for its whole life.',
-        'Review the estimated cost and create it. Setting up takes about 1–2 minutes: we reserve the IP, create encrypted storage, start Chrome and check from inside Chrome that websites see the right IP.',
+        'Review the estimated cost and create it. Setting up usually takes 4–9 minutes, once: we reserve the IP, create encrypted storage, set up Chrome on its new machine and check from inside Chrome that websites see the right IP.',
       ] },
       { p: 'When the IP check passes, the browser opens automatically.' },
       { h: 'Open, sleep and wake' },
@@ -231,7 +231,7 @@ const zh: Article[] = [
       { ul: [
         '打开“浏览器”，选择“新建浏览器”。',
         '填写名称并选择地区。地区和 IP 会在浏览器的整个生命周期内保持不变。',
-        '确认预估费用后创建。准备过程约 1–2 分钟：预留 IP、创建加密存储、启动 Chrome，并在 Chrome 内确认网站看到的是正确的 IP。',
+        '确认预估费用后创建。首次准备通常需要 4–9 分钟：预留 IP、创建加密存储、在新机器上安装并启动 Chrome，并在 Chrome 内确认网站看到的是正确的 IP。',
       ] },
       { p: 'IP 检查通过后，浏览器会自动打开。' },
       { h: '打开、休眠与唤醒', id: 'open' },

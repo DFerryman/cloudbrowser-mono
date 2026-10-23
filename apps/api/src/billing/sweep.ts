@@ -5,19 +5,21 @@
  *  - sends the credit emails (funded-time and low-balance warnings, credit ran out / deletion
  *    reminders) and the notices the engine queues; see ../notifications/user.ts for each one's rule;
  *  - permanently deletes each browser at its seven-day reservation deadline after usable credit
- *    runs out; unused held credit is released;
+ *    runs out; unused held credit is released. Never while a dispute hold is on: the clock is
+ *    paused until an operator lifts it (unfreezeAccount);
  *  - once a night, credits top-ups whose webhook never arrived (Creem's checkout is re-read).
  */
 import { billingRequired, operationRow, schema, type Db } from '@cloudbrowser/db';
-import { and, eq, gte, isNotNull, isNull, lte, notInArray, sql } from 'drizzle-orm';
+import { and, eq, gte, isNotNull, isNull, lte, notInArray, sql, type Column } from 'drizzle-orm';
 import type { Env } from '../env.js';
 import { lowBalanceNotices, retentionNotices, runwayWarnings, sendUserNotices } from '../notifications/user.js';
 import type { Creem } from './creem.js';
 import { notifyHub, refreshTopupPacks } from './ledger.js';
 import { creditCheckout, pendingWebhooks, processWebhook } from './webhooks.js';
 
-const { auditLog, browserInstances, topupCheckouts, topupPacks, operations, events, browserReservations } = schema;
+const { auditLog, billingAccounts, browserInstances, topupCheckouts, topupPacks, operations, events, browserReservations } = schema;
 const DAY = 86_400_000;
+const notFrozen = (userId: Column | string) => sql`NOT EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${userId} AND ${billingAccounts.frozenAt} IS NOT NULL)`;
 
 export async function billingSweep(env: Env, db: Db, creem: Creem | null, now: Date, opts: { nightly: boolean }) {
   const summary = { webhooks: 0, packs: 0, runway: 0, lowBalance: 0, notices: 0, deleted: 0, credited: 0, userNotices: 0 };
@@ -43,7 +45,8 @@ export async function billingSweep(env: Env, db: Db, creem: Creem | null, now: D
   summary.userNotices = await sendUserNotices(env, db, now);
 
   if (await billingRequired(db)) {
-    const due = await db.selectDistinct({ userId: browserReservations.userId }).from(browserReservations).where(lte(browserReservations.retentionEndsAt, now));
+    const due = await db.selectDistinct({ userId: browserReservations.userId }).from(browserReservations)
+      .where(and(lte(browserReservations.retentionEndsAt, now), notFrozen(browserReservations.userId)));
     for (const a of due) summary.deleted += await deleteBrowsers(env, db, a.userId, now);
   }
 
@@ -80,10 +83,12 @@ async function deleteBrowsers(env: Env, db: Db, userId: string, now: Date): Prom
     try {
       const op = operationRow({ instanceId: inst.id, userId: null, kind: 'delete', params: { reason: 'billing', purgeNow: true }, now });
       // Recheck the reservation in the deletion transaction. A sufficient concurrent top-up
-      // restores its deposit and cancels expiry even if this sweep selected it earlier.
+      // restores its deposit and cancels expiry even if this sweep selected it earlier, and a
+      // dispute hold placed meanwhile pauses it.
       const eligible = sql`EXISTS (SELECT 1 FROM ${browserReservations} WHERE ${browserReservations.instanceId} = ${inst.id}
         AND ${browserReservations.retentionStartedAt} IS NOT NULL AND ${browserReservations.retentionEndsAt} <= ${now.getTime()})
-        AND EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${inst.id} AND ${browserInstances.status} NOT IN ('deleting', 'purged', 'failed'))`;
+        AND EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${inst.id} AND ${browserInstances.status} NOT IN ('deleting', 'purged', 'failed'))
+        AND ${notFrozen(userId)}`;
       const exists = sql`EXISTS (SELECT 1 FROM ${operations} WHERE ${operations.id} = ${op.id})`;
       const [inserted] = await db.batch([
         db.insert(operations).select(sql`SELECT ${op.id}, ${inst.id}, NULL, 'delete', 'queued', NULL, 0, NULL, NULL, NULL,

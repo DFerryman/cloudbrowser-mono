@@ -83,6 +83,16 @@ describe('prepaid runtime boundaries', () => {
     expect(requests).toBe(3);
   });
 
+  it('tells the owner of a suspended browser it is suspended, not that credit ran out', async () => {
+    await credit(10_000_000);
+    const id = await create();
+    const session = (await t.call('POST', `/api/v1/instances/${id}/sessions`)).body.session.id as string;
+    t.d1.sqlite.prepare('UPDATE browser_instances SET suspended_at = ? WHERE id = ?').run(Date.now(), id);
+    const suspended = { status: 403, body: { type: 'suspended', detail: 'This browser is suspended. Contact support.' } };
+    expect(await t.call('POST', `/api/v1/sessions/${session}/heartbeat`, { input: false })).toMatchObject(suspended);
+    expect(await t.call('POST', `/api/v1/instances/${id}/sessions`)).toMatchObject(suspended);
+  });
+
   it.each([600, 0])('renews funded access without treating the lease as balance exhaustion with timeout %s', async (idleTimeoutS) => {
     await credit(10_000_000);
     const id = await create(); await meter();

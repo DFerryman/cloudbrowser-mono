@@ -5,11 +5,17 @@
  */
 import { MICROS_PER_USD, type TopUpPack } from '@cloudbrowser/contracts';
 import { eventRow, newId, pricingSettings, reservedTotalSql, schema, type Db } from '@cloudbrowser/db';
-import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import type { Env } from '../env.js';
 import type { Creem } from './creem.js';
 
 const { balanceTransactions, billingAccounts, events, topupPacks, auditLog, browserInstances, browserReservations } = schema;
+
+/** The reservation's browser is kept: not deleted or being deleted. */
+const keptBrowser = sql`EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${browserReservations.instanceId} AND ${browserInstances.desiredState} <> 'deleted' AND ${browserInstances.status} NOT IN ('deleting', 'purged', 'failed'))`;
+/** The balance covers every kept browser's full deposit plus the minimum balance: retention can end. */
+const depositsFunded = (userId: string, minimum: number) => sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${userId}
+  AND ${billingAccounts.balanceMicros} >= coalesce((SELECT sum(br.required_micros) FROM browser_reservations br JOIN browser_instances bi ON bi.id = br.instance_id WHERE br.user_id = ${userId} AND bi.desired_state <> 'deleted' AND bi.status NOT IN ('deleting', 'purged', 'failed')), 0) + ${minimum})`;
 
 export type BalanceKind = 'topup' | 'refund' | 'dispute' | 'adjustment' | 'promotion' | 'signup';
 
@@ -82,10 +88,7 @@ export async function applyBalance(
     // A top-up restores spent retention deposits only when all of them and usable credit fit.
     db.update(browserReservations).set({ reservedMicros: sql`${browserReservations.requiredMicros}`,
       retentionStartedAt: null, retentionEndsAt: null, updatedAt: now,
-    }).where(and(eq(browserReservations.userId, change.userId), sql`${amount} > 0`,
-      sql`EXISTS (SELECT 1 FROM ${browserInstances} WHERE ${browserInstances.id} = ${browserReservations.instanceId} AND ${browserInstances.desiredState} <> 'deleted' AND ${browserInstances.status} NOT IN ('deleting', 'purged', 'failed'))`,
-      sql`EXISTS (SELECT 1 FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${change.userId}
-        AND ${billingAccounts.balanceMicros} >= coalesce((SELECT sum(br.required_micros) FROM browser_reservations br JOIN browser_instances bi ON bi.id = br.instance_id WHERE br.user_id = ${change.userId} AND bi.desired_state <> 'deleted' AND bi.status NOT IN ('deleting', 'purged', 'failed')), 0) + ${minimum})`)),
+    }).where(and(eq(browserReservations.userId, change.userId), sql`${amount} > 0`, keptBrowser, depositsFunded(change.userId, minimum))),
     db
       .update(balanceTransactions)
       .set({ appliedAt: now })
@@ -111,6 +114,26 @@ export async function applyBalance(
 export async function freezeAccount(db: Db, userId: string, reason: string, now: Date) {
   await db.insert(billingAccounts).values({ userId, balanceMicros: 0, updatedAt: now }).onConflictDoNothing();
   await db.update(billingAccounts).set({ frozenAt: now, frozenReason: reason, updatedAt: now }).where(eq(billingAccounts.userId, userId));
+}
+
+/**
+ * Lifts a dispute hold. Nothing could be deleted while it was on, so a deletion clock that was
+ * already running resumes with the time it had left. A balance that funds every deposit ends
+ * retention, as a top-up does; that also repairs clocks earlier versions started for a frozen
+ * account that still had credit. Browsers stay asleep until they are opened.
+ */
+export async function unfreezeAccount(db: Db, userId: string, now: Date) {
+  const minimum = Math.max(1, (await pricingSettings(db)).minBalanceMicros);
+  const frozenAt = sql`(SELECT ${billingAccounts.frozenAt} FROM ${billingAccounts} WHERE ${billingAccounts.userId} = ${userId})`;
+  await db.batch([
+    db.update(browserReservations).set({ retentionEndsAt: sql`${browserReservations.retentionEndsAt} + ${now.getTime()} - max(${frozenAt}, ${browserReservations.retentionStartedAt})`, updatedAt: now })
+      .where(and(eq(browserReservations.userId, userId), isNotNull(browserReservations.retentionStartedAt), sql`${browserReservations.retentionEndsAt} > ${frozenAt}`)),
+    db.update(browserReservations).set({ reservedMicros: sql`${browserReservations.requiredMicros}`, retentionStartedAt: null, retentionEndsAt: null, updatedAt: now })
+      .where(and(eq(browserReservations.userId, userId), isNotNull(browserReservations.retentionStartedAt), keptBrowser, depositsFunded(userId, minimum))),
+    db.update(billingAccounts).set({ exhaustedAt: null }).where(and(eq(billingAccounts.userId, userId), sql`${billingAccounts.balanceMicros} - ${reservedTotalSql(userId)} >= ${minimum}`)),
+    db.update(billingAccounts).set({ frozenAt: null, frozenReason: null, updatedAt: now }).where(eq(billingAccounts.userId, userId)),
+    db.insert(events).values(eventRow(userId, 'entitlements.updated', { balance: true }, now)),
+  ]);
 }
 
 /**

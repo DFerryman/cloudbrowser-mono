@@ -11,7 +11,7 @@ import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import { isAdminEmail } from '../admin/access.js';
 import { acknowledgeAlert } from '../notifications/admin.js';
-import { applyBalance, notifyHub } from '../billing/ledger.js';
+import { applyBalance, notifyHub, unfreezeAccount } from '../billing/ledger.js';
 import type { AppEnv } from '../env.js';
 import { systemOperation } from '../ops.js';
 import { pageQuery } from '../paging.js';
@@ -540,14 +540,14 @@ adminRoute.post('/users/:id/reset-two-factor', async (c) => {
   return c.json({ ok: true });
 });
 
-/** Lifts the hold placed on an account by a payment dispute. */
+/** Lifts the hold placed on an account by a payment dispute; its paused deletion clock resumes. */
 adminRoute.post('/users/:id/unfreeze', async (c) => {
   const db = c.get('db');
   const id = c.req.param('id');
   const { reason } = await body(c, z.object({ reason: z.string().trim().min(3).max(500) }));
   const [u] = await db.select({ id: user.id }).from(user).where(eq(user.id, id));
   if (!u) throw problem(404, 'not_found');
-  await db.update(billingAccounts).set({ frozenAt: null, frozenReason: null, updatedAt: new Date() }).where(eq(billingAccounts.userId, id));
+  await unfreezeAccount(db, id, new Date());
   await audit(db, c, 'user.unfreeze', `user:${id}`, { reason });
   c.executionCtx.waitUntil(notifyHub(c.env, id));
   return c.json({ ok: true });

@@ -8,12 +8,14 @@
  * | Registration link / already registered | Sign-up, or sign-in for an address with no account | Rate limited per IP and address (AUTH_LIMITER)  |
  * | Credit lasts < 24 / 6 / 1 h   | Funded time at current spending crosses each mark | Once per mark while credit keeps falling; re-armed 25% above it |
  * | Low balance                   | Available credit drops below the console's threshold | Once per dip, and no sooner than LOW_BALANCE_COOLDOWN_MS after the last one; skipped when a funded-time warning already went out |
- * | Credit ran out / browsers will be deleted | Usable credit is gone            | Three in total: when it happens, after 3 days, 1 day before deletion |
+ * | Credit ran out / browsers will be deleted | Usable credit is gone (not during a dispute hold) | Three in total: when it happens, after 3 days, 1 day before deletion |
  * | Browser stopped / network paused | The engine stopped a browser or paused its network | Once per event (the engine's notice id) |
  * | Reward credited               | A promotion's reward reached the balance          | One email for all rewards credited together, at most one per REWARD_COOLDOWN_MS |
  *
  * Security, credit-exhaustion and browser notices are never held back: they are rare and the user
- * must act on them. Only the advisory ones (low balance, rewards) have a cooldown.
+ * must act on them. Only the advisory ones (low balance, rewards) have a cooldown. Funded-time,
+ * credit-exhaustion, browser and reward emails count as sent only once they went out: a failed one
+ * is tried again by the next sweep (a browser notice for up to NOTICE_RETRY_MS).
  */
 import { DATA_KEPT_DAYS, MICROS_PER_USD, RUNWAY_WARNING_HOURS } from '@cloudbrowser/contracts';
 import { accountRunway, pricingSettings, schema, type Db } from '@cloudbrowser/db';
@@ -34,6 +36,8 @@ export const LOW_BALANCE_COOLDOWN_MS = 3 * DAY;
 export const REWARD_COOLDOWN_MS = DAY;
 /** Rewards earned close together (several tasks finished at once) are collected for this long first. */
 export const REWARD_BATCH_MS = 10 * 60_000;
+/** A browser notice whose email still fails after this long is dropped, so it cannot hold up newer ones. */
+export const NOTICE_RETRY_MS = DAY;
 
 const usd = (micros: number) => `$${(micros / MICROS_PER_USD).toFixed(2)}`;
 const utc = (d: Date) => `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
@@ -126,9 +130,11 @@ export async function runwayWarnings(env: Env, db: Db, now: Date): Promise<numbe
     while (warned !== null && hours >= warned * REARM_FACTOR) warned = thresholds.find((t) => t > warned!) ?? null;
     const due = thresholds.find((t) => hours < t);
     if (due !== undefined && (warned === null || due < warned)) {
-      await sendToUser(env, db, a.userId, runwayMessage(due, hours, runway, `${env.APP_URL}/billing`));
-      warned = due;
-      sent++;
+      // Recorded once it went out; otherwise the next sweep sends it.
+      if (await finished(env, db, a.userId, await sendToUser(env, db, a.userId, runwayMessage(due, hours, runway, `${env.APP_URL}/billing`)))) {
+        warned = due;
+        sent++;
+      }
     }
     if (warned !== a.warned) await db.update(billingAccounts).set({ runwayWarnedHours: warned }).where(eq(billingAccounts.userId, a.userId));
   }
@@ -164,10 +170,11 @@ export async function lowBalanceNotices(env: Env, db: Db, now: Date): Promise<nu
 
 /**
  * Usable credit ran out: name the stopped browsers and their deletion time when it happens, again
- * after three days, and a final reminder a day before deletion.
+ * after three days, and a final reminder a day before deletion. Not while a dispute hold pauses
+ * deletion: the times would be wrong, and lifting the hold moves them (unfreezeAccount).
  */
 export async function retentionNotices(env: Env, db: Db, now: Date): Promise<number> {
-  const out = await db.select().from(billingAccounts).where(isNotNull(billingAccounts.exhaustedAt));
+  const out = await db.select().from(billingAccounts).where(and(isNotNull(billingAccounts.exhaustedAt), isNull(billingAccounts.frozenAt)));
   let sent = 0;
   for (const a of out) {
     const endedAt = a.exhaustedAt!.getTime();
@@ -179,7 +186,9 @@ export async function retentionNotices(env: Env, db: Db, now: Date): Promise<num
     const [done] = await db.select({ id: auditLog.id }).from(auditLog)
       .where(and(eq(auditLog.target, `user:${a.userId}`), eq(auditLog.action, action))).limit(1);
     if (done) continue;
-    await sendToUser(env, db, a.userId, await retentionMessage(db, retention, stage, `${env.APP_URL}/billing`));
+    const delivered = await sendToUser(env, db, a.userId, await retentionMessage(db, retention, stage, `${env.APP_URL}/billing`));
+    // Recorded once it went out, the final reminder too; otherwise the next sweep sends it.
+    if (!(await finished(env, db, a.userId, delivered))) continue;
     await db.insert(auditLog).values({ actor: 'billing', action, target: `user:${a.userId}`, createdAt: now });
     sent++;
   }
@@ -251,12 +260,17 @@ export async function retentionMessage(db: Db, r: Awaited<ReturnType<typeof rete
 /** Emails the notices the engine queued (it has no email binding), oldest first. */
 export async function sendUserNotices(env: Env, db: Db, now: Date): Promise<number> {
   const pending = await db.select().from(userNotices).where(isNull(userNotices.sentAt)).orderBy(asc(userNotices.createdAt)).limit(50);
+  let handled = 0;
   for (const n of pending) {
     const message = noticeMessage(n.kind, n.data, `${env.APP_URL}/browsers${n.instanceId ? `/${n.instanceId}` : ''}`);
-    if (message) await sendToUser(env, db, n.userId, message);
+    if (message && !(await finished(env, db, n.userId, await sendToUser(env, db, n.userId, message)))) {
+      if (now.getTime() - n.createdAt.getTime() < NOTICE_RETRY_MS) continue;
+      console.error('user notice dropped: its email kept failing', n.id);
+    }
     await db.update(userNotices).set({ sentAt: now }).where(eq(userNotices.id, n.id));
+    handled++;
   }
-  return pending.length;
+  return handled;
 }
 
 export function noticeMessage(kind: string, data: Record<string, unknown>, url: string): Message | null {
@@ -320,7 +334,7 @@ export async function rewardNotices(env: Env, db: Db, now: Date): Promise<number
       const [account] = await db.select({ balance: billingAccounts.balanceMicros }).from(billingAccounts).where(eq(billingAccounts.userId, userId));
       // An email that could not go out is retried by the next sweep; a deleted user has nobody to tell.
       const delivered = await sendToUser(env, db, userId, rewardMessage(paid, account?.balance ?? null, `${env.APP_URL}/billing`));
-      if (!delivered && env.EMAIL && (await userExists(db, userId))) continue;
+      if (!(await finished(env, db, userId, delivered))) continue;
       await setState(db, key, now.getTime(), now);
       sent++;
     }
@@ -333,6 +347,14 @@ export async function rewardNotices(env: Env, db: Db, now: Date): Promise<number
 async function userExists(db: Db, userId: string) {
   const [u] = await db.select({ id: schema.user.id }).from(schema.user).where(eq(schema.user.id, userId));
   return !!u;
+}
+
+/**
+ * Whether an email is finished with: it went out, or it never can (no email binding, as in local
+ * development, or the user is gone). Anything else stays pending for the next sweep.
+ */
+async function finished(env: Env, db: Db, userId: string, delivered: boolean) {
+  return delivered || !env.EMAIL || !(await userExists(db, userId));
 }
 
 export function rewardMessage(rows: { rewardMicros: number; title: { en: string; 'zh-CN': string } | null; taskId: string }[], balanceMicros: number | null, url: string): Message {
