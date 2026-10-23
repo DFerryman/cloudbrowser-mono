@@ -248,7 +248,9 @@ export function stripeFrom(env: Env): Stripe | null {
         tax_id_collection: { enabled: true },
         invoice_creation: { enabled: true, invoice_data: { metadata: ids, footer: invoiceFooter(input.appUrl) } },
         // The balance is kept in USD: the buyer is charged the price's own USD amount, which is
-        // what is credited and what refunds are measured against, whatever the dashboard default.
+        // what is credited and what refunds are measured against, whatever the dashboard default
+        // and even if the price has gained other currencies since it was last read.
+        currency: 'usd',
         adaptive_pricing: { enabled: false },
         ...(termsCheckbox
           ? { consent_collection: { terms_of_service: 'required' }, custom_text: { terms_of_service_acceptance: { message } } }

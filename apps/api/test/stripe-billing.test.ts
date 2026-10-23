@@ -323,6 +323,7 @@ describe('Stripe checkout for a UK account', () => {
       'automatic_tax[enabled]': 'true',
       'tax_id_collection[enabled]': 'true',
       'invoice_creation[enabled]': 'true',
+      currency: 'usd',
       'adaptive_pricing[enabled]': 'false',
       'consent_collection[terms_of_service]': 'required',
     });
