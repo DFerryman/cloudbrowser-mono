@@ -39,14 +39,14 @@ packages/
   db/           Drizzle schema + D1 migrations (single schema authority)
   executors/    Executor interface, `aws-ec2` (the only provider) and the `fake` simulator
   viewer/       Live-view client: neko v3 over the gateway, WebRTC, input, IME, clipboard, stats
-  bridge/       Local MCP server pairing a coding agent with a browser (docs/agent-access.md)
   ui/           Design tokens and components
 ```
 
-A **coding agent** (Claude Code, Cursor, Codex, any MCP client) can drive a browser through the same
-Chrome and sign-ins the live view shows, while the user watches and takes control back with a single
-input. Access is on by default and can be turned off per browser. See
-[`docs/agent-access.md`](docs/agent-access.md).
+A **coding agent** (Claude Code, Cursor, Codex CLI, VS Code, Windsurf, Gemini CLI, any MCP client)
+can drive a browser through the same Chrome and sign-ins the live view shows, while the user watches
+and takes control back with a single input. Nothing is installed: the agent adds the browser's
+remote MCP server URL on the session gateway with a per-browser access key. Access is on by default
+and can be turned off per browser. See [`docs/agent-access.md`](docs/agent-access.md).
 
 ## Local development
 
@@ -117,19 +117,26 @@ node packages/viewer/e2e/run.mjs <instance id> <wrangler log> shot.png
 The runner signs in to the real web app, opens the session view and checks that the fake neko's
 WebRTC video plays.
 
-### Coding-agent bridge
+### Coding agents
 
-Pair once from a browser's Settings → Coding agent access, then run the bridge locally:
+Nothing is installed: a coding agent adds the browser's remote MCP server and an access key. Create
+a key in the browser's Settings → Coding agent access; the page shows the URL and a ready-made setup
+for Claude Code, Cursor, Codex CLI, VS Code, Windsurf and Gemini CLI. Locally the gateway listens on
+port 8790:
 
 ```bash
-pnpm --filter @cloudbrowser/bridge build
-node packages/bridge/dist/cli.mjs pair --app http://localhost:8787 --code <code-from-settings>
-node packages/bridge/dist/cli.mjs serve                 # MCP over stdio for your coding agent
+claude mcp add --transport http nevazu-local http://localhost:8790/mcp/<instance id> \
+  --header "Authorization: Bearer nvzk_..."
+# or check it by hand:
+curl -s http://localhost:8790/mcp/<instance id> -H "Authorization: Bearer nvzk_..." \
+  -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-The bridge stores its credential at mode 0600 and exposes `screenshot`, `act`, `upload_files`,
-`attach_files` and `get_status` (docs/agent-access.md). User input uses one ordered WebSocket queue across mouse, touch, keyboard,
-IME and clipboard events, with backpressure and visible failure instead of silent input loss.
+The tools are `screenshot`, `act`, `upload_file`, `attach_files`, `get_status` and `end_session`;
+the browser's Durable Object holds the agent's session (docs/agent-access.md).
+
+User input in the live view uses one ordered WebSocket queue across mouse, touch, keyboard, IME and
+clipboard events, with backpressure and visible failure instead of silent input loss.
 
 On touch screens, tap to click and swipe with one or two fingers to scroll. Use the toolbar's
 keyboard button to show or hide the software keyboard; touching the picture keeps that choice.
