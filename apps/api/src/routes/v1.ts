@@ -825,7 +825,10 @@ v1.openapi(
     if (c.env.API_LIMITER && !(await c.env.API_LIMITER.limit({ key: `connect:${s.userId}` })).success) throw problem(429, 'rate_limited');
     // The credit check, the placement and the TURN credentials are independent: fetch them
     // together rather than one after another, so the viewer can start its handshake sooner.
-    // Nothing is returned unless every check passes.
+    // Nothing is returned unless every check passes. The TURN credentials stay valid for an hour
+    // although the gateway token lasts 60 s: the relay checks them again each time the allocation
+    // is refreshed, so they must outlast the view they carry, not just its handshake. A view that
+    // reconnects fetches new ones here, within the rate limit above.
     const turn = c.env.GATEWAY_URL && c.env.VIEWER_TOKEN_PRIVATE_KEY
       ? turnIceServers(c.env, 3600).then((servers) => ({ servers }), (error: unknown) => ({ error }))
       : null;
