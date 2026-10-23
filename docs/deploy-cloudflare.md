@@ -182,7 +182,8 @@ company itself sells the credit, so VAT and sales tax, invoices and consumer law
 obligations. The integration (`apps/api/src/billing/stripe.ts`) therefore creates each Checkout
 Session with Stripe Tax (`automatic_tax`), the full billing address (evidence of the buyer's
 country), business tax-id collection (VAT numbers; reverse charge for EU businesses), a post-payment
-invoice (shown in the customer portal), a required tick-box accepting the Terms and Refund Policy
+invoice (shown in the customer portal; its footer confirms the right to withdraw, the durable
+confirmation UK consumer law asks for), a required tick-box accepting the Terms and Refund Policy
 and asking for the credit to be added at once (Consumer Contracts Regulations 2013; the Refund
 Policy refunds unused credit to UK and EU consumers who withdraw within 14 days), and Adaptive
 Pricing off, so buyers are charged and refunded the price's USD amount. Strong Customer
@@ -196,10 +197,17 @@ credited on `checkout.session.async_payment_succeeded`. Requests pin Stripe API 
    `https://<your app domain>/terms` (the Terms tick-box needs it; until it is set the same words
    appear above the pay button instead and the console shows an alert) and privacy policy URL.
    Settings → Payouts: add a **USD bank account** if USD payments should be paid out without
-   conversion to GBP.
+   conversion to GBP (otherwise every charge pays Stripe's 2% conversion fee). Settings → Customer
+   emails: turn on emails for successful payments and for invoices. When onboarding, describe the
+   business as prepaid usage credit for your own service, non-transferable and not redeemable for
+   cash: Stripe lists seller-maintained credit as a *restricted* business (extra review, possibly
+   limits), and say what the dedicated IPs are for.
 2. **Stripe Tax:** Settings → Tax → activate; head office (origin) address in the UK; default tax
    behaviour *Exclusive* (tax is added on top of the price, as with Creem; or set it on each
-   price); a default product tax code (see below); and a **registration** for every place you must
+   price; it cannot be changed later); a default product tax code for an electronically supplied
+   service, e.g. `txcd_10103001` (SaaS, business use) or `txcd_10000000` (general electronically
+   supplied services), confirmed with your accountant, and not the gift-card code (credit is taxed
+   when it is bought, not when it is spent); and a **registration** for every place you must
    collect in: the UK once VAT-registered, the EU (One Stop Shop, non-Union scheme) for EU
    consumers, and others as Stripe Tax's threshold monitoring reports them. Stripe Tax collects only
    where a registration is added. In a sandbox without Stripe Tax, set `STRIPE_AUTOMATIC_TAX=off`.
@@ -228,11 +236,21 @@ pnpm exec wrangler secret put STRIPE_TOPUP_PRICES      # price_…,price_… (co
 ```
 
 8. **Console:** *Pricing & margin* → payment fee: replace Creem's 3.9% + $0.40 with what Stripe
-   charges this account (see below), so the margin estimate and minimum markup stay right.
+   charges this account, so the margin estimate and minimum markup stay right. UK pricing
+   (stripe.com/gb/pricing, October 2026): 1.5% + 20p for standard UK cards, 2.8% + 20p premium UK,
+   2.5% + 20p EEA, 3.15% + 20p international, plus 2% when the charge is converted to GBP; Stripe
+   Tax 0.5% where you are registered; post-payment invoices 0.4% (at most $2); £20 per dispute.
+   Without a USD bank account a typical international card costs about 6% + 20p in all, so a fee
+   setting of 600 bps + 27 cents is a cautious start.
 9. **Policies:** the Terms, Privacy and Refund pages name both providers. As the seller, also
    publish the company's legal name, registered number, registered office and VAT number.
 
 To return to Creem, delete one Stripe secret (`pnpm exec wrangler secret delete STRIPE_TOPUP_PRICES`).
+
+Stripe also offers *Managed Payments*, in which Stripe is the merchant of record (available to UK
+businesses after a review, 3.5% on top of the payment fees). It forbids the tax, invoice and
+customer parameters this integration sends, so it would need its own small change; with it, Stripe
+rather than the company would handle VAT registrations and returns.
 
 ### Creem
 

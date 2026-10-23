@@ -313,6 +313,7 @@ describe('Stripe checkout for a UK account', () => {
       'consent_collection[terms_of_service]': 'required',
     });
     expect(p.get('custom_text[terms_of_service_acceptance][message]')).toMatch(/\[Terms of Service\]\(http:\/\/app\.test\/terms\).*withdraw within 14 days/);
+    expect(p.get('invoice_creation[invoice_data][footer]')).toMatch(/withdraw within 14 days.*http:\/\/app\.test\/refunds/);
     expect(p.has('payment_method_types[0]')).toBe(false);
     const create = stripe.calls.find((c) => c.path === '/v1/checkout/sessions')!;
     expect(create.headers['idempotency-key']).toBe(`checkout:${attemptId}`);

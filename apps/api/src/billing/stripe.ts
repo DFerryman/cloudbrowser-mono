@@ -8,8 +8,9 @@
  * Unlike Creem, Stripe is not a merchant of record: the account holder (a UK company) sells the
  * credit itself. So every checkout calculates VAT and sales tax with Stripe Tax, collects the
  * billing address (evidence of the buyer's country) and business tax ids (reverse charge), issues
- * an invoice, asks the buyer to accept the Terms and to have the credit added at once (UK and EU
- * cancellation rules), and stays in USD (Adaptive Pricing off), the balance's currency.
+ * an invoice that confirms the right to withdraw, asks the buyer to accept the Terms and to have
+ * the credit added at once (UK and EU cancellation rules), and stays in USD (Adaptive Pricing off),
+ * the balance's currency.
  * 3D Secure (Strong Customer Authentication) is handled by Checkout itself.
  *
  * No SDK: plain fetch with form-encoded bodies, pinned to one API version so responses keep their
@@ -104,6 +105,11 @@ function topupPrices(env: Env): string[] | null {
 /** The buyer accepts these at checkout: the Terms, and the credit being added at once (UK/EU cancellation rules). */
 export function termsMessage(appUrl: string) {
   return `I agree to the [Terms of Service](${appUrl}/terms) and the [Refund Policy](${appUrl}/refunds), and ask for the credit to be added to my balance at once. I can still withdraw within 14 days and get back any credit I have not used.`;
+}
+
+/** On every invoice: the confirmation, on a durable medium, of the right to withdraw. */
+export function invoiceFooter(appUrl: string) {
+  return `Prepaid credit, added to your balance at once at your request. Consumers in the UK and the EU may withdraw within 14 days of purchase and get back any credit not yet used: ${appUrl}/refunds. Terms of Service: ${appUrl}/terms.`;
 }
 
 /** Stripe's form encoding: nested objects as `a[b]`, arrays as `a[0]`; null and undefined are left out. */
@@ -220,7 +226,7 @@ export function stripeFrom(env: Env): Stripe | null {
         billing_address_collection: 'required',
         automatic_tax: { enabled: automaticTax },
         tax_id_collection: { enabled: true },
-        invoice_creation: { enabled: true, invoice_data: { metadata: ids } },
+        invoice_creation: { enabled: true, invoice_data: { metadata: ids, footer: invoiceFooter(input.appUrl) } },
         // The balance is kept in USD: the buyer is charged the price's own USD amount, which is
         // what is credited and what refunds are measured against, whatever the dashboard default.
         adaptive_pricing: { enabled: false },
