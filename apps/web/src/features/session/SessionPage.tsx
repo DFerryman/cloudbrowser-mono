@@ -334,16 +334,25 @@ export function SessionPage() {
   }, [touchScreen]);
 
   // The frame is laid out within the page on touch screens: the page itself must never scroll.
+  // With the root's overflow hidden, the body's own overflow is not passed to the viewport: the
+  // body clips. A modal layer's scroll lock (the toolbar's menus) sets `position: relative` on the
+  // body, which then becomes the frame's containing block; holding only absolutely positioned
+  // content it was 0 px tall and clipped the whole frame (a black page behind the open menu).
+  // A full-height body cannot clip it.
   useEffect(() => {
     if (!touchScreen) return;
     const html = document.documentElement;
     const body = document.body;
-    const previous = [html.style.overflow, body.style.overflow];
+    const previous = [html.style.overflow, body.style.overflow, html.style.height, body.style.height];
     html.style.overflow = 'hidden';
     body.style.overflow = 'hidden';
+    html.style.height = '100%';
+    body.style.height = '100%';
     return () => {
       html.style.overflow = previous[0]!;
       body.style.overflow = previous[1]!;
+      html.style.height = previous[2]!;
+      body.style.height = previous[3]!;
     };
   }, [touchScreen]);
 
