@@ -908,6 +908,24 @@ describe('metering and the prepaid balance', () => {
     expect(await balance()).toBeUndefined(); // the pilot is free: nothing taken from a balance
   });
 
+  it('charges at most the tier’s price for a capacity fallback that costs more, and records its real cost', async () => {
+    const [stored] = await w.db.select().from(schema.providerPrices).where(eq(schema.providerPrices.regionId, 'tyo1'));
+    const sheet = stored!.sheet as { instanceTypes: Record<string, number> };
+    await w.db.update(schema.providerPrices).set({ sheet: { ...sheet, instanceTypes: { ...sheet.instanceTypes, 'fake.fallback': 0.104, 'fake.cheaper': 0.09 } } })
+      .where(eq(schema.providerPrices.regionId, 'tyo1'));
+    await w.db.update(placements).set({ instanceType: 'fake.fallback' }).where(eq(placements.instanceId, 'inst1'));
+    await meter();
+    w.advance(5 * 60_000);
+    await meter();
+    expect(await usage('compute')).toMatchObject({ unitPriceMicros: 120_000, unitCostMicros: 104_000 });
+    // A cheaper machine is charged at its own price.
+    await w.db.delete(usageRecords);
+    await w.db.update(placements).set({ instanceType: 'fake.cheaper' }).where(eq(placements.instanceId, 'inst1'));
+    w.advance(5 * 60_000);
+    await meter();
+    expect(await usage('compute')).toMatchObject({ unitPriceMicros: 108_000, unitCostMicros: 90_000 });
+  });
+
   it('bills data sent to the internet from the agent’s counter, across a reboot', async () => {
     await meter();
     await w.db.update(instanceHealth).set({ netTxBytes: 1024 ** 3 }).where(eq(instanceHealth.instanceId, 'inst1'));

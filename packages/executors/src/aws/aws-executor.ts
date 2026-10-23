@@ -94,6 +94,8 @@ export const DEFAULT_TIER_INSTANCE_TYPES: Record<BrowserTier, string[]> = {
   premium: ['c7i.xlarge', 'c6i.xlarge', 'c5.xlarge'],
 };
 export const DEFAULT_INSTANCE_TYPES = DEFAULT_TIER_INSTANCE_TYPES.basic;
+/** How much more than the confirmed hourly price a capacity fallback machine may cost (see ensureVm). */
+export const FALLBACK_PRICE_TOLERANCE = 0.05;
 
 /**
  * A tier's launch candidates and zone offerings in a region. Basic without a list, or a config
@@ -518,7 +520,11 @@ export class AwsExecutor implements Executor {
             throw new ExecutorError('invalid', `A current provider price is required for launch candidate ${type}.`);
           }
         }
-        types = types.filter(({ type }) => spec.instanceTypePrices![type]! <= cap);
+        // A fallback for a capacity shortage may cost up to 5% more: Basic's are priced a fraction
+        // of a percent above its first machine in most regions and were otherwise never tried.
+        // The browser is still billed at most its tier's price (metering). The first machine
+        // itself must fit: costing more means prices rose after the user confirmed them.
+        types = types.filter(({ type, index }) => spec.instanceTypePrices![type]! <= (index === 0 ? cap : cap * (1 + FALLBACK_PRICE_TOLERANCE)));
         if (!types.length) throw new NoLaunchCandidate('price', 'No launch candidate fits the confirmed VM hourly price.');
       }
       // A type this zone does not offer fails with Unsupported; skip it instead of asking.

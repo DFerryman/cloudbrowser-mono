@@ -121,8 +121,11 @@ function spendProjection({ all, holds, prices, settings, placementRows }: SpendI
     const sheet = sheets.get(inst.regionId);
     if (!sheet) return null;
     const machine = machines.get(inst.id);
-    // The machine's own price; before its VM exists, its tier's.
-    const vmPrice = machine?.instanceType ? sheet.instanceTypes[machine.instanceType] : tierSheet(sheet, BrowserTier.catch('basic').parse(inst.tier))?.vmHour;
+    // The machine's own price; before its VM exists, its tier's. A capacity fallback that costs
+    // more than the tier's machine is billed at the tier's price (metering).
+    const tierPrice = tierSheet(sheet, BrowserTier.catch('basic').parse(inst.tier))?.vmHour;
+    const ownPrice = machine?.instanceType ? sheet.instanceTypes[machine.instanceType] : tierPrice;
+    const vmPrice = ownPrice !== undefined && tierPrice !== undefined ? Math.min(ownPrice, tierPrice) : ownPrice;
     if (vmPrice === undefined) return null;
     // The same rounding as metering: the cost to a micro-dollar first, then the markup.
     const rates = customerRates({ ...sheet, vmHour: vmPrice }, settings);
