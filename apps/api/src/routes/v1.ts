@@ -21,14 +21,14 @@ import {
   BALANCE_GRACE_MS,
   UpdateInstanceBody,
   ViewerSession,
+  AgentKey,
   AutomationStatus,
-  CreatePairingBody,
-  Pairing,
+  CreateAgentKeyBody,
   SetControlBody,
   signViewerToken,
   type RegionId,
 } from '@cloudbrowser/contracts';
-import { automationStatus, createPairing, revokeClient, setAccess, setControl } from '../automation.js';
+import { automationStatus, createAgentKey, revokeClient, revokeInstanceClientsStatements, setAccess, setControl } from '../automation.js';
 import { turnIceServers } from '../turn.js';
 import { callerLocation, regionViews } from '../availability.js';
 import { awsInventory, billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, sha256Hex, settleRunningStatements } from '@cloudbrowser/db';
@@ -353,6 +353,7 @@ v1.openapi(
         db.update(archiveKeys).set({ wrappedKey: null, destroyedAt: now }).where(eq(archiveKeys.instanceId, row.id)),
         db.update(schema.browserReservations).set({ reservedMicros: 0, updatedAt: now }).where(eq(schema.browserReservations.instanceId, row.id)),
         db.update(agentCommands).set({ status: 'failed', reply: { error: 'Browser permanently deleted.' }, completedAt: now }).where(and(eq(agentCommands.instanceId, row.id), isNull(agentCommands.completedAt))),
+        ...revokeInstanceClientsStatements(db, row.id, now),
       ],
       after: [db.insert(auditLog).values({ actor: `user:${c.get('user').id}`, action: 'instance.delete_requested', target: `instance:${row.id}`, detail: { permanent: true }, createdAt: now })],
     });
@@ -450,25 +451,27 @@ v1.openapi(
     method: 'get',
     path: '/instances/{id}/automation',
     tags: ['automation'],
-    description: 'Coding-agent access: whether it is allowed, who may drive the browser now, the paired bridges and the connected one.',
+    description: 'Coding-agent access: whether it is allowed, who may drive the browser now, the MCP server URL, the access keys and the open session.',
     request: { params: IdParam },
     responses: { 200: jsonResponse(AutomationStatus, 'Coding-agent access'), ...errors },
   }),
-  async (c) => c.json(await automationStatus(c.get('db'), await ownedInstance(c, c.req.valid('param').id)), 200),
+  async (c) => c.json(await automationStatus(c.get('db'), c.env, await ownedInstance(c, c.req.valid('param').id)), 200),
 );
 
 v1.openapi(
   createRoute({
     method: 'post',
-    path: '/instances/{id}/automation/pairings',
+    path: '/instances/{id}/automation/keys',
     tags: ['automation'],
-    description: 'Pairs a new bridge: returns a one-time code (shown once, valid ten minutes) that the bridge redeems for its credential.',
-    request: { params: IdParam, body: { content: { 'application/json': { schema: CreatePairingBody } }, required: true } },
-    responses: { 201: jsonResponse(Pairing, 'Pairing code'), ...errors },
+    description: 'Creates an access key for a coding agent: it adds the returned MCP server URL with `Authorization: Bearer <key>`. The key is shown once; only its hash is stored. At most 10 active keys per browser.',
+    request: { params: IdParam, body: { content: { 'application/json': { schema: CreateAgentKeyBody } }, required: true } },
+    responses: { 201: jsonResponse(AgentKey, 'The new key, shown once'), ...errors },
   }),
   async (c) => {
     const row = await ownedInstance(c, c.req.valid('param').id);
-    return c.json(await createPairing(c.get('db'), c.env, c.get('user').id, row, c.req.valid('json').name), 201);
+    const key = await createAgentKey(c.get('db'), c.env, (p) => c.executionCtx.waitUntil(p), c.get('user').id, row, c.req.valid('json'));
+    notifyUser(c, c.get('user').id);
+    return c.json(key, 201);
   },
 );
 
@@ -477,7 +480,7 @@ v1.openapi(
     method: 'delete',
     path: '/instances/{id}/automation/clients/{clientId}',
     tags: ['automation'],
-    description: 'Revokes a paired bridge: its credential stops working and its connection is closed at once.',
+    description: 'Revokes an access key (or a legacy bridge credential): it stops working and the agent\'s session is closed at once.',
     request: { params: z.object({ id: z.string().min(1).max(64), clientId: z.string().min(1).max(64) }) },
     responses: { 204: { description: 'Revoked' }, ...errors },
   }),

@@ -94,11 +94,11 @@ export const AgentViewerFile = z.object({
   reason: z.string().max(64).optional(),
 });
 
-/** A response for one bridge session (docs/agent-access.md); blobs are the screenshot bytes. */
+/** A response for one coding-agent session (docs/agent-access.md); blobs are the screenshot bytes. */
 export const AgentAutomationResult = z.object({ t: z.literal('automation_result'), sessionId: z.string().max(128), data: AutomationResponse });
 /**
- * The VM changed who may drive the browser. The gateway fans it out to viewers and bridges and
- * the api persists the mode (`browser_instances.agent_control`) and audits the change.
+ * The VM changed who may drive the browser. The gateway fans it out to viewers and the coding
+ * agent's session, and the api persists the mode (`browser_instances.agent_control`) and audits the change.
  */
 export const AgentControlState = z.object({ t: z.literal('control_state'), control: ControlState, reason: ControlChangeReason });
 export type AgentControlState = z.infer<typeof AgentControlState>;
@@ -120,7 +120,10 @@ export type GatewayToAgent =
   /** A frame from the viewer: a neko message or IME text. */
   | { t: 'viewer'; sessionId: string; relayId?: string; data: ViewerFrame }
   | { t: 'viewer_close'; sessionId: string; relayId?: string }
-  /** A bridge session (docs/agent-access.md): opened, a request, closed. */
+  /**
+   * A coding agent's session (docs/agent-access.md): opened, a request, closed. Protocol 2 VMs treat
+   * a repeated open of the same session id (after a tunnel reconnect) as a resume.
+   */
   | { t: 'automation_open'; sessionId: string; clientId: string }
   | { t: 'automation'; sessionId: string; data: AutomationRequest }
   | { t: 'automation_close'; sessionId: string }
@@ -168,7 +171,7 @@ export type GatewayToViewer =
   /** Another tab or device opened this browser (one controller at a time). */
   | { t: 'taken_over' }
   | { t: 'file'; id: string; status: 'progress' | 'done' | 'error'; received?: number; reason?: string }
-  /** A coding agent's bridge is connected (or not) and who may drive the browser (docs/agent-access.md). */
+  /** A coding agent's session is open (or not) and who may drive the browser (docs/agent-access.md). */
   | { t: 'automation_status'; connected: boolean; control: ControlState };
 
 /** Claims of the single-use viewer token (Ed25519, 60 s, page 2). */

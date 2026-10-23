@@ -2,26 +2,32 @@ import { z } from 'zod';
 import { FILE_TRANSFER } from './transfer.js';
 
 /**
- * Coding-agent access (docs/agent-access.md): a local bridge, paired by the browser's owner,
- * connects to the session gateway on `/v1/automation/:instanceId` and drives the same Chrome,
- * profile and desktop the live view shows. The agent inside the VM arbitrates input between the
- * bridge and the viewer; this module is the wire contract on the bridge side of the gateway and,
- * mirrored in `services/agent/internal/protocol`, between the gateway and the VM.
+ * Coding-agent access (docs/agent-access.md): a coding agent adds the session gateway's remote MCP
+ * endpoint (`POST /mcp/:instanceId` on the gateway's host) with a per-browser access key and drives
+ * the same Chrome, profile and desktop the live view shows. The browser's Durable Object holds the
+ * agent's session and speaks this protocol to the VM, where the agent arbitrates input between the
+ * coding agent and the viewer. This module is the wire contract between the gateway and the VM
+ * (mirrored in `services/agent/internal/protocol`) and the api's key and status shapes.
  */
 
-export const AUTOMATION_PROTOCOL_VERSION = 1;
+/**
+ * 2: screenshots can be scaled to fit (`maxWidth`/`maxHeight`, with the native size in the meta),
+ * `automation_open` is idempotent and a session survives a short tunnel gap, requests wait for the
+ * desktop to be ready. Every addition is optional, so a protocol 1 VM keeps working.
+ */
+export const AUTOMATION_PROTOCOL_VERSION = 2;
 
 /**
  * Who may drive the browser (`browser_instances.agent_control`, owner: api and the VM):
- *  - `agent`: a connected bridge may hold input control.
- *  - `user`: the user took over with a real input; input from the bridge is refused until the
+ *  - `agent`: a connected coding agent may hold input control.
+ *  - `user`: the user took over with a real input; input from the agent is refused until the
  *    user explicitly hands control back (Settings or the live view). Reconnects never clear it.
- *  - `privacy`: as `user`, and no screenshot is delivered to the bridge either.
+ *  - `privacy`: as `user`, and no screenshot is delivered to the agent either.
  */
 export const AgentControlMode = z.enum(['agent', 'user', 'privacy']);
 export type AgentControlMode = z.infer<typeof AgentControlMode>;
 
-/** Who holds input in the VM right now. `none` until a bridge acts or the user touches the view. */
+/** Who holds input in the VM right now. `none` until an agent acts or the user touches the view. */
 export const Controller = z.enum(['none', 'agent', 'user']);
 export type Controller = z.infer<typeof Controller>;
 
@@ -42,12 +48,23 @@ export const AUTOMATION_LIMITS = {
   minScreenshotIntervalMs: 150,
   /** Base64 payload of one blob frame; the frame stays under the gateway's 256 KiB limit. */
   blobChunkChars: 160 * 1024,
-  /** A bridge session ends after this long; the bridge reconnects for a new one. */
+  /** A session ends after this long at the latest; the agent's next call opens a new one. */
   maxSessionMs: 8 * 3600_000,
-  /** A pairing code's lifetime. */
-  pairingCodeMs: 10 * 60_000,
+  /** A session nobody used for this long is closed (its stored files with it). */
+  idleSessionMs: 15 * 60_000,
+  /** A VM keeps a session (and its stored files) this long across a tunnel reconnect (protocol 2). */
+  resumeGraceMs: 60_000,
+  /** How long a request may wait for the desktop session to become ready. */
+  readinessMs: 15_000,
   /** Files held in the VM's temporary store per session (same bound as viewer transfers). */
   maxStoredBytes: FILE_TRANSFER.maxBytes,
+  /** Content an agent may send inline with `upload_file`; larger files use a one-time upload URL. */
+  inlineUploadBytes: 512 * 1024,
+  /** A one-time upload URL's lifetime. */
+  uploadSlotMs: 10 * 60_000,
+  /** Screenshot bounds of `size: 'fit'`: what coding agents' vision models read without resampling. */
+  fitWidth: 1280,
+  fitHeight: 800,
 } as const;
 
 const Coord = z.number().int().min(0).max(0xffff);
@@ -58,7 +75,7 @@ const Modifiers = z.array(z.enum(['Shift', 'Control', 'Alt', 'Meta'])).max(4).op
 export const MouseButton = z.enum(['left', 'middle', 'right', 'back', 'forward']);
 export type MouseButton = z.infer<typeof MouseButton>;
 
-/** One input step of an `act` call. Coordinates are remote screen pixels of the referenced screenshot. */
+/** One input step of an `act` call. Coordinates are remote screen pixels (the gateway maps them from the screenshot image). */
 export const ActionStep = z.discriminatedUnion('type', [
   z.object({ type: z.literal('move'), x: Coord, y: Coord }),
   /** Clicks `count` times (double-click: 2) at the point, with `modifiers` held. */
@@ -84,6 +101,14 @@ export type ActionStep = z.infer<typeof ActionStep>;
 const RequestId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 const Handle = z.string().regex(/^[A-Za-z0-9_-]{1,96}$/);
 const Quality = z.number().int().min(10).max(100).optional();
+/**
+ * Protocol 2: the VM scales the screenshot to fit these bounds (aspect kept, never enlarged) and
+ * reports the native size next to the image size. A protocol 1 VM ignores them.
+ */
+const ShotBounds = {
+  maxWidth: z.number().int().min(320).max(4096).optional(),
+  maxHeight: z.number().int().min(320).max(4096).optional(),
+};
 
 /**
  * A coordinate-based request names the screenshot it was decided on. The VM refuses it when the
@@ -95,9 +120,9 @@ const Basis = {
   controlEpoch: z.number().int().nonnegative().optional(),
 };
 
-/** Bridge → gateway → VM. */
+/** Gateway → VM, for one coding-agent session. */
 export const AutomationRequest = z.discriminatedUnion('t', [
-  z.object({ t: z.literal('screenshot'), id: RequestId, quality: Quality }),
+  z.object({ t: z.literal('screenshot'), id: RequestId, quality: Quality, ...ShotBounds }),
   z.object({
     t: z.literal('act'), id: RequestId, ...Basis,
     steps: z.array(ActionStep).min(1).max(AUTOMATION_LIMITS.maxSteps),
@@ -105,7 +130,7 @@ export const AutomationRequest = z.discriminatedUnion('t', [
     settleMs: z.number().int().min(0).max(AUTOMATION_LIMITS.maxWaitMs).optional(),
     /** Return a screenshot with the result (default true). */
     screenshot: z.boolean().optional(),
-    quality: Quality,
+    quality: Quality, ...ShotBounds,
   }),
   z.object({ t: z.literal('status'), id: RequestId }),
   /** Stops the running `act` (its remaining steps); input already dispatched stays. */
@@ -133,7 +158,7 @@ export const AutomationRequest = z.discriminatedUnion('t', [
     handles: z.array(Handle).min(1).max(FILE_TRANSFER.maxFiles),
     method: z.enum(['picker', 'paste', 'drop']),
     x: Coord.optional(), y: Coord.optional(),
-    screenshot: z.boolean().optional(), quality: Quality,
+    screenshot: z.boolean().optional(), quality: Quality, ...ShotBounds,
   }),
 ]);
 export type AutomationRequest = z.infer<typeof AutomationRequest>;
@@ -141,11 +166,20 @@ export type AutomationRequest = z.infer<typeof AutomationRequest>;
 export const ActionStatus = z.enum(['executed', 'rejected', 'interrupted', 'timeout', 'error']);
 export type ActionStatus = z.infer<typeof ActionStatus>;
 
-/** Why a request did not execute (`reason` of a rejected result). */
+/**
+ * Why a request did not execute (`reason` of a rejected result). The last four never come from
+ * the VM: the gateway refuses with them before a request reaches it.
+ */
 export const RejectReason = z.enum([
   'control_user', 'control_privacy', 'agent_access_off', 'screen_changed', 'control_changed',
   'busy', 'invalid', 'unsupported', 'desktop_unavailable', 'not_on_page', 'no_dialog',
   'too_fast', 'not_found', 'too_large', 'write_failed', 'relay_unavailable',
+  // Protocol 2: the user is working right now (no session held control), a point outside the
+  // screen, a key name the VM does not know, text or a path too long for the target.
+  'user_active', 'off_screen', 'unknown_key', 'too_long',
+  // Gateway: unknown or evicted screenshot id, another agent holds the session, the browser is
+  // not running, a view-only key.
+  'stale_screenshot', 'busy_other_agent', 'browser_unavailable', 'view_only',
 ]);
 export type RejectReason = z.infer<typeof RejectReason>;
 
@@ -158,8 +192,12 @@ export const ScreenshotMeta = z.object({
   blobId: z.string().max(64),
   mime: z.literal('image/jpeg'),
   bytes: z.number().int().nonnegative(),
+  /** The image's own size. */
   width: z.number().int().positive(),
   height: z.number().int().positive(),
+  /** Protocol 2: the screen the image was scaled from; absent means the image is at screen size. */
+  screenWidth: z.number().int().positive().optional(),
+  screenHeight: z.number().int().positive().optional(),
   capturedAt: z.string(),
   screenVersion: z.number().int().nonnegative(),
   controlEpoch: z.number().int().nonnegative(),
@@ -182,10 +220,14 @@ export const AutomationCapabilities = z.object({
   paste: z.boolean(),
   drop: z.boolean(),
   touch: z.literal(false),
+  /** Protocol 2: screenshots honour `maxWidth`/`maxHeight`. */
+  scaledShots: z.boolean().optional(),
+  /** Protocol 2: a session (and its stored files) survives a tunnel reconnect within the grace period. */
+  resume: z.boolean().optional(),
 });
 export type AutomationCapabilities = z.infer<typeof AutomationCapabilities>;
 
-/** VM → gateway → bridge. */
+/** VM → gateway, for one coding-agent session. */
 export const AutomationResponse = z.discriminatedUnion('t', [
   z.object({
     t: z.literal('result'), id: RequestId,
@@ -214,29 +256,52 @@ export const AutomationResponse = z.discriminatedUnion('t', [
 ]);
 export type AutomationResponse = z.infer<typeof AutomationResponse>;
 
-/** Gateway → bridge, besides relayed `AutomationResponse` frames. */
-export type GatewayToAutomation =
-  | AutomationResponse
-  | { t: 'welcome'; sessionId: string; instanceId: string; clientId: string; protocol: number; mode: AgentControlMode }
-  | { t: 'agent_online' }
-  | { t: 'agent_offline' }
-  /** The gateway refused a request before the VM saw it (lease, mode or privacy). */
-  | { t: 'refused'; id: string; reason: RejectReason }
-  | { t: 'revoked'; reason: 'access_off' | 'client_revoked' | 'session_expired' | 'browser_unavailable' };
-
-// --- api: pairing and status ------------------------------------------------------------------
+// --- api: access keys and status ---------------------------------------------------------------
 
 export const AutomationClientName = z.string().trim().min(1).max(64);
+
+/** `control` may act, attach and upload; `view` only takes screenshots and reads the status. */
+export const AgentKeyCapability = z.enum(['control', 'view']);
+export type AgentKeyCapability = z.infer<typeof AgentKeyCapability>;
+
+/** How long a new key works; null never expires (it can still be revoked). */
+export const AGENT_KEY_EXPIRY_DAYS = [7, 30, 90, 365] as const;
+
+export const CreateAgentKeyBody = z.object({
+  name: AutomationClientName,
+  expiresInDays: z.union([z.literal(7), z.literal(30), z.literal(90), z.literal(365), z.null()]).default(90),
+  capability: AgentKeyCapability.default('control'),
+});
+export type CreateAgentKeyBody = z.infer<typeof CreateAgentKeyBody>;
+
+/** A new access key: `key` is shown once and never stored; only its hash is kept. */
+export const AgentKey = z.object({
+  clientId: z.string(),
+  name: z.string(),
+  /** `nvzk_` and 43 base62 characters. */
+  key: z.string(),
+  /** `nvzk_` and the key's first six characters, shown in the list to tell keys apart. */
+  keyPrefix: z.string(),
+  expiresAt: z.string().nullable(),
+  capability: AgentKeyCapability,
+  /** The remote MCP server URL a coding agent adds, with `Authorization: Bearer <key>`. */
+  mcpUrl: z.string(),
+});
+export type AgentKey = z.infer<typeof AgentKey>;
 
 export const AutomationClient = z.object({
   id: z.string(),
   name: z.string(),
+  /** `key`: an access key; `bridge`: a credential of the retired local bridge, accepted as a key. */
+  kind: z.enum(['key', 'bridge']),
+  keyPrefix: z.string().nullable(),
+  capability: AgentKeyCapability,
   createdAt: z.string(),
-  /** Null until the bridge redeemed its pairing code. */
-  activatedAt: z.string().nullable(),
+  /** Null for keys that never expire; an expired key stays listed until it is revoked. */
+  expiresAt: z.string().nullable(),
   lastSeenAt: z.string().nullable(),
-  /** The pairing code expires unused at this time; null once redeemed. */
-  pairingExpiresAt: z.string().nullable(),
+  /** The coding agent that last used the key (its MCP client name and version, or user agent). */
+  lastClient: z.string().nullable(),
 });
 export type AutomationClient = z.infer<typeof AutomationClient>;
 
@@ -244,38 +309,12 @@ export const AutomationStatus = z.object({
   /** The owner's setting: whether coding agents may connect at all. */
   enabled: z.boolean(),
   mode: AgentControlMode,
+  /** The remote MCP server URL for this browser (empty while the gateway is not configured). */
+  mcpUrl: z.string(),
   clients: z.array(AutomationClient),
-  /** The bridge session connected now, if any. */
+  /** The coding agent's session open now, if any. */
   session: z.object({ id: z.string(), clientId: z.string(), startedAt: z.string(), lastSeenAt: z.string() }).nullable(),
 });
 export type AutomationStatus = z.infer<typeof AutomationStatus>;
 
-export const CreatePairingBody = z.object({ name: AutomationClientName });
-export const Pairing = z.object({
-  clientId: z.string(),
-  /** Shown once; the bridge redeems it with `POST /api/automation/pair`. */
-  code: z.string(),
-  expiresAt: z.string(),
-  /** What to run locally. */
-  command: z.string(),
-});
-export type Pairing = z.infer<typeof Pairing>;
-
 export const SetControlBody = z.object({ mode: AgentControlMode });
-
-/** The bridge's redemption of a pairing code (no user session; the code is the proof). */
-export const RedeemPairingBody = z.object({
-  code: z.string().trim().min(8).max(64),
-  /** The bridge's own description of the machine it runs on, shown to the user. */
-  client: z.string().trim().max(120).optional(),
-});
-export const PairingGrant = z.object({
-  clientId: z.string(),
-  instanceId: z.string(),
-  instanceName: z.string(),
-  /** Long-lived bearer credential for the gateway; only its hash is stored. */
-  credential: z.string(),
-  gatewayUrl: z.string(),
-  protocol: z.number().int(),
-});
-export type PairingGrant = z.infer<typeof PairingGrant>;
