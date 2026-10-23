@@ -101,42 +101,42 @@ function useBrowserActions(i: Instance) {
   );
 
   const menu = (onRename: () => void) => (
-    <>
-      <Menu
-        trigger={
-          <Button size="icon" variant="ghost" aria-label={t('browsers.menu')} title={t('browsers.menu')}>
-            <MoreHorizontal />
-          </Button>
-        }
-      >
-        <MenuItem disabled={deleted} onSelect={onRename}>
-          <Pencil /> {t('browsers.rename')}
-        </MenuItem>
-        <MenuItem disabled={!i.ipAddress} onSelect={() => i.ipAddress && void navigator.clipboard.writeText(i.ipAddress).then(() => toast(t('browsers.copied')), () => {})}>
-          <Copy /> {t('browsers.copyIp')}
-        </MenuItem>
-        <MenuItem disabled={deleted || failed} onSelect={() => navigate(`/browsers/${i.id}/settings`)}>
-          <Settings /> {t('browsers.settings')}
-        </MenuItem>
-        <MenuItem disabled={deleted || failed} onSelect={() => navigate(`/browsers/${i.id}/storage`)}>
-          <HardDrive /> {t('manage.storage')}
-        </MenuItem>
-        <MenuItem disabled={failed} onSelect={() => navigate(`/browsers/${i.id}/usage`)}>
-          <BarChart3 /> {t('manage.usage')}
-        </MenuItem>
-        <MenuItem disabled={deleted || failed || sleeping || stopping} onSelect={() => void run(lifecycle.mutateAsync({ id: i.id, action: 'stop' }))}>
-          <Moon /> {t('browsers.sleepNow')}
-        </MenuItem>
-        <MenuSeparator />
-        <MenuItem danger disabled={deleted || (lifecycle.isPending && lifecycle.variables.action === 'delete')} onSelect={() => setConfirmDelete(true)}>
-          <Trash2 /> {t('browsers.delete')}
-        </MenuItem>
-      </Menu>
-      <DeleteBrowserDialog instance={i} open={confirmDelete} onClose={() => setConfirmDelete(false)} />
-    </>
+    <Menu
+      trigger={
+        <Button size="icon" variant="ghost" aria-label={t('browsers.menu')} title={t('browsers.menu')}>
+          <MoreHorizontal />
+        </Button>
+      }
+    >
+      <MenuItem disabled={deleted} onSelect={onRename}>
+        <Pencil /> {t('browsers.rename')}
+      </MenuItem>
+      <MenuItem disabled={!i.ipAddress} onSelect={() => i.ipAddress && void navigator.clipboard.writeText(i.ipAddress).then(() => toast(t('browsers.copied')), () => {})}>
+        <Copy /> {t('browsers.copyIp')}
+      </MenuItem>
+      <MenuItem disabled={deleted || failed} onSelect={() => navigate(`/browsers/${i.id}/settings`)}>
+        <Settings /> {t('browsers.settings')}
+      </MenuItem>
+      <MenuItem disabled={deleted || failed} onSelect={() => navigate(`/browsers/${i.id}/storage`)}>
+        <HardDrive /> {t('manage.storage')}
+      </MenuItem>
+      <MenuItem disabled={failed} onSelect={() => navigate(`/browsers/${i.id}/usage`)}>
+        <BarChart3 /> {t('manage.usage')}
+      </MenuItem>
+      <MenuItem disabled={deleted || failed || sleeping || stopping} onSelect={() => void run(lifecycle.mutateAsync({ id: i.id, action: 'stop' }))}>
+        <Moon /> {t('browsers.sleepNow')}
+      </MenuItem>
+      <MenuSeparator />
+      <MenuItem danger disabled={deleted || (lifecycle.isPending && lifecycle.variables.action === 'delete')} onSelect={() => setConfirmDelete(true)}>
+        <Trash2 /> {t('browsers.delete')}
+      </MenuItem>
+    </Menu>
   );
+  // Rendered once by the card or row: a row shows its menu twice (narrow and wide layouts), and
+  // with the dialog inside the menu one confirmation opened two dialogs.
+  const deleteDialog = <DeleteBrowserDialog instance={i} open={confirmDelete} onClose={() => setConfirmDelete(false)} />;
 
-  return { status, deleted, recoverable, failed, creating, primary, quick, agent, agentDialog, menu, rename };
+  return { status, deleted, recoverable, failed, creating, primary, quick, agent, agentDialog, menu, deleteDialog, rename };
 }
 
 /** The browser's name; double-click (or Rename in its menu) edits it in place. Enter saves, Escape cancels. */
@@ -250,6 +250,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
         {a.menu(() => setEditing(true))}
       </div>
       {a.agentDialog}
+      {a.deleteDialog}
     </Card>
   );
 }
@@ -291,6 +292,7 @@ export function BrowserRow({ instance: i }: { instance: Instance }) {
         {a.menu(() => setEditing(true))}
       </div>
       {a.agentDialog}
+      {a.deleteDialog}
     </div>
   );
 }
