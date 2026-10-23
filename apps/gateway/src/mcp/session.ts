@@ -1,9 +1,10 @@
 import { AUTOMATION_LIMITS, type ActionStep, type ScreenshotMeta } from '@cloudbrowser/contracts';
 
 /**
- * A coding agent's session as the browser's Durable Object keeps it (docs/agent-access.md): the
- * "virtual bridge". It lives in the object's storage under `mcp`, so it survives eviction and
- * deploys; only requests in flight live in memory. One session per browser at a time.
+ * The record of a coding agent's session as the browser's Durable Object keeps it
+ * (docs/agent-access.md), and the pure helpers around it: screenshots and coordinate mapping, and
+ * one-time upload URLs. The record lives in the object's storage under `mcp`, so it survives
+ * eviction and deploys; only requests in flight live in memory (coding-agent.ts).
  */
 
 /** A screenshot the agent may still refer to, and how its image maps onto the screen. */
