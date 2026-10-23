@@ -207,6 +207,7 @@ func bridgeAgent(t *testing.T, n *bridgeNeko) (*Agent, *websocket.Conn, *fakeCli
 	}
 	t.Cleanup(func() { c.CloseNow() })
 	remote := <-g.conns
+	remote.SetReadLimit(1 << 20) // screenshot blobs
 	dir := t.TempDir()
 	clip := &fakeClipboard{}
 	a := New(Config{UploadDir: dir, UploadBrowserDir: "/data/uploads", Clipboard: clip, FileChooser: n}, &fakeBrowser{}, n, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))

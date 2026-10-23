@@ -121,7 +121,7 @@ type activeAction struct {
 	cancel context.CancelFunc
 	stop   context.CancelFunc
 	neko   AutomationSession // the desktop session the action was admitted on
-	reason string           // what interrupted it, protected by automation.mu
+	reason string            // what interrupted it, protected by automation.mu
 }
 
 // shotBasis is what a screenshot was taken under, for a request that names only its screenshotId.

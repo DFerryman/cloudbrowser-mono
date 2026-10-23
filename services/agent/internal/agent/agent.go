@@ -135,11 +135,11 @@ type Agent struct {
 	// uploadsRefused: UploadDir turned out not to be the agent's own directory (checkUploadDir).
 	uploadsRefused bool
 	// IP checks (selfCheck): one periodic check at a time, the address the engine last named, how
-	// many checks in a row failed to observe an address, and whether a check closed the firewall.
-	checking         atomic.Bool
-	engineIP         string // protected by mu
-	firewallMu       sync.Mutex
-	ipFailures       int  // protected by firewallMu
+	// many checks in a row failed to observe an address, and who closed the firewall.
+	checking   atomic.Bool
+	engineIP   string // protected by mu
+	firewallMu sync.Mutex
+	ipFailures int // protected by firewallMu
 	// Who closed the firewall: "" (open), "check" or "engine"; protected by firewallMu.
 	firewallClosedBy string
 }
