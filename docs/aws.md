@@ -59,6 +59,18 @@ What decided it is bursts, which a path drops rather than the average rate: VP8'
 a keyframe every second, while x264's VBV bounds every frame, keyframes too, to 100 ms of the cap.
 There are no periodic keyframes; neko sends one when a viewer asks (below).
 
+The encoder runs on one thread. With `tune=zerolatency` x264 threads by slices, and each slice
+thread's share of the frame-size bound depends on how far the others got, so under the 100 ms
+buffer four threads undershot the cap and smeared text while scrolling. Encoding a dense scrolling
+1080p page offline with the stream's settings (libx264, superfast, quality 23, 3 Mbit/s cap)
+gave 16–24 dB PSNR mid-scroll with four threads (varying run to run) and 28 dB with one, 32–37 vs
+44 dB a second after the scroll stopped, and about 20% less encoder CPU (about 0.3 vCPU at 1080p,
+9 ms a frame). The table above was measured with four threads; repeat its first two rows on a
+Basic VM after an image with one thread is built (one x264 thread at about 0.3 vCPU in
+`top -H -p $(pgrep -x neko)`, 30 fps and no freezes in the viewer). Above 1080p one thread cannot
+keep 30 fps while Chrome saturates both of a Basic VM's CPUs, which is one reason Basic's remote
+screen stops at 1920×1080.
+
 **How the live view adapts.** The viewer (`packages/viewer/src/quality.ts`) reads WebRTC
 statistics every 2 s: round trip, lost packets (after resends), frames decoded, freezes and the
 video bitrate received. Above about 180 ms of round trip (median of the last readings) it uses the
