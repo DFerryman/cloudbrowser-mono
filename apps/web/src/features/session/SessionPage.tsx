@@ -1,6 +1,6 @@
 import { useRegionInfo } from '../instances/hooks.js';
 import { STREAM, TIERS, type ConnectionDiagnostic, type ConnectInfo, type Instance, type VideoQuality, type ViewerSession } from '@cloudbrowser/contracts';
-import { Button, cn, Menu, MenuItem, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
+import { Button, cn, Menu, MenuItem, MenuLabel, MenuSeparator, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
   ArrowLeft,
@@ -108,6 +108,7 @@ export function SessionPage() {
   const [openError, setOpenError] = useState<unknown>(null);
   const [connectionError, setConnectionError] = useState<unknown>(null);
   const [takenOver, setTakenOver] = useState(false);
+  const [inputInterrupted, setInputInterrupted] = useState(false);
   const [sleepAt, setSleepAt] = useState<number | null>(null);
   /** `balance`: the prepaid balance ran out; input does not keep the browser awake. */
   const [sleepReason, setSleepReason] = useState<'idle' | 'balance'>('idle');
@@ -123,7 +124,9 @@ export function SessionPage() {
   // Effect recreation (including StrictMode) must never reuse a sequence for this session.
   const presenceSequence = useRef(0);
   const presenceContext = useRef({ running: false, live: false, takenOver: false });
-  presenceContext.current = { running: instance.data?.status === 'running', live: viewer.state === 'live', takenOver };
+  // Input that may have been lost ended the connection (the viewer's inputFailed): the notice is
+  // not a watched desktop, so it lets the browser's idle countdown start.
+  presenceContext.current = { running: instance.data?.status === 'running', live: viewer.state === 'live' && !inputInterrupted, takenOver };
   const [diagnosticId, setDiagnosticId] = useState<string | null>(null);
   const diagnostics = useRef<{ sessionId: string; reporter: ReturnType<typeof connectionDiagnosticReporter> } | null>(null);
   const pendingDiagnostics = useRef<{ sessionId: string; diagnostic: ConnectionDiagnostic }[]>([]);
@@ -150,7 +153,6 @@ export function SessionPage() {
   });
   const uploadRef = useRef<HTMLInputElement>(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
-  const [inputInterrupted, setInputInterrupted] = useState(false);
   // A coding agent's bridge (docs/agent-access.md): shown while one is connected; the user's own
   // click takes control, and the banner is where control is handed back or screenshots paused.
   const [automation, setAutomation] = useState<AutomationStatus | null>(null);
@@ -213,6 +215,16 @@ export function SessionPage() {
     void open();
   }, [open]);
 
+  // A page restored from the back/forward cache ended its session on pagehide, and its connection
+  // is gone: open a new session as a new intent, as Use here does.
+  useEffect(() => {
+    const restored = (event: PageTransitionEvent) => {
+      if (event.persisted) void open(true);
+    };
+    window.addEventListener('pageshow', restored);
+    return () => window.removeEventListener('pageshow', restored);
+  }, [open]);
+
   // End the viewer session when leaving the page.
   useEffect(() => {
     if (!session) return;
@@ -230,6 +242,15 @@ export function SessionPage() {
   // A hidden or disconnected viewer sends false; the server anchors that transition once.
   useEffect(() => {
     if (!session || takenOver) return;
+    // A 409 says the session has ended: another tab or device opened the browser, or the browser
+    // stopped (it went to sleep or ran out of credit) and its sessions ended with it. Only a browser
+    // that is still meant to run was taken over; any other shows its own status.
+    const sessionEnded = async () => {
+      await queryClient.invalidateQueries({ queryKey: keys.instance(id) });
+      if (currentSessionId.current !== session.id) return;
+      const latest = queryClient.getQueryData<Instance>(keys.instance(id));
+      if (latest && (latest.status === 'running' || latest.desiredState === 'running') && !latest.stopReason) setTakenOver(true);
+    };
     const current = sessionHeartbeat<HeartbeatResult>({
       takeInput: () => { const input = hadInput.current; hadInput.current = false; return input; },
       viewing: () => {
@@ -245,7 +266,7 @@ export function SessionPage() {
         setSleepReason(r.reason ?? 'idle');
       },
       error: (e) => {
-        if (e instanceof ApiError && e.status === 409) setTakenOver(true);
+        if (e instanceof ApiError && e.status === 409) void sessionEnded();
         else if (e instanceof ApiError && [401, 402, 403, 404].includes(e.status)) setOpenError(e);
       },
     });
@@ -422,10 +443,18 @@ export function SessionPage() {
   const regionName = region.name;
   const idleLeft = sleepAt ? sleepAt - now : Infinity;
 
+  // The session page replaces itself in history: Back from the browsers list must not reopen it.
+  const back = () => navigate('/browsers', { replace: true });
+  const failed = (e: unknown) => toast(errorMessage(e), 'error');
+  const restart = (instanceId: string) => lifecycle.mutate({ id: instanceId, action: 'start' }, { onError: failed });
+  const sleep = (instanceId: string) => lifecycle.mutate({ id: instanceId, action: 'stop' }, { onError: failed });
+
   let overlay: ReactNode = null;
-  if (instance.isError) {
-    overlay = <Overlay message={errorMessage(instance.error)} action={<Button onClick={() => navigate('/browsers')}>{t('session.back')}</Button>} />;
-  } else if (takenOver || viewer.state === 'taken-over') {
+  // A failed refetch keeps the browser loaded before: only a browser that never loaded is an error.
+  if (!i && instance.isError) {
+    overlay = <Overlay message={errorMessage(instance.error)} action={<Button onClick={back}>{t('session.back')}</Button>} />;
+  } else if ((takenOver || viewer.state === 'taken-over') && (!i || i.status === 'running')) {
+    // A browser that stopped since says so below instead, with the way to wake it.
     overlay = <Overlay message={t('overlay.elsewhere')} action={<Button variant="primary" onClick={() => void open(true)}>{t('overlay.useHere')}</Button>} />;
   } else if (inputInterrupted) {
     overlay = <Overlay message={t('overlay.inputInterrupted')} action={<Button onClick={() => {
@@ -436,7 +465,7 @@ export function SessionPage() {
     overlay = <Overlay message={connectionErrorMessage(openError ?? connectionError)} action={<Button onClick={() => void open()}>{t('common.retry')}</Button>} />;
   } else if (!decodesH264 && i?.status === 'running') {
     // The live view is H.264 (images/browser/neko.yaml); without a decoder the picture stays black.
-    overlay = <Overlay message={t('session.h264Unsupported')} action={<Button onClick={() => navigate('/browsers')}>{t('session.back')}</Button>} />;
+    overlay = <Overlay message={t('session.h264Unsupported')} action={<Button onClick={back}>{t('session.back')}</Button>} />;
   } else if (i) {
     switch (shownStatus(i)) {
       case 'creating':
@@ -463,7 +492,7 @@ export function SessionPage() {
             <Overlay
               message={t('overlay.networkPaused')}
               action={
-                <Button disabled={verify.isPending} onClick={() => verify.mutate(i.id)}>
+                <Button disabled={verify.isPending} onClick={() => verify.mutate(i.id, { onError: failed })}>
                   {t('overlay.checkStatus')}
                 </Button>
               }
@@ -473,7 +502,7 @@ export function SessionPage() {
               message={t('overlay.error', { reason: i.statusReason ?? '' })}
               body={<p className="font-mono text-xs text-zinc-500">{i.id}</p>}
               action={
-                <Button disabled={lifecycle.isPending} onClick={() => lifecycle.mutate({ id: i.id, action: 'start' })}>
+                <Button disabled={lifecycle.isPending} onClick={() => restart(i.id)}>
                   {t('overlay.restart')}
                 </Button>
               }
@@ -481,11 +510,11 @@ export function SessionPage() {
           );
         break;
       case 'failed':
-        overlay = <Overlay message={t('overlay.failed', { reason: i.statusReason ?? '' })} action={<Button onClick={() => navigate('/browsers')}>{t('session.back')}</Button>} />;
+        overlay = <Overlay message={t('overlay.failed', { reason: i.statusReason ?? '' })} action={<Button onClick={back}>{t('session.back')}</Button>} />;
         break;
       case 'deleting':
       case 'purged':
-        overlay = <Overlay message={t('overlay.deleted')} action={<Button onClick={() => navigate('/browsers')}>{t('session.back')}</Button>} />;
+        overlay = <Overlay message={t('overlay.deleted')} action={<Button onClick={back}>{t('session.back')}</Button>} />;
         break;
       case 'running':
         if (connect.data?.mode === 'webrtc' && viewer.state === 'failed') {
@@ -532,6 +561,8 @@ export function SessionPage() {
   const onTransfer = (update: TransferUpdate) => {
     if (update.state === 'uploading' && update.bytes >= LARGE_TRANSFER_BYTES) toast(t('session.fileSending', { size: formatBytes(update.bytes) }));
     if (update.state !== 'error') return;
+    // A text paste carries no files; the viewer refuses one too large to send.
+    if (update.files === 0 && update.reason === 'too_large') return toast(t('session.pasteTooLarge'), 'error');
     const key: MessageKey = { too_large: 'session.fileTooLarge', too_many: 'session.fileTooMany', not_on_page: 'session.fileNotOnPage', unsupported: 'session.fileUnsupported', timeout: 'session.fileUnsupported' }[update.reason ?? ''] as MessageKey | undefined ?? 'session.fileFailed';
     toast(t(key), 'error');
   };
@@ -572,6 +603,20 @@ export function SessionPage() {
     </Button>
   );
 
+  const pasteLocal = async () => {
+    const text = await navigator.clipboard?.readText().catch(() => '');
+    if (text) viewerRef.current?.paste(text);
+    viewerRef.current?.focus();
+  };
+  /**
+   * A closing menu gives focus back to its trigger, a toolbar button: the keys typed next went
+   * nowhere until the picture was clicked again. The live view takes the keyboard back instead.
+   */
+  const refocusViewer = (event: Event) => {
+    event.preventDefault();
+    viewerRef.current?.focus();
+  };
+
   const disabledTool = (label: string, Icon: typeof Upload) => (
     <Button key={label} size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" disabled aria-label={label} title={`${label} · ${t('session.needsStream')}`}>
       <Icon />
@@ -586,7 +631,7 @@ export function SessionPage() {
     >
       {maximized ? null : (
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-zinc-800 px-2">
-        <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.back')} onClick={() => navigate('/browsers')}>
+        <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.back')} onClick={back}>
           <ArrowLeft />
         </Button>
         <span className="max-w-48 truncate font-medium">{i?.name ?? '…'}</span>
@@ -622,11 +667,7 @@ export function SessionPage() {
                 className="text-zinc-300 hover:bg-zinc-800"
                 aria-label={t('session.pasteLocal')}
                 title={t('session.pasteLocal')}
-                onClick={async () => {
-                  const text = await navigator.clipboard?.readText().catch(() => '');
-                  if (text) viewerRef.current?.paste(text);
-                  viewerRef.current?.focus();
-                }}
+                onClick={() => void pasteLocal()}
               >
                 <ClipboardCopy />
               </Button>
@@ -645,18 +686,6 @@ export function SessionPage() {
                 >
                   <Upload />
                 </Button>
-                <input
-                  ref={uploadRef}
-                  type="file"
-                  multiple
-                  hidden
-                  onChange={(e) => {
-                    const files = [...(e.currentTarget.files ?? [])];
-                    e.currentTarget.value = '';
-                    viewerRef.current?.pasteFiles(files);
-                    viewerRef.current?.focus();
-                  }}
-                />
               </>
             ) : (
               disabledTool(t('session.upload'), Upload)
@@ -664,6 +693,7 @@ export function SessionPage() {
             {disabledTool(t('session.downloads'), Download)}
             {live ? (
               <Menu
+                onCloseAutoFocus={refocusViewer}
                 trigger={
                   <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.keys')} title={t('session.keys')}>
                     <Command />
@@ -673,10 +703,7 @@ export function SessionPage() {
                 {Object.entries(COMBOS).map(([label, names]) => (
                   <MenuItem
                     key={label}
-                    onSelect={() => {
-                      viewerRef.current?.sendCombo(names);
-                      viewerRef.current?.focus();
-                    }}
+                    onSelect={() => viewerRef.current?.sendCombo(names)}
                   >
                     <span className="font-mono text-xs">{label}</span>
                   </MenuItem>
@@ -702,18 +729,55 @@ export function SessionPage() {
               disabledTool(t('session.sound'), Volume2)
             )}
           </div>
+          {live ? (
+            // Outside the tools that phones hide, so the More menu can open it there too.
+            <input
+              ref={uploadRef}
+              type="file"
+              multiple
+              hidden
+              onChange={(e) => {
+                const files = [...(e.currentTarget.files ?? [])];
+                e.currentTarget.value = '';
+                viewerRef.current?.pasteFiles(files);
+                viewerRef.current?.focus();
+              }}
+            />
+          ) : null}
           {sizeButton}
           <Menu
+            onCloseAutoFocus={refocusViewer}
             trigger={
               <Button size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" aria-label={t('session.more')}>
                 <MoreHorizontal />
               </Button>
             }
           >
-            <MenuItem disabled={!i || !['needs_attention'].includes(i.status)} onSelect={() => i && lifecycle.mutate({ id: i.id, action: 'start' })}>
+            {live ? (
+              // A phone held upright has no room for these tools in the toolbar.
+              <>
+                <MenuItem className="sm:hidden" onSelect={() => void pasteLocal()}>
+                  <ClipboardCopy /> {t('session.pasteLocal')}
+                </MenuItem>
+                <MenuItem className="sm:hidden" onSelect={() => uploadRef.current?.click()}>
+                  <Upload /> {t('session.uploadFiles')}
+                </MenuItem>
+                <MenuItem className="sm:hidden" onSelect={() => setMuted((m) => !m)}>
+                  {muted ? <VolumeX /> : <Volume2 />} {t(muted ? 'session.soundOn' : 'session.soundOff')}
+                </MenuItem>
+                <MenuLabel className="sm:hidden">{t('session.keys')}</MenuLabel>
+                {Object.entries(COMBOS).map(([label, names]) => (
+                  <MenuItem key={label} className="sm:hidden" onSelect={() => viewerRef.current?.sendCombo(names)}>
+                    <span className="font-mono text-xs">{label}</span>
+                  </MenuItem>
+                ))}
+                <MenuSeparator className="sm:hidden" />
+              </>
+            ) : null}
+            <MenuItem disabled={!i || !['needs_attention'].includes(i.status)} onSelect={() => i && restart(i.id)}>
               <RotateCw /> {t('overlay.restart')}
             </MenuItem>
-            <MenuItem disabled={i?.status !== 'running'} onSelect={() => i && lifecycle.mutate({ id: i.id, action: 'stop' })}>
+            <MenuItem disabled={i?.status !== 'running'} onSelect={() => i && sleep(i.id)}>
               <Moon /> {t('browsers.sleepNow')}
             </MenuItem>
             <MenuItem
