@@ -1,5 +1,6 @@
 /** Connection evidence is deliberately limited to identifiers and fixed stage/error names.
- * Never pass URLs, token claims, SDP, input payloads or exception messages to these logs. */
+ * Never pass URLs, headers, access keys, upload tokens, token claims, SDP, input payloads or
+ * exception messages to these logs. */
 export type ConnectionIdentity = {
   instanceId?: string;
   generation?: number | null;
@@ -9,7 +10,8 @@ export type ConnectionIdentity = {
 };
 
 type ConnectionEvidence = ConnectionIdentity & {
-  role?: 'agent' | 'viewer' | 'automation';
+  /** `mcp`: a coding agent's remote MCP session (docs/agent-access.md); `event` then names the tool. */
+  role?: 'agent' | 'viewer' | 'mcp';
   code?: string;
   event?: string;
   elapsedMs?: number;

@@ -8,8 +8,13 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     // Ed25519 public key (JWK JSON) from `node scripts/gen-viewer-keys.mjs`.
-    "VIEWER_TOKEN_PUBLIC_KEY": "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"9Qt3463-fc1wkrbVJ3I1AuwwLmyp_27PuwkJJpM3ras\"}"
+    "VIEWER_TOKEN_PUBLIC_KEY": "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"9Qt3463-fc1wkrbVJ3I1AuwwLmyp_27PuwkJJpM3ras\"}",
+    // Browser origins (comma-separated scheme://host) allowed to call the MCP endpoint. Coding
+    // agents send no Origin; empty refuses every web page (docs/agent-access.md).
+    "MCP_ALLOWED_ORIGINS": ""
   },
+  // MCP calls per access key, and failed authentications and upload URL guesses per address.
+  "ratelimits": [{ "name": "MCP_LIMITER", "namespace_id": "1101", "simple": { "limit": 120, "period": 60 } }],
   // Agent auth, agent messages and viewer-token redemption go through the api's Internal entrypoint.
   "services": [{ "binding": "API", "service": "cloudbrowser", "entrypoint": "Internal" }],
   "durable_objects": { "bindings": [{ "name": "INSTANCE_GATEWAY", "class_name": "InstanceGateway" }] },

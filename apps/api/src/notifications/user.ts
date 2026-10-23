@@ -11,6 +11,7 @@
  * | Credit ran out / browsers will be deleted | Usable credit is gone (not during a dispute hold) | Three in total: when it happens, after 3 days, 1 day before deletion |
  * | Browser stopped / network paused | The engine stopped a browser or paused its network | Once per event (the engine's notice id) |
  * | Reward credited               | A promotion's reward reached the balance          | One email for all rewards credited together, at most one per REWARD_COOLDOWN_MS |
+ * | Coding-agent key created      | The owner created an access key for a browser     | Once per key (keys are rate limited like every API write) |
  *
  * Security, credit-exhaustion and browser notices are never held back: they are rare and the user
  * must act on them. Only the advisory ones (low balance, rewards) have a cooldown. Funded-time,
@@ -106,6 +107,25 @@ export async function sendAlreadyRegistered(env: Env, to: string) {
     action: { label: 'Go to sign in', url },
     note: 'If you did not request this email, you can safely ignore it. Nothing has changed on your account.',
   }));
+}
+
+/**
+ * A coding-agent key was created (docs/agent-access.md). A key can drive the browser as its owner,
+ * so its creation is confirmed by email, like a sign-in from a new device would be.
+ */
+export function agentKeyCreatedMessage(keyName: string, browserName: string, url: string): Message {
+  return renderEmail(url, {
+    subject: `A coding-agent key '${keyName}' was created for '${browserName}'`,
+    category: 'Account security',
+    title: 'A coding-agent key was created.',
+    preview: `A coding-agent key '${keyName}' was created for '${browserName}'.`,
+    paragraphs: [
+      `A coding-agent key '${keyName}' was created for '${browserName}'. A coding agent with this key can take screenshots of the browser and, unless the key is view-only, click and type in it as you.`,
+      'If you did not create it, revoke it now in the browser\'s Settings → Coding agent access, then sign out everywhere from your account page.',
+    ],
+    details: [{ label: 'Browser', value: browserName }, { label: 'Key', value: keyName }],
+    action: { label: 'Review coding-agent access', url },
+  });
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -9,7 +9,7 @@ import { createDb, eventRow, schema, sha256Hex, unwrapArchiveKey, type Db } from
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Env } from './env.js';
 import { turnIceServers } from './turn.js';
-import { authenticateAutomation, endAutomationSession, recordControlState } from './automation.js';
+import { authenticateMcp, endAutomationSession, openAutomationSession, recordControlState } from './automation.js';
 
 const { placements, archiveKeys, agentCredentials, agentCommands, instanceHealth, browserInstances, operations, viewerSessions, viewerTokens, auditLog, events } = schema;
 
@@ -88,7 +88,7 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
     case 'viewer_stage':
       return null; // handled by the gateway
     case 'automation_result':
-      return null; // relayed by the gateway to the bridge
+      return null; // answers the coding agent's session in the gateway
     case 'control_state':
       await recordControlState(db, instanceId, frame, now);
       return null;
@@ -254,7 +254,8 @@ export function internalApi(env: Env) {
     agentMessage: (instanceId: string, generation: number, frame: unknown) => agentMessage(env, db, instanceId, generation, frame),
     redeemViewerToken: (claims: ViewerTokenClaims) => redeemViewerToken(db, claims),
     archiveKey: (instanceId: string) => archiveKey(env, db, instanceId),
-    authenticateAutomation: (input: { instanceId: string; credential: string }) => authenticateAutomation(db, input),
+    authenticateMcp: (input: { instanceId: string; key: string; ip?: string; client?: string }) => authenticateMcp(db, input),
+    openAutomationSession: (instanceId: string, clientId: string) => openAutomationSession(db, instanceId, clientId),
     endAutomationSession: (sessionId: string, reason: string) => endAutomationSession(db, sessionId, reason),
   };
 }

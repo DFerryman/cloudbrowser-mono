@@ -4,10 +4,10 @@ export type AgentAuth =
   | { ok: true; generation: number; credential?: string }
   | { ok: false; reason: string };
 
-/** A paired coding-agent bridge admitted for one session (docs/agent-access.md). */
-export type AutomationAuth =
-  | { ok: true; sessionId: string; clientId: string; userId: string; generation: number }
-  | { ok: false; reason: string };
+/** A coding agent's access key on an MCP request (docs/agent-access.md); no session is opened by it. */
+export type McpAuth =
+  | { ok: true; clientId: string; userId: string; generation: number; capability: 'control' | 'view'; name: string }
+  | { ok: false; reason: 'invalid_token' | 'expired' | 'unknown_instance' };
 
 /** The api Worker's `Internal` RPC entrypoint (page 2: the gateway depends on api internal endpoints). */
 export interface InternalApi {
@@ -16,8 +16,10 @@ export interface InternalApi {
   redeemViewerToken(claims: ViewerTokenClaims): Promise<boolean>;
   /** Plain archive key of the instance, or null when archives are off or the key is destroyed. */
   archiveKey(instanceId: string): Promise<string | null>;
-  /** A bridge's long-lived credential, checked against the pairing; opens an automation session. */
-  authenticateAutomation(input: { instanceId: string; credential: string }): Promise<AutomationAuth>;
+  /** Checks an access key against the browser in the URL; `client` is the MCP client's name, if known. */
+  authenticateMcp(input: { instanceId: string; key: string; ip?: string; client?: string }): Promise<McpAuth>;
+  /** Records a coding agent's session (audit, Settings); any other open one ends as `replaced`. */
+  openAutomationSession(instanceId: string, clientId: string): Promise<{ sessionId: string }>;
   endAutomationSession(sessionId: string, reason: string): Promise<void>;
 }
 
@@ -27,4 +29,15 @@ export interface Env {
   INSTANCE_GATEWAY: DurableObjectNamespace;
   /** Ed25519 public key (JWK JSON) for viewer tokens. */
   VIEWER_TOKEN_PUBLIC_KEY?: string;
+  /**
+   * Workers Rate Limiting (`ratelimits` in wrangler.jsonc): MCP calls per access key, and failed
+   * authentications and upload URL guesses per address. Optional, so a local run works without it.
+   */
+  MCP_LIMITER?: RateLimit;
+  /**
+   * Comma-separated origins (scheme://host[:port]) whose browser pages may call the MCP endpoint.
+   * Coding agents send no Origin; any other origin is refused, which stops a web page from using a
+   * key the browser has no business holding (DNS rebinding, CSRF). Empty by default.
+   */
+  MCP_ALLOWED_ORIGINS?: string;
 }

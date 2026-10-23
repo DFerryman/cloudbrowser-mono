@@ -8,7 +8,7 @@ Everything in the control plane runs on Cloudflare. Five Workers share one D1 da
 | `cloudbrowser-engine` | `apps/engine/wrangler.jsonc` | No | Queue, cron every minute, service binding | D1, Queues (consumer + producer), Durable Object `EventHub`, R2 (presigned archive URLs) |
 | `cloudbrowser-reaper` | `apps/engine/wrangler.reaper.jsonc` | No | cron every minute | D1, Durable Object binding, R2 (deletes archives) |
 | `cloudbrowser-reconciler` | `apps/reconciler/wrangler.jsonc` | No | cron every 5 min, Queue (`cloudbrowser-aws-provider`) | D1, Queues (producer + consumer) |
-| `cloudbrowser-gateway` | `apps/gateway/wrangler.jsonc` | Yes: `connect.` domain | HTTP (WebSocket: viewers, agent tunnels and coding-agent bridges), Queue | Durable Object `InstanceGateway`, Queues (consumer), service binding to the api's `Internal` entrypoint, D1 |
+| `cloudbrowser-gateway` | `apps/gateway/wrangler.jsonc` | Yes: `connect.` domain | HTTP (WebSocket: viewers and agent tunnels; coding agents' MCP endpoint `/mcp/:id` and upload URLs `/u/:token`), Queue | Durable Object `InstanceGateway`, Queues (consumer), service binding to the api's `Internal` entrypoint, D1, Rate Limiting (`MCP_LIMITER`) |
 
 ## Prerequisites
 
@@ -83,7 +83,10 @@ Nevazu's edge security rules are recorded in `deploy/cloudflare-auth-security.js
 completion pages skip Browser Integrity Check and Security Level challenges so visitors are not
 challenged once before the app and again by Turnstile. Managed WAF and DDoS protections still apply.
 The app checks Turnstile only when requesting an email; method lookup, passkeys, code entry and
-TOTP do not start another challenge.
+TOTP do not start another challenge. On `connect.<domain>` the same skip covers the authenticated
+protocols, none of which is a browser that could answer a challenge: `/health`, the agent tunnel,
+viewer streams, the coding agents' MCP endpoint (`/mcp/`, any method) and upload URLs (`/u/`). A
+zone without this skip challenges `POST /mcp/…` and `PUT /u/…` and breaks every coding agent.
 
 Secrets and keys:
 
@@ -98,6 +101,11 @@ openssl rand -base64 48 | pnpm exec wrangler secret put BOOTSTRAP_SECRET   # der
 ```
 
 - `apps/gateway/wrangler.jsonc` → `VIEWER_TOKEN_PUBLIC_KEY`: the public JWK (not secret).
+- `apps/gateway/wrangler.jsonc` → `MCP_ALLOWED_ORIGINS`: browser origins allowed to call the MCP
+  endpoint, comma-separated (`https://tools.example.com`). Leave it empty: coding agents send no
+  `Origin`, and every web page is refused. The `ratelimits` entry `MCP_LIMITER` (namespace `1101`,
+  120 per minute) limits calls per access key and failed authentications per address; it needs no
+  setup beyond the deploy.
 - `apps/api/wrangler.jsonc` and `apps/engine/wrangler.jsonc` → `GATEWAY_URL`: `wss://connect.example.com`.
 - **TURN (live view):** Dashboard → Realtime → TURN → create a key, then on the api Worker set
   `TURN_KEY_ID` (var) and `TURN_KEY_API_TOKEN` (secret). Without them viewers get no relay servers.
@@ -339,10 +347,20 @@ Migration `0034` adds coding-agent access (`docs/agent-access.md`): the per-brow
 and `agent_control` columns and the `automation_clients` and `automation_sessions` tables. It is
 additive and can be applied before the new Workers. Deploy the gateway before the api as usual: the
 api reaches the gateway's `Internal` entrypoint for the new `automationControl` and
-`revokeAutomation` methods, and the gateway reaches the api's `Internal` entrypoint for
-`authenticateAutomation` and `endAutomationSession`. No new variables or secrets are needed; agent
-access is on by default for new browsers and the public `POST /api/automation/pair` endpoint uses
-the existing `AUTH_LIMITER`.
+`revokeAutomation` methods. No new variables or secrets are needed; agent access is on by default
+for new browsers.
+
+Migration `0035` replaces the local bridge and its pairing codes with access keys for the
+gateway's MCP endpoint: `automation_clients` gains `kind`, `key_prefix`, `expires_at`,
+`capability`, `last_client` and `last_ip` and an index on `credential_hash`, and pairing codes that
+were never redeemed are revoked (a redeemed bridge's credential keeps working as a key). Apply it
+before deploying any Worker: the gateway's per-call check reads `expires_at` and the api reads every
+new column. Then deploy as usual, gateway first. Until the api is deployed the new gateway answers
+MCP calls with a temporary error, because it reaches the api's `Internal` entrypoint for
+`authenticateMcp`, `openAutomationSession` and `endAutomationSession`; bridges of the old kind are
+disconnected for good (their route is gone). The gateway's `ratelimits` binding is created by the
+deploy. Update the zone's security rule (`deploy/cloudflare-auth-security.json`) so
+`connect.<domain>` skips Browser Integrity Check and Security Level for `/mcp/` and `/u/`.
 
 The api deploys last: it binds to the gateway's `Internal` entrypoint (to revoke live connections),
 to the engine as a service and to its `EventHub` Durable Object. The gateway and the api call each

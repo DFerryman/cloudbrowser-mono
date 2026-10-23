@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "@cloudbrowser/contracts": "workspace:*",
-    "@cloudbrowser/db": "workspace:*"
+    "@cloudbrowser/db": "workspace:*",
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260702.1",

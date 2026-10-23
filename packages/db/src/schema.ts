@@ -483,8 +483,10 @@ export const agentCommands = sqliteTable(
 );
 
 /**
- * A paired coding-agent bridge (docs/agent-access.md): the owner creates a pairing in Settings and
- * the bridge redeems its code once for a long-lived credential. Only hashes are stored. Owner: api.
+ * A coding agent's access to one browser (docs/agent-access.md): an access key the owner created
+ * in Settings (`kind = 'key'`), or the credential of a bridge paired before keys existed
+ * (`kind = 'bridge'`), which is accepted as a key. Only the hash `sha256('bridge:' + secret)` is
+ * stored. The pairing columns are kept for those older rows. Owner: api.
  */
 export const automationClients = sqliteTable(
   'automation_clients',
@@ -500,15 +502,30 @@ export const automationClients = sqliteTable(
     pairingHash: text('pairing_hash'),
     pairingExpiresAt: ts('pairing_expires_at'),
     credentialHash: text('credential_hash'),
+    /** `key` | `bridge`. */
+    kind: text('kind').notNull().default('bridge'),
+    /** `nvzk_` and the key's first six characters; null for bridges. */
+    keyPrefix: text('key_prefix'),
+    /** Null: never expires. */
+    expiresAt: ts('expires_at'),
+    /** `control` | `view` (screenshots and status only). */
+    capability: text('capability').notNull().default('control'),
+    /** The MCP client name and version (or user agent) that last used the key, at most 120 characters. */
+    lastClient: text('last_client'),
+    lastIp: text('last_ip'),
     createdAt: ts('created_at').notNull(),
     activatedAt: ts('activated_at'),
     lastSeenAt: ts('last_seen_at'),
     revokedAt: ts('revoked_at'),
   },
-  (t) => [index('automation_clients_instance_idx').on(t.instanceId, t.revokedAt), uniqueIndex('automation_clients_pairing_idx').on(t.pairingHash)],
+  (t) => [
+    index('automation_clients_instance_idx').on(t.instanceId, t.revokedAt),
+    uniqueIndex('automation_clients_pairing_idx').on(t.pairingHash),
+    index('automation_clients_credential_idx').on(t.credentialHash),
+  ],
 );
 
-/** One bridge connection the gateway admitted. Owner: api (through the gateway's RPCs). */
+/** One coding-agent session the gateway opened. Owner: api (through the gateway's RPCs). */
 export const automationSessions = sqliteTable(
   'automation_sessions',
   {

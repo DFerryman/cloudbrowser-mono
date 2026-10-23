@@ -10,7 +10,7 @@ import { adminOrigin, isAdminOrigin, isAdminPath, requireAdmin } from './admin/a
 import { creemFrom } from './billing/creem.js';
 import { billingSweep } from './billing/sweep.js';
 import { processWebhook, receiveWebhook } from './billing/webhooks.js';
-import type { MiddlewareHandler } from 'hono';
+import type { Context, MiddlewareHandler, Next } from 'hono';
 import { createAuth } from './auth.js';
 import type { AppEnv, Env } from './env.js';
 import { internalApi } from './internal.js';
@@ -22,8 +22,7 @@ import { promotionSweep } from './promotions.js';
 import { adminRoute } from './routes/admin.js';
 import { publicRoute } from './routes/public.js';
 import { v1 } from './routes/v1.js';
-import { redeemPairing } from './automation.js';
-import { RedeemPairingBody } from '@cloudbrowser/contracts';
+import { revokeUserClients } from './automation.js';
 
 const app = new OpenAPIHono<AppEnv>();
 
@@ -95,6 +94,22 @@ const limitSignIn: MiddlewareHandler<AppEnv> = async (c, next) => {
 
 // Turnstile first: requests without a valid token do not use up an address's rate-limit budget.
 app.use('/api/auth/*', requireTurnstile, limitSignIn);
+
+/**
+ * "Sign out everywhere" (and "sign out other devices") also revokes the user's coding-agent keys
+ * (docs/agent-access.md): a session the user is ending may have created one. The two Better Auth
+ * endpoints are wrapped here, next to the rest of the request plumbing: the user is read from the
+ * session before the endpoint ends it, and the keys are revoked only when it succeeded.
+ */
+app.post('/api/auth/revoke-sessions', revokeAgentKeysToo);
+app.post('/api/auth/revoke-other-sessions', revokeAgentKeysToo);
+async function revokeAgentKeysToo(c: Context<AppEnv>, next: Next) {
+  const session = await c.get('auth').api.getSession({ headers: c.req.raw.headers }).catch(() => null);
+  await next();
+  if (session && c.res.ok) {
+    c.executionCtx.waitUntil(revokeUserClients(c.get('db'), c.env, session.user.id).catch((e) => console.error('revoke agent keys failed', e)));
+  }
+}
 app.route('/api/auth', signInRoute);
 app.on(['GET', 'POST'], '/api/auth/*', (c) => c.get('auth').handler(c.req.raw));
 
@@ -116,22 +131,6 @@ app.get('/api/echo/ip', (c) => {
 app.post('/api/webhooks/creem', async (c) => {
   const status = await receiveWebhook(c.env, c.get('db'), await c.req.text(), c.req.header('creem-signature'));
   return c.text(status === 200 ? 'ok' : 'rejected', status as 200 | 400 | 401);
-});
-
-/**
- * A coding agent's bridge redeems its pairing code here (docs/agent-access.md): no user session
- * and no origin check, because it runs on the user's own machine, outside the web app. The code
- * is the proof; it works once, expires in ten minutes and attempts are rate limited per address.
- */
-app.post('/api/automation/pair', async (c) => {
-  const ip = c.req.header('cf-connecting-ip') ?? 'unknown';
-  if (c.env.AUTH_LIMITER && !(await c.env.AUTH_LIMITER.limit({ key: `pair-ip:${ip}` })).success) return c.json(tooMany, 429);
-  const body = RedeemPairingBody.safeParse(await c.req.json().catch(() => null));
-  if (!body.success) throw problem(400, 'validation_failed', 'A pairing code is required.');
-  if (!c.env.GATEWAY_URL) throw problem(503, 'viewer_unavailable', 'The session gateway is not configured.');
-  const grant = await redeemPairing(c.get('db'), c.env, body.data.code, body.data.client);
-  if (!grant) throw problem(401, 'pairing_invalid', 'This pairing code is invalid, expired or already used. Create a new one in the browser\'s settings.');
-  return c.json(grant, 200);
 });
 
 /** State-changing requests must come from our own origin (page 1, "Security"). */
@@ -230,8 +229,12 @@ export class Internal extends WorkerEntrypoint<Env> {
   archiveKey(instanceId: string) {
     return internalApi(this.env).archiveKey(instanceId);
   }
-  authenticateAutomation(input: { instanceId: string; credential: string }) {
-    return internalApi(this.env).authenticateAutomation(input);
+  /** A coding agent's access key on an MCP request (docs/agent-access.md); opens no session. */
+  authenticateMcp(input: { instanceId: string; key: string; ip?: string; client?: string }) {
+    return internalApi(this.env).authenticateMcp(input);
+  }
+  openAutomationSession(instanceId: string, clientId: string) {
+    return internalApi(this.env).openAutomationSession(instanceId, clientId);
   }
   endAutomationSession(sessionId: string, reason: string) {
     return internalApi(this.env).endAutomationSession(sessionId, reason);
