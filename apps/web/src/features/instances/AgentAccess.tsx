@@ -44,13 +44,15 @@ function CopyButton({ id, text, copy }: { id: string; text: string; copy: Return
 }
 
 /** A code or text block with a copy button and a label (a file, a terminal, who it is for). */
-function CodeBox({ id, label, code, copy, wrap = false, testId }: {
+function CodeBox({ id, label, code, copy, wrap = false, compact = false, testId }: {
   id: string;
   label: string;
   code: string;
   copy: ReturnType<typeof useCopy>;
   /** Prose wraps; configuration keeps its lines and scrolls. */
   wrap?: boolean;
+  /** Shorter, for text that is copied rather than read through. */
+  compact?: boolean;
   testId?: string;
 }) {
   return (
@@ -59,7 +61,7 @@ function CodeBox({ id, label, code, copy, wrap = false, testId }: {
         <span className="truncate font-mono text-[11px] text-subtle">{label}</span>
         <CopyButton id={id} text={code} copy={copy} />
       </div>
-      <pre className={cn('max-h-64 overflow-auto bg-bg p-3 font-mono text-xs leading-relaxed', wrap && 'break-words whitespace-pre-wrap')} data-testid={testId}>{code}</pre>
+      <pre className={cn(compact ? 'max-h-40' : 'max-h-64', 'overflow-auto bg-bg p-3 font-mono text-xs leading-relaxed', wrap && 'break-words whitespace-pre-wrap')} data-testid={testId}>{code}</pre>
     </div>
   );
 }
@@ -159,7 +161,7 @@ function AgentConnect({ instance: i, status }: { instance: Instance; status: Aut
                   value={system}
                   onChange={setSystem}
                 />
-                <CodeBox id="env" label={t('agents.setup.terminal')} code={keyEnvCommands(server.env, created.key)[system]} copy={copy} testId="agent-key-env" />
+                <CodeBox id="env" label={t('agents.setup.terminal')} code={keyEnvCommands(server.env, created.key)[system]} copy={copy} wrap testId="agent-key-env" />
                 <Hint>{t('agents.env.hint')}</Hint>
               </div>
             ) : null}
@@ -181,7 +183,7 @@ function AgentConnect({ instance: i, status }: { instance: Instance; status: Aut
             <div>
               <Label htmlFor={`agent-key-name-${i.id}`}>{t('agents.key.name')}</Label>
               <div className="flex flex-col gap-2 sm:flex-row">
-                <Input id={`agent-key-name-${i.id}`} className="min-w-0 flex-1" value={name} maxLength={64} placeholder={t('agents.key.namePlaceholder')} onChange={(e) => setName(e.target.value)} />
+                <Input id={`agent-key-name-${i.id}`} className="min-w-0 sm:flex-1" value={name} maxLength={64} placeholder={t('agents.key.namePlaceholder')} onChange={(e) => setName(e.target.value)} />
                 <Button type="submit" variant="primary" className="justify-center" disabled={!name.trim() || create.isPending}><KeyRound /> {t('agents.key.create')}</Button>
               </div>
             </div>
@@ -212,7 +214,7 @@ function AgentConnect({ instance: i, status }: { instance: Instance; status: Aut
 
       {server ? (
         <Step n={2} title={t('agents.step.handoff')}>
-          <CodeBox id="handoff" label={t('agents.handoff.label')} code={agentHandoff(server, i.name)} copy={copy} wrap testId="agent-handoff" />
+          <CodeBox id="handoff" label={t('agents.handoff.label')} code={agentHandoff(server, i.name)} copy={copy} wrap compact testId="agent-handoff" />
           <Hint>{t('agents.handoff.hint', { env: server.env })}</Hint>
         </Step>
       ) : (
