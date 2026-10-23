@@ -1,0 +1,1479 @@
+diff --git a/apps/web/src/features/session/SessionPage.tsx b/apps/web/src/features/session/SessionPage.tsx
+index 28dfa0d..3a5cf4c 100644
+--- a/apps/web/src/features/session/SessionPage.tsx
++++ b/apps/web/src/features/session/SessionPage.tsx
+@@ -1,5 +1,5 @@
+ import { useRegionInfo } from '../instances/hooks.js';
+-import { STREAM, type ConnectionDiagnostic, type ConnectInfo, type Instance, type VideoQuality, type ViewerSession } from '@cloudbrowser/contracts';
++import { STREAM, TIERS, type ConnectionDiagnostic, type ConnectInfo, type Instance, type VideoQuality, type ViewerSession } from '@cloudbrowser/contracts';
+ import { Button, cn, Menu, MenuItem, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
+ import { useQuery } from '@tanstack/react-query';
+ import {
+@@ -753,7 +753,9 @@ export function SessionPage() {
+             rotated={rotated}
+             debug={debugInput}
+             className="absolute inset-0 bg-frame"
++            maxScreenPixels={TIERS[i.tier ?? 'basic'].maxScreenPixels}
+             muted={muted}
++            onMutedChange={setMuted}
+             // Each viewer token works once, so every (re)connect asks the api for a fresh one.
+             getConnectInfo={async () => {
+               const sequence = ++connectRequestSequence.current;
+diff --git a/packages/contracts/src/tiers.ts b/packages/contracts/src/tiers.ts
+index 5455d90..074ff6e 100644
+--- a/packages/contracts/src/tiers.ts
++++ b/packages/contracts/src/tiers.ts
+@@ -13,11 +13,17 @@ export interface TierSpec {
+   /** vCPUs and memory every launch candidate of the tier has (AWS: DEFAULT_TIER_INSTANCE_TYPES). */
+   vcpu: number;
+   memoryGb: number;
++  /**
++   * The most desktop pixels the live view asks for (width × height). Chrome's software
++   * compositing and x264 both cost about in proportion to pixels: 1080p scrolling keeps about
++   * 1.3 of Basic's 2 vCPUs busy (docs/aws.md), so 1440p (1.78× the pixels) would leave none.
++   */
++  maxScreenPixels: number;
+ }
+ 
+ export const TIERS: Record<BrowserTier, TierSpec> = {
+-  basic: { vcpu: 2, memoryGb: 4 },
+-  premium: { vcpu: 4, memoryGb: 8 },
++  basic: { vcpu: 2, memoryGb: 4, maxScreenPixels: 1920 * 1080 },
++  premium: { vcpu: 4, memoryGb: 8, maxScreenPixels: 2560 * 1440 },
+ };
+ 
+ /** The live view every browser streams, whatever its tier. */
+diff --git a/packages/viewer/src/mapping.ts b/packages/viewer/src/mapping.ts
+index 3cc100c..51137ab 100644
+--- a/packages/viewer/src/mapping.ts
++++ b/packages/viewer/src/mapping.ts
+@@ -10,6 +10,19 @@ export function pictureRect(
+   return { left: box.left + (box.width - width * scale) / 2, top: box.top + (box.height - height * scale) / 2, width: width * scale, height: height * scale };
+ }
+ 
++/**
++ * The remote pixels input is mapped to. A picture level keeps the screen's shape, so it is neko's
++ * screen whenever the frame has that shape; right after a resize the old frames may still show
++ * while neko already reports the new screen, and input then follows what is on screen.
++ */
++export function remoteSpace(
++  frame: { width: number; height: number },
++  screen: { width: number; height: number } | null,
++): { width: number; height: number; source: 'screen' | 'frame' } {
++  const sameShape = screen && frame.width > 0 && frame.height > 0 && Math.abs(screen.width / screen.height - frame.width / frame.height) < 0.02;
++  return sameShape ? { width: screen.width, height: screen.height, source: 'screen' } : { width: frame.width, height: frame.height, source: 'frame' };
++}
++
+ /**
+  * Box coordinates → remote pixels, accounting for the explicit picture rectangle. A lower
+  * picture level is a downscaled video of the same desktop, so positions are scaled to the remote
+@@ -26,11 +39,7 @@ export function toRemotePoint(
+   const vh = video.height || box.height;
+   const picture = pictureRect(box, video);
+   if (picture.width <= 0 || picture.height <= 0 || clientX < picture.left || clientY < picture.top || clientX >= picture.left + picture.width || clientY >= picture.top + picture.height) return null;
+-  // A picture level keeps the screen's shape. Right after a resize the old frames may still
+-  // show while neko already reports the new screen: map to what is on screen then.
+-  const sameShape = screen && Math.abs(screen.width / screen.height - vw / vh) < 0.02;
+-  const width = sameShape ? screen.width : vw;
+-  const height = sameShape ? screen.height : vh;
++  const { width, height } = remoteSpace({ width: vw, height: vh }, screen);
+   return {
+     x: Math.min(((clientX - picture.left) / picture.width) * width, width - 1),
+     y: Math.min(((clientY - picture.top) / picture.height) * height, height - 1),
+diff --git a/packages/viewer/src/neko.ts b/packages/viewer/src/neko.ts
+index e281ec9..ce57884 100644
+--- a/packages/viewer/src/neko.ts
++++ b/packages/viewer/src/neko.ts
+@@ -127,11 +127,10 @@ export function x11Button(domButton: number): number | null {
+   return ({ 0: 1, 1: 2, 2: 3, 3: 8, 4: 9 } as Record<number, number>)[domButton] ?? null;
+ }
+ 
+-/** Remote screen sizes the server can apply (page 5, "Screen-size policy"). */
++/** Remote screen sizes the server can apply (page 5, "Screen-size policy"); all 16:9 (squarePixels). */
+ export const SCREEN_SIZES = [
+   [1280, 720],
+   [1366, 768],
+-  [1440, 900],
+   [1536, 864],
+   [1600, 900],
+   [1920, 1080],
+@@ -153,25 +152,57 @@ export function screenOf(value: unknown): ScreenConfiguration | null {
+     && typeof rate === 'number' && Number.isInteger(rate) && rate > 0 ? { width, height, rate } : null;
+ }
+ 
++/**
++ * Whether neko streams a desktop of this shape with square pixels. Its X server keeps the physical
++ * size of its first, 16:9 mode through every RandR change; GStreamer's ximagesrc derives a pixel
++ * aspect ratio from that size and x264 writes it into the stream, so a 16:10, 4:3 or 5:4 desktop
++ * is tagged 11:10. Chrome ignores the tag. Safari honours it: it painted a 1280×800 desktop as
++ * 1408×800 (aspect 1.76) inside the 1280×800 box the viewer laid out and mapped input to, and
++ * taps landed up to 36 px off. ximagesrc keeps 1:1 within about 3% of 16:9.
++ */
++export const squarePixels = (s: { width: number; height: number }) =>
++  s.width > 0 && s.height > 0 && Math.abs((s.width * 9) / (s.height * 16) - 1) < 0.03;
++
+ /** Whether neko would end up on the same mode: Xorg rounds widths down to a multiple of 8. */
+ export const sameScreen = (a: ScreenConfiguration, b: ScreenConfiguration) =>
+   a.height === b.height && a.rate === b.rate && a.width - (a.width % 8) === b.width - (b.width % 8);
+ 
++/**
++ * Xorg widths are multiples of 8 (sameScreen), so a mode up to 7 px wider than the viewport still
++ * counts as fitting: a 1366 px wide view takes 1368×768 at 99.9% rather than 1280×720 enlarged.
++ */
++const WIDTH_SLACK = 8;
++
+ /**
+  * The largest supported size that fits the viewport, at the highest refresh rate up to `maxRate`
+  * that neko offers for it: Chrome draws no faster than the desktop, so the rate caps the frame
+- * rate (STREAM.maxRefreshRate).
++ * rate (STREAM.maxRefreshRate). Sizes offered at such a rate come before larger ones offered only
++ * faster. `maxPixels` bounds the desktop's area (TIERS[tier].maxScreenPixels).
+  */
+ export function fitScreen(width: number, height: number): { width: number; height: number };
+-export function fitScreen(width: number, height: number, configurations: readonly ScreenConfiguration[], maxRate?: number): ScreenConfiguration | null;
+-export function fitScreen(width: number, height: number, configurations?: readonly ScreenConfiguration[], maxRate = 30) {
++export function fitScreen(width: number, height: number, configurations: readonly ScreenConfiguration[], maxRate?: number, maxPixels?: number): ScreenConfiguration | null;
++export function fitScreen(width: number, height: number, configurations?: readonly ScreenConfiguration[], maxRate = 30, maxPixels = Infinity) {
+   if (configurations) {
+     if (configurations.length === 0) return null;
++    // Only shapes neko streams with square pixels, whenever it offers one: besides its 16:9 modes,
++    // Xorg adds its default VESA and CVT modes (1280×800, 1280×960, 1280×1024, …), and an iPad's
++    // 1366-wide view fitted 1280×800 at 60 Hz.
++    const square = configurations.filter(squarePixels);
++    const shaped = square.length > 0 ? square : configurations;
+     // Keep the existing 720p–1440p policy when the server supports it. For smaller viewports,
+     // use the smallest supported desktop and let the video scale down.
+-    const policy = configurations.filter((s) => s.width >= 1280 && s.height >= 720 && s.width <= 2560 && s.height <= 1440);
+-    const available = policy.length > 0 ? policy : configurations;
+-    const fits = available.filter((s) => s.width <= width && s.height <= height);
++    const policy = shaped.filter((s) => s.width >= 1280 && s.height >= 720 && s.width <= 2560 && s.height <= 1440);
++    const sized = policy.length > 0 ? policy : shaped;
++    // The tier's budget, unless no mode is within it.
++    const capped = sized.filter((s) => s.width * s.height <= maxPixels);
++    const budgeted = capped.length > 0 ? capped : sized;
++    // A size neko offers only above `maxRate` (2048×1152 at 60 Hz) would have Chrome draw twice the
++    // frames the stream carries, on the browser's own CPU: a smaller size at a bounded rate is
++    // better, and only without one does the rate give way.
++    const paced = budgeted.filter((s) => budgeted.some((o) => o.width === s.width && o.height === s.height && o.rate <= maxRate));
++    const available = paced.length > 0 ? paced : budgeted;
++    // ResizeObserver reports fractional sizes: a 719.6 px tall box still shows a 720 px desktop.
++    const fits = available.filter((s) => s.width < width + WIDTH_SLACK && s.height <= Math.round(height));
+     const sizes = fits.length > 0 ? fits : available;
+     const best = sizes.reduce((a, b) => {
+       const difference = b.width * b.height - a.width * a.height;
+diff --git a/packages/viewer/src/playback.ts b/packages/viewer/src/playback.ts
+index 1d7f526..57461f1 100644
+--- a/packages/viewer/src/playback.ts
++++ b/packages/viewer/src/playback.ts
+@@ -29,6 +29,42 @@ export function playbackFailure(error: unknown): Exclude<PlaybackState, 'unknown
+   return 'failed';
+ }
+ 
++/** What startPlayback uses of a <video>. */
++export interface PlayableVideo {
++  muted: boolean;
++  play(): Promise<void>;
++}
++
++/**
++ * Plays the element and reports the outcome while `current` holds. WebKit refuses to play an
++ * unmuted <video> that mounts again (or gets a new stream) without a user gesture; the picture
++ * then stayed black until the connection deadline replaced the connection, which met the same
++ * refusal, again and again. Muted playback needs no gesture: the element is muted, `muted` tells
++ * the page, and it plays again once.
++ */
++export function startPlayback(video: PlayableVideo, options: { current: () => boolean; report: (state: PlaybackState) => void; muted: () => void }): void {
++  const failed = (error: unknown, retry: boolean) => {
++    if (!options.current()) return;
++    const state = playbackFailure(error);
++    options.report(state);
++    if (state !== 'not_allowed' || !retry || video.muted) return;
++    video.muted = true;
++    options.muted();
++    attempt(false);
++  };
++  const attempt = (retry: boolean) => {
++    try {
++      void video.play().then(
++        () => { if (options.current()) options.report('resolved'); },
++        (error: unknown) => failed(error, retry),
++      );
++    } catch (error) {
++      failed(error, retry);
++    }
++  };
++  attempt(true);
++}
++
+ function dimension(value: unknown): value is number {
+   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 32_768;
+ }
+diff --git a/packages/viewer/src/quality.ts b/packages/viewer/src/quality.ts
+index ebbc5ac..0f73e06 100644
+--- a/packages/viewer/src/quality.ts
++++ b/packages/viewer/src/quality.ts
+@@ -76,8 +76,17 @@ const LATENCY_MIN_READINGS = 3;
+  * are downscaled pictures (75% or 50%), the viewer stays at full rather than blur the text.
+  */
+ export const MIN_LEGIBLE_SCALE = 0.9;
+-/** Consecutive readings below MIN_LEGIBLE_SCALE before a level is ruled out; a resize can mislead one. */
++/** Consecutive readings below MIN_LEGIBLE_SCALE before a level is ruled out. */
+ const ILLEGIBLE_READINGS = 2;
++/**
++ * How long after the desktop changes size the picture's scale says nothing about a level. neko
++ * reports the new size at once, while frames of the old size keep arriving until its encoder has
++ * restarted (and the receiver's statistics lag those): a reduced level then reads as a small
++ * picture and was ruled out for the rest of the session, pinning the lowest level allowed above
++ * what a congested path carries. Ignoring the scale for a while keeps the rule for what it is
++ * for, an older image whose lower levels really are downscaled pictures, which stays so.
++ */
++const SCREEN_SETTLE_MS = 10_000;
+ 
+ /**
+  * Chooses the live view's picture level from what the viewer receives. neko 3.0.8's own
+@@ -105,6 +114,8 @@ export class QualityController {
+   /** Index of the lowest level allowed: a level whose picture proved too small to read is ruled out. */
+   private floor = VIDEO_QUALITIES.length - 1;
+   private illegible = 0;
++  /** Scale readings before this mean nothing: the desktop changed size (screenChanged). */
++  private scaleSettleUntil = -Infinity;
+   /** The least the path carried while congested in the current run of bad readings, kbit/s. */
+   private carried: number | null = null;
+ 
+@@ -127,13 +138,20 @@ export class QualityController {
+     this.settleUntil = now + SETTLE_MS;
+   }
+ 
++  /** The remote desktop changed size (or a new session reported its own): see SCREEN_SETTLE_MS. */
++  screenChanged(now: number) {
++    this.scaleSettleUntil = now + SCREEN_SETTLE_MS;
++    this.illegible = 0;
++  }
++
+   /** Returns the level to switch to, or null to stay. */
+   observe(s: QualitySample): VideoQuality | null {
+     const bestRtt = this.rtts.length ? Math.min(...this.rtts) : null;
+     if (s.rttMs !== null) this.rtts = [...this.rtts, s.rttMs].slice(-RTT_WINDOW);
+     this.updateLatencyCap();
+     if (s.at < this.settleUntil) return null;
+-    if (s.scale != null && s.scale < MIN_LEGIBLE_SCALE && this.level > 0) {
++    const scale = s.at < this.scaleSettleUntil ? null : s.scale;
++    if (scale != null && scale < MIN_LEGIBLE_SCALE && this.level > 0) {
+       if (++this.illegible >= ILLEGIBLE_READINGS) {
+         this.floor = Math.min(this.floor, this.level - 1);
+         this.illegible = 0;
+diff --git a/packages/viewer/src/react.tsx b/packages/viewer/src/react.tsx
+index ae51291..925a410 100644
+--- a/packages/viewer/src/react.tsx
++++ b/packages/viewer/src/react.tsx
+@@ -1,6 +1,7 @@
+ import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type CSSProperties } from 'react';
+ import { isMac } from './keyboard.js';
+-import { elementPoint, pictureRect, toRemotePoint, unrotate, type PositionedEvent } from './mapping.js';
++import { elementPoint, pictureRect, remoteSpace, toRemotePoint, unrotate, type PositionedEvent } from './mapping.js';
++import { squarePixels } from './neko.js';
+ import type { ConnectionDiagnostic, VideoQuality } from '@cloudbrowser/contracts';
+ import type { VideoPreference } from './quality.js';
+ import { RemoteBrowser, type AutomationStatus, type ConnectInfo, type ViewerState } from './remote-browser.js';
+@@ -10,7 +11,7 @@ import { TextInputController } from './text-input.js';
+ import type { InputFailure } from './input-queue.js';
+ import { pastedFiles, type TransferUpdate } from './file-transfer.js';
+ import { observeFirstFrame } from './first-frame.js';
+-import { isDisplaying, playbackFailure, readPlayback, type PlaybackState } from './playback.js';
++import { isDisplaying, readPlayback, startPlayback, type PlaybackState } from './playback.js';
+ 
+ /** Image types Chrome cannot paste from the X clipboard; one is pasted as a PNG instead. */
+ const CONVERTED_IMAGES = ['image/jpeg', 'image/webp', 'image/bmp', 'image/avif'];
+@@ -72,7 +73,14 @@ export interface RemoteBrowserViewProps {
+   video?: VideoPreference;
+   /** The level being streamed now. */
+   onVideo?: (quality: VideoQuality) => void;
++  /** The most desktop pixels to ask for (TIERS[tier].maxScreenPixels), read once per viewer. */
++  maxScreenPixels?: number;
+   muted?: boolean;
++  /**
++   * The viewer muted itself: the browser refused to play the stream with sound before a user
++   * gesture (WebKit, when the view mounts again unmuted). The page shows sound as off.
++   */
++  onMutedChange?: (muted: boolean) => void;
+   className?: string;
+   style?: CSSProperties;
+ }
+@@ -82,7 +90,7 @@ export interface RemoteBrowserViewProps {
+  * textarea that owns the keyboard (so IME composition works), and the remote cursor drawn locally.
+  */
+ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserViewProps>(function RemoteBrowserView(
+-  { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onTransfer, onAutomation, rotated = false, debug = false, video, onVideo, muted = true, className, style },
++  { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onTransfer, onAutomation, rotated = false, debug = false, video, onVideo, maxScreenPixels, muted = true, onMutedChange, className, style },
+   ref,
+ ) {
+   const boxRef = useRef<HTMLDivElement>(null);
+@@ -96,7 +104,12 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+   const [cursor, setCursor] = useState('default');
+   const [dragging, setDragging] = useState(false);
+   const [boxSize, setBoxSize] = useState<{ width: number; height: number } | null>(null);
+-  const [pictureSize, setPictureSize] = useState({ width: 0, height: 0 });
++  /**
++   * The one frame size behind the painted rectangle and the input mapping: the decoded frame's
++   * pixels, from the frame being presented where the browser reports it (requestVideoFrameCallback)
++   * and from the element's resize events otherwise. `source` is whichever saw the last change.
++   */
++  const [pictureSize, setPictureSize] = useState<{ width: number; height: number; source: 'none' | 'frame' | 'element' }>({ width: 0, height: 0, source: 'none' });
+   const pictureSizeRef = useRef(pictureSize);
+   pictureSizeRef.current = pictureSize;
+   const rotatedRef = useRef(rotated);
+@@ -104,8 +117,11 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+   const debugRef = useRef(debug);
+   debugRef.current = debug;
+   const [debugInfo, setDebugInfo] = useState<{ x: number; y: number; lines: string[] } | null>(null);
+-  const callbacks = useRef({ getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation });
+-  callbacks.current = { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation };
++  const statsRef = useRef<ViewerStats | null>(null);
++  const callbacks = useRef({ getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation, onMutedChange });
++  callbacks.current = { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation, onMutedChange };
++  /** Plays the current stream again if it is paused; a pointer press calls it, as a user gesture. */
++  const resumePlayback = useRef<(() => void) | null>(null);
+   const initialVideo = useRef(video);
+ 
+   const updateKeyboard = (open: boolean) => {
+@@ -147,7 +163,11 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+         });
+       },
+       requireFirstFrame: true,
+-      onStats: (s) => callbacks.current.onStats?.(s),
++      ...(maxScreenPixels ? { maxScreenPixels } : {}),
++      onStats: (s) => {
++        statsRef.current = s;
++        callbacks.current.onStats?.(s);
++      },
+       onInputError: (reason) => {
+         textInputRef.current?.reset();
+         callbacks.current.onInputError?.(reason);
+@@ -164,18 +184,20 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+             playState = 'unknown';
+             stopFirstFrame = observeFirstFrame(element, stream, () => browser.reportFirstFrame(attemptId, frameSequence));
+           }
+-          const request = ++playSequence;
+-          playState = 'unknown';
+-          const current = () => active && videoRef.current === element && element.srcObject === stream
+-            && observedAttemptId === attemptId && observedFrameSequence === frameSequence && request === playSequence;
+-          try {
+-            void element.play().then(
+-              () => { if (current()) playState = 'resolved'; },
+-              (error: unknown) => { if (current()) playState = playbackFailure(error); },
+-            );
+-          } catch (error) {
+-            if (current()) playState = playbackFailure(error);
+-          }
++          const shown = () => active && videoRef.current === element && element.srcObject === stream
++            && observedAttemptId === attemptId && observedFrameSequence === frameSequence;
++          const play = () => {
++            const request = ++playSequence;
++            playState = 'unknown';
++            startPlayback(element, {
++              current: () => shown() && request === playSequence,
++              report: (state) => { playState = state; },
++              muted: () => callbacks.current.onMutedChange?.(true),
++            });
++          };
++          play();
++          // Playback refused even muted (iOS Low Power Mode blocks autoplay) is allowed in a gesture.
++          resumePlayback.current = () => { if (shown() && element.paused) play(); };
+         }
+       },
+       onCursor: setCursor,
+@@ -183,8 +205,9 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+         // Unicode software input can use the remote clipboard; do not replace the user's
+         // local clipboard with each IME commit while the keyboard is open.
+         if (keyboardRequested.current) return;
+-        // Remote → local clipboard; allowed while this document has focus.
+-        void navigator.clipboard?.writeText(text).catch(() => {});
++        // Remote → local clipboard; allowed while this document has focus. Until it succeeds a
++        // local paste uses the remote clipboard (pasteClipboard).
++        void navigator.clipboard?.writeText(text).then(() => browser.clipboardCopied(text), () => {});
+       },
+       macToPc: isMac(),
+       ...(initialVideo.current ? { video: initialVideo.current } : {}),
+@@ -197,14 +220,16 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+       mode: () => keyboardRequested.current ? 'software' : 'desktop',
+       key: (down, event) => keyboardRequested.current ? browser.softwareKey(down, event) : browser.key(down, event),
+       typeText: (text) => keyboardRequested.current ? browser.typeSoftwareText(text) : browser.typeText(text),
+-      sendCombo: (names) => keyboardRequested.current ? browser.sendSoftwareCombo(names) : browser.sendCombo(names),
++      sendCombo: (names, exact) => keyboardRequested.current ? browser.sendSoftwareCombo(names) : browser.sendCombo(names, exact),
+       releaseAllKeys: () => browser.releaseAllKeys(),
+       activity: () => callbacks.current.onInput?.(),
++      mac: isMac(),
+     });
+     void browser.connect();
+     return () => {
+       active = false;
+       playSequence++;
++      resumePlayback.current = null;
+       stopFirstFrame?.();
+       keyboardRequested.current = false;
+       callbacks.current.onKeyboardChange?.(false);
+@@ -221,12 +246,21 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+   useEffect(() => {
+     const element = videoRef.current;
+     if (!element) return;
+-    const update = () => setPictureSize((previous) => previous.width === element.videoWidth && previous.height === element.videoHeight
+-      ? previous : { width: element.videoWidth, height: element.videoHeight });
++    const set = (width: number, height: number, source: 'frame' | 'element') => setPictureSize((previous) =>
++      previous.width === width && previous.height === height ? previous : { width, height, source });
++    const update = () => set(element.videoWidth, element.videoHeight, 'element');
++    // Each presented frame confirms its size, so the rectangle never waits on a resize event.
++    let frame: number | undefined;
++    const presented = (_now: number, metadata: VideoFrameCallbackMetadata) => {
++      if (metadata.width > 0 && metadata.height > 0) set(metadata.width, metadata.height, 'frame');
++      frame = element.requestVideoFrameCallback(presented);
++    };
++    if (typeof element.requestVideoFrameCallback === 'function') frame = element.requestVideoFrameCallback(presented);
+     update();
+     element.addEventListener('resize', update);
+     element.addEventListener('loadedmetadata', update);
+     return () => {
++      if (frame !== undefined && typeof element.cancelVideoFrameCallback === 'function') element.cancelVideoFrameCallback(frame);
+       element.removeEventListener('resize', update);
+       element.removeEventListener('loadedmetadata', update);
+     };
+@@ -312,16 +346,20 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+       const remote = remoteAt(local.x, local.y, local.frame);
+       const rect = box.getBoundingClientRect();
+       const video = videoRef.current!;
+-      const screen = browserRef.current?.screenSize;
++      const mode = browserRef.current?.screenMode ?? null;
++      const frame = pictureSizeRef.current;
++      const space = remoteSpace({ width: frame.width || local.frame.width, height: frame.height || local.frame.height }, mode);
++      const picture = pictureRect(local.frame, frame);
++      const stats = statsRef.current;
+       const vv = window.visualViewport;
+-      const painted = video.getBoundingClientRect();
+       const n = (value: number) => value.toFixed(0);
+       setDebugInfo({ x: point.x, y: point.y, lines: [
+         `${kind} ${e.pointerType} client ${n(e.clientX)},${n(e.clientY)} offset ${n(e.offsetX)},${n(e.offsetY)} page ${n(e.pageX)},${n(e.pageY)} target ${e.target === box ? 'box' : 'other'}`,
+-        `box point ${n(point.x)},${n(point.y)} → remote ${remote ? `${n(remote.x)},${n(remote.y)}` : 'outside the picture'}`,
++        `box point ${n(point.x)},${n(point.y)} → remote ${remote ? `${n(remote.x)},${n(remote.y)}` : 'outside the picture'} of ${space.width}×${space.height} (${space.source})`,
+         `box ${box.clientWidth}×${box.clientHeight} rect ${n(rect.left)},${n(rect.top)} ${n(rect.width)}×${n(rect.height)} rotated ${rotatedRef.current}`,
+-        `video ${video.videoWidth}×${video.videoHeight} screen ${screen ? `${screen.width}×${screen.height}` : '?'}`,
+-        `picture rect ${n(painted.left)},${n(painted.top)} ${n(painted.width)}×${n(painted.height)} fit fill`,
++        `frame ${frame.width}×${frame.height} from ${frame.source} · element ${video.videoWidth}×${video.videoHeight} · rtp ${stats?.width ?? '?'}×${stats?.height ?? '?'}`,
++        `screen ${mode ? `${mode.width}×${mode.height}@${mode.rate}${squarePixels(mode) ? '' : ' (not 16:9: the stream is tagged with 11:10 pixels)'}` : '?'}`,
++        `picture ${n(picture.left)},${n(picture.top)} ${n(picture.width)}×${n(picture.height)} · laid out ${video.offsetLeft},${video.offsetTop} ${video.offsetWidth}×${video.offsetHeight} fit ${getComputedStyle(video).objectFit}`,
+         `viewport ${vv ? `offset ${n(vv.offsetLeft)},${n(vv.offsetTop)} page ${n(vv.pageLeft)},${n(vv.pageTop)} ${n(vv.width)}×${n(vv.height)} scale ${vv.scale.toFixed(2)}` : 'none'}`,
+         `scroll ${window.scrollX},${window.scrollY} inner ${window.innerWidth}×${window.innerHeight} client ${document.documentElement.clientWidth}×${document.documentElement.clientHeight}`,
+       ] });
+@@ -348,6 +386,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+         e.preventDefault();
+         return;
+       }
++      // A press is a user gesture: playback the browser refused without one can start now.
++      resumePlayback.current?.();
+       const p = toRemote(e);
+       if (!p) return;
+       keysRef.current?.focus({ preventScroll: true });
+@@ -360,6 +400,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+     const onUp = (e: PointerEvent) => {
+       trace('up', e);
+       if (e.pointerType === 'touch') {
++        // A touch becomes a user gesture only when the finger lifts; a mouse press already is one.
++        resumePlayback.current?.();
+         touch.pointerUp(touchEvent(e));
+         browserRef.current?.finishScroll();
+         e.preventDefault();
+@@ -385,6 +427,10 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+       }
+     };
+     const onHidden = () => { if (document.hidden) reset(); };
++    const onBlur = () => {
++      browserRef.current?.pageBlurred();
++      reset();
++    };
+     const onWheel = (e: WheelEvent) => {
+       // The entire viewer owns scrolling, including its letterbox. Never scroll the local page.
+       e.preventDefault();
+@@ -411,7 +457,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+     box.addEventListener('touchstart', noTouchScroll, { passive: false });
+     box.addEventListener('touchmove', noTouchScroll, { passive: false });
+     box.addEventListener('contextmenu', noMenu);
+-    window.addEventListener('blur', reset);
++    window.addEventListener('blur', onBlur);
+     document.addEventListener('visibilitychange', onHidden);
+     return () => {
+       reset();
+@@ -424,7 +470,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+       box.removeEventListener('touchstart', noTouchScroll);
+       box.removeEventListener('touchmove', noTouchScroll);
+       box.removeEventListener('contextmenu', noMenu);
+-      window.removeEventListener('blur', reset);
++      window.removeEventListener('blur', onBlur);
+       document.removeEventListener('visibilitychange', onHidden);
+     };
+   }, []);
+@@ -565,6 +611,9 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
+         {/* Share the input mapping's fit instead of letting the video compositor choose a
+             separate intrinsic fit during a WebRTC resize. */}
+         <video ref={videoRef} autoPlay playsInline muted={muted} style={{ position: 'absolute', display: 'block', ...(fitted ? { left: fitted.left, top: fitted.top, width: fitted.width, height: fitted.height } : { inset: 0, width: '100%', height: '100%' }), maxWidth: 'none', objectFit: 'fill', pointerEvents: 'none' }} />
++        {/* Input diagnostics: the rectangle input is mapped to. A picture painted smaller than it
++            (bars inside the outline) means the compositor fitted the frame a second time. */}
++        {debug && fitted ? <div aria-hidden data-testid="input-picture" style={{ position: 'absolute', left: fitted.left, top: fitted.top, width: fitted.width, height: fitted.height, boxSizing: 'border-box', border: '1px dashed #ff2fd0', pointerEvents: 'none' }} /> : null}
+       </div>
+       {dragging ? <div aria-hidden style={{ position: 'absolute', inset: 0, pointerEvents: 'none', outline: '2px dashed currentColor', outlineOffset: -6, opacity: 0.6 }} /> : null}
+       {debug && debugInfo ? (
+diff --git a/packages/viewer/src/remote-browser.ts b/packages/viewer/src/remote-browser.ts
+index 5500ce8..b6507bf 100644
+--- a/packages/viewer/src/remote-browser.ts
++++ b/packages/viewer/src/remote-browser.ts
+@@ -31,9 +31,9 @@ export interface RemoteBrowserOptions {
+   onStats?: (stats: ViewerStats) => void;
+   /** A CSS `cursor` value for the remote cursor, drawn locally (page 5). */
+   onCursor?: (css: string) => void;
+-  /** Text the remote Chrome put on its clipboard. */
++  /** Text the remote Chrome put on its clipboard. Report a successful local copy with clipboardCopied. */
+   onClipboard?: (text: string) => void;
+-  /** A pasted or dropped file transfer started, progressed or ended. */
++  /** A pasted or dropped file transfer started, progressed or ended; also a text paste refused as too large (`files` 0). */
+   onTransfer?: (update: TransferUpdate) => void;
+   /** Delivery was interrupted; discard old input and require an explicit reconnect. */
+   onInputError?: (reason: InputFailure) => void;
+@@ -46,6 +46,8 @@ export interface RemoteBrowserOptions {
+   /** The level neko streams now, whenever it changes. */
+   onVideo?: (quality: VideoQuality) => void;
+   statsIntervalMs?: number;
++  /** The most desktop pixels to ask for (TIERS[tier].maxScreenPixels); unbounded by default. */
++  maxScreenPixels?: number;
+   /** Maximum time per token fetch or transport/WebRTC handshake before retrying. Defaults to 20 s. */
+   connectionTimeoutMs?: number;
+   /** Total consecutive failed attempts, including the initial one. Defaults to three. */
+@@ -68,6 +70,16 @@ const MAX_MEDIA_SAMPLE_AGE_MS = 5000;
+ const SOFTWARE_SHIFTED = new Set([...`~!@#$%^&*()_+{}|:"<>?`]);
+ const SHIFTED_KEYSYMS = new Map([...'`1234567890-=[]\\;\',./'].map((character, index) =>
+   [character.charCodeAt(0), [...SOFTWARE_SHIFTED][index]!.charCodeAt(0)]));
++/**
++ * The most text one paste carries, in UTF-8. The gateway closes a viewer socket for a frame above
++ * 256 KiB (apps/gateway MAX_FRAME_BYTES), and JSON can double text full of quotes or newlines.
++ */
++const MAX_PASTE_BYTES = 128 * 1024;
++/** Committed text longer than this, in characters, goes as one paste (typeSoftwareText). */
++const LONG_TYPED_TEXT = 100;
++/** How long a clipboard/updated matching text typed through the remote clipboard counts as its echo. */
++const TYPED_ECHO_MS = 3000;
++const encoder = new TextEncoder();
+ const modifierKeysym = (sym: number) => sym >= 0xffe1 && sym <= 0xffee;
+ const shiftedKeysym = (sym: number) => sym >= 0x61 && sym <= 0x7a ? sym - 0x20 : SHIFTED_KEYSYMS.get(sym) ?? sym;
+ 
+@@ -130,6 +142,12 @@ export class RemoteBrowser {
+   private offeredVideos: string[] = [];
+   private counters: { lost: number; received: number; freezes: number; frames: number; at: number } | null = null;
+   private readonly files: FileTransfers;
++  /** Text the remote clipboard last reported (clipboard/updated); null once typing went through it. */
++  private remoteClipboard: string | null = null;
++  /** The remote clipboard changed, and the page has not reported copying it to the local one. */
++  private remoteClipboardNewer = false;
++  /** Text recently typed through the remote clipboard, whose clipboard/updated is only an echo. */
++  private typedPastes: { text: string; at: number }[] = [];
+ 
+   constructor(private readonly opts: RemoteBrowserOptions) {
+     this.files = new FileTransfers({
+@@ -147,12 +165,7 @@ export class RemoteBrowser {
+       transport: () => this.ws,
+       ready: () => this.inputReady && !this.stopped,
+       held: () => this.transportKeys.size > 0 || this.transportButtons.size > 0,
+-      failed: (reason) => {
+-        this.inputReady = false;
+-        this.stopped = true;
+-        this.releaseTransportKeys();
+-        this.opts.onInputError?.(reason);
+-      },
++      failed: (reason) => this.inputFailed(reason),
+       sent: (data) => {
+         const frame = JSON.parse(data) as { data: NekoMessage<{ keysym?: number; code?: number }> };
+         const { event, payload } = frame.data;
+@@ -173,6 +186,11 @@ export class RemoteBrowser {
+     return this.remoteScreen ? { width: this.remoteScreen.width, height: this.remoteScreen.height } : null;
+   }
+ 
++  /** neko's current mode with its refresh rate, for input diagnostics. */
++  get screenMode(): ScreenConfiguration | null {
++    return this.remoteScreen ? { ...this.remoteScreen } : null;
++  }
++
+   /** A changed preference applies at once to a live stream, without reconnecting. */
+   setVideoPreference(video: VideoPreference) {
+     if (video.quality === this.video.quality && video.auto === this.video.auto) return;
+@@ -268,9 +286,10 @@ export class RemoteBrowser {
+     ws.onclose = () => {
+       if (this.ws !== ws) return;
+       this.inputReady = false;
+-      this.inputQueue.interrupt('disconnected');
+       // Capture the peer and its last bounded sample before teardown advances its sequence.
+       if (!this.stopped && this.state !== 'taken-over') this.diagnostic('failed', 'transport_closed');
++      this.inputQueue.interrupt('disconnected');
++      if (this.ws !== ws) return; // The interruption lost input and ended the connection.
+       this.ws = null;
+       this.clearConnectionTimer();
+       this.teardownPeer();
+@@ -282,6 +301,12 @@ export class RemoteBrowser {
+ 
+   disconnect() {
+     this.diagnostic('closed', 'canceled');
++    this.end();
++    this.setState('closed');
++  }
++
++  /** Ends the connection for good: only connect() starts another. */
++  private end() {
+     this.connectSequence++;
+     this.cancelConnectInfo?.();
+     this.stopped = true;
+@@ -295,7 +320,23 @@ export class RemoteBrowser {
+     const ws = this.ws;
+     this.ws = null;
+     ws?.close();
++    if (this.cursorUrl) {
++      URL.revokeObjectURL(this.cursorUrl);
++      this.cursorUrl = null;
++      // The page must not keep drawing a cursor whose image is gone.
++      this.opts.onCursor?.('default');
++    }
++  }
++
++  /**
++   * Input may have been lost. The connection ends here rather than carrying on with input the
++   * user believes was delivered: an open socket and peer would also keep reporting a live,
++   * watched desktop (and keep the browser awake) behind the page's interruption notice.
++   */
++  private inputFailed(reason: InputFailure) {
++    this.end();
+     this.setState('closed');
++    this.opts.onInputError?.(reason);
+   }
+ 
+   /** A renderer calls this only after observing a frame from this attempt's video stream. */
+@@ -364,9 +405,13 @@ export class RemoteBrowser {
+     this.releaseSoftwareKeys();
+   }
+ 
+-  /** Presses and releases a combination such as ['Control', 't'] (toolbar Keys menu). */
+-  sendCombo(names: string[]) {
+-    this.sendChord(names);
++  /**
++   * Presses and releases a combination such as ['Control', 't'] (toolbar Keys menu). Held modifiers
++   * stay down; `exact` lifts those the combination does not name for its duration, all but Shift,
++   * which extends a selection (a Mac's Option+← arrives with Alt held and goes out as Ctrl+←).
++   */
++  sendCombo(names: string[], exact = false) {
++    this.sendChord(names, exact);
+   }
+ 
+   /** IME commits share the input FIFO and work in browser chrome as well as web pages. */
+@@ -394,6 +439,12 @@ export class RemoteBrowser {
+ 
+   /** Types into the focused X11 window, including Chrome's address bar and menus. */
+   typeSoftwareText(text: string) {
++    const normalized = text.replace(/\r\n?/g, '\n');
++    // A long or multi-line commit (dictation, a text replacement) goes as one paste. Typed out key
++    // by key it overflowed the input queue at about 2,000 characters, and each newline became
++    // Enter, which sends a chat message or submits a form halfway through the text.
++    const whole = [...normalized].length > LONG_TYPED_TEXT || (normalized.includes('\n') && /[^\n]/.test(normalized));
++    if (whole && !this.fitsPaste(normalized)) return;
+     // Native input is a committed text operation, never a continuation of a held key.
+     // Missing mobile keyups must not change its casing or keep the last character repeating.
+     this.releaseSoftwareKeys();
+@@ -404,11 +455,13 @@ export class RemoteBrowser {
+     const flush = () => {
+       if (paste) {
+         this.sendInput({ event: EV.CONTROL_PASTE, payload: { text: paste } });
++        this.typedThroughClipboard(paste);
+         pasted = true;
+       }
+       paste = '';
+     };
+-    for (const character of text.replace(/\r\n?/g, '\n')) {
++    if (whole) paste = normalized;
++    else for (const character of normalized) {
+       const cp = character.codePointAt(0)!;
+       if (cp >= 0x80) {
+         paste += character;
+@@ -443,7 +496,7 @@ export class RemoteBrowser {
+ 
+   /** Neko waits for the clipboard write and then pastes inside this single ordered command. */
+   paste(text: string) {
+-    if (!text) return;
++    if (!text || !this.fitsPaste(text)) return;
+     const keys = new Set([...this.pressed, ...this.softwarePressed]);
+     const buttons = [...this.pressedButtons];
+     this.sendInput({ event: EV.CONTROL_PASTE, payload: { text } });
+@@ -453,6 +506,28 @@ export class RemoteBrowser {
+     for (const code of buttons) this.sendInput({ event: EV.CONTROL_BUTTONDOWN, payload: { code } });
+   }
+ 
++  /**
++   * A local Ctrl+V (Cmd+V) carrying the local clipboard's `text`. Sending it (paste) also replaces
++   * the remote clipboard, which may hold what the local one cannot: an image copied in the remote
++   * Chrome (neko reports text only), or text the page could not copy out. So the remote page pastes
++   * its own clipboard (a plain Ctrl+V) unless the text is new: not empty, not what the remote
++   * clipboard last reported, and not older than a remote copy that never reached the local clipboard.
++   */
++  pasteClipboard(text: string) {
++    if (!text || text === this.remoteClipboard || this.remoteClipboardNewer) this.sendChord(['Control', 'v']);
++    else this.paste(text);
++  }
++
++  /** The page put `text`, from onClipboard, on the local clipboard. */
++  clipboardCopied(text: string) {
++    if (text === this.remoteClipboard) this.remoteClipboardNewer = false;
++  }
++
++  /** The page lost focus: whatever is copied elsewhere meanwhile is newer than the remote clipboard. */
++  pageBlurred() {
++    this.remoteClipboardNewer = false;
++  }
++
+   /**
+    * Sends local files to the remote browser. paste: onto its clipboard, then Ctrl+V into the
+    * focused field; drop: onto the page at a point in remote screen pixels. Returns the transfer id,
+@@ -537,6 +612,7 @@ export class RemoteBrowser {
+     this.connectionAttempts = 0;
+     this.inputReady = true;
+     this.inputQueue.flush();
++    if (this.stopped) return; // Queued input could not be delivered (inputFailed).
+     this.setState('live');
+     this.startStats();
+     if (this.pendingViewport) this.applyScreen();
+@@ -592,6 +668,7 @@ export class RemoteBrowser {
+     // input must pause visibly instead of following the retry into another session.
+     this.inputReady = false;
+     this.inputQueue.interrupt('disconnected');
++    if (this.stopped) return; // The interruption lost input and ended the connection.
+     this.ws = null;
+     this.clearConnectionTimer();
+     this.teardownPeer();
+@@ -613,14 +690,15 @@ export class RemoteBrowser {
+     this.sendInput({ event: down ? EV.CONTROL_KEYDOWN : EV.CONTROL_KEYUP, payload: { keysym } });
+   }
+ 
+-  private sendChord(names: string[]) {
++  private sendChord(names: string[], exact = false) {
+     const held = new Set([...this.pressed, ...this.softwarePressed]);
+     const shift = names.includes('Shift') || held.has(KEYSYM.Shift_L) || held.has(0xffe2);
+     const syms = names.map(keysymForName).filter((sym): sym is number => sym !== null)
+       .map((sym) => shift ? shiftedKeysym(sym) : sym);
+-    // Held modifiers remain down. A held character still needs a fresh stroke to trigger
+-    // a toolbar shortcut, then returns to its original held state after the chord.
+-    const suspended = [...held].filter((sym) => !modifierKeysym(sym));
++    // Held modifiers remain down unless `exact` lifts them. A held character still needs a fresh
++    // stroke to trigger a toolbar shortcut, then returns to its original held state after the chord.
++    const suspended = [...held].filter((sym) => !modifierKeysym(sym)
++      || (exact && sym !== KEYSYM.Shift_L && sym !== 0xffe2 && !syms.includes(sym)));
+     for (const keysym of [...suspended].reverse()) this.sendInput({ event: EV.CONTROL_KEYUP, payload: { keysym } });
+     const added = syms.filter((sym) => !modifierKeysym(sym) || !held.has(sym));
+     for (const keysym of added) this.sendInput({ event: EV.CONTROL_KEYDOWN, payload: { keysym } });
+@@ -649,6 +727,26 @@ export class RemoteBrowser {
+     return sym;
+   }
+ 
++  /** Refuses text too large for one gateway frame, and says so (onTransfer), rather than lose the connection over it. */
++  private fitsPaste(text: string): boolean {
++    const bytes = encoder.encode(text).byteLength;
++    if (bytes <= MAX_PASTE_BYTES) return true;
++    this.opts.onTransfer?.({ id: `text-${Date.now().toString(36)}`, action: 'paste', files: 0, bytes, received: 0, state: 'error', reason: 'too_large' });
++    return false;
++  }
++
++  /**
++   * Typed text went through the remote clipboard. neko reports it back (clipboard/updated) as if it
++   * had been copied, which put every IME commit on the local clipboard: that echo is dropped. The
++   * remote clipboard now holds nothing the user copied, so a local paste sends its own text.
++   */
++  private typedThroughClipboard(text: string) {
++    const now = Date.now();
++    this.typedPastes = [...this.typedPastes.filter((typed) => now - typed.at < TYPED_ECHO_MS), { text, at: now }].slice(-16);
++    this.remoteClipboard = null;
++    this.remoteClipboardNewer = false;
++  }
++
+   private sendInput(msg: NekoMessage): boolean {
+     if (msg.event !== EV.CONTROL_SCROLL && msg.event !== EV.CONTROL_MOVE) this.finishScroll();
+     return this.inputQueue.enqueue({ t: 'neko', data: msg });
+@@ -729,6 +827,8 @@ export class RemoteBrowser {
+           // An offline notification with no user input pauses the queue without failing it.
+           // A returning agent must make a fresh, empty queue usable on this same socket.
+           this.inputQueue.resume();
++          // The returning agent gets a whole deadline to renegotiate, not what its absence left.
++          this.clearConnectionTimer();
+           this.startConnectionTimer(ws);
+         }
+         return;
+@@ -736,6 +836,7 @@ export class RemoteBrowser {
+         this.diagnostic('failed', 'agent_offline');
+         this.inputReady = false;
+         this.inputQueue.interrupt('disconnected');
++        if (this.stopped) return; // The interruption lost input and ended the connection.
+         this.clearConnectionTimer();
+         this.teardownPeer();
+         this.signalRequested = false;
+@@ -779,9 +880,12 @@ export class RemoteBrowser {
+       case EV.SYSTEM_INIT: {
+         this.diagnostic('desktop_ready');
+         const init = msg.payload as { screen_size?: unknown; webrtc?: { videos?: unknown } } | undefined;
+-        this.remoteScreen = screenOf(init?.screen_size) ?? this.remoteScreen;
++        // Each system/init comes from a fresh neko session: an unknown screen is better than one
++        // carried over from a relay that ended (input then maps to the picture's own pixels).
++        this.remoteScreen = screenOf(init?.screen_size);
+         this.offeredVideos = Array.isArray(init?.webrtc?.videos) ? init.webrtc.videos.filter((v): v is string => typeof v === 'string') : [];
+         this.requestSignal(ws);
++        this.qualityController?.screenChanged(Date.now());
+         return;
+       }
+       case EV.SYSTEM_ADMIN: {
+@@ -791,9 +895,13 @@ export class RemoteBrowser {
+         this.applyScreen();
+         return;
+       }
+-      case EV.SCREEN_UPDATED:
+-        this.remoteScreen = screenOf(msg.payload) ?? this.remoteScreen;
++      case EV.SCREEN_UPDATED: {
++        const screen = screenOf(msg.payload);
++        if (!screen) return;
++        this.remoteScreen = screen;
++        this.qualityController?.screenChanged(Date.now());
+         return;
++      }
+       case EV.SIGNAL_PROVIDE:
+         this.videoChanged((msg.payload as unknown as SignalProvide).video?.id);
+         await this.answer(msg.payload as unknown as SignalProvide, ws);
+@@ -818,7 +926,16 @@ export class RemoteBrowser {
+       }
+       case EV.CLIPBOARD_UPDATED: {
+         const text = (msg.payload as { text?: unknown } | undefined)?.text;
+-        if (typeof text === 'string') this.opts.onClipboard?.(text);
++        if (typeof text !== 'string') return;
++        const now = Date.now();
++        const echo = this.typedPastes.findIndex((typed) => typed.text === text && now - typed.at < TYPED_ECHO_MS);
++        if (echo >= 0) {
++          this.typedPastes.splice(echo, 1);
++          return;
++        }
++        this.remoteClipboard = text;
++        this.remoteClipboardNewer = true;
++        this.opts.onClipboard?.(text);
+         return;
+       }
+       case EV.CURSOR_IMAGE: {
+@@ -885,9 +1002,8 @@ export class RemoteBrowser {
+         this.startStats();
+         this.becomeLive();
+       } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+-        this.inputReady = false;
+-        this.inputQueue.interrupt('disconnected');
+-        // An ICE failure (e.g. a network change): start over with a fresh token.
++        // An ICE failure (e.g. a network change): start over with a fresh token. Pending input
++        // is interrupted there, after the failure is recorded.
+         this.reconnect(ws);
+       }
+     };
+@@ -930,7 +1046,7 @@ export class RemoteBrowser {
+     if (!viewport || (!live && (!this.screenConfigurations.length || !this.signalRequested || this.ws?.readyState !== 1))) return;
+     // Neko advertises the actual X11 modes, including their refresh rates. A familiar size
+     // such as 1600×900 can support 25 Hz without supporting 30 Hz.
+-    const s = fitScreen(viewport.width, viewport.height, this.screenConfigurations, STREAM.maxRefreshRate)
++    const s = fitScreen(viewport.width, viewport.height, this.screenConfigurations, STREAM.maxRefreshRate, this.opts.maxScreenPixels)
+       ?? { ...fitScreen(viewport.width, viewport.height), rate: 60 }; // Neko v3's default for clients without capabilities.
+     const key = `${s.width}x${s.height}@${s.rate}`;
+     if (key === this.appliedScreen) return;
+diff --git a/packages/viewer/src/text-input.ts b/packages/viewer/src/text-input.ts
+index 6e1da24..d599272 100644
+--- a/packages/viewer/src/text-input.ts
++++ b/packages/viewer/src/text-input.ts
+@@ -10,6 +10,8 @@ export interface TextKeyEvent {
+   shiftKey?: boolean;
+   isComposing?: boolean;
+   keyCode?: number;
++  /** KeyboardEvent's own; the controller asks it for AltGraph. */
++  getModifierState?: (key: string) => boolean;
+ }
+ 
+ export interface TextInputEvent {
+@@ -23,9 +25,12 @@ export interface TextInputCallbacks {
+   mode: () => 'desktop' | 'software';
+   key: (down: boolean, event: TextKeyEvent) => boolean;
+   typeText: (text: string) => void;
+-  sendCombo: (names: string[]) => void;
++  /** `exact`: modifiers held but not named are lifted for the combination (RemoteBrowser.sendCombo). */
++  sendCombo: (names: string[], exact?: boolean) => void;
+   releaseAllKeys: () => void;
+   activity?: () => void;
++  /** A Mac's (or an iPad's) keyboard, whose Cmd and Option the remote reads as Control and Alt: see keyDown. */
++  mac?: boolean;
+ }
+ 
+ type Edit = { kind: 'backspace' | 'delete' | 'enter'; combo: string[] };
+@@ -51,6 +56,22 @@ function keyEdit(key: string): Edit | null {
+ 
+ const modifierKey = (key: string) => ['Shift', 'Control', 'Alt', 'Meta', 'AltGraph'].includes(key);
+ 
++/**
++ * A Mac moves the caret by word with Option and to the ends of the line or the text with Cmd. On
++ * the remote PC those would arrive as Alt+← (Chrome's Back) and Ctrl+←: the PC's own keys for the
++ * same motion go out instead. Shift still selects.
++ */
++function macMotion(event: TextKeyEvent): string[] | null {
++  if (event.ctrlKey || !!event.altKey === !!event.metaKey) return null;
++  switch (event.key) {
++    case 'ArrowLeft': return event.altKey ? ['Control', 'ArrowLeft'] : ['Home'];
++    case 'ArrowRight': return event.altKey ? ['Control', 'ArrowRight'] : ['End'];
++    case 'ArrowUp': return event.metaKey ? ['Control', 'Home'] : null;
++    case 'ArrowDown': return event.metaKey ? ['Control', 'End'] : null;
++    default: return null;
++  }
++}
++
+ /**
+  * A DOM-independent controller for the viewer's textarea.
+  *
+@@ -91,6 +112,31 @@ export class TextInputController {
+       return this.softwareStroke(event);
+     }
+ 
++    // Windows types an AltGr character (@ on a German keyboard) with Control and Alt held, which the
++    // remote US layout would take as a Ctrl+Alt shortcut: type the character itself. The AltGraph
++    // key stays local.
++    if (event.key === 'AltGraph') return false;
++    if (!event.metaKey && [...event.key].length === 1 && event.getModifierState?.('AltGraph')) {
++      this.callbacks.typeText(event.key);
++      this.callbacks.activity?.();
++      return true;
++    }
++    const motion = this.callbacks.mac ? macMotion(event) : null;
++    if (motion) {
++      this.callbacks.sendCombo(motion, true);
++      this.callbacks.activity?.();
++      return true;
++    }
++    // macOS sends no keyup for a key pressed while Cmd is held. Tracked, the key would stay down on
++    // the remote, where X11 repeats it, and its next press would read as a repeat. Send the stroke at once.
++    if (this.callbacks.mac && event.metaKey && !modifierKey(event.key)) {
++      if (!this.callbacks.key(true, event)) return false;
++      this.callbacks.key(false, event);
++      if (edit) this.rememberEdit(edit.kind);
++      this.callbacks.activity?.();
++      return true;
++    }
++
+     // Neko/X11 already repeats a held key. Repeated keydowns would replace the original
+     // mapping when Shift or the input layout changes, leaving the first keysym held forever.
+     if (matchingKeyIdentity(this.forwarded, event) !== null) {
+@@ -127,6 +173,14 @@ export class TextInputController {
+     }
+     const down = this.forwarded.get(id)!;
+     this.forwarded.delete(id);
++    if (this.callbacks.mac && down.key === 'Meta') {
++      // A key that was already down when Cmd was pressed lost its keyup as well (see keyDown).
++      for (const [other, held] of [...this.forwarded]) {
++        if (modifierKey(held.key)) continue;
++        this.forwarded.delete(other);
++        this.callbacks.key(false, held);
++      }
++    }
+     // Use the original mapping if the OS changed key/modifier fields before keyup.
+     return this.callbacks.key(false, down);
+   }
+diff --git a/packages/viewer/test/mapping.test.ts b/packages/viewer/test/mapping.test.ts
+index c0eb3dd..6955166 100644
+--- a/packages/viewer/test/mapping.test.ts
++++ b/packages/viewer/test/mapping.test.ts
+@@ -1,5 +1,34 @@
+ import { describe, expect, it } from 'vitest';
+-import { elementPoint, pictureRect, toRemotePoint } from '../src/mapping.js';
++import { elementPoint, pictureRect, remoteSpace, toRemotePoint } from '../src/mapping.js';
++
++describe('the iPad report: box 1366×829, frame and screen 1280×800, a tap at box point 561,60', () => {
++  const box = { left: 0, top: 0, width: 1366, height: 829 };
++  const frame = { width: 1280, height: 800 };
++
++  it('maps the tap as the diagnostics showed', () => {
++    const point = toRemotePoint(561, 60, box, frame, frame)!;
++    expect([Math.round(point.x), Math.round(point.y)]).toEqual([522, 58]);
++  });
++
++  it('was painted 11:10 inside the rectangle input used, as measured in the screenshot', () => {
++    // object-fit: contain sized the layer from videoWidth×videoHeight; Safari's display layer then
++    // fitted the frame again at its tagged display aspect, 1408×800.
++    const painted = pictureRect(pictureRect(box, frame), { width: 1408, height: 800 });
++    expect(painted.width).toBeCloseTo(1326.4, 1); // measured 1325
++    expect(painted.height).toBeCloseTo(753.6, 1); // measured 752.5, bars of the page's own colour
++    expect(painted.top).toBeCloseTo(37.7, 1); // measured 38.3; a 1280×720 frame would give 41.4
++    // The finger touched remote y ≈ 24 (the tab strip); input went to y = 58 (the address bar).
++    expect(((60 - painted.top) / painted.height) * 800).toBeCloseTo(23.7, 0);
++  });
++});
++
++describe('remoteSpace', () => {
++  it('maps to neko\'s screen when the frame has its shape, and to the frame otherwise', () => {
++    expect(remoteSpace({ width: 960, height: 540 }, { width: 1920, height: 1080 })).toEqual({ width: 1920, height: 1080, source: 'screen' });
++    expect(remoteSpace({ width: 1280, height: 720 }, { width: 1280, height: 800 })).toEqual({ width: 1280, height: 720, source: 'frame' });
++    expect(remoteSpace({ width: 1280, height: 720 }, null)).toEqual({ width: 1280, height: 720, source: 'frame' });
++  });
++});
+ 
+ describe('picture layout and input share the same rectangle', () => {
+   it.each([
+diff --git a/packages/viewer/test/playback.test.ts b/packages/viewer/test/playback.test.ts
+index a720d43..d55b474 100644
+--- a/packages/viewer/test/playback.test.ts
++++ b/packages/viewer/test/playback.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, it, vi } from 'vitest';
+-import { isDisplaying, playbackFailure, readPlayback } from '../src/playback.js';
++import { isDisplaying, playbackFailure, readPlayback, startPlayback } from '../src/playback.js';
+ 
+ const video = () => ({ paused: false, readyState: 4, videoWidth: 1920, videoHeight: 1080 });
+ 
+@@ -148,3 +148,55 @@ describe('current video display', () => {
+     expect(isDisplaying(source)).toBe(false);
+   });
+ });
++
++describe('starting playback', () => {
++  /** WebKit without a user gesture: only muted playback is allowed. */
++  const webkit = (muted = false) => {
++    const element = {
++      muted,
++      play: vi.fn(() => element.muted ? Promise.resolve() : Promise.reject(Object.assign(new Error('gesture required'), { name: 'NotAllowedError' }))),
++    };
++    return element;
++  };
++  const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
++
++  it('mutes a stream WebKit refuses to play with sound, says so, and plays it again', async () => {
++    const element = webkit();
++    const states: string[] = [];
++    const muted = vi.fn();
++    startPlayback(element, { current: () => true, report: (state) => states.push(state), muted });
++    await flush();
++    expect(element.play).toHaveBeenCalledTimes(2);
++    expect(element.muted).toBe(true);
++    expect(muted).toHaveBeenCalledOnce();
++    expect(states).toEqual(['not_allowed', 'resolved']);
++  });
++
++  it('retries only once, and leaves an already muted or replaced stream alone', async () => {
++    const refused = { muted: true, play: vi.fn(() => Promise.reject(Object.assign(new Error(), { name: 'NotAllowedError' }))) };
++    const states: string[] = [];
++    startPlayback(refused, { current: () => true, report: (state) => states.push(state), muted: () => {} });
++    await flush();
++    expect(refused.play).toHaveBeenCalledOnce();
++    expect(states).toEqual(['not_allowed']);
++
++    const element = webkit();
++    let current = true;
++    const muted = vi.fn();
++    startPlayback(element, { current: () => current, report: () => {}, muted });
++    current = false;
++    await flush();
++    expect(element.play).toHaveBeenCalledOnce();
++    expect(element.muted).toBe(false);
++    expect(muted).not.toHaveBeenCalled();
++  });
++
++  it('does not mute for other failures', async () => {
++    const element = { muted: false, play: vi.fn(() => Promise.reject(Object.assign(new Error(), { name: 'AbortError' }))) };
++    const states: string[] = [];
++    startPlayback(element, { current: () => true, report: (state) => states.push(state), muted: () => {} });
++    await flush();
++    expect(element.muted).toBe(false);
++    expect(states).toEqual(['aborted']);
++  });
++});
+diff --git a/packages/viewer/test/quality.test.ts b/packages/viewer/test/quality.test.ts
+index 03c5158..f989b13 100644
+--- a/packages/viewer/test/quality.test.ts
++++ b/packages/viewer/test/quality.test.ts
+@@ -140,6 +140,28 @@ describe('picture quality controller', () => {
+     expect(run(current, 10_000, 40, (at) => ({ ...bad(at), scale: 1 })).map(([, q]) => q)).toEqual(['high', 'medium', 'low']);
+   });
+ 
++  it('does not take frames of the old size after a resize for a downscaled level', () => {
++    // At medium, the desktop grows from 1600 to 1920 wide: neko says so at once, while 1600-wide
++    // frames keep arriving for two readings. That once ruled out medium and low for good.
++    const c = new QualityController('full', 0, 'medium');
++    let t = 10_000;
++    const advance = (seconds: number, sample: (at: number) => QualitySample) => { const s = run(c, t, seconds, sample); t += seconds * 1000; return s; };
++    expect(advance(6, (at) => ({ ...good(at, 15), scale: 1 }))).toEqual([]);
++    c.screenChanged(t);
++    expect(advance(4, (at) => ({ ...good(at, 15), scale: 1600 / 1920 }))).toEqual([]);
++    // Then the path congests: the controller still goes down to what it carries.
++    advance(30, (at) => ({ ...bad(at), stalled: true, lossRate: 0.3, kbps: 500, scale: 1 }));
++    expect(c.quality).toBe('low');
++  });
++
++  it('still rules out a level whose picture stays small once the desktop has settled', () => {
++    const scales: Record<string, number> = { full: 1, high: 0.75, medium: 0.5, low: 0.5 };
++    const c = new QualityController('full', 0);
++    c.screenChanged(0);
++    const sample = (at: number): QualitySample => ({ ...bad(at), scale: scales[c.quality]! });
++    expect(run(c, 10_000, 60, sample).map(([, q]) => q)).toEqual(['high', 'full']);
++  });
++
+   it('runs low at 10 fps on purpose', () => {
+     const low = new QualityController('low', 0);
+     expect(run(low, 10_000, 30, (at) => good(at, 10))).toEqual([]);
+diff --git a/packages/viewer/test/text-input.test.ts b/packages/viewer/test/text-input.test.ts
+index b28d45d..d928682 100644
+--- a/packages/viewer/test/text-input.test.ts
++++ b/packages/viewer/test/text-input.test.ts
+@@ -1,7 +1,7 @@
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+ import { TextInputController, type TextKeyEvent } from '../src/text-input.js';
+ 
+-function setup(mode: 'desktop' | 'software' = 'desktop') {
++function setup(mode: 'desktop' | 'software' = 'desktop', mac = false) {
+   const callbacks = {
+     mode: vi.fn(() => mode),
+     key: vi.fn((_down: boolean, event: TextKeyEvent) => !['Unidentified', 'Process', 'Dead'].includes(event.key)),
+@@ -9,6 +9,7 @@ function setup(mode: 'desktop' | 'software' = 'desktop') {
+     sendCombo: vi.fn(),
+     releaseAllKeys: vi.fn(),
+     activity: vi.fn(),
++    mac,
+   };
+   return { controller: new TextInputController(callbacks), ...callbacks };
+ }
+@@ -16,6 +17,79 @@ function setup(mode: 'desktop' | 'software' = 'desktop') {
+ beforeEach(() => vi.useFakeTimers());
+ afterEach(() => vi.useRealTimers());
+ 
++const strokes = (key: ReturnType<typeof setup>['key']) => key.mock.calls.map(([down, event]) => [down, event.key]);
++
++describe('keyboards with their own rules', () => {
++  it('sends a key pressed with Cmd on a Mac as one stroke, since macOS never sends its keyup', () => {
++    const { controller, key } = setup('desktop', true);
++    expect(controller.keyDown({ key: 'Meta', code: 'MetaLeft', metaKey: true })).toBe(true);
++    expect(controller.keyDown({ key: 'c', code: 'KeyC', metaKey: true })).toBe(true);
++    expect(controller.keyUp({ key: 'Meta', code: 'MetaLeft' })).toBe(true);
++    expect(strokes(key)).toEqual([[true, 'Meta'], [true, 'c'], [false, 'c'], [false, 'Meta']]);
++    key.mockClear();
++    // The next C is a press of its own, not a repeat of a key that was never released.
++    expect(controller.keyDown({ key: 'c', code: 'KeyC' })).toBe(true);
++    expect(controller.keyUp({ key: 'c', code: 'KeyC' })).toBe(true);
++    expect(strokes(key)).toEqual([[true, 'c'], [false, 'c']]);
++  });
++
++  it('releases a key that was down before Cmd when Cmd goes up on a Mac', () => {
++    const { controller, key } = setup('desktop', true);
++    controller.keyDown({ key: 'a', code: 'KeyA' });
++    controller.keyDown({ key: 'Shift', code: 'ShiftLeft', shiftKey: true });
++    controller.keyDown({ key: 'Meta', code: 'MetaLeft', metaKey: true, shiftKey: true });
++    controller.keyUp({ key: 'Meta', code: 'MetaLeft', shiftKey: true });
++    expect(strokes(key)).toEqual([[true, 'a'], [true, 'Shift'], [true, 'Meta'], [false, 'a'], [false, 'Meta']]);
++    expect(controller.keyUp({ key: 'a', code: 'KeyA' })).toBe(false);
++  });
++
++  it('tracks Cmd and Ctrl chords as usual elsewhere', () => {
++    const { controller, key } = setup('desktop');
++    controller.keyDown({ key: 'Meta', code: 'MetaLeft', metaKey: true });
++    controller.keyDown({ key: 'c', code: 'KeyC', metaKey: true });
++    expect(strokes(key)).toEqual([[true, 'Meta'], [true, 'c']]);
++  });
++
++  it('types an AltGr character rather than sending Ctrl+Alt with it', () => {
++    const { controller, key, typeText } = setup('desktop');
++    const altGraph = (k: string, code: string): TextKeyEvent => ({ key: k, code, ctrlKey: true, altKey: true, getModifierState: (m) => m === 'AltGraph' });
++    // Windows: a Control press precedes AltGraph, both reported as held with the character.
++    expect(controller.keyDown({ key: 'Control', code: 'ControlLeft', ctrlKey: true })).toBe(true);
++    expect(controller.keyDown(altGraph('AltGraph', 'AltRight'))).toBe(false);
++    expect(controller.keyDown(altGraph('@', 'KeyQ'))).toBe(true);
++    expect(typeText.mock.calls).toEqual([['@']]);
++    expect(controller.keyUp(altGraph('@', 'KeyQ'))).toBe(false);
++    expect(controller.keyUp({ key: 'AltGraph', code: 'AltRight' })).toBe(false);
++    expect(controller.keyUp({ key: 'Control', code: 'ControlLeft' })).toBe(true);
++    expect(strokes(key)).toEqual([[true, 'Control'], [false, 'Control']]);
++  });
++
++  it.each([
++    [{ key: 'ArrowLeft', code: 'ArrowLeft', altKey: true }, ['Control', 'ArrowLeft']],
++    [{ key: 'ArrowRight', code: 'ArrowRight', altKey: true, shiftKey: true }, ['Control', 'ArrowRight']],
++    [{ key: 'ArrowLeft', code: 'ArrowLeft', metaKey: true }, ['Home']],
++    [{ key: 'ArrowRight', code: 'ArrowRight', metaKey: true, shiftKey: true }, ['End']],
++    [{ key: 'ArrowUp', code: 'ArrowUp', metaKey: true }, ['Control', 'Home']],
++    [{ key: 'ArrowDown', code: 'ArrowDown', metaKey: true }, ['Control', 'End']],
++  ] as [TextKeyEvent, string[]][])('sends a Mac\'s caret motion %j as the PC keys for it', (event, combo) => {
++    const { controller, key, sendCombo } = setup('desktop', true);
++    expect(controller.keyDown(event)).toBe(true);
++    expect(sendCombo.mock.calls).toEqual([[combo, true]]);
++    expect(key).not.toHaveBeenCalled();
++    expect(controller.keyUp(event)).toBe(false);
++  });
++
++  it('leaves Alt+arrow alone off a Mac and Option+Up on one', () => {
++    const pc = setup('desktop');
++    pc.controller.keyDown({ key: 'ArrowLeft', code: 'ArrowLeft', altKey: true });
++    expect(pc.sendCombo).not.toHaveBeenCalled();
++    expect(strokes(pc.key)).toEqual([[true, 'ArrowLeft']]);
++    const mac = setup('desktop', true);
++    mac.controller.keyDown({ key: 'ArrowUp', code: 'ArrowUp', altKey: true });
++    expect(mac.sendCombo).not.toHaveBeenCalled();
++  });
++});
++
+ describe('viewer text input', () => {
+   it('keeps desktop keydown immediate and pairs keyup with the original key', () => {
+     const { controller, key, typeText } = setup();
+diff --git a/packages/viewer/test/viewer.test.ts b/packages/viewer/test/viewer.test.ts
+index 499624d..45309ca 100644
+--- a/packages/viewer/test/viewer.test.ts
++++ b/packages/viewer/test/viewer.test.ts
+@@ -1,9 +1,21 @@
++import { TIERS } from '@cloudbrowser/contracts';
+ import { afterEach, describe, expect, it, vi } from 'vitest';
+ import { keysymFor, keysymForName } from '../src/keyboard.js';
+-import { decode, encode, fitScreen } from '../src/neko.js';
++import { decode, encode, fitScreen, squarePixels } from '../src/neko.js';
+ import { RemoteBrowser, type RemoteBrowserOptions } from '../src/remote-browser.js';
+ import { qualityLevel } from '../src/stats.js';
+ 
++// What neko advertises on the browser image: its xorg.conf modes and the VESA and CVT modes Xorg
++// adds itself (validateAllDefaultModes), at the rates neko lists (≤ 30 Hz, or tens up to 60).
++const NEKO_MODES = ([
++  [1024, 576, 30], [1024, 576, 60], [1024, 768, 60], [1152, 648, 30], [1152, 648, 60],
++  [1280, 720, 30], [1280, 720, 60], [1280, 800, 60], [1280, 960, 60], [1280, 1024, 60],
++  [1368, 768, 25], [1368, 768, 30], [1368, 768, 60], [1400, 900, 60], [1400, 1050, 60],
++  [1600, 900, 25], [1600, 900, 60], [1600, 1200, 60], [1680, 1050, 60], [1920, 1080, 25],
++  [1920, 1080, 30], [1920, 1080, 60], [1920, 1200, 60], [2048, 1152, 60], [2560, 1440, 25],
++  [2560, 1440, 30], [3840, 2160, 25],
++] as const).map(([width, height, rate]) => ({ width, height, rate }));
++
+ describe('neko data channel encoding', () => {
+   it('encodes move, scroll, key and button frames big-endian', () => {
+     expect([...new Uint8Array(encode.move(1920, 5))]).toEqual([0x01, 0, 4, 0x07, 0x80, 0, 5]);
+@@ -49,10 +61,56 @@ describe('neko data channel encoding', () => {
+     expect(fitScreen(1600, 900, [])).toBeNull();
+   });
+ 
++  it('only picks desktops that neko streams with square pixels', () => {
++    // iPad Pro 12.9" in landscape: a 1366×829 box fitted 1280×800 at 60 Hz, which Safari painted at 11:10.
++    expect(fitScreen(1366, 829, NEKO_MODES)).toEqual({ width: 1368, height: 768, rate: 30 });
++    expect(fitScreen(1300, 985, NEKO_MODES)).toEqual({ width: 1280, height: 720, rate: 30 }); // not 1280×960
++    expect(fitScreen(1400, 1000, NEKO_MODES)).toEqual({ width: 1368, height: 768, rate: 30 }); // not 1400×900
++    expect(fitScreen(1700, 1250, NEKO_MODES)).toEqual({ width: 1600, height: 900, rate: 25 }); // not 1600×1200
++    expect(fitScreen(1500, 950)).toEqual({ width: 1366, height: 768 }); // the fallback list has no 1440×900
++    for (const [width, height] of [[1280, 720], [1360, 768], [1366, 768], [1368, 768], [1600, 900], [2560, 1440]] as const) {
++      expect(squarePixels({ width, height })).toBe(true);
++    }
++    for (const [width, height] of [[1280, 800], [1440, 900], [1280, 960], [1280, 1024], [1400, 900], [800, 1600], [0, 0]] as const) {
++      expect(squarePixels({ width, height })).toBe(false);
++    }
++  });
++
++  it('takes a mode Xorg rounded up to a multiple of 8, such as 1368×768 for a 1366 px wide view', () => {
++    const configurations = [{ width: 1280, height: 720, rate: 30 }, { width: 1368, height: 768, rate: 30 }];
++    expect(fitScreen(1366, 829, configurations)).toEqual({ width: 1368, height: 768, rate: 30 });
++    expect(fitScreen(1360, 829, configurations)).toEqual({ width: 1280, height: 720, rate: 30 });
++    expect(fitScreen(1279.6, 719.6, configurations)).toEqual({ width: 1280, height: 720, rate: 30 });
++  });
++
++  it('keeps the desktop within a tier\'s pixel budget', () => {
++    const configurations = [
++      { width: 1368, height: 768, rate: 30 },
++      { width: 1920, height: 1080, rate: 30 },
++      { width: 2560, height: 1440, rate: 30 },
++    ];
++    expect(fitScreen(2560, 1440, configurations, 30, 1920 * 1080)).toEqual({ width: 1920, height: 1080, rate: 30 });
++    expect(fitScreen(2560, 1440, configurations, 30, 2560 * 1440)).toEqual({ width: 2560, height: 1440, rate: 30 });
++    expect(fitScreen(1440, 860, configurations, 30, 1920 * 1080)).toEqual({ width: 1368, height: 768, rate: 30 });
++    // A budget below every mode is ignored rather than leaving no desktop at all.
++    expect(fitScreen(2560, 1440, configurations, 30, 1000)).toEqual({ width: 2560, height: 1440, rate: 30 });
++    // With neko's full list: Basic stops at 1080p, Premium takes 1440p, both at a bounded rate.
++    expect(fitScreen(2600, 1500, NEKO_MODES, 30, TIERS.basic.maxScreenPixels)).toEqual({ width: 1920, height: 1080, rate: 30 });
++    expect(fitScreen(2600, 1500, NEKO_MODES, 30, TIERS.premium.maxScreenPixels)).toEqual({ width: 2560, height: 1440, rate: 30 });
++  });
++
+   it('uses the supported rate when a screen has no mode at or below 30 Hz', () => {
+     expect(fitScreen(1600, 1000, [{ width: 1440, height: 900, rate: 60 }])).toEqual({ width: 1440, height: 900, rate: 60 });
+   });
+ 
++  it('prefers a size offered at a bounded refresh rate over a larger one offered only faster', () => {
++    // neko offers 2048×1152 only at 60 Hz: Chrome would draw twice the frames the stream carries.
++    expect(fitScreen(2100, 1200, NEKO_MODES)).toEqual({ width: 1920, height: 1080, rate: 30 });
++    expect(fitScreen(1700, 1000, [{ width: 1600, height: 900, rate: 60 }, { width: 1366, height: 768, rate: 30 }])).toEqual({ width: 1366, height: 768, rate: 30 });
++    // Premium allows 60 Hz, so the larger desktop is the better fit there.
++    expect(fitScreen(2100, 1200, NEKO_MODES, 60)).toEqual({ width: 2048, height: 1152, rate: 60 });
++  });
++
+   it('gives Premium the 60 Hz desktop where neko has one, and the same size as Basic', () => {
+     const configurations = [
+       { width: 1368, height: 768, rate: 60 },
+@@ -193,7 +251,7 @@ describe('RemoteBrowser', () => {
+ 
+   function setup(
+     iceServers: { urls: string[]; username?: string; credential?: string }[] = [],
+-    options: Pick<RemoteBrowserOptions, 'connectionTimeoutMs' | 'maxConnectionAttempts' | 'requireFirstFrame' | 'onDiagnostic' | 'getPlaybackState' | 'onStream' | 'onStats' | 'onInputError' | 'video' | 'onVideo'> = {},
++    options: Partial<Omit<RemoteBrowserOptions, 'getConnectInfo' | 'onState' | 'WebSocketImpl' | 'RTCPeerConnectionImpl'>> = {},
+   ) {
+     FakeWS.all = [];
+     const getConnectInfo = vi.fn(async () => ({ gatewayUrl: 'wss://gw/v1/stream/i1', token: `tok${getConnectInfo.mock.calls.length}`, iceServers }));
+@@ -301,6 +359,30 @@ describe('RemoteBrowser', () => {
+     b.disconnect();
+   });
+ 
++  it('lifts held modifiers an exact combination does not name, all but Shift', async () => {
++    const { b } = setup([], { macToPc: true });
++    await b.connect();
++    const ws = FakeWS.all[0]!;
++    await readyInput(ws);
++    // A Mac's Shift+Option+←, sent as Ctrl+Shift+←; then Cmd+→ (Control on the remote) as End.
++    b.key(true, { key: 'Shift', code: 'ShiftLeft' });
++    b.key(true, { key: 'Alt', code: 'AltLeft' });
++    b.sendCombo(['Control', 'ArrowLeft'], true);
++    b.key(false, { key: 'Alt', code: 'AltLeft' });
++    b.key(true, { key: 'Meta', code: 'MetaLeft' });
++    b.sendCombo(['End'], true);
++    b.key(false, { key: 'Meta', code: 'MetaLeft' });
++    b.key(false, { key: 'Shift', code: 'ShiftLeft' });
++    expect(ws.sent.map((frame: any) => `${frame.data.event.slice(8)} ${frame.data.payload.keysym.toString(16)}`)).toEqual([
++      'keydown ffe1', 'keydown ffe9',
++      'keyup ffe9', 'keydown ffe3', 'keydown ff51', 'keyup ff51', 'keyup ffe3', 'keydown ffe9',
++      'keyup ffe9', 'keydown ffe3',
++      'keyup ffe3', 'keydown ff57', 'keyup ff57', 'keydown ffe3',
++      'keyup ffe3', 'keyup ffe1',
++    ]);
++    b.disconnect();
++  });
++
+   it('uses final shifted keysyms and still strokes a toolbar character that was already held', async () => {
+     const { b } = setup();
+     await b.connect();
+@@ -443,6 +525,94 @@ describe('RemoteBrowser', () => {
+     b.disconnect();
+   });
+ 
++  it('ends the connection when input may have been lost, instead of staying live behind the notice', async () => {
++    vi.useFakeTimers();
++    const onInputError = vi.fn();
++    const { b, states } = setup([], { onInputError });
++    await b.connect();
++    const ws = FakeWS.all[0]!;
++    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
++    await vi.advanceTimersByTimeAsync(0);
++    const pc = FakePC.last;
++    pc.connect();
++    expect(b.currentState).toBe('live');
++    b.move(10, 10);
++    // An ICE drop right after input: the click may not have arrived.
++    pc.connectionState = 'failed';
++    pc.onconnectionstatechange();
++    expect(onInputError).toHaveBeenCalledExactlyOnceWith('disconnected');
++    expect(states.at(-1)).toBe('closed');
++    expect(b.currentState).toBe('closed');
++    expect(ws.readyState).toBe(3);
++    expect(pc.closed).toBe(true);
++    // Nothing reconnects by itself: the page asks the user first.
++    await vi.advanceTimersByTimeAsync(60_000);
++    expect(FakeWS.all).toHaveLength(1);
++    expect(b.currentState).toBe('closed');
++    // An explicit reconnect starts over.
++    await b.connect();
++    expect(FakeWS.all).toHaveLength(2);
++    b.disconnect();
++  });
++
++  it('ends the connection when the agent leaves right after input', async () => {
++    const onInputError = vi.fn();
++    const { b, states } = setup([], { onInputError });
++    await b.connect();
++    const ws = FakeWS.all[0]!;
++    await readyInput(ws);
++    b.typeSoftwareText('a');
++    ws.push({ t: 'agent_offline' });
++    expect(onInputError).toHaveBeenCalledExactlyOnceWith('disconnected');
++    expect(states.at(-1)).toBe('closed');
++    expect(ws.readyState).toBe(3);
++  });
++
++  it('gives a returning agent a whole connection deadline', async () => {
++    vi.useFakeTimers();
++    const { b, states } = setup([], { connectionTimeoutMs: 20_000 });
++    await b.connect();
++    const ws = FakeWS.all[0]!;
++    ws.push({ t: 'agent_online' });
++    ws.push({ t: 'neko', data: { event: 'system/init' } });
++    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
++    await vi.advanceTimersByTimeAsync(0);
++    FakePC.last.connect();
++    expect(states.at(-1)).toBe('live');
++    ws.push({ t: 'agent_offline' });
++    await vi.advanceTimersByTimeAsync(15_000);
++    // Back after 15 s: it renegotiates within its own 20 s, not the 5 s the outage left.
++    ws.push({ t: 'agent_online' });
++    ws.push({ t: 'neko', data: { event: 'system/init' } });
++    await vi.advanceTimersByTimeAsync(10_000);
++    expect(FakeWS.all).toHaveLength(1);
++    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
++    await vi.advanceTimersByTimeAsync(0);
++    FakePC.last.connect();
++    expect(states.at(-1)).toBe('live');
++    expect(FakeWS.all).toHaveLength(1);
++    b.disconnect();
++  });
++
++  it('frees the cursor image when the view goes away', async () => {
++    const cursors: string[] = [];
++    const revoke = vi.spyOn(URL, 'revokeObjectURL');
++    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:cursor');
++    const { b } = setup([], { onCursor: (css) => cursors.push(css) });
++    await b.connect();
++    const ws = FakeWS.all[0]!;
++    await readyInput(ws);
++    const channel = { binaryType: '', onmessage: null as null | ((m: { data: ArrayBuffer }) => void) };
++    FakePC.last.ondatachannel({ channel });
++    const image = new ArrayBuffer(12);
++    new DataView(image).setUint8(0, 2);
++    channel.onmessage!({ data: image });
++    expect(cursors).toEqual(['url(blob:cursor) 0 0, default']);
++    b.disconnect();
++    expect(revoke).toHaveBeenCalledExactlyOnceWith('blob:cursor');
++    expect(cursors.at(-1)).toBe('default');
++  });
++
+   it('uses Neko screen capabilities for both dimensions and rate, ignoring malformed entries', async () => {
+     vi.useFakeTimers();
+     const { b } = setup();
+@@ -543,6 +713,38 @@ describe('RemoteBrowser', () => {
+     b.disconnect();
+   });
+ 
++  it('moves an iPad off a 16:10 desktop and forgets a screen that a new relay does not report', async () => {
++    vi.useFakeTimers();
++    const { b } = setup();
++    b.setViewport(1366, 829);
++    await b.connect();
++    const ws = FakeWS.all[0]!;
++    ws.push({ t: 'agent_online' });
++    ws.push({ t: 'neko', data: { event: 'system/init', payload: { screen_size: { width: 1280, height: 800, rate: 60 } } } });
++    ws.push({ t: 'neko', data: { event: 'system/admin', payload: { screen_sizes_list: NEKO_MODES } } });
++    expect(ws.neko('screen/set')).toEqual([{ width: 1368, height: 768, rate: 30 }]);
++    ws.push({ t: 'neko', data: { event: 'screen/updated', payload: { id: 'a', width: 1368, height: 768, rate: 30 } } });
++    expect(b.screenMode).toEqual({ width: 1368, height: 768, rate: 30 });
++    // The agent's relay restarts on the same socket; its init says nothing about the screen.
++    ws.push({ t: 'agent_offline' });
++    ws.push({ t: 'agent_online' });
++    ws.push({ t: 'neko', data: { event: 'system/init' } });
++    expect(b.screenSize).toBeNull();
++    b.disconnect();
++  });
++
++  it('asks for no more desktop than the tier\'s pixel budget', async () => {
++    vi.useFakeTimers();
++    const { b } = setup([], { maxScreenPixels: TIERS.basic.maxScreenPixels });
++    b.setViewport(2600, 1500);
++    await b.connect();
++    const ws = FakeWS.all[0]!;
++    ws.push({ t: 'neko', data: { event: 'system/init', payload: { screen_size: { width: 1280, height: 720, rate: 30 } } } });
++    ws.push({ t: 'neko', data: { event: 'system/admin', payload: { screen_sizes_list: NEKO_MODES } } });
++    expect(ws.neko('screen/set')).toEqual([{ width: 1920, height: 1080, rate: 30 }]);
++    b.disconnect();
++  });
++
+   it('treats Xorg\'s width rounding as the same screen mode', async () => {
+     vi.useFakeTimers();
+     const { b } = setup();

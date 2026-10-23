@@ -1,0 +1,1694 @@
+diff --git a/services/agent/internal/agent/automation.go b/services/agent/internal/agent/automation.go
+index d350884..ae878ac 100644
+--- a/services/agent/internal/agent/automation.go
++++ b/services/agent/internal/agent/automation.go
+@@ -20,10 +20,12 @@ import (
+ // A bridge session (docs/agent-access.md): the coding agent's connection, relayed by the gateway
+ // as `automation_*` frames. It gets its own neko session for input and screen events and its
+ // own temporary files; screenshots come from neko's screenshot endpoint, so they show the whole
+-// remote display (tabs, address bar, dialogs) without touching focus or layout.
++// remote display (tabs, address bar, dialogs) without touching focus or layout. The gateway's
++// hosted MCP endpoint opens sessions lazily and may open one again, and a session outlives a lost
++// tunnel for a short grace; protocol.AutomationProtocol describes the wire contract.
+ 
+ // AutomationNeko is implemented by the production relay: a neko session that can also take
+-// screenshots and feed Chrome's open file dialog.
++// screenshots.
+ type AutomationNeko interface {
+ 	OpenAutomation(ctx context.Context, onEvent func(json.RawMessage)) (AutomationSession, error)
+ }
+@@ -32,12 +34,16 @@ type AutomationSession interface {
+ 	NekoSession
+ 	// Screenshot is the whole display as JPEG at `quality` (1-100).
+ 	Screenshot(ctx context.Context, quality int) ([]byte, error)
+-	// UploadDialog hands files (paths on the VM) to Chrome's open file-chooser dialog; false means no dialog is open.
+-	UploadDialog(ctx context.Context, paths []string) (bool, error)
++}
++
++// FileChooser tells whether Chrome's own file chooser, the GTK dialog an upload button opens, is
++// open on the remote display (cmd/agent asks xdotool in the browser container). Optional: without
++// one, a picker attach types into whatever has focus and its screenshot shows what happened.
++type FileChooser interface {
++	FileChooserOpen(ctx context.Context) (bool, error)
+ }
+ 
+ const (
+-	automationProtocol   = 1
+ 	maxActDuration       = 30 * time.Second
+ 	maxWaitStep          = 5 * time.Second
+ 	defaultSettle        = 400 * time.Millisecond
+@@ -50,8 +56,23 @@ const (
+ 	automationStoredMax  = int64(maxTransferBytes)
+ 	maxStoredPerSession  = 10
+ 	automationFilePrefix = "a-"
++	// A session outlives a lost tunnel this long, for the gateway to open it again.
++	automationSuspendGrace = 60 * time.Second
++	// A request waits this long for a desktop session that is still being opened.
++	automationReadyWait = 15 * time.Second
++	// The user is still at work for this long after a real input: the agent may not claim control.
++	userActiveFor = 10 * time.Second
++	// The box a request may ask its screenshot to fit in (maxWidth, maxHeight).
++	minShotSide, maxShotSide = 320, 4096
++	// Screenshots a session remembers for requests that name only their screenshotId.
++	rememberedShots = 16
++	// How long a picker attach waits for Chrome's file chooser to close after Enter.
++	pickerSettle = 2 * time.Second
+ )
+ 
++// automationReopen is the backoff before a bridge's desktop session is opened again.
++var automationReopen = []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second}
++
+ type screenState struct {
+ 	version       int64
+ 	width, height int
+@@ -66,36 +87,54 @@ type storedFile struct {
+ 
+ type automation struct {
+ 	id, clientID string
+-	gatewayCtx   context.Context
+-	cancel       context.CancelFunc
++	// From automation_open until the session is closed; a lost tunnel only suspends it.
++	ctx    context.Context
++	cancel context.CancelFunc
+ 
+ 	mu       sync.Mutex
+ 	neko     AutomationSession
+ 	ready    bool
++	readyCh  chan struct{} // closed while ready, so a request can wait for the desktop session
+ 	failure  string
+ 	heldKeys []int64 // keysyms the bridge holds, in press order
+ 	heldBtns []int64
+ 	active   *activeAction
+ 	lastShot time.Time
++	shots    []shotBasis // the latest screenshots taken, newest last
+ 	stored   map[string]storedFile
+ 	storedB  int64
+ 	transfer *transfer
+-	writeMu  sync.Mutex // one goroutine writes this session's frames at a time
+-	writer   func(ctx context.Context, v any) error
++	// suspended: the tunnel it was opened on is gone; automation_open within the grace resumes it.
++	suspended  bool
++	suspension int // counts suspensions, so a resumed session's old grace timer does nothing
++	grace      *time.Timer
++	closing    bool
++	writeMu    sync.Mutex // one goroutine writes this session's frames at a time
++	writer     func(ctx context.Context, v any) error
+ }
+ 
+ type activeAction struct {
+ 	id     string
++	ctx    context.Context
+ 	cancel context.CancelFunc
++	neko   AutomationSession // the desktop session the action was admitted on
+ 	reason string
+ }
+ 
++// shotBasis is what a screenshot was taken under, for a request that names only its screenshotId.
++type shotBasis struct {
++	id             string
++	version, epoch int64
++}
++
+ // automationRequest is a contracts AutomationRequest; unknown fields are ignored.
+ type automationRequest struct {
+ 	T             string              `json:"t"`
+ 	ID            string              `json:"id"`
+ 	ActionID      string              `json:"actionId,omitempty"`
+ 	Quality       int                 `json:"quality,omitempty"`
++	MaxWidth      *int                `json:"maxWidth,omitempty"`
++	MaxHeight     *int                `json:"maxHeight,omitempty"`
+ 	ScreenshotID  string              `json:"screenshotId,omitempty"`
+ 	ScreenVersion *int64              `json:"screenVersion,omitempty"`
+ 	ControlEpoch  *int64              `json:"controlEpoch,omitempty"`
+@@ -113,12 +152,15 @@ type automationRequest struct {
+ }
+ 
+ type screenshotMeta struct {
+-	ID            string `json:"id"`
+-	BlobID        string `json:"blobId"`
+-	Mime          string `json:"mime"`
+-	Bytes         int    `json:"bytes"`
++	ID     string `json:"id"`
++	BlobID string `json:"blobId"`
++	Mime   string `json:"mime"`
++	Bytes  int    `json:"bytes"`
++	// The image's size, and the screen's: they differ when the request asked for a smaller box.
+ 	Width         int    `json:"width"`
+ 	Height        int    `json:"height"`
++	ScreenWidth   int    `json:"screenWidth"`
++	ScreenHeight  int    `json:"screenHeight"`
+ 	CapturedAt    string `json:"capturedAt"`
+ 	ScreenVersion int64  `json:"screenVersion"`
+ 	ControlEpoch  int64  `json:"controlEpoch"`
+@@ -154,12 +196,12 @@ func (a *Agent) automationList() []*automation {
+ 
+ func (a *Agent) capabilities() map[string]any {
+ 	_, nekoOK := a.neko.(AutomationNeko)
+-	files := a.cfg.UploadDir != "" && a.cfg.UploadBrowserDir != ""
++	files := a.uploadsConfigured()
+ 	return map[string]any{
+-		"protocol": automationProtocol, "agentVersion": Version,
++		"protocol": protocol.AutomationProtocol, "agentVersion": Version,
+ 		"screenshot": nekoOK, "files": files,
+ 		"picker": files && nekoOK, "paste": files && a.cfg.Clipboard != nil, "drop": files,
+-		"touch": false,
++		"touch": false, "scaledShots": true, "resume": true,
+ 	}
+ }
+ 
+@@ -168,23 +210,68 @@ func (a *Agent) screenNow() screenInfo {
+ }
+ 
+ // openAutomation admits a bridge session: its neko session is opened in the background and the
+-// bridge learns the control state and screen as soon as they are known.
++// bridge learns the control state and screen as soon as they are known. Opening a session the VM
++// already has keeps it instead (resumeAutomation).
+ func (a *Agent) openAutomation(ctx context.Context, sessionID, clientID string) {
+ 	if sessionID == "" {
+ 		return
+ 	}
++	if a.resumeAutomation(ctx, sessionID, clientID) {
++		return
++	}
+ 	a.closeAutomation(sessionID)
+-	sctx, cancel := context.WithCancel(ctx)
+-	s := &automation{id: sessionID, clientID: clientID, gatewayCtx: ctx, cancel: cancel, stored: map[string]storedFile{}, writer: a.write}
++	// The session's lifetime is its own, not the tunnel's: a lost tunnel suspends it
++	// (suspendAutomations) instead of ending its desktop session.
++	sctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
++	s := &automation{id: sessionID, clientID: clientID, ctx: sctx, cancel: cancel, readyCh: make(chan struct{}), stored: map[string]storedFile{}, writer: a.write}
+ 	a.mu.Lock()
+ 	a.automations[sessionID] = s
+ 	state := a.controlSnapshot()
+ 	a.mu.Unlock()
+ 	s.push(ctx, map[string]any{"t": "control", "control": state, "reason": "restored"})
+-	go a.finishAutomationOpen(sctx, s)
++	go a.keepAutomationDesktop(sctx, s)
+ }
+ 
+-func (a *Agent) finishAutomationOpen(ctx context.Context, s *automation) {
++// resumeAutomation keeps a session that is opened again: the hosted MCP endpoint may send
++// automation_open for a session it already has, and after a tunnel blip it resumes a suspended
++// one. Its desktop session and stored files stay, and the gateway learns the control state and
++// the screen again. False when there is no such session to keep: a new id, another client, a
++// session already being closed, or one that can never have a desktop.
++func (a *Agent) resumeAutomation(ctx context.Context, sessionID, clientID string) bool {
++	a.mu.Lock()
++	s := a.automations[sessionID]
++	a.mu.Unlock()
++	if s == nil {
++		return false
++	}
++	s.mu.Lock()
++	keep := !s.closing && s.clientID == clientID && s.failure != "unsupported"
++	if keep {
++		s.suspended = false
++		if s.grace != nil {
++			s.grace.Stop()
++			s.grace = nil
++		}
++	}
++	s.mu.Unlock()
++	if !keep {
++		return false
++	}
++	a.mu.Lock()
++	state, screen := a.controlSnapshot(), a.screenNow()
++	a.mu.Unlock()
++	s.push(ctx, map[string]any{"t": "control", "control": state, "reason": "restored"})
++	if screen.Width > 0 {
++		s.push(ctx, map[string]any{"t": "screen", "screen": screen})
++	}
++	return true
++}
++
++// keepAutomationDesktop holds the session's own desktop (neko) session for as long as the bridge
++// session lasts: it opens it, and whenever neko ends it, opens it again with backoff (1 s, 2 s,
++// 5 s, then every 10 s), so a restart of neko does not leave the session without input and
++// screenshots until the bridge reconnects.
++func (a *Agent) keepAutomationDesktop(ctx context.Context, s *automation) {
+ 	n, ok := a.neko.(AutomationNeko)
+ 	if !ok {
+ 		s.mu.Lock()
+@@ -192,49 +279,118 @@ func (a *Agent) finishAutomationOpen(ctx context.Context, s *automation) {
+ 		s.mu.Unlock()
+ 		return
+ 	}
+-	octx, cancel := context.WithTimeout(ctx, automationOpenLimit)
++	retry := 0
++	for {
++		started := time.Now()
++		if session, end := a.openAutomationDesktop(ctx, n, s); session != nil {
++			select {
++			case <-ctx.Done():
++			case <-session.Done():
++			}
++			end()
++			if ctx.Err() != nil {
++				return
++			}
++			a.log.Warn("bridge desktop session ended; opening it again", "sessionId", s.id)
++			if time.Since(started) > time.Minute {
++				retry = 0
++			}
++		}
++		if ctx.Err() != nil {
++			return
++		}
++		delay := a.reopenDelays[min(retry, len(a.reopenDelays)-1)]
++		retry++
++		select {
++		case <-ctx.Done():
++			return
++		case <-time.After(delay):
++		}
++	}
++}
++
++// openAutomationDesktop opens the session's desktop session once. Only the opening is bounded
++// (automationOpenLimit): the relay derives the session's lifetime from the context it is opened
++// with, so a deadline on that context would end the session the moment it passed. It returns the
++// session and the function that ends it, or nil when it could not be opened.
++func (a *Agent) openAutomationDesktop(ctx context.Context, n AutomationNeko, s *automation) (AutomationSession, func()) {
++	octx, cancel := context.WithCancel(ctx)
++	timer := time.AfterFunc(automationOpenLimit, cancel)
+ 	session, err := n.OpenAutomation(octx, func(msg json.RawMessage) { a.automationEvent(ctx, s, msg) })
+-	cancel()
++	inTime := timer.Stop()
+ 	a.mu.Lock()
+ 	current := a.automations[s.id] == s && ctx.Err() == nil
+ 	a.mu.Unlock()
+-	if err != nil || session == nil || !current {
++	if err != nil || session == nil || !inTime || !current {
+ 		if session != nil {
+ 			session.Close()
+ 		}
++		cancel()
+ 		s.mu.Lock()
+ 		s.failure = "desktop_unavailable"
+ 		s.mu.Unlock()
+ 		if current {
+-			a.log.Warn("bridge desktop session", "sessionId", s.id, "code", failureCode(err))
++			code := failureCode(err)
++			if err == nil {
++				code = "desktop_timeout"
++			}
++			a.log.Warn("bridge desktop session", "sessionId", s.id, "code", code)
+ 		}
+-		return
++		return nil, nil
+ 	}
+ 	s.mu.Lock()
+-	s.neko = session
+-	s.ready = true
++	s.neko, s.ready, s.failure = session, true, ""
++	close(s.readyCh)
+ 	s.mu.Unlock()
++	// Keys and buttons a lost desktop session could not let go of are released now.
++	s.releaseHeld()
+ 	a.mu.Lock()
+ 	screen := a.screenNow()
+ 	a.mu.Unlock()
+-	if screen.width() > 0 {
++	if screen.Width > 0 {
+ 		s.push(ctx, map[string]any{"t": "screen", "screen": screen})
+ 	}
+-	go func() {
++	return session, func() {
++		s.mu.Lock()
++		if s.neko == session {
++			s.neko, s.ready, s.failure = nil, false, "desktop_unavailable"
++			s.readyCh = make(chan struct{})
++		}
++		s.mu.Unlock()
++		s.interrupt("desktop_unavailable")
++		session.Close()
++		cancel()
++	}
++}
++
++// waitDesktop returns the session's desktop session, waiting up to `wait` while it is being
++// opened (or opened again): a request that arrives right after automation_open must not fail
++// only because neko has not answered yet. Nil if it is not ready in time.
++func (a *Agent) waitDesktop(ctx context.Context, s *automation, wait time.Duration) AutomationSession {
++	timer := time.NewTimer(wait)
++	defer timer.Stop()
++	for {
++		s.mu.Lock()
++		n, ready, readyCh, failure := s.neko, s.ready, s.readyCh, s.failure
++		s.mu.Unlock()
++		if ready && n != nil {
++			return n
++		}
++		if failure == "unsupported" || ctx.Err() != nil || s.ctx.Err() != nil {
++			return nil
++		}
+ 		select {
++		case <-readyCh:
++		case <-timer.C:
++			return nil
+ 		case <-ctx.Done():
+-		case <-session.Done():
+-			s.mu.Lock()
+-			s.ready = false
+-			s.failure = "desktop_unavailable"
+-			s.mu.Unlock()
+-			s.interrupt("desktop_unavailable")
++			return nil
++		case <-s.ctx.Done():
++			return nil
+ 		}
+-	}()
++	}
+ }
+ 
+-func (si screenInfo) width() int { return si.Width }
+-
+ // automationEvent handles neko's messages on the bridge's session: only screen geometry matters.
+ func (a *Agent) automationEvent(ctx context.Context, s *automation, msg json.RawMessage) {
+ 	var m struct {
+@@ -286,23 +442,40 @@ func (a *Agent) automationEvent(ctx context.Context, s *automation, msg json.Raw
+ func (a *Agent) closeAutomation(sessionID string) {
+ 	a.mu.Lock()
+ 	s := a.automations[sessionID]
+-	delete(a.automations, sessionID)
+-	if s == nil {
++	a.mu.Unlock()
++	if s != nil {
++		a.endAutomation(s)
++	}
++}
++
++// endAutomation ends a bridge session: its action, held input, desktop session and files.
++func (a *Agent) endAutomation(s *automation) {
++	a.mu.Lock()
++	if a.automations[s.id] != s {
+ 		a.mu.Unlock()
+ 		return
+ 	}
++	delete(a.automations, s.id)
+ 	if len(a.automations) == 0 && a.control.controller == ctlAgent {
+ 		a.control.controller = ctlNone
+ 		a.control.epoch++
+ 	}
+ 	a.mu.Unlock()
++	s.mu.Lock()
++	s.closing = true
++	if s.grace != nil {
++		s.grace.Stop()
++		s.grace = nil
++	}
++	s.mu.Unlock()
+ 	s.interrupt("relay_unavailable")
+-	s.releaseHeld(context.Background())
++	s.releaseHeld()
+ 	s.cancel()
+ 	s.mu.Lock()
+ 	n := s.neko
+ 	s.neko = nil
+ 	s.ready = false
++	s.readyCh = make(chan struct{})
+ 	stored := s.stored
+ 	s.stored = map[string]storedFile{}
+ 	t := s.transfer
+@@ -326,13 +499,48 @@ func (a *Agent) closeAutomation(sessionID string) {
+ 
+ func (a *Agent) closeAutomations() {
+ 	a.mu.Lock()
+-	ids := make([]string, 0, len(a.automations))
+-	for id := range a.automations {
+-		ids = append(ids, id)
++	sessions := a.automationList()
++	a.mu.Unlock()
++	for _, s := range sessions {
++		a.endAutomation(s)
+ 	}
++}
++
++// suspendAutomations keeps the bridge sessions of a lost tunnel for automationSuspendGrace, for
++// the gateway to open them again on its next tunnel: the running action stops, every held key and
++// button is released, and the desktop session and stored files stay. A session that is not
++// resumed in time is closed.
++func (a *Agent) suspendAutomations() {
++	a.mu.Lock()
++	sessions := a.automationList()
+ 	a.mu.Unlock()
+-	for _, id := range ids {
+-		a.closeAutomation(id)
++	for _, s := range sessions {
++		s.mu.Lock()
++		if s.closing || s.suspended {
++			s.mu.Unlock()
++			continue
++		}
++		s.suspended = true
++		s.suspension++
++		suspension := s.suspension
++		s.grace = time.AfterFunc(a.suspendGrace, func() { a.expireAutomation(s, suspension) })
++		s.mu.Unlock()
++		s.interrupt("relay_unavailable")
++		s.releaseHeld()
++	}
++}
++
++// expireAutomation closes a session still suspended since `suspension` when its grace ran out.
++func (a *Agent) expireAutomation(s *automation, suspension int) {
++	s.mu.Lock()
++	expired := s.suspended && s.suspension == suspension && !s.closing
++	if expired {
++		s.closing = true // no automation_open can resume it from here on
++	}
++	s.mu.Unlock()
++	if expired {
++		a.log.Info("bridge session not resumed after a lost tunnel; closed", "sessionId", s.id)
++		a.endAutomation(s)
+ 	}
+ }
+ 
+@@ -345,6 +553,12 @@ func (s *automation) push(ctx context.Context, data any) {
+ }
+ 
+ func (s *automation) pushLocked(ctx context.Context, data any) {
++	s.mu.Lock()
++	suspended := s.suspended
++	s.mu.Unlock()
++	if suspended {
++		return // the gateway that asked is gone; a resumed session is told its state again
++	}
+ 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+ 	defer cancel()
+ 	_ = s.write(wctx, protocol.AutomationResult{T: "automation_result", SessionID: s.id, Data: data})
+@@ -370,21 +584,46 @@ func (s *automation) interrupt(reason string) {
+ 	}
+ }
+ 
+-// releaseHeld lets go of every key and button the bridge left pressed (a takeover mid-chord).
+-func (s *automation) releaseHeld(ctx context.Context) {
++// releaseHeld lets go of every key and button the bridge still holds: a takeover mid-chord, an
++// action that did not end normally, a lost tunnel. It takes no context, as nothing that stopped
++// the action may stop its releases. Sending under s.mu orders it with key and button, so a press
++// is either released here or never sent. Without a desktop session the keys stay listed, and the
++// next desktop session releases them.
++func (s *automation) releaseHeld() {
+ 	s.mu.Lock()
+-	keys, btns, n := s.heldKeys, s.heldBtns, s.neko
+-	s.heldKeys, s.heldBtns = nil, nil
+-	s.mu.Unlock()
++	defer s.mu.Unlock()
++	n := s.neko
+ 	if n == nil {
+ 		return
+ 	}
+-	for i := len(keys) - 1; i >= 0; i-- {
+-		_ = n.Send(nekoEvent("control/keyup", map[string]any{"keysym": keys[i]}))
++	for i := len(s.heldKeys) - 1; i >= 0; i-- {
++		_ = n.Send(nekoEvent("control/keyup", map[string]any{"keysym": s.heldKeys[i]}))
+ 	}
+-	for i := len(btns) - 1; i >= 0; i-- {
+-		_ = n.Send(nekoEvent("control/buttonup", map[string]any{"code": btns[i]}))
++	for i := len(s.heldBtns) - 1; i >= 0; i-- {
++		_ = n.Send(nekoEvent("control/buttonup", map[string]any{"code": s.heldBtns[i]}))
++	}
++	s.heldKeys, s.heldBtns = nil, nil
++}
++
++// rememberShot keeps what a screenshot was taken under, for requests that name only its id.
++func (s *automation) rememberShot(b shotBasis) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.shots = append(s.shots, b)
++	if len(s.shots) > rememberedShots {
++		s.shots = append([]shotBasis(nil), s.shots[len(s.shots)-rememberedShots:]...)
++	}
++}
++
++func (s *automation) shotBasis(id string) (shotBasis, bool) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	for i := len(s.shots) - 1; i >= 0; i-- {
++		if s.shots[i].id == id {
++			return s.shots[i], true
++		}
+ 	}
++	return shotBasis{}, false
+ }
+ 
+ func nekoEvent(event string, payload any) json.RawMessage {
+@@ -404,6 +643,12 @@ func (a *Agent) fromAutomation(ctx context.Context, sessionID string, data json.
+ 	if s == nil {
+ 		return
+ 	}
++	s.mu.Lock()
++	suspended := s.suspended
++	s.mu.Unlock()
++	if suspended {
++		return // only automation_open resumes it
++	}
+ 	switch req.T {
+ 	case "status":
+ 		s.push(ctx, a.result(s, req.ID, "status", "executed", "", nil))
+@@ -448,20 +693,47 @@ func (a *Agent) result(s *automation, id, kind, status, reason string, shot *scr
+ 	return r
+ }
+ 
+-// checkBasis refuses a coordinate-based request decided on a stale screenshot.
+-func (a *Agent) checkBasis(req automationRequest) string {
++// rejectStep refuses a request because of one of its steps, naming the step.
++func (a *Agent) rejectStep(ctx context.Context, s *automation, req automationRequest, kind, reason string, step int) {
++	r := a.result(s, req.ID, kind, "rejected", reason, nil)
++	r.StoppedAt = &step
++	s.push(ctx, r)
++}
++
++// checkBasis refuses a coordinate-based request decided on a stale screenshot. The screen must be
++// the same version. Control may have moved meanwhile only to the agent itself: its own claims
++// advance the epoch, but only the user taking control, a pause, access turned off or a hand-back
++// (leftEpoch) make what the screenshot showed unreliable. A request that names only a screenshot
++// this session took is checked against what that screenshot was taken under.
++func (a *Agent) checkBasis(s *automation, req automationRequest) string {
++	version, epoch := req.ScreenVersion, req.ControlEpoch
++	if req.ScreenshotID != "" && (version == nil || epoch == nil) {
++		if shot, ok := s.shotBasis(req.ScreenshotID); ok {
++			if version == nil {
++				version = &shot.version
++			}
++			if epoch == nil {
++				epoch = &shot.epoch
++			}
++		}
++	}
+ 	a.mu.Lock()
+ 	defer a.mu.Unlock()
+-	if req.ScreenVersion != nil && *req.ScreenVersion != a.screen.version {
++	if version != nil && *version != a.screen.version {
+ 		return "screen_changed"
+ 	}
+-	if req.ControlEpoch != nil && *req.ControlEpoch != a.control.epoch {
++	if epoch != nil && *epoch < a.control.leftEpoch {
+ 		return "control_changed"
+ 	}
+ 	return ""
+ }
+ 
+ func (a *Agent) serveScreenshot(ctx context.Context, s *automation, req automationRequest) {
++	box, ok := screenshotBox(req)
++	if !ok {
++		s.push(ctx, a.result(s, req.ID, "screenshot", "rejected", "invalid", nil))
++		return
++	}
+ 	a.mu.Lock()
+ 	refused := ""
+ 	switch {
+@@ -475,7 +747,7 @@ func (a *Agent) serveScreenshot(ctx context.Context, s *automation, req automati
+ 		s.push(ctx, a.result(s, req.ID, "screenshot", "rejected", refused, nil))
+ 		return
+ 	}
+-	shot, reason := a.captureScreenshot(ctx, s, req.Quality)
++	shot, reason := a.captureScreenshot(ctx, s, req.Quality, box, a.readyWait)
+ 	if shot == nil {
+ 		s.push(ctx, a.result(s, req.ID, "screenshot", "rejected", reason, nil))
+ 		return
+@@ -490,18 +762,19 @@ type capturedShot struct {
+ 
+ // captureScreenshot takes the display as it is now and makes sure its size and the screen
+ // version agree; a change during capture is retried, then refused, never returned inconsistent.
+-func (a *Agent) captureScreenshot(ctx context.Context, s *automation, quality int) (*capturedShot, string) {
++// The image is scaled down to the box the request asked for, if the screen is larger.
++func (a *Agent) captureScreenshot(ctx context.Context, s *automation, quality int, box shotBox, wait time.Duration) (*capturedShot, string) {
++	n := a.waitDesktop(ctx, s, wait)
++	if n == nil {
++		return nil, "desktop_unavailable"
++	}
+ 	s.mu.Lock()
+-	n, ready := s.neko, s.ready
+ 	if time.Since(s.lastShot) < minScreenshotGap {
+ 		s.mu.Unlock()
+ 		return nil, "too_fast"
+ 	}
+ 	s.lastShot = time.Now()
+ 	s.mu.Unlock()
+-	if !ready || n == nil {
+-		return nil, "desktop_unavailable"
+-	}
+ 	if quality <= 0 {
+ 		quality = defaultJPEGQuality
+ 	}
+@@ -536,9 +809,18 @@ func (a *Agent) captureScreenshot(ctx context.Context, s *automation, quality in
+ 		if after != before || cfg.Width != after.width || cfg.Height != after.height {
+ 			continue
+ 		}
++		width, height := box.fit(cfg.Width, cfg.Height)
++		if width != cfg.Width || height != cfg.Height {
++			if data, err = scaleJPEG(data, width, height, quality); err != nil {
++				a.log.Warn("scale screenshot", "err", err)
++				return nil, "desktop_unavailable"
++			}
++		}
+ 		id := strconv.FormatInt(time.Now().UnixNano(), 36)
++		s.rememberShot(shotBasis{id: id, version: after.version, epoch: epoch})
+ 		return &capturedShot{data: data, meta: screenshotMeta{
+-			ID: id, BlobID: id, Mime: "image/jpeg", Bytes: len(data), Width: cfg.Width, Height: cfg.Height,
++			ID: id, BlobID: id, Mime: "image/jpeg", Bytes: len(data), Width: width, Height: height,
++			ScreenWidth: cfg.Width, ScreenHeight: cfg.Height,
+ 			CapturedAt: time.Now().UTC().Format(time.RFC3339Nano), ScreenVersion: after.version, ControlEpoch: epoch,
+ 		}}, ""
+ 	}
+@@ -564,40 +846,54 @@ func (a *Agent) deliverShot(ctx context.Context, s *automation, id, kind, status
+ 	s.pushLocked(ctx, r)
+ }
+ 
+-// beginAction claims input for the bridge and registers the action; empty reason on success.
+-func (a *Agent) beginAction(ctx context.Context, s *automation, req automationRequest) (context.Context, *activeAction, string) {
+-	if reason := a.checkBasis(req); reason != "" {
+-		return nil, nil, reason
++// beginAction claims input for the bridge and registers the action. It waits for the desktop
++// session first (a request may arrive while it is still being opened), then refuses a request
++// decided on a stale screenshot or with a step off the screen, so a refused request never takes
++// control. On refusal it returns the reason and, for a step, its index.
++func (a *Agent) beginAction(ctx context.Context, s *automation, req automationRequest, steps []step) (*activeAction, string, *int) {
++	if a.waitDesktop(ctx, s, a.readyWait) == nil {
++		return nil, "desktop_unavailable", nil
++	}
++	if reason := a.checkBasis(s, req); reason != "" {
++		return nil, reason, nil
+ 	}
+ 	s.mu.Lock()
+ 	if s.active != nil {
+ 		s.mu.Unlock()
+-		return nil, nil, "busy"
++		return nil, "busy", nil
+ 	}
+-	if !s.ready || s.neko == nil {
++	n := s.neko
++	if !s.ready || n == nil {
+ 		s.mu.Unlock()
+-		return nil, nil, "desktop_unavailable"
++		return nil, "desktop_unavailable", nil
+ 	}
+ 	a.mu.Lock()
++	if i := offScreen(steps, a.screen); i >= 0 {
++		a.mu.Unlock()
++		s.mu.Unlock()
++		return nil, "off_screen", &i
++	}
+ 	changed, reason := a.claimForBridge()
+ 	if reason != "" {
+ 		a.mu.Unlock()
+ 		s.mu.Unlock()
+-		return nil, nil, reason
++		return nil, reason, nil
+ 	}
+ 	state := a.controlSnapshot()
+ 	a.lastInputAt = time.Now()
+ 	a.mu.Unlock()
+ 	actx, cancel := context.WithTimeout(ctx, maxActDuration)
+-	act := &activeAction{id: req.ID, cancel: cancel}
++	act := &activeAction{id: req.ID, ctx: actx, cancel: cancel, neko: n}
+ 	s.active = act
+ 	s.mu.Unlock()
+ 	if changed {
+ 		a.publishControl(ctx, state, "agent_input")
+ 	}
+-	return actx, act, ""
++	return act, "", nil
+ }
+ 
++// endAction unregisters the action and returns what interrupted it, if anything. An action that
++// did not end normally must then release everything held (releaseHeld).
+ func (a *Agent) endAction(s *automation, act *activeAction) string {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+@@ -609,27 +905,43 @@ func (a *Agent) endAction(s *automation, act *activeAction) string {
+ }
+ 
+ func (a *Agent) serveAct(ctx context.Context, s *automation, req automationRequest) {
+-	steps, err := parseSteps(req.Steps)
+-	if err != nil {
++	box, ok := screenshotBox(req)
++	if !ok {
+ 		s.push(ctx, a.result(s, req.ID, "act", "rejected", "invalid", nil))
+ 		return
+ 	}
+-	actx, act, reason := a.beginAction(ctx, s, req)
+-	if reason != "" {
+-		s.push(ctx, a.result(s, req.ID, "act", "rejected", reason, nil))
++	steps, cost, err := parseSteps(req.Steps)
++	if err != nil {
++		var bad *stepError
++		if errors.As(err, &bad) && bad.reason == "unknown_key" {
++			a.rejectStep(ctx, s, req, "act", bad.reason, bad.index)
++			return
++		}
++		s.push(ctx, a.result(s, req.ID, "act", "rejected", "invalid", nil))
+ 		return
+ 	}
+-	a.mu.Lock()
+-	screen := a.screen
+-	a.mu.Unlock()
+-	stoppedAt, stepErr := a.runSteps(actx, s, steps, screen)
+ 	settle := defaultSettle
+ 	if req.SettleMs != nil {
+ 		settle = time.Duration(max(0, min(*req.SettleMs, int(maxWaitStep/time.Millisecond)))) * time.Millisecond
+ 	}
++	// An action that cannot finish in time is refused up front, never cut off halfway through.
++	if cost+settle > maxActDuration {
++		s.push(ctx, a.result(s, req.ID, "act", "rejected", "too_long", nil))
++		return
++	}
++	act, reason, step := a.beginAction(ctx, s, req, steps)
++	if reason != "" {
++		if step != nil {
++			a.rejectStep(ctx, s, req, "act", reason, *step)
++		} else {
++			s.push(ctx, a.result(s, req.ID, "act", "rejected", reason, nil))
++		}
++		return
++	}
++	stoppedAt, stepErr := a.runSteps(act.ctx, s, act.neko, steps)
+ 	if stepErr == nil && settle > 0 {
+ 		select {
+-		case <-actx.Done():
++		case <-act.ctx.Done():
+ 		case <-time.After(settle):
+ 		}
+ 	}
+@@ -641,17 +953,22 @@ func (a *Agent) serveAct(ctx context.Context, s *automation, req automationReque
+ 		status, why, stopped = "interrupted", "canceled", &stoppedAt
+ 	case interruption != "":
+ 		status, why, stopped = "interrupted", interruption, &stoppedAt
+-	case errors.Is(stepErr, context.DeadlineExceeded) || errors.Is(actx.Err(), context.DeadlineExceeded):
++	case errors.Is(stepErr, context.DeadlineExceeded) || errors.Is(act.ctx.Err(), context.DeadlineExceeded):
+ 		status, why, stopped = "timeout", "", &stoppedAt
+ 	case stepErr != nil:
+ 		status, why, stopped = "error", "relay_unavailable", &stoppedAt
+ 	}
+-	a.finishWithShot(ctx, s, req, "act", status, why, stopped)
++	if status != "executed" {
++		// Explicit holds (keyhold, button down) last across actions only while each one ends
++		// normally: a stopped action never leaves a key or a button pressed.
++		s.releaseHeld()
++	}
++	a.finishWithShot(ctx, s, req, box, "act", status, why, stopped)
+ }
+ 
+ // finishWithShot ends a request with a fresh screenshot unless the bridge asked for none or
+ // control moved to the user meanwhile (the result still says so).
+-func (a *Agent) finishWithShot(ctx context.Context, s *automation, req automationRequest, kind, status, reason string, stopped *int) {
++func (a *Agent) finishWithShot(ctx context.Context, s *automation, req automationRequest, box shotBox, kind, status, reason string, stopped *int) {
+ 	want := req.Screenshot == nil || *req.Screenshot
+ 	a.mu.Lock()
+ 	privacy := a.control.mode == modePrivacy || !a.control.access
+@@ -662,7 +979,9 @@ func (a *Agent) finishWithShot(ctx context.Context, s *automation, req automatio
+ 		s.push(ctx, r)
+ 		return
+ 	}
+-	shot, shotReason := a.captureScreenshot(ctx, s, req.Quality)
++	// No wait for the desktop here: the request already ran, and its result must not wait for
++	// a desktop session that ended meanwhile to come back.
++	shot, shotReason := a.captureScreenshot(ctx, s, req.Quality, box, 0)
+ 	if shot == nil && status == "executed" && shotReason != "" {
+ 		// The input went in; only the picture is missing. Say which.
+ 		reason = shotReason
+@@ -760,7 +1079,7 @@ func (s *automation) dropTransfer(t *transfer) {
+ 
+ // beginStore starts a transfer into the session's temporary area (no input control needed).
+ func (a *Agent) beginStore(s *automation, req automationRequest) string {
+-	if a.cfg.UploadDir == "" || a.cfg.UploadBrowserDir == "" {
++	if !a.uploadsConfigured() {
+ 		return "unsupported"
+ 	}
+ 	if !transferID.MatchString(req.ID) || req.Action != "store" || len(req.Files) == 0 || len(req.Files) > maxTransferFiles {
+@@ -783,6 +1102,9 @@ func (a *Agent) beginStore(s *automation, req automationRequest) string {
+ 	if over {
+ 		return "too_large"
+ 	}
++	if reason := a.checkUploadDir(); reason != "" {
++		return reason
++	}
+ 	a.pruneUploads()
+ 	t := &transfer{sessionID: "bridge:" + s.id, id: req.ID, action: "store", files: req.Files}
+ 	t.dir = filepath.Join(a.cfg.UploadDir, strconv.FormatInt(time.Now().UnixNano(), 36)+"-"+req.ID)
+@@ -812,6 +1134,11 @@ func (a *Agent) beginStore(s *automation, req automationRequest) string {
+ // serveAttach delivers stored files to the page. Unlike storing, this changes the browser, so
+ // it needs input control at the moment it runs, never the permission the upload began with.
+ func (a *Agent) serveAttach(ctx context.Context, s *automation, req automationRequest) {
++	box, ok := screenshotBox(req)
++	if !ok {
++		s.push(ctx, a.result(s, req.ID, "attach", "rejected", "invalid", nil))
++		return
++	}
+ 	s.mu.Lock()
+ 	var files []storedFile
+ 	for _, h := range req.Handles {
+@@ -828,33 +1155,28 @@ func (a *Agent) serveAttach(ctx context.Context, s *automation, req automationRe
+ 		s.push(ctx, a.result(s, req.ID, "attach", "rejected", "invalid", nil))
+ 		return
+ 	}
+-	if req.Method == "paste" && a.cfg.Clipboard == nil {
++	// The file chooser takes one typed path; several files go one attach at a time.
++	if (req.Method == "picker" && len(files) != 1) || (req.Method == "paste" && a.cfg.Clipboard == nil) {
+ 		s.push(ctx, a.result(s, req.ID, "attach", "rejected", "unsupported", nil))
+ 		return
+ 	}
+-	actx, act, reason := a.beginAction(ctx, s, req)
++	act, reason, _ := a.beginAction(ctx, s, req, nil)
+ 	if reason != "" {
+ 		s.push(ctx, a.result(s, req.ID, "attach", "rejected", reason, nil))
+ 		return
+ 	}
+-	dctx, cancel := context.WithTimeout(actx, attachDeliverLimit)
++	dctx, cancel := context.WithTimeout(act.ctx, attachDeliverLimit)
+ 	defer cancel()
+-	vmPaths, browserPaths := make([]string, len(files)), make([]string, len(files))
++	browserPaths := make([]string, len(files))
+ 	for i, f := range files {
+-		vmPaths[i], browserPaths[i] = f.path, f.browserPath
++		browserPaths[i] = f.browserPath
+ 	}
++	// Input goes through the desktop session the action was admitted on, never s.neko read
++	// again: closing the session meanwhile empties that.
+ 	status, why := "executed", ""
+ 	switch req.Method {
+ 	case "picker":
+-		s.mu.Lock()
+-		n := s.neko
+-		s.mu.Unlock()
+-		ok, err := n.UploadDialog(dctx, vmPaths)
+-		if err != nil {
+-			status, why = "error", "relay_unavailable"
+-		} else if !ok {
+-			status, why = "rejected", "no_dialog"
+-		}
++		status, why = a.attachPicker(dctx, s, act.neko, files[0])
+ 	case "paste":
+ 		mime, data := "text/uri-list", fileList(browserPaths)
+ 		if len(files) == 1 && files[0].mime == "image/png" {
+@@ -869,10 +1191,7 @@ func (a *Agent) serveAttach(ctx context.Context, s *automation, req automationRe
+ 			status, why = "error", "write_failed"
+ 			break
+ 		}
+-		s.mu.Lock()
+-		n := s.neko
+-		s.mu.Unlock()
+-		if err := a.sendChord(dctx, s, n, []string{"Control", "v"}); err != nil {
++		if err := a.sendChord(dctx, s, act.neko, []string{"Control", "v"}); err != nil {
+ 			status, why = "error", "relay_unavailable"
+ 		}
+ 	case "drop":
+@@ -886,7 +1205,59 @@ func (a *Agent) serveAttach(ctx context.Context, s *automation, req automationRe
+ 	if interruption := a.endAction(s, act); interruption != "" {
+ 		status, why = "interrupted", interruption
+ 	}
+-	a.finishWithShot(ctx, s, req, "attach", status, why, nil)
++	if status != "executed" {
++		s.releaseHeld()
++	}
++	a.finishWithShot(ctx, s, req, box, "attach", status, why, nil)
++}
++
++// attachPicker hands one stored file to Chrome's own file chooser, the GTK dialog an upload
++// button opens: Ctrl+L focuses its location field, the file's path as Chrome sees it is typed,
++// Delete drops what GTK's completion appended, and Enter picks the file. neko's own dialog
++// handling stays off (desktop.file_chooser_dialog): it would replace file dialogs for the person
++// in the live view too. With a FileChooser the dialog must be open before and gone after; without
++// one, the keys go to whatever has focus and the screenshot shows what happened.
++func (a *Agent) attachPicker(ctx context.Context, s *automation, n AutomationSession, f storedFile) (status, reason string) {
++	chooser := a.cfg.FileChooser
++	if chooser != nil {
++		open, err := chooser.FileChooserOpen(ctx)
++		if err != nil {
++			a.log.Warn("find the file chooser", "err", err)
++			return "error", "relay_unavailable"
++		}
++		if !open {
++			return "rejected", "no_dialog"
++		}
++	}
++	err := a.sendChord(ctx, s, n, []string{"Control", "l"})
++	if err == nil {
++		err = pace(ctx, clickGap)
++	}
++	if err == nil {
++		err = a.typeText(ctx, s, n, f.browserPath)
++	}
++	if err == nil {
++		err = a.sendChord(ctx, s, n, []string{"Delete"})
++	}
++	if err == nil {
++		err = a.sendChord(ctx, s, n, []string{"Enter"})
++	}
++	if err != nil {
++		return "error", "relay_unavailable"
++	}
++	if chooser == nil {
++		return "executed", ""
++	}
++	// GTK closes the dialog once it took the file; a dialog still open did not.
++	deadline := time.Now().Add(pickerSettle)
++	for {
++		if open, err := chooser.FileChooserOpen(ctx); err == nil && !open {
++			return "executed", ""
++		}
++		if time.Now().After(deadline) || pace(ctx, 200*time.Millisecond) != nil {
++			return "error", "dialog_open"
++		}
++	}
+ }
+ 
+ // bridgeHeldReset is for tests: whether anything is still held.
+diff --git a/services/agent/internal/agent/automation_input.go b/services/agent/internal/agent/automation_input.go
+index c8ab5aa..83eaea1 100644
+--- a/services/agent/internal/agent/automation_input.go
++++ b/services/agent/internal/agent/automation_input.go
+@@ -23,6 +23,9 @@ const (
+ 	typeGap     = 8 * time.Millisecond
+ 	maxSteps    = 32
+ 	maxTypeText = 4000
++	// sendCost bounds what one input event costs besides its pacing (a write to neko on the
++	// loopback interface): with the pacing it makes step.cost's estimate of an action's length.
++	sendCost = time.Millisecond
+ )
+ 
+ type step struct {
+@@ -46,27 +49,46 @@ type point struct {
+ 	Y int `json:"y"`
+ }
+ 
+-func parseSteps(raw []json.RawMessage) ([]step, error) {
++// stepError is a refused step: why ("invalid" or "unknown_key") and which one.
++type stepError struct {
++	reason string
++	index  int
++	err    error
++}
++
++func (e *stepError) Error() string { return fmt.Sprintf("step %d: %v", e.index, e.err) }
++
++var errUnknownKey = errors.New("unknown key")
++
++// parseSteps validates the steps and estimates how long they take to run, pacing included, so
++// an action that cannot finish within maxActDuration is refused before any of it runs.
++func parseSteps(raw []json.RawMessage) ([]step, time.Duration, error) {
+ 	if len(raw) == 0 || len(raw) > maxSteps {
+-		return nil, errors.New("step count")
++		return nil, 0, errors.New("step count")
+ 	}
+ 	steps := make([]step, 0, len(raw))
+-	for _, r := range raw {
++	var cost time.Duration
++	for i, r := range raw {
+ 		var s step
+ 		var xy struct {
+ 			X *int `json:"x"`
+ 			Y *int `json:"y"`
+ 		}
+ 		if json.Unmarshal(r, &s) != nil || json.Unmarshal(r, &xy) != nil {
+-			return nil, errors.New("step")
++			return nil, 0, &stepError{reason: "invalid", index: i, err: errors.New("step")}
+ 		}
+ 		s.X, s.Y = xy.X, xy.Y
+ 		if err := s.validate(); err != nil {
+-			return nil, err
++			reason := "invalid"
++			if errors.Is(err, errUnknownKey) {
++				reason = "unknown_key"
++			}
++			return nil, 0, &stepError{reason: reason, index: i, err: err}
+ 		}
+ 		steps = append(steps, s)
++		cost += s.cost()
+ 	}
+-	return steps, nil
++	return steps, cost, nil
+ }
+ 
+ func (s *step) validate() error {
+@@ -81,7 +103,10 @@ func (s *step) validate() error {
+ 		return errors.New("button")
+ 	}
+ 	for _, m := range s.Modifiers {
+-		if _, ok := keysymForName(m); !ok || !isModifier(m) {
++		if _, ok := keysymForName(m); !ok {
++			return fmt.Errorf("modifier %q: %w", m, errUnknownKey)
++		}
++		if !isModifier(m) {
+ 			return errors.New("modifier")
+ 		}
+ 	}
+@@ -120,7 +145,7 @@ func (s *step) validate() error {
+ 		}
+ 		for _, k := range s.Keys {
+ 			if _, ok := keysymForName(k); !ok {
+-				return fmt.Errorf("key %q", k)
++				return fmt.Errorf("key %q: %w", k, errUnknownKey)
+ 			}
+ 		}
+ 	case "keyhold":
+@@ -128,7 +153,7 @@ func (s *step) validate() error {
+ 			return errors.New("keyhold needs down")
+ 		}
+ 		if _, ok := keysymForName(s.Key); !ok {
+-			return errors.New("key")
++			return fmt.Errorf("key %q: %w", s.Key, errUnknownKey)
+ 		}
+ 	case "type", "paste":
+ 		if s.Text == "" || len(s.Text) > maxTypeText*4 || utf8.RuneCountInString(s.Text) > maxTypeText || !utf8.ValidString(s.Text) {
+@@ -144,6 +169,54 @@ func (s *step) validate() error {
+ 	return nil
+ }
+ 
++// cost is how long runSteps takes for the step: its input events, its pacing and waits, and the
++// pause after every step.
++func (s *step) cost() time.Duration {
++	d := pressGap
++	if len(s.Modifiers) > 0 {
++		d += time.Duration(2*len(s.Modifiers))*sendCost + pressGap
++	}
++	if s.X != nil && s.Type != "move" {
++		d += sendCost + pressGap // the move to the point first
++	}
++	switch s.Type {
++	case "move", "button", "scroll", "keyhold", "paste":
++		d += sendCost
++	case "click":
++		d += time.Duration(s.Count)*(2*sendCost+pressGap) + time.Duration(s.Count-1)*clickGap
++	case "drag":
++		d += 3*sendCost + pressGap + 2*clickGap + time.Duration(len(s.Path)-1)*(sendCost+dragGap)
++	case "key":
++		d += time.Duration(2*len(s.Keys)) * (sendCost + pressGap)
++	case "type":
++		d += typeCost(s.Text)
++	case "wait":
++		d += time.Duration(s.Ms) * time.Millisecond
++	}
++	return d
++}
++
++// typeCost follows typeText: a printable ASCII character, Enter or Tab is up to four key events
++// and a typeGap; each run of other characters is one paste and a clickGap.
++func typeCost(text string) time.Duration {
++	var d time.Duration
++	pasting := false
++	for _, r := range text {
++		if r >= 0x80 {
++			if !pasting {
++				d += sendCost + clickGap
++			}
++			pasting = true
++			continue
++		}
++		pasting = false
++		if r == '\n' || r == '\r' || r == '\t' || (r >= 0x20 && r <= 0x7e) {
++			d += 4*sendCost + typeGap
++		}
++	}
++	return d
++}
++
+ var x11Buttons = map[string]int64{"left": 1, "middle": 2, "right": 3, "back": 8, "forward": 9}
+ 
+ var namedKeysyms = map[string]int64{
+@@ -234,50 +307,61 @@ func pace(ctx context.Context, d time.Duration) error {
+ 	}
+ }
+ 
++// key presses or releases one key and keeps the list of keys the bridge holds. The context
++// check, the list and the send happen under s.mu, so releaseHeld (a takeover) either sees a
++// press and releases it, or the stopped action never sends it. A release ignores the context: a
++// stopped chord must still let go of its keys. It is sent only for a key the bridge still holds,
++// since releaseHeld may have released it already and by then the same key can be the user's own.
+ func (a *Agent) key(ctx context.Context, s *automation, n NekoSession, down bool, sym int64) error {
+-	if ctx.Err() != nil {
+-		return ctx.Err()
+-	}
+-	ev := "control/keyup"
+-	if down {
+-		ev = "control/keydown"
+-	}
+ 	s.mu.Lock()
++	defer s.mu.Unlock()
+ 	if down {
+-		s.heldKeys = append(s.heldKeys, sym)
+-	} else {
+-		for i := len(s.heldKeys) - 1; i >= 0; i-- {
+-			if s.heldKeys[i] == sym {
+-				s.heldKeys = append(s.heldKeys[:i], s.heldKeys[i+1:]...)
+-				break
+-			}
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++		if err := n.Send(nekoEvent("control/keydown", map[string]any{"keysym": sym})); err != nil {
++			return err
+ 		}
++		s.heldKeys = append(s.heldKeys, sym)
++		return nil
+ 	}
+-	s.mu.Unlock()
+-	return n.Send(nekoEvent(ev, map[string]any{"keysym": sym}))
++	i := lastIndex(s.heldKeys, sym)
++	if i < 0 {
++		return nil
++	}
++	s.heldKeys = append(s.heldKeys[:i], s.heldKeys[i+1:]...)
++	return n.Send(nekoEvent("control/keyup", map[string]any{"keysym": sym}))
+ }
+ 
++// button is key for mouse buttons.
+ func (a *Agent) button(ctx context.Context, s *automation, n NekoSession, down bool, code int64) error {
+-	if ctx.Err() != nil {
+-		return ctx.Err()
+-	}
+-	ev := "control/buttonup"
+-	if down {
+-		ev = "control/buttondown"
+-	}
+ 	s.mu.Lock()
++	defer s.mu.Unlock()
+ 	if down {
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++		if err := n.Send(nekoEvent("control/buttondown", map[string]any{"code": code})); err != nil {
++			return err
++		}
+ 		s.heldBtns = append(s.heldBtns, code)
+-	} else {
+-		for i := len(s.heldBtns) - 1; i >= 0; i-- {
+-			if s.heldBtns[i] == code {
+-				s.heldBtns = append(s.heldBtns[:i], s.heldBtns[i+1:]...)
+-				break
+-			}
++		return nil
++	}
++	i := lastIndex(s.heldBtns, code)
++	if i < 0 {
++		return nil
++	}
++	s.heldBtns = append(s.heldBtns[:i], s.heldBtns[i+1:]...)
++	return n.Send(nekoEvent("control/buttonup", map[string]any{"code": code}))
++}
++
++func lastIndex(held []int64, v int64) int {
++	for i := len(held) - 1; i >= 0; i-- {
++		if held[i] == v {
++			return i
+ 		}
+ 	}
+-	s.mu.Unlock()
+-	return n.Send(nekoEvent(ev, map[string]any{"code": code}))
++	return -1
+ }
+ 
+ func (a *Agent) move(ctx context.Context, n NekoSession, x, y int) error {
+@@ -288,7 +372,8 @@ func (a *Agent) move(ctx context.Context, n NekoSession, x, y int) error {
+ }
+ 
+ // sendChord presses the keys in order and releases them in reverse; a letter under Shift is
+-// sent as its shifted symbol.
++// sent as its shifted symbol. Every key it pressed is released, also when it is stopped halfway:
++// an interrupted Control+Alt+Delete must not leave Control and Alt held for the user.
+ func (a *Agent) sendChord(ctx context.Context, s *automation, n NekoSession, names []string) error {
+ 	shift := false
+ 	for _, name := range names {
+@@ -307,42 +392,47 @@ func (a *Agent) sendChord(ctx context.Context, s *automation, n NekoSession, nam
+ 		}
+ 		syms = append(syms, sym)
+ 	}
++	pressed := 0
++	var err error
+ 	for _, sym := range syms {
+-		if err := a.key(ctx, s, n, true, sym); err != nil {
+-			return err
++		if err = a.key(ctx, s, n, true, sym); err != nil {
++			break
+ 		}
+-		if err := pace(ctx, pressGap); err != nil {
+-			return err
++		pressed++
++		if err = pace(ctx, pressGap); err != nil {
++			break
+ 		}
+ 	}
+-	for i := len(syms) - 1; i >= 0; i-- {
+-		if err := a.key(ctx, s, n, false, syms[i]); err != nil {
+-			return err
++	for i := pressed - 1; i >= 0; i-- {
++		if e := a.key(ctx, s, n, false, syms[i]); e != nil && err == nil {
++			err = e
+ 		}
+-		if err := pace(ctx, pressGap); err != nil {
+-			return err
++		if err == nil {
++			err = pace(ctx, pressGap)
+ 		}
+ 	}
+-	return nil
++	return err
+ }
+ 
++// withModifiers holds the modifiers around body and releases them whatever happens to it.
+ func (a *Agent) withModifiers(ctx context.Context, s *automation, n NekoSession, mods []string, body func() error) error {
+ 	var syms []int64
++	var err error
+ 	for _, m := range mods {
+ 		sym, _ := keysymForName(m)
+-		syms = append(syms, sym)
+-		if err := a.key(ctx, s, n, true, sym); err != nil {
+-			return err
++		if err = a.key(ctx, s, n, true, sym); err != nil {
++			break
+ 		}
++		syms = append(syms, sym)
+ 	}
+-	if len(syms) > 0 {
+-		if err := pace(ctx, pressGap); err != nil {
+-			return err
+-		}
++	if err == nil && len(syms) > 0 {
++		err = pace(ctx, pressGap)
++	}
++	if err == nil {
++		err = body()
+ 	}
+-	err := body()
+ 	for i := len(syms) - 1; i >= 0; i-- {
+-		if e := a.key(context.WithoutCancel(ctx), s, n, false, syms[i]); err == nil {
++		if e := a.key(ctx, s, n, false, syms[i]); err == nil {
+ 			err = e
+ 		}
+ 	}
+@@ -351,12 +441,16 @@ func (a *Agent) withModifiers(ctx context.Context, s *automation, n NekoSession,
+ 
+ // typeText types like the live view's software keyboard: ASCII as key strokes (Shift where the
+ // US layout needs it), anything else through neko's paste, with no Enter unless the text has one.
++// A character whose key went down always comes up again, also when the action is stopped.
+ func (a *Agent) typeText(ctx context.Context, s *automation, n NekoSession, text string) error {
+ 	var pending strings.Builder
+ 	flush := func() error {
+ 		if pending.Len() == 0 {
+ 			return nil
+ 		}
++		if err := ctx.Err(); err != nil {
++			return err
++		}
+ 		err := n.Send(nekoEvent("control/paste", map[string]any{"text": pending.String()}))
+ 		pending.Reset()
+ 		if err != nil {
+@@ -391,17 +485,18 @@ func (a *Agent) typeText(ctx context.Context, s *automation, n NekoSession, text
+ 				return err
+ 			}
+ 		}
+-		if err := a.key(ctx, s, n, true, sym); err != nil {
+-			return err
+-		}
+-		if err := a.key(ctx, s, n, false, sym); err != nil {
+-			return err
++		err := a.key(ctx, s, n, true, sym)
++		if err == nil {
++			err = a.key(ctx, s, n, false, sym)
+ 		}
+ 		if shift {
+-			if err := a.key(ctx, s, n, false, symShift); err != nil {
+-				return err
++			if e := a.key(ctx, s, n, false, symShift); err == nil {
++				err = e
+ 			}
+ 		}
++		if err != nil {
++			return err
++		}
+ 		if err := pace(ctx, typeGap); err != nil {
+ 			return err
+ 		}
+@@ -409,24 +504,36 @@ func (a *Agent) typeText(ctx context.Context, s *automation, n NekoSession, text
+ 	return flush()
+ }
+ 
+-// runSteps executes the steps; it returns the index of the first step that did not complete.
+-func (a *Agent) runSteps(ctx context.Context, s *automation, steps []step, screen screenState) (int, error) {
+-	s.mu.Lock()
+-	n := s.neko
+-	s.mu.Unlock()
+-	if n == nil {
+-		return 0, errors.New("no desktop session")
++// offScreen is the index of the first step with a point outside the screen, or -1. Nothing is
++// checked while the screen is unknown (neither neko's init nor a screenshot told it yet).
++func offScreen(steps []step, screen screenState) int {
++	if screen.width == 0 {
++		return -1
+ 	}
+-	inScreen := func(x, y int) bool {
+-		return screen.width == 0 || (x < screen.width && y < screen.height)
++	inside := func(x, y int) bool { return x < screen.width && y < screen.height }
++	for i, st := range steps {
++		if st.X != nil && !inside(*st.X, *st.Y) {
++			return i
++		}
++		if st.Type == "drag" {
++			for _, p := range st.Path {
++				if !inside(p.X, p.Y) {
++					return i
++				}
++			}
++		}
+ 	}
++	return -1
++}
++
++// runSteps executes the steps; it returns the index of the first step that did not complete.
++// Their points were checked against the screen (offScreen) when the action began; a screen
++// change since stops the action.
++func (a *Agent) runSteps(ctx context.Context, s *automation, n NekoSession, steps []step) (int, error) {
+ 	for i, st := range steps {
+ 		if ctx.Err() != nil {
+ 			return i, ctx.Err()
+ 		}
+-		if st.X != nil && !inScreen(*st.X, *st.Y) {
+-			return i, errors.New("off screen")
+-		}
+ 		var err error
+ 		switch st.Type {
+ 		case "move":
+@@ -451,10 +558,12 @@ func (a *Agent) runSteps(ctx context.Context, s *automation, steps []step, scree
+ 					if err := a.button(ctx, s, n, true, code); err != nil {
+ 						return err
+ 					}
+-					if err := pace(ctx, pressGap); err != nil {
+-						return err
++					err := pace(ctx, pressGap)
++					// The button comes up even when the action stops between press and release.
++					if e := a.button(ctx, s, n, false, code); err == nil {
++						err = e
+ 					}
+-					if err := a.button(ctx, s, n, false, code); err != nil {
++					if err != nil {
+ 						return err
+ 					}
+ 				}
+@@ -471,11 +580,6 @@ func (a *Agent) runSteps(ctx context.Context, s *automation, steps []step, scree
+ 			}
+ 			err = a.button(ctx, s, n, *st.Down, x11Buttons[st.Button])
+ 		case "drag":
+-			for _, p := range st.Path {
+-				if !inScreen(p.X, p.Y) {
+-					return i, errors.New("off screen")
+-				}
+-			}
+ 			err = a.withModifiers(ctx, s, n, st.Modifiers, func() error {
+ 				code := x11Buttons[st.Button]
+ 				first := st.Path[0]
+@@ -488,21 +592,24 @@ func (a *Agent) runSteps(ctx context.Context, s *automation, steps []step, scree
+ 				if err := a.button(ctx, s, n, true, code); err != nil {
+ 					return err
+ 				}
+-				if err := pace(ctx, clickGap); err != nil {
+-					return err
+-				}
++				err := pace(ctx, clickGap)
+ 				for _, p := range st.Path[1:] {
+-					if err := a.move(ctx, n, p.X, p.Y); err != nil {
+-						return err
++					if err != nil {
++						break
+ 					}
+-					if err := pace(ctx, dragGap); err != nil {
+-						return err
++					if err = a.move(ctx, n, p.X, p.Y); err == nil {
++						err = pace(ctx, dragGap)
+ 					}
+ 				}
+-				if err := pace(ctx, clickGap); err != nil {
+-					return err
++				if err == nil {
++					err = pace(ctx, clickGap)
++				}
++				// Released where the drag stopped if it was stopped: a button left down would
++				// turn the user's next pointer movement into a drag.
++				if e := a.button(ctx, s, n, false, code); err == nil {
++					err = e
+ 				}
+-				return a.button(ctx, s, n, false, code)
++				return err
+ 			})
+ 		case "scroll":
+ 			err = a.withModifiers(ctx, s, n, st.Modifiers, func() error {
+@@ -520,6 +627,9 @@ func (a *Agent) runSteps(ctx context.Context, s *automation, steps []step, scree
+ 						control = true
+ 					}
+ 				}
++				if err := ctx.Err(); err != nil {
++					return err
++				}
+ 				// neko's deltas are signed X11 wheel clicks: positive delta_y scrolls up.
+ 				return n.Send(nekoEvent("control/scroll", map[string]any{"delta_x": -st.DeltaX, "delta_y": -st.DeltaY, "control_key": control}))
+ 			})
+@@ -531,7 +641,9 @@ func (a *Agent) runSteps(ctx context.Context, s *automation, steps []step, scree
+ 		case "type":
+ 			err = a.typeText(ctx, s, n, st.Text)
+ 		case "paste":
+-			err = n.Send(nekoEvent("control/paste", map[string]any{"text": st.Text}))
++			if err = ctx.Err(); err == nil {
++				err = n.Send(nekoEvent("control/paste", map[string]any{"text": st.Text}))
++			}
+ 		case "wait":
+ 			err = pace(ctx, time.Duration(st.Ms)*time.Millisecond)
+ 		}
+diff --git a/services/agent/internal/agent/control.go b/services/agent/internal/agent/control.go
+index cee3881..f37f74a 100644
+--- a/services/agent/internal/agent/control.go
++++ b/services/agent/internal/agent/control.go
+@@ -11,12 +11,15 @@ import (
+ // Input control between the user's live view and a coding agent's bridge (docs/agent-access.md).
+ // Every input path, viewer and bridge alike, passes through this one state: who holds input now
+ // (controller), who may hold it (mode, persisted by the api so a takeover survives restarts), and
+-// a control epoch that every bridge action must still match when it is dispatched.
++// a control epoch: a bridge action decided on a screenshot taken before control last left the
++// agent is refused when it is dispatched.
+ //
+ //   - A real input from the user (a click, a key, a scroll, pasted text, a dropped file) takes
+ //     control at once: the epoch advances, the running bridge action is stopped, keys and buttons
+ //     the bridge left held are released, then that same input is executed. While a bridge is
+ //     connected the mode also becomes `user`, which only the user's explicit hand-back ends.
++//     Without that pause (no bridge was connected), a bridge may take control only once the
++//     user has given no real input for userActiveFor.
+ //   - Pointer movement while the bridge controls is not forwarded: it would change the hover
+ //     state the bridge is looking at. The last position is replayed before a click takes over.
+ //   - A remote screen change is not a takeover; it voids coordinates (screenVersion) instead.
+@@ -35,6 +38,13 @@ type controlState struct {
+ 	mode       string
+ 	access     bool
+ 	epoch      int64
++	// leftEpoch is the epoch at which control last left the agent (a takeover, a pause, access
++	// turned off) or was handed back to it: a screenshot taken before it may show a screen the
++	// user changed since (checkBasis). The agent's own claims advance epoch, not leftEpoch, so
++	// several actions can be decided on one screenshot.
++	leftEpoch int64
++	// The user's last real input; pointer movement does not count.
++	userInputAt time.Time
+ 	// The viewer's last pointer position withheld while the bridge controls (x, y, known).
+ 	pointer struct {
+ 		x, y  int
+@@ -81,6 +91,9 @@ func userInputKind(f protocol.ViewerFrame) string {
+ func (a *Agent) arbitrateViewer(ctx context.Context, f protocol.ViewerFrame) (ahead []json.RawMessage, forward bool) {
+ 	kind := userInputKind(f)
+ 	a.mu.Lock()
++	if kind == "input" {
++		a.control.userInputAt = time.Now()
++	}
+ 	withheld := a.control.controller == ctlAgent && a.bridgeConnected()
+ 	if kind == "move" && withheld {
+ 		var m struct {
+@@ -107,6 +120,7 @@ func (a *Agent) arbitrateViewer(ctx context.Context, f protocol.ViewerFrame) (ah
+ 	a.control.pointer.known = false
+ 	a.control.controller = ctlUser
+ 	a.control.epoch++
++	a.control.leftEpoch = a.control.epoch
+ 	reason := "user_input"
+ 	if a.bridgeConnected() && a.control.mode == modeAgent {
+ 		a.control.mode = modeUser
+@@ -116,7 +130,7 @@ func (a *Agent) arbitrateViewer(ctx context.Context, f protocol.ViewerFrame) (ah
+ 	a.mu.Unlock()
+ 	for _, s := range sessions {
+ 		s.interrupt("control_changed")
+-		s.releaseHeld(ctx)
++		s.releaseHeld()
+ 	}
+ 	a.publishControl(ctx, state, reason)
+ 	return ahead, true
+@@ -132,6 +146,10 @@ func (a *Agent) claimForBridge() (changed bool, reason string) {
+ 		return false, "control_privacy"
+ 	case a.control.mode == modeUser:
+ 		return false, "control_user"
++	case a.control.controller == ctlUser && time.Since(a.control.userInputAt) < userActiveFor:
++		// The user is at work, though no pause was persisted (they took control while no bridge
++		// was connected): the agent may take over only once they have left it alone for a while.
++		return false, "user_active"
+ 	}
+ 	if a.control.controller == ctlAgent {
+ 		return false, ""
+@@ -143,19 +161,49 @@ func (a *Agent) claimForBridge() (changed bool, reason string) {
+ }
+ 
+ // applyControl is the user's choice, relayed by the api: hand control back (`agent`), keep it
+-// (`user`), privacy pause, or turning agent access off altogether. A restart replays the
+-// persisted mode through the gateway's welcome.
++// (`user`), privacy pause, or turning agent access off altogether.
+ func (a *Agent) applyControl(ctx context.Context, mode string, access *bool, reason string) {
++	a.setControl(ctx, mode, access, reason, false)
++}
++
++// restoreControl applies the control state the gateway persisted, from its welcome. A stricter
++// mode the VM holds (privacy > user > agent) stays: a takeover made while the tunnel was down, or
++// whose control_state never reached the api, must not be undone by a reconnect, and only an
++// explicit automation_control relaxes it. The state is published either way, so the gateway
++// learns the VM's; a takeover the api has not recorded is reported as the user_input it was,
++// which the api persists.
++func (a *Agent) restoreControl(ctx context.Context, persisted string, access bool) {
++	a.setControl(ctx, persisted, &access, "restored", true)
++}
++
++func modeRank(mode string) int {
++	switch mode {
++	case modePrivacy:
++		return 2
++	case modeUser:
++		return 1
++	}
++	return 0
++}
++
++func (a *Agent) setControl(ctx context.Context, mode string, access *bool, reason string, restore bool) {
+ 	a.mu.Lock()
+-	changed := false
++	if restore && modeRank(a.control.mode) > modeRank(mode) {
++		if a.control.mode == modeUser && mode == modeAgent {
++			reason = "user_input"
++		}
++		mode = a.control.mode
++	}
++	changed, left := false, false
+ 	if access != nil && *access != a.control.access {
+ 		a.control.access = *access
+ 		changed = true
++		left = !*access
+ 	}
+ 	if mode == modeAgent || mode == modeUser || mode == modePrivacy {
+ 		if mode != a.control.mode {
+ 			a.control.mode = mode
+-			changed = true
++			changed, left = true, true
+ 		}
+ 		if mode == modeAgent && a.control.controller == ctlUser {
+ 			// Hand-back: nobody holds control until the bridge's next action or the user's next input.
+@@ -167,24 +215,30 @@ func (a *Agent) applyControl(ctx context.Context, mode string, access *bool, rea
+ 			changed = true
+ 		}
+ 	}
+-	if !changed {
++	if !changed && !restore {
+ 		a.mu.Unlock()
+ 		return
+ 	}
+-	a.control.epoch++
++	if changed {
++		a.control.epoch++
++		if left {
++			a.control.leftEpoch = a.control.epoch
++		}
++	}
+ 	state := a.controlSnapshot()
+ 	sessions := a.automationList()
+-	stopping := state.Mode != modeAgent || state.Controller != ctlAgent
++	stopping := changed && (state.Mode != modeAgent || state.Controller != ctlAgent)
++	accessOff := !a.control.access
+ 	a.mu.Unlock()
+ 	if stopping {
+ 		for _, s := range sessions {
+ 			s.interrupt("control_changed")
+-			s.releaseHeld(ctx)
++			s.releaseHeld()
+ 		}
+ 	}
+-	if !a.control.access {
++	if accessOff {
+ 		for _, s := range sessions {
+-			a.closeAutomation(s.id)
++			a.endAutomation(s)
+ 		}
+ 	}
+ 	a.publishControl(ctx, state, reason)
+diff --git a/services/agent/internal/protocol/protocol.go b/services/agent/internal/protocol/protocol.go
+index 03d4221..ec9b03f 100644
+--- a/services/agent/internal/protocol/protocol.go
++++ b/services/agent/internal/protocol/protocol.go
+@@ -76,12 +76,68 @@ type Incoming struct {
+ }
+ 
+ // AutomationWelcome is the control state the gateway persisted: a manual takeover survives an
+-// agent restart because the welcome carries it back.
++// agent restart because the welcome carries it back. The VM keeps the stricter of this mode and
++// its own (privacy > user > agent) and answers with a control_state: a takeover the gateway has
++// not persisted yet (made while the tunnel was down) is reported with reason "user_input" so the
++// api records it. Only an explicit automation_control relaxes user or privacy.
+ type AutomationWelcome struct {
+ 	Mode   string `json:"mode"` // agent | user | privacy
+ 	Access bool   `json:"access"`
+ }
+ 
++// AutomationProtocol is the automation protocol version the VM speaks (capabilities.protocol).
++//
++// Protocol 2, for the gateway's hosted MCP endpoint, which opens VM automation sessions lazily and
++// speaks request/response to its clients. Frames are as in protocol 1 (packages/contracts
++// automation.ts) with these additions; a protocol 1 gateway sees nothing new it must understand.
++//
++// Sessions (gateway → VM):
++//   - {t:"automation_open", sessionId, clientId} is idempotent. For a session id the VM already
++//     has (open, or suspended as below) with the same clientId, the session is kept with its
++//     desktop session and stored files, and the VM pushes {t:"control", control, reason:"restored"}
++//     and, when the screen is known, {t:"screen", screen}. Any other id opens a new session as in
++//     protocol 1.
++//   - When the agent's tunnel drops, its automation sessions are suspended rather than closed: the
++//     running act ends (status "interrupted", reason "relay_unavailable"; the result is not
++//     delivered), every held key and button is released, and the desktop session and stored files
++//     stay. Nothing is pushed for a suspended session and requests for it are ignored. An
++//     automation_open for it within 60 s resumes it on the new tunnel; after that it is closed.
++//     automation_close, agent access turned off and the agent shutting down close sessions at once.
++//
++// Requests (VM ← gateway, `automation` data):
++//   - screenshot, act and attach that arrive before the session's desktop session is ready wait up
++//     to 15 s for it (or until the tunnel ends) instead of failing with "desktop_unavailable".
++//   - screenshot, act and attach may carry maxWidth and maxHeight: integers 320..4096, either or
++//     both; any other value rejects the request with reason "invalid". When the screen exceeds
++//     them, the screenshot is downscaled (area-averaged, aspect kept, never enlarged) to fit and
++//     encoded as JPEG at the request's quality. Coordinates in act and attach remain native screen
++//     pixels.
++//   - A request's basis: screenVersion must equal the current one ("screen_changed" otherwise);
++//     controlEpoch is refused ("control_changed") only when it is older than the epoch at which
++//     control last left the agent (a user takeover, the mode becoming user or privacy, access
++//     turned off) or was handed back to it. An agent's own claim of control advances the epoch
++//     but does not void its screenshots, so several acts may be decided on one screenshot. A
++//     request with only screenshotId uses that screenshot's screenVersion and controlEpoch when
++//     the session issued it.
++//
++// Results (VM → gateway, `automation_result` data):
++//   - screenshot meta gains screenWidth and screenHeight, the native screen size, next to width
++//     and height, the image's size.
++//   - New reasons for act, all with status "rejected" and nothing executed:
++//     "off_screen" (a coordinate outside the current screen; stoppedAt is that step's index),
++//     "unknown_key" (a key name the VM does not know; stoppedAt is that step's index),
++//     "too_long" (the steps, their waits and settleMs cannot finish within 30 s), and
++//     "user_active" (the user holds control and gave a real input in the last 10 s; also for
++//     attach). Any act or attach that does not end "executed" releases every held key and button;
++//     keys and buttons held explicitly (keyhold, button down) last across acts only while each
++//     act ends normally.
++//   - attach with method "picker" takes exactly one handle ("unsupported" for more): it types the
++//     file's path into Chrome's own file chooser (the dialog an upload button opens), "no_dialog"
++//     when none is open, status "error" with reason "dialog_open" when the dialog did not take the
++//     file.
++//   - capabilities: protocol 2, scaledShots true, resume true.
++const AutomationProtocol = 2
++
+ // ControlState is who may drive the browser (contracts ControlState).
+ type ControlState struct {
+ 	Controller string `json:"controller"` // none | agent | user
