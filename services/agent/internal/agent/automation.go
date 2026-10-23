@@ -660,13 +660,16 @@ func (a *Agent) fromAutomation(ctx context.Context, sessionID string, data json.
 	if suspended {
 		return // only automation_open resumes it
 	}
+	// Act and attach are checked and admitted here, in the order they arrived (the second of two
+	// is the busy one); their waiting and running happen on their own goroutines, so status,
+	// cancel and everything else are answered meanwhile.
 	switch req.T {
 	case "status":
 		s.push(ctx, a.result(s, req.ID, "status", "executed", "", nil))
 	case "screenshot":
 		go a.serveScreenshot(ctx, s, req)
 	case "act":
-		go a.serveAct(ctx, s, req)
+		a.serveAct(ctx, s, req)
 	case "cancel":
 		s.mu.Lock()
 		act := s.active
@@ -679,7 +682,7 @@ func (a *Agent) fromAutomation(ctx context.Context, sessionID string, data json.
 		}
 		s.push(ctx, a.result(s, req.ID, "cancel", status, map[bool]string{true: "", false: "not_found"}[status == "executed"], nil))
 	case "attach":
-		go a.serveAttach(ctx, s, req)
+		a.serveAttach(ctx, s, req)
 	case "file_begin", "file_chunk", "file_end", "file_cancel":
 		a.automationFile(ctx, s, req)
 	}
@@ -954,6 +957,8 @@ func (a *Agent) refuseAction(ctx context.Context, s *automation, act *activeActi
 // nominal time, and an action refused up front is better than one cut off halfway through.
 const actSlack = 500 * time.Millisecond
 
+// serveAct refuses an invalid act or admits it as the session's action, then runs it (runAct) on
+// its own goroutine.
 func (a *Agent) serveAct(ctx context.Context, s *automation, req automationRequest) {
 	box, ok := screenshotBox(req)
 	if !ok {
@@ -984,6 +989,11 @@ func (a *Agent) serveAct(ctx context.Context, s *automation, req automationReque
 		s.push(ctx, a.result(s, req.ID, "act", "rejected", "busy", nil))
 		return
 	}
+	go a.runAct(ctx, s, act, req, box, steps, settle)
+}
+
+// runAct waits for the desktop, claims control and runs an admitted act's steps.
+func (a *Agent) runAct(ctx context.Context, s *automation, act *activeAction, req automationRequest, box shotBox, steps []step, settle time.Duration) {
 	if reason, step := a.beginAction(ctx, s, act, req, steps); reason != "" {
 		a.refuseAction(ctx, s, act, req, box, "act", reason, step)
 		return
@@ -1183,8 +1193,10 @@ func (a *Agent) beginStore(s *automation, req automationRequest) string {
 	return ""
 }
 
-// serveAttach delivers stored files to the page. Unlike storing, this changes the browser, so
-// it needs input control at the moment it runs, never the permission the upload began with.
+// serveAttach refuses an invalid attach or admits it as the session's action, then delivers the
+// stored files to the page (runAttach) on its own goroutine. Unlike storing, this changes the
+// browser, so it needs input control at the moment it runs, never the permission the upload
+// began with.
 func (a *Agent) serveAttach(ctx context.Context, s *automation, req automationRequest) {
 	box, ok := screenshotBox(req)
 	if !ok {
@@ -1217,6 +1229,11 @@ func (a *Agent) serveAttach(ctx context.Context, s *automation, req automationRe
 		s.push(ctx, a.result(s, req.ID, "attach", "rejected", "busy", nil))
 		return
 	}
+	go a.runAttach(ctx, s, act, req, box, files)
+}
+
+// runAttach waits for the desktop, claims control and delivers an admitted attach's files.
+func (a *Agent) runAttach(ctx context.Context, s *automation, act *activeAction, req automationRequest, box shotBox, files []storedFile) {
 	// A drop lands at a point of the screen: refused off it, like an act's step.
 	var at []step
 	if req.Method == "drop" {
