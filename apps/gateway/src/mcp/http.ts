@@ -221,7 +221,6 @@ function forward(env: Env, instanceId: string, auth: Extract<Awaited<ReturnType<
       'x-cb-instance': instanceId,
       'x-cb-client': auth.clientId,
       'x-cb-user': auth.userId,
-      'x-cb-generation': String(auth.generation),
       'x-cb-capability': auth.capability,
       'x-cb-key-name': encodeURIComponent(auth.name),
       'x-cb-agent': encodeURIComponent((req.headers.get('user-agent') ?? '').slice(0, 120)),

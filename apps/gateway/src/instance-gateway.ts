@@ -1,26 +1,31 @@
-import { AgentFrame, AutomationRequest, AUTOMATION_LIMITS, AUTOMATION_PROTOCOL_VERSION, ViewerFrame, type AgentControlMode, type ControlState, type GatewayToAgent, type GatewayToAutomation, type GatewayToViewer } from '@cloudbrowser/contracts';
+import { AgentFrame, ViewerFrame, type AgentControlMode, type ControlState, type GatewayToAgent, type GatewayToViewer } from '@cloudbrowser/contracts';
 import { createDb, prepaidAccess } from '@cloudbrowser/db';
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from './env.js';
 import { connectionAttempt, connectionLog, type ConnectionIdentity } from './connection-log.js';
+import { browserGone, controlMode, withRetry, type LiveInstance } from './instance-row.js';
+import { CodingAgentSession } from './mcp/coding-agent.js';
 
+/**
+ * Sockets accepted before coding agents moved to the MCP endpoint may still carry the retired
+ * `automation` role. It is no role any more, so their next frame closes them.
+ */
 type Attachment = ({ instanceId?: string } & { role: 'agent'; generation: number })
-  | ({ instanceId?: string; attemptId?: string; signalsSeen?: string[] } & { role: 'viewer'; sessionId: string; generation: number; relayId?: string })
-  /** A coding agent's bridge (docs/agent-access.md); `startedAt` bounds the session's life. */
-  | ({ instanceId?: string } & { role: 'automation'; sessionId: string; clientId: string; userId: string; generation: number; startedAt: number });
+  | ({ instanceId?: string; attemptId?: string; signalsSeen?: string[] } & { role: 'viewer'; sessionId: string; generation: number; relayId?: string });
 type CommandRow = { id: string; kind: string; payload: string };
-type LiveInstance = { user_id: string; status: string; desired_state: string; generation: number | null; agent_access: number; agent_control: string };
 type Role = Attachment['role'];
-const ROLES: readonly Role[] = ['agent', 'viewer', 'automation'];
-const controlMode = (row: LiveInstance): AgentControlMode => (row.agent_control === 'user' || row.agent_control === 'privacy' ? row.agent_control : 'agent');
+const ROLES: readonly Role[] = ['agent', 'viewer'];
 
 /** Frames bigger than this are refused (page 2: message size limits). */
 const MAX_FRAME_BYTES = 256 * 1024;
-/** Bridge screenshots arrive as several blob frames at once; they are relayed, never held. */
-const MAX_QUEUED_FRAME_BYTES = 4 * 1024 * 1024;
-/** A bridge's actions count as activity for auto-sleep this often, like a viewer's input. */
-const AUTOMATION_ACTIVITY_MS = 30_000;
+/**
+ * Each socket's frames wait in that socket's own queue, within its own budget: a viewer's input
+ * burst, the VM's screenshot blobs. A socket over its budget is closed; the others are untouched.
+ */
 const MAX_QUEUED_FRAMES = 4096;
+const MAX_QUEUED_FRAME_BYTES = 4 * 1024 * 1024;
+/** A coding agent's actions count as activity for auto-sleep this often, like a viewer's input. */
+const AUTOMATION_ACTIVITY_MS = 30_000;
 /** All relay frames share a short authorization lease; stop/delete RPCs revoke it immediately. */
 const INPUT_AUTH_LEASE_MS = 1000;
 /**
@@ -36,20 +41,23 @@ const RENEW_BEFORE_MS = 500;
  * transient read error closed a healthy connection.
  */
 const IDLE_RECHECK_MS = 10_000;
-/** A failed D1 read is retried after these pauses before authorization fails closed. */
-const READ_RETRY_MS = [100, 400];
+/** Agent frames that belong to one viewer's relay: that viewer's lease authorizes them. */
+const VIEWER_RELAY_FRAMES = ['viewer', 'viewer_error', 'viewer_stage', 'viewer_file'];
+/**
+ * The VM's answers for the coding agent's session reuse a fresh read of the browser's row for
+ * the length of a lease, under this grant key. They carry no input, so no credit check applies.
+ */
+const MCP_GRANT = 'mcp';
 
-async function withRetry<T>(read: () => Promise<T>): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await read();
-    } catch (error) {
-      const wait = READ_RETRY_MS[attempt];
-      if (wait === undefined) throw error;
-      await new Promise((resolve) => setTimeout(resolve, wait));
-    }
+function parseLoosely(message: string): { t?: unknown; sessionId?: unknown; relayId?: unknown } | null {
+  try {
+    const value: unknown = JSON.parse(message);
+    return value && typeof value === 'object' ? value : null;
+  } catch {
+    return null;
   }
 }
+
 /** `until` ends the lease for frames; `recheckAt` is when the alarm re-checks it without one. */
 type InputGrant = { instanceId: string; row: LiveInstance; until: number; recheckAt: number };
 
@@ -61,30 +69,62 @@ const COMMAND_ACTIVE = `(instr(c.id, ':') = 0 OR substr(c.id, 1, 8) = 'ipcheck:'
 
 /**
  * One Durable Object per browser instance: the meeting point of that instance's agent tunnel and
- * its viewer (page 2, `services/gateway`). It replaces the plan's Go gateway and its
- * `agent_sessions` registry, because routing by instance id is what a Durable Object gives for
- * free. Uses the WebSocket hibernation API, so idle connections cost nothing between frames.
+ * its viewer (page 2, `services/gateway`), and the home of a coding agent's session. It replaces
+ * the plan's Go gateway and its `agent_sessions` registry, because routing by instance id is what
+ * a Durable Object gives for free. Uses the WebSocket hibernation API, so idle connections cost
+ * nothing between frames.
  */
 export class InstanceGateway extends DurableObject<Env> {
-  // Prevent an upgrade already awaiting a DB read from surviving a concurrent revoke RPC.
+  // Prevent an upgrade or a check already awaiting a DB read from surviving a concurrent revoke
+  // RPC. Deletion bumps both epochs; sleep revokes only the viewers, and the agent's work goes on.
   private revocationEpoch = 0;
-  private messageTail: Promise<void> = Promise.resolve();
-  private queuedFrames = 0;
-  private queuedFrameBytes = 0;
+  private viewerEpoch = 0;
+  /** Each socket's frames, in order, behind each other and never behind another socket's. */
+  private queues = new WeakMap<WebSocket, { tail: Promise<void>; frames: number; bytes: number }>();
   private inputGrants = new Map<string, InputGrant>();
   private sessionChecks = new Map<string, Promise<boolean>>();
   private renewal: Promise<void> | null = null;
   /** The VM's last reported control state; the mode is also persisted by the api. */
   private control: ControlState | null = null;
   private automationActivityAt = 0;
+  private storedInstanceId: string | null = null;
+  /** The coding agent's session (docs/agent-access.md), driven through the MCP endpoint. */
+  private readonly mcp: CodingAgentSession;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // Keepalives are answered without waking the object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"t":"ping"}', '{"t":"pong"}'));
+    this.mcp = new CodingAgentSession({
+      ctx, env,
+      agent: () => this.sockets('agent')[0],
+      sendToAgent: (frame) => {
+        const agent = this.sockets('agent')[0];
+        return !!agent && this.send(agent, frame);
+      },
+      readInstance: (instanceId) => this.readInstance(instanceId),
+      controlState: (row) => this.controlState(row),
+      statusChanged: (row) => this.ctx.waitUntil(this.broadcastAutomationStatus(row).catch(() => {})),
+      scheduleAlarm: (at) => this.scheduleAlarm(at),
+      epoch: () => this.revocationEpoch,
+      touchActivity: (instanceId, sessionId) => this.touchAutomationActivity(instanceId, sessionId),
+    });
   }
 
   private async instanceId(): Promise<string> {
     return (await this.ctx.storage.get<string>('instanceId')) ?? '';
+  }
+
+  /** The alarm needs the instance id after a wake; it is written once, not on every request. */
+  private async rememberInstance(instanceId: string) {
+    if (this.storedInstanceId === instanceId) return;
+    await this.ctx.storage.put('instanceId', instanceId);
+    this.storedInstanceId = instanceId;
+  }
+
+  /** Viewer re-checks and the coding agent's session deadlines share the object's one alarm: the earliest wins. */
+  private async scheduleAlarm(at: number) {
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current <= Date.now() || at < current) await this.ctx.storage.setAlarm(at);
   }
 
   private sockets(role: Role) {
@@ -96,105 +136,32 @@ export class InstanceGateway extends DurableObject<Env> {
     return {
       instanceId: att?.instanceId ?? instanceId,
       generation: att?.generation,
-      role: att?.role,
+      role: ROLES.includes(att?.role as Role) ? att?.role : undefined,
       ...(att?.role === 'viewer' ? { sessionId: att.sessionId, relayId: att.relayId, attemptId: att.attemptId } : {}),
-      ...(att?.role === 'automation' ? { sessionId: att.sessionId } : {}),
     };
   }
 
-  // --- coding-agent bridges (docs/agent-access.md) -------------------------------------------
+  // --- the coding agent's session (docs/agent-access.md) --------------------------------------
 
   private controlState(row: LiveInstance): ControlState {
     const mode = controlMode(row);
     // The VM's report is authoritative while it agrees with the persisted mode; the api's own
-    // writes (hand-back, pause) reach the VM through this object, which updates both.
+    // writes (hand-back, pause) reach the VM through this object, which updates both. After an
+    // eviction the report is gone, and the persisted mode decides.
     return this.control && this.control.mode === mode ? this.control : { controller: 'none', mode, epoch: this.control?.epoch ?? 0 };
   }
 
-  private sendAutomation(ws: WebSocket, frame: GatewayToAutomation) {
-    return this.send(ws, frame as never);
+  /** Tells viewers whether a coding agent's session is open and who may drive the browser. */
+  private async broadcastAutomationStatus(row?: LiveInstance) {
+    const viewers = this.sockets('viewer');
+    if (!viewers.length) return;
+    const live = row ?? (await this.readInstance(await this.instanceId()));
+    if (!live) return;
+    await this.mcp.load();
+    for (const v of viewers) this.send(v, { t: 'automation_status', connected: this.mcp.open, control: this.controlState(live) });
   }
 
-  /** Tells viewers whether a bridge is connected and who may drive the browser. */
-  private broadcastAutomationStatus(row: LiveInstance) {
-    const connected = this.sockets('automation').length > 0;
-    const control = this.controlState(row);
-    for (const v of this.sockets('viewer')) this.send(v, { t: 'automation_status', connected, control });
-  }
-
-  private openAutomationRelay(agent: WebSocket, bridge: WebSocket) {
-    const att = bridge.deserializeAttachment() as Attachment | null;
-    if (att?.role !== 'automation') return;
-    if (!this.send(agent, { t: 'automation_open', sessionId: att.sessionId, clientId: att.clientId })) {
-      this.sendAutomation(bridge, { t: 'agent_offline' });
-    }
-  }
-
-  private closeAutomation(ws: WebSocket, reason: 'access_off' | 'client_revoked' | 'session_expired' | 'browser_unavailable', code = 4003) {
-    const att = ws.deserializeAttachment() as Attachment | null;
-    if (att?.role !== 'automation') { ws.close(code, reason); return; }
-    connectionLog('automation_revoked', { ...this.identity(ws), closeCode: code, code: reason });
-    this.inputGrants.delete(`automation:${att.sessionId}`);
-    this.sendAutomation(ws, { t: 'revoked', reason });
-    for (const agent of this.sockets('agent')) this.send(agent, { t: 'automation_close', sessionId: att.sessionId });
-    ws.close(code, reason);
-    this.ctx.waitUntil(this.env.API.endAutomationSession(att.sessionId, reason).catch(() => {}));
-  }
-
-  /** A bridge's session must still be open, its client paired, agent access on and credit available. */
-  private async validAutomation(att: Extract<Attachment, { role: 'automation' }>, row: LiveInstance, instanceId: string, allowCached: boolean): Promise<boolean> {
-    if (row.desired_state !== 'running' || row.status !== 'running' || !row.agent_access) return false;
-    if (Date.now() - att.startedAt > AUTOMATION_LIMITS.maxSessionMs) return false;
-    const key = `automation:${att.sessionId}`;
-    const cached = this.inputGrants.get(key);
-    if (allowCached && cached && cached.instanceId === instanceId && cached.row.user_id === row.user_id
-      && cached.row.generation === row.generation && cached.until > Date.now()) return true;
-    const checkKey = `${this.revocationEpoch}:${instanceId}:${row.user_id}:${row.generation}:${key}`;
-    const checking = this.sessionChecks.get(checkKey);
-    if (checking) return checking;
-    const check = this.refreshAutomation(att, row, instanceId, key);
-    this.sessionChecks.set(checkKey, check);
-    try { return await check; }
-    finally { if (this.sessionChecks.get(checkKey) === check) this.sessionChecks.delete(checkKey); }
-  }
-
-  private async refreshAutomation(att: Extract<Attachment, { role: 'automation' }>, row: LiveInstance, instanceId: string, key: string): Promise<boolean> {
-    const epoch = this.revocationEpoch;
-    try {
-      const [session, access] = await withRetry(() => Promise.all([
-        this.env.DB.prepare(`SELECT s.id FROM automation_sessions s JOIN automation_clients c ON c.id = s.client_id
-          WHERE s.id = ? AND s.instance_id = ? AND s.user_id = ? AND s.ended_at IS NULL
-            AND c.revoked_at IS NULL AND c.instance_id = s.instance_id`)
-          .bind(att.sessionId, instanceId, row.user_id).first(),
-        prepaidAccess(createDb(this.env.DB), row.user_id, instanceId),
-      ]));
-      if (!session) {
-        connectionLog('automation_authorization_rejected', { instanceId, generation: row.generation, sessionId: att.sessionId, code: 'session_ended' });
-        return false;
-      }
-      if (!access.allowed || epoch !== this.revocationEpoch) {
-        connectionLog('automation_authorization_rejected', { instanceId, generation: row.generation, sessionId: att.sessionId, code: access.allowed ? 'revoked' : 'billing_denied' });
-        return false;
-      }
-      const until = Math.min(Date.now() + INPUT_AUTH_LEASE_MS, access.deadlineAt?.getTime() ?? Infinity);
-      if (until <= Date.now()) return false;
-      const recheckAt = Math.min(Date.now() + IDLE_RECHECK_MS, access.deadlineAt?.getTime() ?? Infinity);
-      const grant = { instanceId, row, until, recheckAt };
-      this.inputGrants.set(key, grant);
-      await this.ctx.storage.setAlarm(recheckAt);
-      if (epoch !== this.revocationEpoch || until <= Date.now()) {
-        if (this.inputGrants.get(key) === grant) this.inputGrants.delete(key);
-        return false;
-      }
-      return true;
-    } catch {
-      connectionLog('automation_authorization_failed', { instanceId, generation: row.generation, sessionId: att.sessionId, code: 'authorization_unavailable' });
-      this.closeAll('authorization unavailable');
-      return false;
-    }
-  }
-
-  /** A bridge's action is activity for auto-sleep and the Settings page, recorded at most every 30 s. */
+  /** A coding agent's action is activity for auto-sleep and the Settings page, recorded at most every 30 s. */
   private async touchAutomationActivity(instanceId: string, sessionId: string) {
     const now = Date.now();
     if (now - this.automationActivityAt < AUTOMATION_ACTIVITY_MS) return;
@@ -244,29 +211,38 @@ export class InstanceGateway extends DurableObject<Env> {
       if (attachment?.role === 'viewer') this.closeViewer(viewer, attachment.sessionId, code, reason);
       else viewer.close(code, reason);
     }
-    for (const bridge of this.sockets('automation')) this.closeAutomation(bridge, 'browser_unavailable', code);
     for (const agent of this.sockets('agent')) {
       connectionLog('agent_revoked', { ...this.identity(agent), closeCode: code, code: reason.replaceAll(' ', '_') });
       agent.close(code, reason);
     }
+    // A closed tunnel answers nothing more; the coding agent hears so now, not at its timeout.
+    this.mcp.agentOffline();
   }
 
-  /** D1 is authoritative; upgrades and expired authorization leases read current state. */
-  private async liveInstance(instanceId: string): Promise<LiveInstance | null> {
+  /** The browser's row: null when it is gone, undefined when D1 could not be read. Closes nothing. */
+  private async readInstance(instanceId: string): Promise<LiveInstance | null | undefined> {
     try {
       const row = await withRetry(() => this.env.DB.prepare(`SELECT b.user_id, b.status, b.desired_state, a.generation, b.agent_access, b.agent_control
         FROM browser_instances b LEFT JOIN agent_credentials a ON a.instance_id = b.id WHERE b.id = ?`)
         .bind(instanceId).first<LiveInstance>());
-      if (!row || row.desired_state === 'deleted' || ['deleting', 'purged', 'failed'].includes(row.status)) {
-        this.closeAll('browser unavailable');
-        return null;
-      }
-      return row;
+      return row && !browserGone(row) ? row : null;
     } catch {
       connectionLog('instance_lookup_failed', { instanceId, code: 'authorization_unavailable' });
+      return undefined;
+    }
+  }
+
+  /** D1 is authoritative; expired authorization leases read current state and fail closed. */
+  private async liveInstance(instanceId: string): Promise<LiveInstance | null> {
+    const row = await this.readInstance(instanceId);
+    if (row) return row;
+    if (row === undefined) {
       this.closeAll('authorization unavailable');
       return null;
     }
+    this.closeAll('browser unavailable');
+    await this.mcp.close('browser_unavailable').catch(() => {});
+    return null;
   }
 
   private async validSocket(ws: WebSocket, row: LiveInstance, instanceId: string, allowCached = false): Promise<boolean> {
@@ -282,14 +258,6 @@ export class InstanceGateway extends DurableObject<Env> {
         return false;
       }
     }
-    if (attachment.role === 'automation') {
-      if (!(await this.validAutomation(attachment, row, instanceId, allowCached))) {
-        const reason = !row.agent_access ? 'access_off' : Date.now() - attachment.startedAt > AUTOMATION_LIMITS.maxSessionMs ? 'session_expired' : 'client_revoked';
-        this.closeAutomation(ws, reason);
-        this.broadcastAutomationStatus(row);
-        return false;
-      }
-    }
     return ws.readyState === WebSocket.OPEN;
   }
 
@@ -300,7 +268,7 @@ export class InstanceGateway extends DurableObject<Env> {
       && cached.row.generation === row.generation && cached.until > Date.now()) return true;
     // An alarm, upgrade and the FIFO relay can await the same check. Never launch duplicate
     // cross-region billing reads for a single authorization decision.
-    const key = `${this.revocationEpoch}:${instanceId}:${row.user_id}:${row.generation}:${sessionId}`;
+    const key = `${this.viewerEpoch}:${instanceId}:${row.user_id}:${row.generation}:${sessionId}`;
     const checking = this.sessionChecks.get(key);
     if (checking) return checking;
     const check = this.refreshSession(sessionId, row, instanceId);
@@ -310,7 +278,7 @@ export class InstanceGateway extends DurableObject<Env> {
   }
 
   private async refreshSession(sessionId: string, row: LiveInstance, instanceId: string): Promise<boolean> {
-    const epoch = this.revocationEpoch;
+    const epoch = this.viewerEpoch;
     try {
       // Both reads are independent; one round trip instead of two on the connect path.
       const [session, access] = await withRetry(() => Promise.all([
@@ -323,7 +291,7 @@ export class InstanceGateway extends DurableObject<Env> {
         connectionLog('viewer_authorization_rejected', { instanceId, generation: row.generation, sessionId, code: 'session_ended' });
         return false;
       }
-      if (!access.allowed || epoch !== this.revocationEpoch) {
+      if (!access.allowed || epoch !== this.viewerEpoch) {
         connectionLog('viewer_authorization_rejected', { instanceId, generation: row.generation, sessionId, code: access.allowed ? 'revoked' : 'billing_denied' });
         return false;
       }
@@ -333,8 +301,8 @@ export class InstanceGateway extends DurableObject<Env> {
       const grant = { instanceId, row, until, recheckAt };
       this.inputGrants.set(sessionId, grant);
       // A depleted balance is revoked even if the viewer sends no more input frames.
-      await this.ctx.storage.setAlarm(recheckAt);
-      if (epoch !== this.revocationEpoch || until <= Date.now()) {
+      await this.scheduleAlarm(recheckAt);
+      if (epoch !== this.viewerEpoch || until <= Date.now()) {
         if (this.inputGrants.get(sessionId) === grant) this.inputGrants.delete(sessionId);
         return false;
       }
@@ -365,63 +333,69 @@ export class InstanceGateway extends DurableObject<Env> {
     // Only the gateway's trusted service entrypoint reaches this Durable Object route.
     if (url.pathname === '/revoke' && req.method === 'POST') {
       this.revocationEpoch++;
+      this.viewerEpoch++;
       this.closeAll('browser deleted');
+      await this.mcp.close('browser_deleted');
       return new Response(null, { status: 204 });
     }
     if (url.pathname === '/automation-control' && req.method === 'POST') {
-      // The user's choice from the api, already persisted: tell the VM, the bridges and the viewers.
+      // The user's choice from the api, already persisted: tell the VM, the agent's session and the viewers.
       const body = await req.json<{ mode: AgentControlMode; access: boolean }>();
       const mode: AgentControlMode = body.mode === 'user' || body.mode === 'privacy' ? body.mode : 'agent';
       const access = body.access !== false;
       this.control = { controller: mode === 'agent' ? 'none' : 'user', mode, epoch: (this.control?.epoch ?? 0) + 1 };
       for (const agent of this.sockets('agent')) this.send(agent, { t: 'automation_control', mode, access });
-      if (!access) for (const bridge of this.sockets('automation')) this.closeAutomation(bridge, 'access_off');
-      else for (const bridge of this.sockets('automation')) this.sendAutomation(bridge, { t: 'control', control: this.control, reason: mode === 'agent' ? 'resumed' : mode === 'privacy' ? 'privacy' : 'paused' });
-      const connected = this.sockets('automation').length > 0;
-      for (const v of this.sockets('viewer')) this.send(v, { t: 'automation_status', connected, control: this.control });
+      if (!access) await this.mcp.close('access_off');
+      this.mcp.controlChanged();
+      await this.mcp.load();
+      for (const v of this.sockets('viewer')) this.send(v, { t: 'automation_status', connected: this.mcp.open, control: this.control });
       return new Response(null, { status: 204 });
     }
     if (url.pathname === '/revoke-automation' && req.method === 'POST') {
       const body = await req.json<{ clientId: string | null }>();
-      const instanceId = req.headers.get('x-cb-instance') ?? '';
-      for (const bridge of this.sockets('automation')) {
-        const att = bridge.deserializeAttachment() as Attachment | null;
-        if (att?.role === 'automation' && (!body.clientId || att.clientId === body.clientId)) this.closeAutomation(bridge, 'client_revoked');
-      }
-      const row = instanceId ? await this.liveInstance(instanceId).catch(() => null) : null;
-      if (row) this.broadcastAutomationStatus(row);
+      await this.mcp.revoke(body.clientId);
       return new Response(null, { status: 204 });
     }
     if (url.pathname === '/revoke-viewers' && req.method === 'POST') {
-      this.revocationEpoch++;
+      this.viewerEpoch++;
       this.inputGrants.clear();
       for (const viewer of this.sockets('viewer')) {
         const attachment = viewer.deserializeAttachment() as Attachment | null;
         if (attachment?.role === 'viewer') this.closeViewer(viewer, attachment.sessionId);
         else viewer.close(4003, 'session revoked');
       }
+      // The browser is going to sleep: its VM keeps no coding-agent session either.
+      await this.mcp.close('browser_stopped');
       return new Response(null, { status: 204 });
     }
     const epoch = this.revocationEpoch;
+    const viewerEpoch = this.viewerEpoch;
     const instanceId = req.headers.get('x-cb-instance') ?? '';
     const role = req.headers.get('x-cb-role');
     const admission: ConnectionIdentity & { role?: Role } = {
-      instanceId, sessionId: role === 'viewer' || role === 'automation' ? req.headers.get('x-cb-session') ?? undefined : undefined,
+      instanceId, sessionId: role === 'viewer' ? req.headers.get('x-cb-session') ?? undefined : undefined,
       attemptId: role === 'viewer' ? connectionAttempt(req.headers.get('x-cb-attempt')) : undefined,
-      role: role === 'agent' || role === 'viewer' || role === 'automation' ? role : undefined,
+      role: role === 'agent' || role === 'viewer' ? role : undefined,
     };
     if (role === 'viewer') connectionLog('viewer_admission_started', admission);
-    if (instanceId) await this.ctx.storage.put('instanceId', instanceId);
+    if (instanceId) await this.rememberInstance(instanceId);
 
+    // A coding agent's tool calls, cancellations and uploads (docs/agent-access.md).
+    if (url.pathname.startsWith('/mcp/') && (req.method === 'POST' || req.method === 'PUT')) return this.mcp.fetch(req, url.pathname, instanceId);
     if (url.pathname === '/deliver') {
       await this.deliverPending();
       return new Response(null, { status: 204 });
     }
     if (req.headers.get('upgrade') !== 'websocket') return new Response('expected websocket', { status: 426 });
 
-    const row = await this.liveInstance(instanceId);
-    if (!row || epoch !== this.revocationEpoch) {
-      connectionLog('upgrade_rejected', { ...admission, code: 'instance_unavailable', status: 403 });
+    // A failed read refuses this socket alone: the connections already admitted keep their leases.
+    const row = await this.readInstance(instanceId);
+    if (row === null) {
+      this.closeAll('browser unavailable');
+      await this.mcp.close('browser_unavailable').catch(() => {});
+    }
+    if (!row || epoch !== this.revocationEpoch || (role === 'viewer' && viewerEpoch !== this.viewerEpoch)) {
+      connectionLog('upgrade_rejected', { ...admission, code: row === undefined ? 'authorization_unavailable' : 'instance_unavailable', status: 403 });
       return new Response('browser unavailable', { status: 403 });
     }
     await this.pruneSockets(row, instanceId, true);
@@ -437,11 +411,13 @@ export class InstanceGateway extends DurableObject<Env> {
         connectionLog('agent_upgrade_rejected', { ...admission, generation, code: 'generation_revoked', status: 403 });
         return new Response('generation revoked', { status: 403 });
       }
-      // A reconnecting agent replaces the old tunnel.
-      for (const old of this.sockets('agent')) {
+      // A reconnecting agent replaces the old tunnel; what was in flight on it is never answered.
+      const replaced = this.sockets('agent');
+      for (const old of replaced) {
         connectionLog('agent_replaced', { ...this.identity(old, instanceId), closeCode: 4000 });
         old.close(4000, 'replaced');
       }
+      if (replaced.length) this.mcp.agentOffline();
       const att: Attachment = { role: 'agent', generation, instanceId };
       this.ctx.acceptWebSocket(server, ['agent']);
       server.serializeAttachment(att);
@@ -453,18 +429,18 @@ export class InstanceGateway extends DurableObject<Env> {
         this.send(v, { t: 'agent_online' });
         this.openViewerRelay(server, v);
       }
-      for (const b of this.sockets('automation')) {
-        this.sendAutomation(b, { t: 'agent_online' });
-        this.openAutomationRelay(server, b);
-      }
-      await this.deliverPending();
+      // Nothing that can fail is awaited once the tunnel is accepted: the 101 must still go out.
+      // The coding agent's session reopens and pending commands are delivered in the background.
+      this.ctx.waitUntil(this.mcp.agentOnline().catch(() => connectionLog('mcp_resume_failed', { ...this.identity(server), code: 'storage_unavailable' })));
+      this.ctx.waitUntil(this.deliverPending().catch(() => connectionLog('command_delivery_failed', { ...this.identity(server), code: 'delivery_unavailable' })));
     } else if (role === 'viewer') {
       const sessionId = req.headers.get('x-cb-session') ?? '';
       const attachment: Attachment = { role: 'viewer', sessionId, generation: row.generation ?? 0, relayId: crypto.randomUUID(), instanceId, attemptId: admission.attemptId };
-      if (!row.generation || !(await this.validSession(sessionId, row, instanceId)) || epoch !== this.revocationEpoch) {
+      if (!row.generation || !(await this.validSession(sessionId, row, instanceId)) || viewerEpoch !== this.viewerEpoch) {
         connectionLog('viewer_admission_rejected', { ...admission, generation: row.generation, relayId: attachment.relayId, code: 'authorization_rejected', status: 403 });
         return new Response('session revoked', { status: 403 });
       }
+      const agentSession = await this.mcp.load().then((rec) => !!rec, () => false);
       // One controller at a time: the newest viewer takes over (page 5).
       for (const old of this.sockets('viewer')) {
         const prior = old.deserializeAttachment() as Attachment | null;
@@ -479,28 +455,7 @@ export class InstanceGateway extends DurableObject<Env> {
       this.send(server, agent ? { t: 'agent_online' } : { t: 'agent_offline' });
       if (agent) this.openViewerRelay(agent, server);
       else connectionLog('viewer_agent_offline', { ...this.identity(server), code: 'relay_unavailable' });
-      this.send(server, { t: 'automation_status', connected: this.sockets('automation').length > 0, control: this.controlState(row) });
-    } else if (role === 'automation') {
-      const sessionId = req.headers.get('x-cb-session') ?? '';
-      const attachment: Attachment = {
-        role: 'automation', sessionId, clientId: req.headers.get('x-cb-client') ?? '', userId: req.headers.get('x-cb-user') ?? '',
-        generation: Number(req.headers.get('x-cb-generation') ?? 0), instanceId, startedAt: Date.now(),
-      };
-      if (!row.generation || attachment.generation !== row.generation || !row.agent_access || attachment.userId !== row.user_id
-        || !(await this.validAutomation(attachment, row, instanceId, false)) || epoch !== this.revocationEpoch) {
-        connectionLog('automation_admission_rejected', { ...admission, generation: row.generation, code: !row.agent_access ? 'access_off' : 'authorization_rejected', status: 403 });
-        return new Response('automation refused', { status: 403 });
-      }
-      // One bridge at a time: a newer connection from the same or another client replaces it.
-      for (const old of this.sockets('automation')) this.closeAutomation(old, 'client_revoked', 4001);
-      this.ctx.acceptWebSocket(server, ['automation', `automation:${sessionId}`]);
-      server.serializeAttachment(attachment);
-      connectionLog('automation_gateway_accepted', this.identity(server));
-      this.sendAutomation(server, { t: 'welcome', sessionId, instanceId, clientId: attachment.clientId, protocol: AUTOMATION_PROTOCOL_VERSION, mode: controlMode(row) });
-      const agent = this.sockets('agent')[0];
-      this.sendAutomation(server, agent ? { t: 'agent_online' } : { t: 'agent_offline' });
-      if (agent) this.openAutomationRelay(agent, server);
-      this.broadcastAutomationStatus(row);
+      this.send(server, { t: 'automation_status', connected: agentSession, control: this.controlState(row) });
     } else {
       return new Response('forbidden', { status: 403 });
     }
@@ -509,28 +464,61 @@ export class InstanceGateway extends DurableObject<Env> {
 
   override webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const bytes = typeof message === 'string' ? new TextEncoder().encode(message).byteLength : message.byteLength;
+    const role = (ws.deserializeAttachment() as Attachment | null)?.role;
     if (typeof message !== 'string' || bytes > MAX_FRAME_BYTES) {
-      ws.close(1009, 'frame too large or not text');
+      if (role === 'agent') this.dropAgentFrame(ws, message);
+      else ws.close(1009, 'frame too large or not text');
       return Promise.resolve();
     }
-    if (this.queuedFrames >= MAX_QUEUED_FRAMES || this.queuedFrameBytes + bytes > MAX_QUEUED_FRAME_BYTES) {
-      // Make failure visible instead of silently dropping an input or growing memory forever.
-      this.closeAll('input queue overloaded', 1013);
+    let queue = this.queues.get(ws);
+    if (!queue) this.queues.set(ws, queue = { tail: Promise.resolve(), frames: 0, bytes: 0 });
+    if (queue.frames >= MAX_QUEUED_FRAMES || queue.bytes + bytes > MAX_QUEUED_FRAME_BYTES) {
+      // Make failure visible instead of silently dropping an input or growing memory forever,
+      // and only for the socket that outran its own budget.
+      this.closeSocket(ws, 1013, 'input queue overloaded');
       return Promise.resolve();
     }
-    this.queuedFrames++;
-    this.queuedFrameBytes += bytes;
-    // D1/RPC awaits can otherwise let a later WebSocket event overtake this one.
-    const next = this.messageTail.then(() => this.processWebSocketMessage(ws, message))
-      .catch(() => { this.closeAll('input processing failed', 1011); })
-      .finally(() => { this.queuedFrames--; this.queuedFrameBytes -= bytes; });
-    this.messageTail = next;
+    queue.frames++;
+    queue.bytes += bytes;
+    const q = queue;
+    // D1/RPC awaits can otherwise let a later frame of this socket overtake this one.
+    const next = q.tail.then(() => this.processWebSocketMessage(ws, message))
+      .catch(() => { this.closeSocket(ws, 1011, 'input processing failed'); })
+      .finally(() => { q.frames--; q.bytes -= bytes; });
+    q.tail = next;
     return next;
+  }
+
+  /** Closes one socket for its own failure; the tunnel and the other viewers are not affected. */
+  private closeSocket(ws: WebSocket, code: number, reason: string) {
+    const att = ws.deserializeAttachment() as Attachment | null;
+    if (att?.role === 'viewer') {
+      this.closeViewer(ws, att.sessionId, code, reason);
+      return;
+    }
+    connectionLog(att?.role === 'agent' ? 'agent_tunnel_failed' : 'socket_failed', { ...this.identity(ws), closeCode: code, code: reason.replaceAll(' ', '_') });
+    ws.close(code, reason);
+    if (att?.role === 'agent' && this.sockets('agent').length === 0) this.mcp.agentOffline();
+  }
+
+  /**
+   * The VM's tunnel carries every viewer's relay and the coding agent's session, so one oversized
+   * frame (a huge clipboard, say) is dropped rather than closing it. A viewer whose relay lost a
+   * frame is told, since its stream may now be incomplete.
+   */
+  private dropAgentFrame(ws: WebSocket, message: string | ArrayBuffer) {
+    const frame = typeof message === 'string' ? parseLoosely(message) : null;
+    const type = typeof frame?.t === 'string' ? frame.t : undefined;
+    connectionLog('agent_frame_dropped', { ...this.identity(ws), code: 'frame_too_large', event: type });
+    if (type && VIEWER_RELAY_FRAMES.includes(type) && typeof frame?.sessionId === 'string') {
+      this.inputFailure(frame.sessionId, 'frame_too_large', typeof frame.relayId === 'string' ? frame.relayId : undefined);
+    }
   }
 
   private async processWebSocketMessage(ws: WebSocket, message: string) {
     if (ws.readyState !== WebSocket.OPEN) return;
     const epoch = this.revocationEpoch;
+    const viewerEpoch = this.viewerEpoch;
     const instanceId = await this.instanceId();
     let raw: unknown;
     try {
@@ -543,41 +531,59 @@ export class InstanceGateway extends DurableObject<Env> {
     const frameType = raw && typeof raw === 'object' && 't' in raw ? String(raw.t) : '';
     const frameSession = raw && typeof raw === 'object' && 'sessionId' in raw && typeof raw.sessionId === 'string' ? raw.sessionId : null;
     const relayedSession = attachment?.role === 'viewer' ? attachment.sessionId
-      : attachment?.role === 'automation' ? `automation:${attachment.sessionId}`
-        : ['viewer', 'viewer_error', 'viewer_stage'].includes(frameType) ? frameSession
-          : frameType === 'automation_result' && frameSession ? `automation:${frameSession}` : null;
+      : VIEWER_RELAY_FRAMES.includes(frameType) ? frameSession
+        : frameType === 'automation_result' ? MCP_GRANT : null;
     const cached = relayedSession ? this.inputGrants.get(relayedSession) : null;
+    const fresh = !!cached && cached.instanceId === instanceId && cached.until > Date.now();
     // SDP and system/init are on the same authorized channel as input. Reading the instance,
     // session and billing multiple times per signal can stall the entire ordered handshake.
-    const row = cached && cached.instanceId === instanceId && cached.until > Date.now()
-      ? cached.row : await this.liveInstance(instanceId);
-    if (!row || epoch !== this.revocationEpoch) return;
+    const row = fresh ? cached.row : await this.liveInstance(instanceId);
+    if (!row || epoch !== this.revocationEpoch || (attachment?.role === 'viewer' && viewerEpoch !== this.viewerEpoch)) return;
+    if (!fresh && relayedSession === MCP_GRANT) {
+      this.inputGrants.set(MCP_GRANT, { instanceId, row, until: Date.now() + INPUT_AUTH_LEASE_MS, recheckAt: Date.now() + IDLE_RECHECK_MS });
+    }
     await this.pruneSockets(row, instanceId, true);
     if (!(await this.validSocket(ws, row, instanceId, true)) || epoch !== this.revocationEpoch) return;
-    if (relayedSession) this.renewSoon(relayedSession, instanceId);
+    if (relayedSession && relayedSession !== MCP_GRANT) this.renewSoon(relayedSession, instanceId);
     const att = ws.deserializeAttachment() as Attachment;
     if (att.role === 'agent') await this.fromAgent(ws, att, raw);
-    else if (att.role === 'viewer') this.fromViewer(ws, att, raw);
-    else await this.fromAutomation(ws, att, raw, row, instanceId);
+    else this.fromViewer(ws, att, raw);
   }
 
   override async alarm() {
     const instanceId = await this.instanceId();
-    const viewers = [...this.sockets('viewer'), ...this.sockets('automation')];
-    if (!instanceId || !viewers.length) return;
-    // A frame may have renewed an expiring lease before this alarm was delivered. Preserve the
-    // renewed grant; it already scheduled its own bounded deadline. Expired grants are rechecked.
-    const grants = viewers.map(viewer => {
-      const att = viewer.deserializeAttachment() as Attachment | null;
-      return att?.role === 'viewer' ? this.inputGrants.get(att.sessionId)
-        : att?.role === 'automation' ? this.inputGrants.get(`automation:${att.sessionId}`) : null;
-    });
-    if (grants.every(grant => grant && grant.instanceId === instanceId && grant.until > Date.now())) {
-      await this.ctx.storage.setAlarm(Math.min(...grants.map(grant => grant!.recheckAt)));
-      return;
+    if (!instanceId) return;
+    // The coding agent's session has deadlines of its own (idle, expiry, upload URLs), with or
+    // without any socket open; they share this alarm with the viewers' re-checks.
+    const sessionDeadline = await this.mcp.expire();
+    let viewerDeadline = Infinity;
+    const viewers = this.sockets('viewer');
+    if (viewers.length) {
+      // A frame may have renewed an expiring lease before this alarm was delivered. Preserve the
+      // renewed grant; it already scheduled its own bounded deadline. Expired grants are rechecked.
+      const grants = viewers.map((viewer) => {
+        const att = viewer.deserializeAttachment() as Attachment | null;
+        return att?.role === 'viewer' ? this.inputGrants.get(att.sessionId) : null;
+      });
+      if (grants.every((grant) => grant && grant.instanceId === instanceId && grant.until > Date.now())) {
+        viewerDeadline = Math.min(...grants.map((grant) => grant!.recheckAt));
+      } else {
+        const row = await this.liveInstance(instanceId);
+        if (row) await this.pruneSockets(row, instanceId, true);
+      }
     }
-    const row = await this.liveInstance(instanceId);
-    if (row) await this.pruneSockets(row, instanceId, true);
+    const next = Math.min(viewerDeadline, sessionDeadline ?? Infinity);
+    if (next < Infinity) await this.scheduleAlarm(next);
+  }
+
+  /** The api's answer to an agent frame. A failed call is retried, then the frame is dropped and logged; the tunnel stays. */
+  private async agentRpc(ws: WebSocket, att: Extract<Attachment, { role: 'agent' }>, frame: AgentFrame): Promise<GatewayToAgent | null> {
+    try {
+      return await withRetry(async () => this.env.API.agentMessage(await this.instanceId(), att.generation, frame));
+    } catch {
+      connectionLog('agent_message_dropped', { ...this.identity(ws), code: 'api_unavailable', event: frame.t });
+      return null;
+    }
   }
 
   private async fromAgent(ws: WebSocket, att: Extract<Attachment, { role: 'agent' }>, raw: unknown) {
@@ -628,26 +634,27 @@ export class InstanceGateway extends DurableObject<Env> {
       return;
     }
     if (frame.t === 'automation_result') {
-      for (const b of this.ctx.getWebSockets(`automation:${frame.sessionId}`)) {
-        if (b.readyState === WebSocket.OPEN) this.sendAutomation(b, frame.data);
-      }
+      await this.mcp.fromAgent(frame);
       return;
     }
     if (frame.t === 'control_state') {
       // Who may drive the browser changed inside the VM (a takeover, a hand-back it applied).
       this.control = frame.control;
       connectionLog('control_changed', { ...this.identity(ws), code: frame.reason });
-      const connected = this.sockets('automation').length > 0;
-      for (const v of this.sockets('viewer')) this.send(v, { t: 'automation_status', connected, control: frame.control });
-      await this.env.API.agentMessage(await this.instanceId(), att.generation, frame);
+      await this.mcp.load();
+      for (const v of this.sockets('viewer')) this.send(v, { t: 'automation_status', connected: this.mcp.open, control: frame.control });
+      this.mcp.controlChanged();
+      await this.agentRpc(ws, att, frame);
       return;
     }
     if (frame.t === 'hello') return;
     // Events, replies and TURN requests go to the api, which owns those records.
-    const answer = await this.env.API.agentMessage(await this.instanceId(), att.generation, frame);
+    const answer = await this.agentRpc(ws, att, frame);
     if (answer) this.send(ws, answer);
     // Backstop for a lost queue poke: every heartbeat (15 s) also delivers pending commands.
-    if (frame.t === 'event' && frame.kind === 'heartbeat') await this.deliverPending();
+    if (frame.t === 'event' && frame.kind === 'heartbeat') {
+      this.ctx.waitUntil(this.deliverPending().catch(() => connectionLog('command_delivery_failed', { ...this.identity(ws), code: 'delivery_unavailable' })));
+    }
   }
 
   private fromViewer(ws: WebSocket, att: Extract<Attachment, { role: 'viewer' }>, raw: unknown) {
@@ -659,33 +666,6 @@ export class InstanceGateway extends DurableObject<Env> {
     if (!this.send(agent, { t: 'viewer', sessionId: att.sessionId, relayId: att.relayId, data: parsed.data })) {
       this.inputFailure(att.sessionId, 'relay_failed');
     }
-  }
-
-  /** A bridge's request: checked against the persisted mode here, then by the VM again when it runs. */
-  private async fromAutomation(ws: WebSocket, att: Extract<Attachment, { role: 'automation' }>, raw: unknown, row: LiveInstance, instanceId: string) {
-    const parsed = AutomationRequest.safeParse(raw);
-    if (!parsed.success) {
-      connectionLog('automation_frame_rejected', { ...this.identity(ws), code: 'invalid_frame', closeCode: 1007 });
-      ws.close(1007, 'invalid frame');
-      return;
-    }
-    const data = parsed.data;
-    const mode = controlMode(row);
-    const changesBrowser = data.t === 'act' || data.t === 'attach';
-    if (changesBrowser && mode !== 'agent') {
-      this.sendAutomation(ws, { t: 'refused', id: data.id, reason: mode === 'privacy' ? 'control_privacy' : 'control_user' });
-      return;
-    }
-    if (data.t === 'screenshot' && mode === 'privacy') {
-      this.sendAutomation(ws, { t: 'refused', id: data.id, reason: 'control_privacy' });
-      return;
-    }
-    const agent = this.sockets('agent')[0];
-    if (!agent || !this.send(agent, { t: 'automation', sessionId: att.sessionId, data })) {
-      this.sendAutomation(ws, { t: 'refused', id: data.id, reason: 'relay_unavailable' });
-      return;
-    }
-    if (changesBrowser) await this.touchAutomationActivity(instanceId, att.sessionId);
   }
 
   private inputFailure(sessionId: string, reason: string, relayId?: string) {
@@ -719,7 +699,11 @@ export class InstanceGateway extends DurableObject<Env> {
     // attachments retain their instance ID across hibernation; legacy IDs may be absent.
     connectionLog(att?.role === 'agent' ? 'agent_tunnel_closed' : 'viewer_socket_closed', { ...this.identity(ws), closeCode: code, wasClean });
     if (att?.role === 'agent') {
-      if (this.sockets('agent').every((s) => s === ws)) for (const v of this.sockets('viewer')) this.send(v, { t: 'agent_offline' });
+      if (this.sockets('agent').every((s) => s === ws)) {
+        for (const v of this.sockets('viewer')) this.send(v, { t: 'agent_offline' });
+        // The coding agent's calls in flight fail now with relay_unavailable, not at their timeout.
+        this.mcp.agentOffline();
+      }
     } else if (att?.role === 'viewer') {
       // A reconnect can accept/open the same session before the replaced socket's close callback.
       // Its relay now belongs to the replacement; the old close must not tear that relay down.
@@ -728,14 +712,6 @@ export class InstanceGateway extends DurableObject<Env> {
       if (replacement) return;
       const agent = this.sockets('agent')[0];
       if (agent) this.send(agent, { t: 'viewer_close', sessionId: att.sessionId, relayId: att.relayId });
-    } else if (att?.role === 'automation') {
-      this.inputGrants.delete(`automation:${att.sessionId}`);
-      const agent = this.sockets('agent')[0];
-      if (agent) this.send(agent, { t: 'automation_close', sessionId: att.sessionId });
-      this.ctx.waitUntil(this.env.API.endAutomationSession(att.sessionId, 'closed').catch(() => {}));
-      const connected = this.sockets('automation').length > 0;
-      const control = this.control ?? { controller: 'none' as const, mode: 'agent' as const, epoch: 0 };
-      for (const v of this.sockets('viewer')) this.send(v, { t: 'automation_status', connected, control });
     }
   }
 

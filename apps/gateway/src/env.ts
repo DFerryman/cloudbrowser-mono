@@ -30,11 +30,10 @@ export interface Env {
   /** Ed25519 public key (JWK JSON) for viewer tokens. */
   VIEWER_TOKEN_PUBLIC_KEY?: string;
   /**
-   * Workers Rate Limiting: MCP calls per access key (and failed authentications per address), and
-   * WebSocket upgrade attempts and failed uploads per address.
+   * Workers Rate Limiting (`ratelimits` in wrangler.jsonc): MCP calls per access key, and failed
+   * authentications and upload URL guesses per address. Optional, so a local run works without it.
    */
   MCP_LIMITER?: RateLimit;
-  UPGRADE_LIMITER?: RateLimit;
   /**
    * Comma-separated origins (scheme://host[:port]) whose browser pages may call the MCP endpoint.
    * Coding agents send no Origin; any other origin is refused, which stops a web page from using a
