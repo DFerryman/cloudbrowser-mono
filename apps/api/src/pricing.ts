@@ -4,6 +4,7 @@
  * was shown; if prices changed meanwhile, the action is refused with `price_changed`.
  */
 import {
+  billedVmHour,
   browserEstimate,
   BrowserTier,
   customerRates,
@@ -51,8 +52,7 @@ export async function instancePrice(db: Db, inst: { id: string; regionId: string
   if (!p) return null;
   const [placement] = await db.select().from(schema.placements).where(and(eq(schema.placements.instanceId, inst.id), eq(schema.placements.status, 'current')));
   const machine = placement?.instanceType ? p.sheet.instanceTypes[placement.instanceType] : tierPrice?.sheet.vmHour;
-  // A capacity fallback that costs more than the tier's machine is billed at the tier's price.
-  const actual = machine !== undefined && tierPrice ? Math.min(machine, tierPrice.sheet.vmHour) : machine;
+  const actual = machine === undefined ? undefined : billedVmHour(machine, tierPrice?.sheet.vmHour);
   if (actual === undefined) return null;
   const sheet = { ...p.sheet, vmHour: actual, rootVolumeGb: placement?.rootVolumeGb ?? p.sheet.rootVolumeGb };
   return { ...p, sheet, rates: { ...customerRates(sheet, await pricingSettings(db)), snapshot: 0 } };

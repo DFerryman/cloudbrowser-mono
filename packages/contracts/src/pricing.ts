@@ -63,6 +63,22 @@ export function tierSheet(sheet: ProviderPriceSheet, tier: BrowserTier): Provide
   return t ? { ...sheet, instanceType: t.instanceType, vmHour: t.vmHour, machine: t.machine } : null;
 }
 
+/**
+ * How much more than its tier's machine a machine launched for a capacity shortage may cost.
+ * Basic's fallbacks cost a fraction of a percent more in most regions. No launch goes above it.
+ */
+export const FALLBACK_PRICE_TOLERANCE = 0.05;
+
+/**
+ * The hourly price a browser's machine is billed at (any unit). One that costs more than its
+ * tier's machine, but within the fallback tolerance, was launched for a capacity shortage: the
+ * user pays the tier's price they confirmed. One that costs even more is an older machine the
+ * browser keeps, billed at its own price, like a cheaper one. Pure.
+ */
+export function billedVmHour(machineHour: number, tierHour: number | undefined): number {
+  return tierHour !== undefined && machineHour > tierHour && machineHour <= tierHour * (1 + FALLBACK_PRICE_TOLERANCE) ? tierHour : machineHour;
+}
+
 /** Billable usage of a browser. Each has its own unit and per-unit price. */
 export const UsageItem = z.enum(['compute', 'ip', 'storage', 'snapshot', 'transfer']);
 export type UsageItem = z.infer<typeof UsageItem>;

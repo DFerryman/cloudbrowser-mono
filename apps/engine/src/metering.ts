@@ -15,6 +15,7 @@
 import {
   BYTES_PER_GB,
   BrowserTier,
+  billedVmHour,
   splitUsagePeriod,
   tierSheet,
   costRates,
@@ -95,15 +96,15 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
     // The machine's own price; a placement that has not recorded its type yet uses its tier's.
     const tierPrices = tierSheet(priced.sheet, BrowserTier.catch('basic').parse(inst.tier));
     const cost = costRates(tierPrices ?? priced.sheet, settings.relayGbMicros);
-    // A capacity fallback may cost up to 5% more than the tier's machine: the user pays at most the tier's price.
-    const tierCompute = tierPrices ? cost.compute : Infinity;
+    // A capacity fallback that costs a little more than the tier's machine is charged at the tier's price.
+    const tierCompute = tierPrices ? cost.compute : undefined;
     if (placement?.instanceType) cost.compute = Math.round(priced.sheet.instanceTypes[placement.instanceType]! * 1_000_000);
     const removed = inst.status === 'deleting';
     const hold = holds.get(inst.id);
     const retaining = !!hold?.retentionStartedAt;
     const free: Rates = { compute: 0, ip: 0, storage: 0, snapshot: 0, transfer: 0 };
     const quoted = removed ? free : retaining ? { ...hold.rates, compute: 0, transfer: 0, snapshot: 0 } : { ...customerRates(priced.sheet, settings), snapshot: 0 };
-    if (!removed && !retaining) quoted.compute = Math.round(Math.min(cost.compute, tierCompute) * settings.markupPercent / 100);
+    if (!removed && !retaining) quoted.compute = Math.round(billedVmHour(cost.compute, tierCompute) * settings.markupPercent / 100);
     const rootGb = placement?.rootVolumeGb ?? priced.sheet.rootVolumeGb;
     const ledger = retained.filter((r) => r.instanceId === inst.id);
     const live = ledger.filter((r) => r.state !== 'deleted' && r.providerId !== null);
