@@ -1,5 +1,17 @@
+import { agentServer, agentSetups, mcpConfig, type AgentClient } from '../features/instances/agent-setup.js';
 import type { Locale } from '../lib/i18n.js';
-import type { Article } from './types.js';
+import type { Article, Block } from './types.js';
+
+/** The example in "Coding agent setup": a browser named Work. The app fills in a browser's own values. */
+const EXAMPLE_SERVER = agentServer({ url: 'https://connect.nevazu.com/mcp/BROWSER_ID', browserName: 'Work' });
+
+/** "Coding agent setup", one folded section per client, from the same snippets the app shows. */
+function clientSetupBlocks(text: Record<AgentClient, string>, otherTitle: string): Block[] {
+  return agentSetups(EXAMPLE_SERVER).map((setup) => ({
+    details: setup.client === 'other' ? otherTitle : setup.label,
+    blocks: [{ p: text[setup.client] }, { code: setup.code, label: setup.where }],
+  }));
+}
 
 /**
  * The user guide. Longer explanations live here rather than on the app's pages; the app links
@@ -99,18 +111,20 @@ const en: Article[] = [
       { h: 'Turning it on or off', id: 'switch' },
       { p: 'Allow coding agents to connect is ticked when you create a browser; untick it to create a browser no agent can ever reach. In a browser’s Settings the same switch can be changed later: turning it off disconnects any agent at once and keeps the access keys for when you turn it on again.' },
       { h: 'Connecting an agent', id: 'pair' },
-      { p: 'Nothing needs to be installed. Each browser has its own server address for the Model Context Protocol (MCP), which coding agents use to reach tools; the agent connects to it over HTTPS with an access key.' },
+      { p: 'Nothing needs to be installed, and your agent sets itself up. Each browser has its own server address for the Model Context Protocol (MCP), which coding agents use to reach tools; the agent connects to it over HTTPS with an access key. The key is the one part you handle yourself.' },
       { ul: [
         'On the browsers page, choose the robot button on a browser (or open Settings → Coding agent access).',
         'Create an access key: give it a name, an expiry and whether the agent may act or only look. The key is shown once; Nevazu keeps only a fingerprint of it.',
-        'Pick your agent (Claude Code, Cursor, Codex, VS Code, Windsurf, Gemini CLI or any MCP client) and copy the setup shown. It already contains the address and the new key.',
-        'Ask your agent to take a screenshot of the browser. It gets the tools screenshot, act, upload_file, attach_files, get_status and end_session.',
+        'Save the key on your computer in the environment variable the dialog names, such as NEVAZU_WORK_KEY, with the command shown for macOS, Linux or Windows. Your agent only ever refers to the variable, so the key stays out of its chat and its configuration.',
+        'Copy the setup for your agent and paste it into Claude Code, Codex, Cursor, OpenCode or any other coding agent. It contains the server’s name and address in the standard mcpServers format and points the agent to Coding agent setup, where it finds the steps for its own client and adds the server itself.',
+        'Restart the agent if it asks, then ask it to take a screenshot of the browser. It gets the tools screenshot, act, upload_file, attach_files, get_status and end_session.',
         'Revoke a key at any time: it stops working at once and an agent using it is disconnected.',
       ] },
+      { p: 'To configure an agent yourself, open Set it up by hand in the same dialog: it shows the command or configuration file for each client, already filled in for that browser.' },
       { note: 'A key works only for the browser it was created for. Treat it like a password: anyone who has it can see and act in that browser with your sign-ins. Deleting the browser or signing out on all devices revokes its keys.' },
       { h: 'Who is driving', id: 'control' },
-      { p: 'While an agent is connected, the live view shows a banner saying who is driving. Any click, key, scroll, paste or dropped file of yours takes control from the agent before it is carried out: the agent’s remaining steps are cancelled, keys it was holding are released, and it is told it lost control. Moving your mouse without clicking does not take over, so the page the agent is looking at does not change under it.' },
-      { p: 'Once you have taken over, the agent stays paused until you choose Hand control back, in the banner or in Settings. Closing the live view, reconnecting, or the agent reconnecting does not hand control back. When you hand it back, the agent takes a fresh screenshot before it continues; nothing it had queued before is resumed.' },
+      { p: 'While an agent is connected, the live view says who is driving: an orange outline around the picture while the agent is in control, a blue one while you are, and the robot button in the toolbar, whose menu holds the choices below. A short notice appears when control changes; it closes by itself. Any click, key, scroll, paste or dropped file of yours takes control from the agent before it is carried out: the agent’s remaining steps are cancelled, keys it was holding are released, and it is told it lost control. Moving your mouse without clicking does not take over, so the page the agent is looking at does not change under it.' },
+      { p: 'Once you have taken over, the agent stays paused until you choose Hand control back, in the robot button’s menu or in Settings. Closing the live view, reconnecting, or the agent reconnecting does not hand control back. When you hand it back, the agent takes a fresh screenshot before it continues; nothing it had queued before is resumed.' },
       { p: 'Privacy pause goes one step further: besides pausing input, no screenshot reaches the agent until you end the pause. Screenshots the agent already received cannot be taken back.' },
       { h: 'Screens and coordinates', id: 'screen' },
       { p: 'The agent sees the whole remote display, including tabs, the address bar, menus and file dialogs, scaled to a size models read reliably; the coordinates it sends are mapped back to the real screen. Every action names the screenshot it was decided on: if your window changed the remote screen size or you took control since, the action is refused and the agent takes a new screenshot. Resizing never takes control away from it.' },
@@ -118,6 +132,42 @@ const en: Article[] = [
       { p: 'To give the browser a file from your computer, the agent asks for a one-time upload address and sends the file with curl, which comes with macOS, Linux and Windows; small files can also be sent directly. Uploading only copies a file to the browser’s temporary storage; attaching it to a page (into Chrome’s file dialog, by paste or by drop) needs the agent to have control at that moment. Temporary files are removed when the agent’s session ends.' },
       { h: 'What the agent can do', id: 'scope' },
       { p: 'The agent has the same reach as you at the keyboard and mouse: every website you are signed in to, including anything those accounts allow (reading, sending, buying, deleting). Give an agent only tasks you would do yourself, watch it in the live view, and prefer a separate browser with its own sign-ins for agent work. Agent actions count as activity, so a browser an agent is working in does not go to sleep; an idle connection does not keep it awake.' },
+    ],
+  },
+  {
+    slug: 'agent-setup',
+    title: 'Coding agent setup',
+    summary: 'For coding agents: how to add a Nevazu browser to your own MCP configuration in Claude Code, Codex, Cursor, VS Code, Windsurf, Gemini CLI, OpenCode or any other client.',
+    blocks: [
+      { p: 'This page is written for coding agents, and for anyone who wants to see what their agent will do. A Nevazu user hands their agent a short setup from a browser’s Connect a coding agent dialog. It names the server (for example nevazu-work), its URL (https://connect.nevazu.com/mcp/ followed by the browser’s ID) and the environment variable that holds the browser’s access key (for example NEVAZU_WORK_KEY), in this standard form:' },
+      { code: mcpConfig(EXAMPLE_SERVER), label: 'mcpServers' },
+      { p: 'The examples below use these names. Use the ones from the setup you were given, and follow the section for the client you are.' },
+      { h: 'Rules', id: 'rules' },
+      { ul: [
+        'The user creates the access key and saves it in the environment variable themselves. Refer to the variable as shown for your client. Never ask for the key, print it, or write its value into a file or a message.',
+        'Add the server to your user-level configuration, so it works in every project, and keep the servers already there: merge into an existing file rather than replacing it.',
+        'One server per browser: each browser has its own name, URL and key variable.',
+        'Most clients load MCP servers when they start. Tell the user if you must be restarted. The variable must be set in the environment the client starts from: a new terminal has it; an app opened from the Dock or the Start menu may need to be quit and opened again.',
+        'Check the connection with the server’s get_status tool, then take a screenshot to see the browser.',
+      ] },
+      { h: 'Steps for each client', id: 'clients' },
+      ...clientSetupBlocks({
+        'claude-code': 'Run this in a terminal. The user scope makes the server available in every project. The single quotes keep ${NEVAZU_WORK_KEY} as written, and Claude Code expands it each time it starts. Check with claude mcp list; the server is loaded after a restart.',
+        codex: 'Add this to ~/.codex/config.toml (create the file if it is missing). Codex sends the value of the named variable as the bearer token. The same in one command: codex mcp add nevazu-work --url https://connect.nevazu.com/mcp/BROWSER_ID --bearer-token-env-var NEVAZU_WORK_KEY. Check with codex mcp list; the server is loaded after a restart.',
+        cursor: 'Merge this into ~/.cursor/mcp.json, keeping any servers already there. Cursor substitutes ${env:NEVAZU_WORK_KEY} when it starts. The server appears in Cursor’s MCP settings, where it may need turning on.',
+        vscode: 'Merge this into the user MCP configuration (the command MCP: Open User Configuration) or into .vscode/mcp.json, keeping the entries already there. The first time the server starts, VS Code asks the user for the key and keeps it in its secret storage; the user pastes the value of NEVAZU_WORK_KEY there.',
+        windsurf: 'Merge this into ~/.codeium/windsurf/mcp_config.json, keeping any servers already there, then refresh the MCP servers in Windsurf. Windsurf substitutes ${env:NEVAZU_WORK_KEY}.',
+        gemini: 'Merge this into ~/.gemini/settings.json, keeping the settings already there. Gemini CLI expands ${NEVAZU_WORK_KEY} from the environment when it loads its settings. Check with /mcp.',
+        opencode: 'Merge this into ~/.config/opencode/opencode.json (or opencode.json in a project), keeping the configuration already there. OpenCode substitutes {env:NEVAZU_WORK_KEY} when it loads its configuration; oauth: false stops it from trying to sign in with OAuth.',
+        other: 'Any client that speaks MCP over Streamable HTTP connects with the URL and an Authorization header carrying the key. Use the client’s own way of reading an environment variable; if it has none, tell the user where to put the key themselves. The curl command checks the key by listing the tools.',
+      }, 'Any other client'),
+      { h: 'If it does not connect', id: 'troubleshooting' },
+      { ul: [
+        '401 Unauthorized: the key did not arrive or is not valid. The variable may be empty in the environment the client started from (the literal ${…} is then sent), or the key was revoked or has expired. The user can create a new key in the browser’s Settings → Coding agent access.',
+        '429 Too many failed attempts: wait a minute before trying again.',
+        'A tool says the browser is not running: ask the user to open it in Nevazu. A coding agent cannot wake a sleeping browser.',
+        'A tool says coding agent access is off: the user turns on Allow coding agents to connect in the browser’s settings.',
+      ] },
     ],
   },
   {
@@ -345,18 +395,20 @@ const zh: Article[] = [
       { h: '开启或关闭', id: 'switch' },
       { p: '创建浏览器时“允许编程智能体连接”默认勾选；取消勾选即可创建一个任何智能体都无法访问的浏览器。在浏览器的设置中可以随时更改这个开关：关闭会立即断开正在连接的智能体，访问密钥保留，再次开启后仍可使用。' },
       { h: '连接智能体', id: 'pair' },
-      { p: '无需安装任何东西。每个浏览器都有自己的 MCP（模型上下文协议，编程智能体用它调用工具）服务器地址，智能体通过 HTTPS 和访问密钥连接。' },
+      { p: '无需安装任何东西，智能体会自行完成配置。每个浏览器都有自己的 MCP（模型上下文协议，编程智能体用它调用工具）服务器地址，智能体通过 HTTPS 和访问密钥连接。只有密钥需要你自己处理。' },
       { ul: [
         '在浏览器列表中点击浏览器上的机器人按钮（或打开“设置 → 编程智能体访问”）。',
         '创建访问密钥：填写名称、有效期，以及智能体是可以操作还是只能查看。密钥只显示一次，Nevazu 只保存它的指纹。',
-        '选择你的智能体（Claude Code、Cursor、Codex、VS Code、Windsurf、Gemini CLI 或任何 MCP 客户端），复制显示的配置，其中已包含地址和新密钥。',
-        '让智能体给浏览器截个图。它会获得 screenshot、act、upload_file、attach_files、get_status 和 end_session 这些工具。',
+        '用对话框为 macOS、Linux 或 Windows 给出的命令，把密钥保存到它指定的环境变量中，例如 NEVAZU_WORK_KEY。智能体只引用这个变量，密钥不会出现在它的对话或配置中。',
+        '复制给智能体的配置，粘贴到 Claude Code、Codex、Cursor、OpenCode 或任何编程智能体中。其中以标准 mcpServers 格式写明服务器名称和地址，并让智能体查看“编程智能体配置”，在那里找到它所属客户端的步骤并自行加入服务器。',
+        '如果智能体要求，重启它，然后让它给浏览器截个图。它会获得 screenshot、act、upload_file、attach_files、get_status 和 end_session 这些工具。',
         '随时可以撤销密钥：它立即失效，正在使用它的智能体会被断开。',
       ] },
+      { p: '想自己配置智能体，可以在同一个对话框中展开“手动配置”：那里有每个客户端的命令或配置文件，已填好该浏览器的信息。' },
       { note: '密钥只对创建它的那个浏览器有效。请像密码一样保管：拿到它的人可以用你的登录状态查看和操作该浏览器。删除浏览器或在所有设备上退出登录都会撤销它的密钥。' },
       { h: '由谁操作', id: 'control' },
-      { p: '智能体连接期间，实时画面顶部会显示由谁在操作。你的任何点击、按键、滚动、粘贴或拖入文件都会在执行之前先从智能体手中接管控制权：智能体剩余的步骤被取消，它按住的按键被释放，并会被告知已失去控制权。只移动鼠标而不点击不会接管，这样智能体正在看的页面不会在它眼皮底下改变。' },
-      { p: '一旦你接管，智能体会一直暂停，直到你在横幅或设置中选择“交还控制权”。关闭实时画面、重新连接或智能体重新连接都不会交还控制权。交还后，智能体会先重新截图再继续；之前排队的操作不会恢复。' },
+      { p: '智能体连接期间，实时画面会显示由谁在操作：智能体控制时画面四周是橙色边框，你控制时是蓝色边框；工具栏中的机器人按钮也会显示，它的菜单里有下面这些选项。控制权变化时会出现一条简短提示，几秒后自动消失。你的任何点击、按键、滚动、粘贴或拖入文件都会在执行之前先从智能体手中接管控制权：智能体剩余的步骤被取消，它按住的按键被释放，并会被告知已失去控制权。只移动鼠标而不点击不会接管，这样智能体正在看的页面不会在它眼皮底下改变。' },
+      { p: '一旦你接管，智能体会一直暂停，直到你在机器人按钮的菜单或设置中选择“交还控制权”。关闭实时画面、重新连接或智能体重新连接都不会交还控制权。交还后，智能体会先重新截图再继续；之前排队的操作不会恢复。' },
       { p: '“隐私暂停”更进一步：除了暂停输入，在你结束暂停之前智能体收不到任何截图。已经发给智能体的截图无法收回。' },
       { h: '屏幕与坐标', id: 'screen' },
       { p: '智能体看到的是整个远程屏幕，包括标签栏、地址栏、菜单和文件对话框，并缩放到模型能可靠识别的尺寸；它发送的坐标会换算回真实屏幕。每个操作都注明它依据的是哪张截图：如果之后你的窗口改变了远程屏幕尺寸或你接管了控制权，该操作会被拒绝，智能体会重新截图。改变尺寸不会夺走它的控制权。' },
@@ -364,6 +416,42 @@ const zh: Article[] = [
       { p: '要把你电脑上的文件交给浏览器，智能体会申请一个一次性上传地址，并用 curl（macOS、Linux 和 Windows 都自带）发送文件；小文件也可以直接发送。上传只是把文件复制到浏览器的临时存储；把文件附加到页面（放进 Chrome 的文件对话框、粘贴或拖放）要求智能体在那一刻拥有控制权。智能体的会话结束时临时文件会被删除。' },
       { h: '智能体能做什么', id: 'scope' },
       { p: '智能体拥有和你用键盘鼠标一样的能力：你登录过的每个网站，以及这些账户允许的一切（读取、发送、购买、删除）。只把你自己会做的任务交给它，在实时画面中看着它工作，并尽量为智能体工作单独准备一个有独立登录状态的浏览器。智能体的操作算作活动，因此它正在工作的浏览器不会休眠；仅保持连接不会让浏览器保持唤醒。' },
+    ],
+  },
+  {
+    slug: 'agent-setup',
+    title: '编程智能体配置',
+    summary: '写给编程智能体：如何在 Claude Code、Codex、Cursor、VS Code、Windsurf、Gemini CLI、OpenCode 或其他客户端中，把 Nevazu 浏览器加入自己的 MCP 配置。',
+    blocks: [
+      { p: '本页写给编程智能体，也写给想了解智能体会做什么的人。Nevazu 用户会从浏览器的“连接编程智能体”对话框中复制一段简短的配置交给智能体。其中包含服务器名称（例如 nevazu-work）、地址（https://connect.nevazu.com/mcp/ 加浏览器 ID），以及保存该浏览器访问密钥的环境变量（例如 NEVAZU_WORK_KEY），格式如下：' },
+      { code: mcpConfig(EXAMPLE_SERVER), label: 'mcpServers' },
+      { p: '下面的示例使用这些名称。请换成你收到的配置中的名称，并按照你所属客户端的那一节操作。' },
+      { h: '规则', id: 'rules' },
+      { ul: [
+        '访问密钥由用户自己创建并保存到环境变量中。按你的客户端所示引用这个变量。不要向用户索要密钥，不要打印它，也不要把它的值写进任何文件或消息。',
+        '把服务器加入用户级配置，使它在所有项目中可用，并保留已有的服务器：合并到已有文件中，而不是替换它。',
+        '每个浏览器一个服务器：每个浏览器都有自己的名称、地址和密钥变量。',
+        '大多数客户端在启动时加载 MCP 服务器。如果你需要重启，请告诉用户。变量必须存在于客户端启动时的环境中：新打开的终端里有；从程序坞或开始菜单打开的应用可能需要退出后重新打开。',
+        '用服务器的 get_status 工具检查连接，然后截图查看浏览器。',
+      ] },
+      { h: '各客户端的步骤', id: 'clients' },
+      ...clientSetupBlocks({
+        'claude-code': '在终端中运行。user 作用域让服务器在所有项目中可用。单引号让 ${NEVAZU_WORK_KEY} 保持原样，Claude Code 每次启动时展开它。用 claude mcp list 检查；重启后服务器才会加载。',
+        codex: '加入 ~/.codex/config.toml（文件不存在就创建）。Codex 会把该变量的值作为 bearer 令牌发送。也可以用一条命令：codex mcp add nevazu-work --url https://connect.nevazu.com/mcp/BROWSER_ID --bearer-token-env-var NEVAZU_WORK_KEY。用 codex mcp list 检查；重启后服务器才会加载。',
+        cursor: '合并到 ~/.cursor/mcp.json，保留已有的服务器。Cursor 启动时替换 ${env:NEVAZU_WORK_KEY}。服务器会出现在 Cursor 的 MCP 设置中，可能需要手动启用。',
+        vscode: '合并到用户 MCP 配置（命令 MCP: Open User Configuration）或 .vscode/mcp.json，保留已有的条目。服务器第一次启动时，VS Code 会向用户询问密钥并保存在安全存储中；用户在那里粘贴 NEVAZU_WORK_KEY 的值。',
+        windsurf: '合并到 ~/.codeium/windsurf/mcp_config.json，保留已有的服务器，然后在 Windsurf 中刷新 MCP 服务器。Windsurf 会替换 ${env:NEVAZU_WORK_KEY}。',
+        gemini: '合并到 ~/.gemini/settings.json，保留已有的设置。Gemini CLI 加载设置时从环境中展开 ${NEVAZU_WORK_KEY}。用 /mcp 检查。',
+        opencode: '合并到 ~/.config/opencode/opencode.json（或项目中的 opencode.json），保留已有的配置。OpenCode 加载配置时替换 {env:NEVAZU_WORK_KEY}；oauth: false 让它不尝试用 OAuth 登录。',
+        other: '任何通过 Streamable HTTP 使用 MCP 的客户端，都用这个地址和携带密钥的 Authorization 请求头连接。请用客户端自己读取环境变量的方式；如果没有，告诉用户自己把密钥填在哪里。curl 命令通过列出工具来检查密钥。',
+      }, '其他客户端'),
+      { h: '连接不上时', id: 'troubleshooting' },
+      { ul: [
+        '401 Unauthorized：密钥没有送达或无效。可能是客户端启动时的环境中变量为空（此时发送的是字面的 ${…}），也可能密钥已被撤销或已过期。用户可以在浏览器的“设置 → 编程智能体访问”中创建新密钥。',
+        '429 失败次数过多：等一分钟再试。',
+        '工具提示浏览器未运行：请用户在 Nevazu 中打开它。编程智能体无法唤醒休眠的浏览器。',
+        '工具提示编程智能体访问已关闭：用户需要在浏览器设置中开启“允许编程智能体连接”。',
+      ] },
     ],
   },
   {

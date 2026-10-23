@@ -71,6 +71,9 @@ function blockMarkdown(b: Block): string {
   if ('h' in b) return `## ${b.h}`;
   if ('ul' in b) return b.ul.map((li) => `- ${li}`).join('\n');
   if ('note' in b) return `> **Note:** ${b.note}`;
+  if ('code' in b) return [b.label ? `${b.label}:` : null, '```', b.code, '```'].filter((l) => l !== null).join('\n');
+  // A folded section is unfolded for language models: all of it is meant to be read.
+  if ('details' in b) return [`### ${b.details}`, ...b.blocks.map(blockMarkdown)].join('\n\n');
   return b.p;
 }
 
@@ -100,7 +103,7 @@ const keyFacts = () => [
   `- Each browser is a real Chrome on its own cloud computer (Amazon Web Services), in the region chosen when it is created; the browser keeps that region and its dedicated IPv4 address for life.`,
   `- Profile, cookies, extensions and sign-ins are kept on encrypted storage between sessions; an idle browser sleeps (10 minutes by default) and wakes in about a minute.`,
   `- The live view streams Chrome over WebRTC to any desktop, tablet or phone browser, with ordered keyboard, mouse, touch, input-method and clipboard input.`,
-  `- Coding agents (Claude Code, Cursor, Codex, VS Code, Windsurf, Gemini CLI or any MCP client) connect to a browser's own hosted MCP server over HTTPS with an access key from the browser's settings; nothing is installed. The user watches and takes control back with any click or key.`,
+  `- Coding agents (Claude Code, Codex, Cursor, VS Code, Windsurf, Gemini CLI, OpenCode or any MCP client) connect to a browser's own hosted MCP server over HTTPS with an access key the user keeps in an environment variable; nothing is installed, and the agent adds the server to its own configuration (${mdUrl('/docs/agent-setup.md')}). The user watches and takes control back with any click or key.`,
   `- Two machine tiers: ${tiers()}`,
   `- Prepaid, no subscription: running time per minute while awake; the dedicated IP per hour and storage per GB-month while the browser exists; data sent per GB. Prices are public AWS list prices for the region times a published multiplier.`,
   `- Sign-in with one-time email codes (no password), optional passkeys and two-step verification; payments through Creem, the merchant of record.`,

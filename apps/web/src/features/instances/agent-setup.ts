@@ -1,13 +1,16 @@
 /**
- * Copy-paste setup for connecting a coding agent to a browser's hosted MCP endpoint
- * (docs/agent-access.md). Nothing is installed: every client below adds a remote MCP server by
- * URL and sends the access key as a bearer header. A key is known only right after it is created;
- * otherwise the snippets carry a placeholder the user replaces.
+ * Connecting a coding agent to a browser's hosted MCP endpoint (docs/agent-access.md). Nothing is
+ * installed, and the agent configures itself: the user saves the access key in an environment
+ * variable and hands the agent a short setup (agentHandoff) with a standard MCP configuration and
+ * the per-client steps (/docs/agent-setup), which the agent follows for whichever client it is.
+ * Every client below refers to the variable, so the key never passes through the agent's chat or
+ * lands in its configuration.
  */
 
-export const KEY_PLACEHOLDER = 'YOUR_ACCESS_KEY';
+/** The steps for each client, as markdown an agent can read (the docs article "agent-setup"). */
+export const SETUP_GUIDE_URL = 'https://nevazu.com/docs/agent-setup.md';
 
-export type AgentClient = 'claude-code' | 'cursor' | 'codex' | 'vscode' | 'windsurf' | 'gemini' | 'other';
+export type AgentClient = 'claude-code' | 'codex' | 'cursor' | 'vscode' | 'windsurf' | 'gemini' | 'opencode' | 'other';
 
 export interface AgentSetup {
   client: AgentClient;
@@ -17,68 +20,115 @@ export interface AgentSetup {
   code: string;
 }
 
+/** What a browser's setup is made of: the server's name, its URL and the variable holding the key. */
+export interface AgentServer {
+  name: string;
+  url: string;
+  env: string;
+}
+
+const slug = (browserName: string) =>
+  browserName.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
+
 /** The server's name in the agent's configuration: one per browser, so several can coexist. */
 export function serverName(browserName: string): string {
-  const slug = browserName.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
-  return `nevazu-${slug || 'browser'}`;
+  return `nevazu-${slug(browserName) || 'browser'}`;
+}
+
+/** The environment variable holding the browser's key: one per browser, like the server name. */
+export function keyEnvName(browserName: string): string {
+  return `${serverName(browserName).toUpperCase().replace(/-/g, '_')}_KEY`;
+}
+
+export function agentServer({ url, browserName }: { url: string; browserName: string }): AgentServer {
+  return { name: serverName(browserName), url, env: keyEnvName(browserName) };
 }
 
 const json = (value: unknown) => JSON.stringify(value, null, 2);
 
-export function agentSetups({ url, key, browserName }: { url: string; key?: string | null; browserName: string }): AgentSetup[] {
-  const name = serverName(browserName);
-  const secret = key || KEY_PLACEHOLDER;
-  const bearer = `Bearer ${secret}`;
+/** The configuration most agents read or can translate: `mcpServers`, with the key as `${VAR}`. */
+export function mcpConfig({ name, url, env }: AgentServer): string {
+  return json({ mcpServers: { [name]: { type: 'http', url, headers: { Authorization: `Bearer \${${env}}` } } } });
+}
+
+/** What the user pastes into their agent: everything it needs to configure itself, but the key. */
+export function agentHandoff(server: AgentServer, browserName: string): string {
+  const label = browserName.replace(/\s+/g, ' ').trim();
+  return [
+    `Add my Nevazu cloud browser "${label}" to your own MCP configuration as a remote server (Streamable HTTP), so you can use it from now on. The configuration, in the standard mcpServers format:`,
+    '',
+    mcpConfig(server),
+    '',
+    `Follow the steps for your client (Claude Code, Codex, Cursor, VS Code, Windsurf, Gemini CLI, OpenCode or any other MCP client): ${SETUP_GUIDE_URL}`,
+    '',
+    `The access key is in the environment variable ${server.env}, which I set myself. Refer to the variable as those steps show; never ask me for the key, print it, or write its value into a file. When you are done, tell me if you must be restarted to load the server, and once it is loaded, check the connection with its get_status tool.`,
+  ].join('\n');
+}
+
+/** Saving a just-created key where agents read it: the user's own step, for the shell they use. */
+export function keyEnvCommands(env: string, key: string): { unix: string; windows: string } {
+  return {
+    unix: [
+      '# zsh (macOS). With bash, use ~/.bashrc instead of ~/.zshrc.',
+      `echo 'export ${env}="${key}"' >> ~/.zshrc`,
+    ].join('\n'),
+    windows: [
+      '# PowerShell or Command Prompt',
+      `setx ${env} "${key}"`,
+    ].join('\n'),
+  };
+}
+
+/** The per-client steps, each reading the key from the server's variable. */
+export function agentSetups(server: AgentServer): AgentSetup[] {
+  const { name, url, env } = server;
   return [
     {
       client: 'claude-code',
       label: 'Claude Code',
       where: 'Terminal',
-      code: `claude mcp add --transport http --scope user ${name} ${url} --header "Authorization: ${bearer}"`,
+      // Single quotes keep ${VAR} as written: Claude Code expands it each time it starts.
+      code: `claude mcp add-json --scope user ${name} '${JSON.stringify({ type: 'http', url, headers: { Authorization: `Bearer \${${env}}` } })}'`,
+    },
+    {
+      client: 'codex',
+      label: 'Codex',
+      where: '~/.codex/config.toml',
+      code: [`[mcp_servers.${name}]`, `url = "${url}"`, `bearer_token_env_var = "${env}"`, 'tool_timeout_sec = 90'].join('\n'),
     },
     {
       client: 'cursor',
       label: 'Cursor',
       where: '~/.cursor/mcp.json',
-      code: json({ mcpServers: { [name]: { url, headers: { Authorization: bearer } } } }),
-    },
-    {
-      client: 'codex',
-      label: 'Codex CLI',
-      where: '~/.codex/config.toml',
-      // Codex reads a bearer token from an environment variable, so the key stays out of the file.
-      code: [
-        '# In your shell profile (~/.zshrc, ~/.bashrc):',
-        `export NEVAZU_KEY="${secret}"`,
-        '',
-        '# In ~/.codex/config.toml:',
-        `[mcp_servers.${name}]`,
-        `url = "${url}"`,
-        'bearer_token_env_var = "NEVAZU_KEY"',
-        'tool_timeout_sec = 90',
-      ].join('\n'),
+      code: json({ mcpServers: { [name]: { url, headers: { Authorization: `Bearer \${env:${env}}` } } } }),
     },
     {
       client: 'vscode',
       label: 'VS Code',
-      where: '.vscode/mcp.json',
+      where: 'MCP: Open User Configuration',
       // VS Code asks for the key once and keeps it in its secret storage, never in the file.
       code: json({
-        inputs: [{ type: 'promptString', id: 'nevazu-key', description: 'Nevazu access key', password: true }],
-        servers: { [name]: { type: 'http', url, headers: { Authorization: 'Bearer ${input:nevazu-key}' } } },
+        inputs: [{ type: 'promptString', id: `${name}-key`, description: `Nevazu access key (${env})`, password: true }],
+        servers: { [name]: { type: 'http', url, headers: { Authorization: `Bearer \${input:${name}-key}` } } },
       }),
     },
     {
       client: 'windsurf',
       label: 'Windsurf',
       where: '~/.codeium/windsurf/mcp_config.json',
-      code: json({ mcpServers: { [name]: { serverUrl: url, headers: { Authorization: bearer } } } }),
+      code: json({ mcpServers: { [name]: { serverUrl: url, headers: { Authorization: `Bearer \${env:${env}}` } } } }),
     },
     {
       client: 'gemini',
       label: 'Gemini CLI',
       where: '~/.gemini/settings.json',
-      code: json({ mcpServers: { [name]: { httpUrl: url, headers: { Authorization: bearer } } } }),
+      code: json({ mcpServers: { [name]: { httpUrl: url, headers: { Authorization: `Bearer \${${env}}` } } } }),
+    },
+    {
+      client: 'opencode',
+      label: 'OpenCode',
+      where: '~/.config/opencode/opencode.json',
+      code: json({ $schema: 'https://opencode.ai/config.json', mcp: { [name]: { type: 'remote', url, enabled: true, oauth: false, headers: { Authorization: `Bearer {env:${env}}` } } } }),
     },
     {
       client: 'other',
@@ -86,10 +136,10 @@ export function agentSetups({ url, key, browserName }: { url: string; key?: stri
       where: 'Any MCP client (Streamable HTTP)',
       code: [
         `URL: ${url}`,
-        `Header: Authorization: ${bearer}`,
+        `Header: Authorization: Bearer <the value of ${env}>`,
         '',
-        '# Check the connection (lists the tools):',
-        `curl -s ${url} -H "Authorization: ${bearer}" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`,
+        '# Check the key (lists the tools):',
+        `curl -s ${url} -H "Authorization: Bearer $${env}" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`,
       ].join('\n'),
     },
   ];

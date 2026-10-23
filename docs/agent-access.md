@@ -239,23 +239,41 @@ so a reconnect or restart never silently returns control to the agent; only an e
 
 ## Client setup
 
-The Settings page shows these snippets with the browser's URL and, right after creating a key, the
-key itself (`apps/web/src/features/instances/agent-setup.ts`). `<name>` is `nevazu-<browser name>`,
-so several browsers can coexist.
+The agent sets itself up; the user handles only the secret
+(`apps/web/src/features/instances/agent-setup.ts`, shown in the Connect a coding agent dialog):
 
-- **Claude Code**: `claude mcp add --transport http --scope user <name> <url> --header "Authorization: Bearer <key>"`
-- **Cursor** (`~/.cursor/mcp.json`): `{"mcpServers": {"<name>": {"url": "<url>", "headers": {"Authorization": "Bearer <key>"}}}}`
-- **Codex CLI** (`~/.codex/config.toml`): `[mcp_servers.<name>]` with `url = "<url>"`,
-  `bearer_token_env_var = "NEVAZU_KEY"` and `tool_timeout_sec = 90`, and `export NEVAZU_KEY="<key>"`
-  in the shell profile.
-- **VS Code** (`.vscode/mcp.json`): a `promptString` input `nevazu-key` (password), and
-  `"servers": {"<name>": {"type": "http", "url": "<url>", "headers": {"Authorization": "Bearer ${input:nevazu-key}"}}}`.
-- **Windsurf** (`~/.codeium/windsurf/mcp_config.json`): `{"mcpServers": {"<name>": {"serverUrl": "<url>", "headers": {"Authorization": "Bearer <key>"}}}}`
-- **Gemini CLI** (`~/.gemini/settings.json`): `{"mcpServers": {"<name>": {"httpUrl": "<url>", "headers": {"Authorization": "Bearer <key>"}}}}`
+1. The user creates a key and saves it in an environment variable named after the browser,
+   `NEVAZU_<BROWSER>_KEY` (`echo 'export …' >> ~/.zshrc`, or `setx` on Windows).
+2. The user pastes the **handoff** into their agent: a standard `mcpServers` entry
+   (`"type": "http"`, the URL, `"Authorization": "Bearer ${NEVAZU_<BROWSER>_KEY}"`) and a link to
+   `https://nevazu.com/docs/agent-setup.md`, the per-client steps as markdown (the docs article
+   `agent-setup`, generated from the same snippets). The agent picks the section for the client it
+   is, merges the server into its user-level configuration, and checks with `get_status`.
+
+`<name>` is `nevazu-<browser name>`, so several browsers coexist; every client below reads the key
+from the variable (VS Code instead prompts once and keeps it in its secret storage), so the key is
+never written to a configuration file or seen by the model. The same snippets sit in the dialog's
+folded **Set it up by hand** section, filled in for the browser.
+
+<details>
+<summary>Per-client configuration</summary>
+
+- **Claude Code**: `claude mcp add-json --scope user <name> '{"type":"http","url":"<url>","headers":{"Authorization":"Bearer ${<ENV>}"}}'`
+  (single quotes: Claude Code expands `${VAR}` in `url` and `headers` at startup).
+- **Codex** (`~/.codex/config.toml`): `[mcp_servers.<name>]` with `url = "<url>"`,
+  `bearer_token_env_var = "<ENV>"` and `tool_timeout_sec = 90`.
+- **Cursor** (`~/.cursor/mcp.json`): `{"mcpServers": {"<name>": {"url": "<url>", "headers": {"Authorization": "Bearer ${env:<ENV>}"}}}}`
+- **VS Code** (user MCP configuration): a `promptString` input `<name>-key` (password), and
+  `"servers": {"<name>": {"type": "http", "url": "<url>", "headers": {"Authorization": "Bearer ${input:<name>-key}"}}}`.
+- **Windsurf** (`~/.codeium/windsurf/mcp_config.json`): `{"mcpServers": {"<name>": {"serverUrl": "<url>", "headers": {"Authorization": "Bearer ${env:<ENV>}"}}}}`
+- **Gemini CLI** (`~/.gemini/settings.json`): `{"mcpServers": {"<name>": {"httpUrl": "<url>", "headers": {"Authorization": "Bearer ${<ENV>}"}}}}`
+- **OpenCode** (`~/.config/opencode/opencode.json`): `{"mcp": {"<name>": {"type": "remote", "url": "<url>", "enabled": true, "oauth": false, "headers": {"Authorization": "Bearer {env:<ENV>}"}}}}`
 - **Claude Desktop**: until OAuth, `claude_desktop_config.json` with
   `{"mcpServers": {"<name>": {"command": "npx", "args": ["-y", "mcp-remote", "<url>", "--header", "Authorization:Bearer <key>"]}}}`.
 - **Any other client** (Streamable HTTP): the URL and the header. A quick check that lists the tools:
-  `curl -s <url> -H "Authorization: Bearer <key>" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
+  `curl -s <url> -H "Authorization: Bearer $<ENV>" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
+
+</details>
 
 ## Next: OAuth 2.1
 

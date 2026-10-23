@@ -129,18 +129,37 @@ WebRTC video plays.
 
 ### Coding agents
 
-Nothing is installed: a coding agent adds the browser's remote MCP server and an access key. Create
-a key in the browser's Settings → Coding agent access; the page shows the URL and a ready-made setup
-for Claude Code, Cursor, Codex CLI, VS Code, Windsurf and Gemini CLI. Locally the gateway listens on
-port 8790:
+Nothing is installed, and the agent configures itself. In a browser's **Connect a coding agent**
+dialog (the robot button, or Settings → Coding agent access) the user creates an access key, saves
+it in an environment variable such as `NEVAZU_WORK_KEY`, and pastes a short setup into their agent:
+a standard `mcpServers` entry that refers to the variable, plus a pointer to
+[`/docs/agent-setup`](https://nevazu.com/docs/agent-setup.md), where the agent finds the steps for
+its own client. The key never passes through the agent's chat or configuration.
+
+```json
+{
+  "mcpServers": {
+    "nevazu-work": {
+      "type": "http",
+      "url": "https://connect.nevazu.com/mcp/<instance id>",
+      "headers": { "Authorization": "Bearer ${NEVAZU_WORK_KEY}" }
+    }
+  }
+}
+```
+
+<details>
+<summary>Local development (gateway on port 8790)</summary>
 
 ```bash
-claude mcp add --transport http nevazu-local http://localhost:8790/mcp/<instance id> \
-  --header "Authorization: Bearer nvzk_..."
+export NEVAZU_LOCAL_KEY=nvzk_...
+claude mcp add-json nevazu-local '{"type":"http","url":"http://localhost:8790/mcp/<instance id>","headers":{"Authorization":"Bearer ${NEVAZU_LOCAL_KEY}"}}'
 # or check it by hand:
-curl -s http://localhost:8790/mcp/<instance id> -H "Authorization: Bearer nvzk_..." \
+curl -s http://localhost:8790/mcp/<instance id> -H "Authorization: Bearer $NEVAZU_LOCAL_KEY" \
   -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
+
+</details>
 
 The tools are `screenshot`, `act`, `upload_file`, `attach_files`, `get_status` and `end_session`;
 the browser's Durable Object holds the agent's session (docs/agent-access.md).

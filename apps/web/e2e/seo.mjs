@@ -40,6 +40,7 @@ const KEY_TEXT = {
   '/docs': ['Documentation', 'Getting started', 'Frequently asked questions'],
   '/docs/faq': ['What is Nevazu?', 'Model Context Protocol (MCP)', 'How do I start?'],
   '/docs/coding-agents': ['Coding agents', 'Connecting an agent'],
+  '/docs/agent-setup': ['Coding agent setup', 'Steps for each client', 'claude mcp add-json', 'NEVAZU_WORK_KEY'],
   '/terms': ['Terms of Service'],
   '/privacy': ['Privacy Policy', 'What we collect'],
   '/refunds': ['Refund Policy'],
@@ -129,6 +130,15 @@ check('every page but status has a markdown twin', () => {
     assert.match(read(file), /^# .+\n\n> .+/, file);
     assert.match(read(fileFor(route)), new RegExp(`<link rel="alternate" type="text/markdown" href="/${file.replace('.', '\\.')}"`), `${route} links its markdown`);
   }
+});
+
+check('the agent setup reads unfolded as markdown, with each client’s configuration', () => {
+  const md = read('docs/agent-setup.md');
+  for (const client of ['Claude Code', 'Codex', 'Cursor', 'VS Code', 'Windsurf', 'Gemini CLI', 'OpenCode']) assert.ok(md.includes(`\n### ${client}\n`), client);
+  assert.ok(md.includes('"Authorization": "Bearer ${NEVAZU_WORK_KEY}"'), 'the mcpServers example');
+  assert.ok(!/<details|nvzk_/.test(md), 'no folded HTML and no key');
+  assert.match(read('docs/agent-setup.html'), /<details[^>]*>\s*<summary[^>]*>[\s\S]*?Claude Code/, 'folded sections in the HTML');
+  assert.ok(read('llms.txt').includes('https://nevazu.com/docs/agent-setup.md'), 'llms.txt links the setup');
 });
 
 check('files with live slots run the api Worker first', () => {
