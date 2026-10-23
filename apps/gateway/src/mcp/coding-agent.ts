@@ -417,8 +417,10 @@ export class CodingAgentSession {
   async agentOnline() {
     const rec = await this.load();
     if (!rec) return;
-    // A protocol 2 VM resumes the session and keeps its files; a protocol 1 VM starts it afresh.
+    // A protocol 2 VM resumes the session and keeps its files; a protocol 1 VM (or one not known
+    // to be newer) starts it afresh, so its handles would only lead to not_found.
     rec.openedAt = Date.now();
+    if ((rec.vmProtocol ?? 1) < 2) rec.handles = {};
     this.host.sendToAgent({ t: 'automation_open', sessionId: rec.sessionId, clientId: rec.clientId });
     await this.save(rec);
   }
