@@ -594,12 +594,31 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       aria-label="Remote browser"
       className={className}
       style={{ overflow: 'hidden', overscrollBehavior: 'none', touchAction: 'none', userSelect: 'none', cursor, ...style }}
-      onKeyDown={(e) => { if (textInputRef.current?.keyDown(e.nativeEvent)) e.preventDefault(); }}
+      onKeyDown={(e) => {
+        // Ctrl/Cmd+V is left to the browser, which reads the local clipboard into a paste event.
+        // Safari fires it only at an editable element, and the box itself has focus on a touch
+        // screen with the keyboard closed (an iPad with a hardware keyboard): focus the textarea
+        // first, which receives the paste that this keydown goes on to perform.
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && document.activeElement !== keysRef.current) keysRef.current?.focus({ preventScroll: true });
+        if (textInputRef.current?.keyDown(e.nativeEvent)) e.preventDefault();
+      }}
       onKeyUp={(e) => { if (textInputRef.current?.keyUp(e.nativeEvent)) e.preventDefault(); }}
       onBlur={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
           textInputRef.current?.reset();
           updateKeyboard(false);
+        }
+      }}
+      // On the box rather than the textarea: a paste reaches whichever of the two has focus.
+      onPaste={(e) => {
+        const text = e.clipboardData.getData('text/plain');
+        const files = pastedFiles([...e.clipboardData.files], text);
+        e.preventDefault();
+        if (files.length > 0) void pasteFiles(files);
+        else {
+          // Without new local text the remote page pastes its own clipboard (pasteClipboard).
+          browserRef.current?.pasteClipboard(text);
+          callbacks.current.onInput?.();
         }
       }}
     >
@@ -635,16 +654,6 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         inputMode={keyboardOpen ? 'text' : 'none'}
         readOnly={touchDevice && !keyboardOpen}
         style={{ position: 'absolute', left: 0, top: 0, width: 1, height: 1, fontSize: 16, opacity: 0, border: 0, padding: 0, resize: 'none' }}
-        onPaste={(e) => {
-          const text = e.clipboardData.getData('text/plain');
-          const files = pastedFiles([...e.clipboardData.files], text);
-          e.preventDefault();
-          if (files.length > 0) void pasteFiles(files);
-          else if (text) {
-            browserRef.current?.paste(text);
-            callbacks.current.onInput?.();
-          }
-        }}
       />
     </div>
   );

@@ -443,12 +443,79 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
+  it('sends long or multi-line soft-keyboard text as one paste, within the size limit', async () => {
+    const transfers: unknown[] = [];
+    const { b } = setup([], { onTransfer: (update) => transfers.push(update) });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    await readyInput(ws);
+    b.typeSoftwareText('first line\r\nsecond line');
+    b.typeSoftwareText('x'.repeat(101));
+    expect(ws.neko('control/paste')).toEqual([{ text: 'first line\nsecond line' }, { text: 'x'.repeat(101) }]);
+    expect(ws.neko('control/keydown')).toEqual([]);
+    ws.sent.length = 0;
+    b.typeSoftwareText('é'.repeat(70_000)); // 140,000 bytes of UTF-8
+    b.paste('y'.repeat(128 * 1024 + 1));
+    expect(ws.sent).toEqual([]);
+    expect(transfers).toMatchObject([{ files: 0, state: 'error', reason: 'too_large' }, { files: 0, state: 'error', reason: 'too_large' }]);
+    b.disconnect();
+  });
+
+  it('pastes the remote clipboard on Ctrl+V unless the local text is new', async () => {
+    const { b } = setup();
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    await readyInput(ws);
+    const strokes = () => ws.sent.map((frame: any) => frame.data.event === 'control/paste' ? `paste:${frame.data.payload.text}` : `${frame.data.event}:${frame.data.payload.keysym}`);
+    // Nothing local (an image copied remotely, or an empty clipboard): the remote page pastes its own.
+    b.pasteClipboard('');
+    expect(strokes()).toEqual(['control/keydown:65507', 'control/keydown:118', 'control/keyup:118', 'control/keyup:65507']);
+    ws.sent.length = 0;
+    b.pasteClipboard('local text');
+    expect(strokes()).toEqual(['paste:local text']);
+    ws.sent.length = 0;
+    // Copied remotely but never written locally: the local text is older.
+    ws.push({ t: 'neko', data: { event: 'clipboard/updated', payload: { text: 'remote text' } } });
+    b.pasteClipboard('local text');
+    expect(ws.neko('control/paste')).toEqual([]);
+    ws.sent.length = 0;
+    // Written locally, or copied elsewhere while the page was in the background: the local text counts.
+    b.clipboardCopied('remote text');
+    b.pasteClipboard('remote text');
+    expect(ws.neko('control/paste')).toEqual([]);
+    b.pasteClipboard('copied since');
+    expect(ws.neko('control/paste')).toEqual([{ text: 'copied since' }]);
+    ws.push({ t: 'neko', data: { event: 'clipboard/updated', payload: { text: 'remote again' } } });
+    b.pageBlurred();
+    ws.sent.length = 0;
+    b.pasteClipboard('copied elsewhere');
+    expect(ws.neko('control/paste')).toEqual([{ text: 'copied elsewhere' }]);
+    b.disconnect();
+  });
+
+  it('does not report text typed through the remote clipboard as copied', async () => {
+    const clipboard: string[] = [];
+    const { b } = setup([], { onClipboard: (text) => clipboard.push(text) });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    await readyInput(ws);
+    b.typeSoftwareText('你好');
+    ws.push({ t: 'neko', data: { event: 'clipboard/updated', payload: { text: '你好' } } });
+    expect(clipboard).toEqual([]);
+    // A real copy of the same text later is reported.
+    ws.push({ t: 'neko', data: { event: 'clipboard/updated', payload: { text: '你好' } } });
+    expect(clipboard).toEqual(['你好']);
+    b.disconnect();
+  });
+
   it('maps all US shifted punctuation and newline/tab without using the page-only IME path', async () => {
     const { b } = setup();
     await b.connect();
     const ws = FakeWS.all[0]!;
     await readyInput(ws);
-    b.typeSoftwareText('~!@#$%^&*()_+{}|:"<>?\r\n\t');
+    // Typed apart: a line break among other text goes as one paste (typeSoftwareText).
+    b.typeSoftwareText('~!@#$%^&*()_+{}|:"<>?');
+    b.typeSoftwareText('\r\n\t');
     const keys = ws.sent.map((frame: any) => [frame.data.event, frame.data.payload.keysym]);
     const expected = [...'~!@#$%^&*()_+{}|:"<>?'].flatMap((character) => [
       ['control/keydown', 0xffe1], ['control/keydown', character.charCodeAt(0)],

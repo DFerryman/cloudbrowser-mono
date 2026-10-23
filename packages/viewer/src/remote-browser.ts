@@ -442,8 +442,9 @@ export class RemoteBrowser {
     const normalized = text.replace(/\r\n?/g, '\n');
     // A long or multi-line commit (dictation, a text replacement) goes as one paste. Typed out key
     // by key it overflowed the input queue at about 2,000 characters, and each newline became
-    // Enter, which sends a chat message or submits a form halfway through the text.
-    const whole = [...normalized].length > LONG_TYPED_TEXT || (normalized.includes('\n') && /[^\n]/.test(normalized));
+    // Enter, which sends a chat message or submits a form halfway through the text. A commit of
+    // only line breaks and tabs is still typed: those are the keys themselves.
+    const whole = [...normalized].length > LONG_TYPED_TEXT || (normalized.includes('\n') && /\S/.test(normalized));
     if (whole && !this.fitsPaste(normalized)) return;
     // Native input is a committed text operation, never a continuation of a held key.
     // Missing mobile keyups must not change its casing or keep the last character repeating.
