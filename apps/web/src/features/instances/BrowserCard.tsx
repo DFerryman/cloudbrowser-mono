@@ -1,11 +1,12 @@
 import { useRegionInfo } from './hooks.js';
 import type { Instance } from '@cloudbrowser/contracts';
 import { Button, Card, cn, Menu, MenuItem, MenuSeparator, RegionIpChip, StatusBadge, useToast } from '@cloudbrowser/ui';
-import { BarChart3, Check, Copy, HardDrive, Moon, MoreHorizontal, Pencil, Play, Power, RotateCcw, Settings, Trash2 } from 'lucide-react';
+import { BarChart3, Bot, Check, Copy, HardDrive, Moon, MoreHorizontal, Pencil, Play, Power, RotateCcw, Settings, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useI18n, useRelativeTime } from '../../lib/i18n.js';
 import type { MessageKey } from '../../messages/en.js';
+import { AgentConnectDialog } from './AgentAccess.js';
 import { CreateProgress } from './CreateProgress.js';
 import { DeleteBrowserDialog } from './DeleteBrowser.js';
 import { useLifecycle, useUpdateInstance } from './hooks.js';
@@ -38,6 +39,7 @@ function useBrowserActions(i: Instance) {
   const update = useUpdateInstance();
   const billing = useBilling();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [agentOpen, setAgentOpen] = useState(false);
   const run = (p: Promise<unknown>) => p.catch((e) => toast(errorMessage(e), 'error'));
 
   const deleted = i.status === 'deleting';
@@ -76,6 +78,16 @@ function useBrowserActions(i: Instance) {
     );
   };
 
+  // Coding agents connect from the dashboard itself (docs/agent-access.md): the button opens the
+  // browser's MCP URL, access keys and per-client setup. Settings stays in the browser's menu.
+  const agentLabel = t(i.agentAccess ? 'agents.open' : 'agents.open.off');
+  const agent = !deleted && !failed ? (
+    <Button size="icon" variant="ghost" className={cn(!i.agentAccess && 'text-subtle')} aria-label={agentLabel} title={agentLabel} onClick={() => setAgentOpen(true)}>
+      <Bot />
+    </Button>
+  ) : null;
+  const agentDialog = !deleted && !failed ? <AgentConnectDialog instance={i} open={agentOpen} onClose={() => setAgentOpen(false)} /> : null;
+
   // Fixed slots, so the buttons line up from row to row whichever of them a browser offers.
   const quick = (
     <>
@@ -84,11 +96,7 @@ function useBrowserActions(i: Instance) {
           <Moon />
         </Button>
       ) : <span className="size-8 shrink-0" aria-hidden />}
-      {!deleted && !failed ? (
-        <Button size="icon" variant="ghost" aria-label={t('browsers.settings')} title={t('browsers.settings')} onClick={() => navigate(`/browsers/${i.id}/settings`)}>
-          <Settings />
-        </Button>
-      ) : <span className="size-8 shrink-0" aria-hidden />}
+      {agent ?? <span className="size-8 shrink-0" aria-hidden />}
     </>
   );
 
@@ -128,7 +136,7 @@ function useBrowserActions(i: Instance) {
     </>
   );
 
-  return { status, deleted, recoverable, failed, creating, primary, quick, menu, rename };
+  return { status, deleted, recoverable, failed, creating, primary, quick, agent, agentDialog, menu, rename };
 }
 
 /** The browser's name; double-click (or Rename in its menu) edits it in place. Enter saves, Escape cancels. */
@@ -241,6 +249,7 @@ export function BrowserCard({ instance: i }: { instance: Instance }) {
         {a.quick}
         {a.menu(() => setEditing(true))}
       </div>
+      {a.agentDialog}
     </Card>
   );
 }
@@ -263,6 +272,7 @@ export function BrowserRow({ instance: i }: { instance: Instance }) {
         </div>
         <div className="flex shrink-0 items-center gap-0.5 lg:hidden">
           {a.primary('h-8 px-3 text-[13px]')}
+          {a.agent}
           {a.menu(() => setEditing(true))}
         </div>
       </div>
@@ -280,6 +290,7 @@ export function BrowserRow({ instance: i }: { instance: Instance }) {
         {a.quick}
         {a.menu(() => setEditing(true))}
       </div>
+      {a.agentDialog}
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { REGION_INFO } from '@cloudbrowser/contracts';
-import type { Accepted, AgentControlMode, AutomationStatus, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, NeverSleepQuote, Pairing, Region } from '@cloudbrowser/contracts';
+import type { Accepted, AgentControlMode, AgentKey, AutomationStatus, CreateAgentKeyBody, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, NeverSleepQuote, Region } from '@cloudbrowser/contracts';
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api.js';
 import { keys, queryClient } from '../../lib/query.js';
@@ -112,10 +112,10 @@ export function useResizeStorage() {
 export const useAutomation = (id: string, enabled = true) =>
   useQuery({ queryKey: keys.automation(id), queryFn: () => api<AutomationStatus>('GET', `/instances/${id}/automation`), enabled, refetchInterval: 15_000 });
 
-/** Pairs a new bridge: the code comes back once. */
-export function useCreatePairing() {
+/** Creates an access key for the browser's hosted MCP endpoint: the key comes back once. */
+export function useCreateAgentKey() {
   return useMutation({
-    mutationFn: ({ id, name }: { id: string; name: string }) => api<Pairing>('POST', `/instances/${id}/automation/pairings`, { body: { name } }),
+    mutationFn: ({ id, body }: { id: string; body: CreateAgentKeyBody }) => api<AgentKey>('POST', `/instances/${id}/automation/keys`, { body }),
     onSettled: (_d, _e, v) => void queryClient.invalidateQueries({ queryKey: keys.automation(v.id) }),
   });
 }
