@@ -127,7 +127,8 @@ async function enqueuePriorityOperation(c: Context<AppEnv>, input: EnqueueInput)
     }
     let old = await unfinishedOperation(db, input.instanceId);
     const deletedIntent = owner.desiredState === 'deleted' || ['deleting', 'purged'].includes(owner.status);
-    // A failed create holds nothing to put to sleep; its resources go to the reaper.
+    // A failed create holds nothing to put to sleep: the reaper releases what it allocated, and
+    // asleep it would keep (and be charged for) them. The acceptance below checks it again.
     if (input.priority === 'stop' && !deletedIntent && owner.status === 'failed') throw problem(409, 'invalid_state', 'Cannot stop a browser that is failed.');
     // The worker's delete may already be finished while the reaper has yet to release resources.
     // Such a browser remains deleted; a late stop is only an acknowledgment of that stronger intent.
@@ -182,7 +183,7 @@ async function enqueuePriorityOperation(c: Context<AppEnv>, input: EnqueueInput)
     if (input.priority === 'stop') stmts.push(db.insert(auditLog).values({
       // Stop's earlier read may race all the way through a complete delete. Fence the acceptance
       // transaction itself, not just the uniqueness of unfinished operation rows.
-      actor: sql`CASE WHEN EXISTS (SELECT 1 FROM browser_instances WHERE id = ${input.instanceId} AND user_id = ${user.id} AND desired_state != 'deleted' AND status NOT IN ('deleting', 'purged')) THEN ${`user:${user.id}`} ELSE NULL END`,
+      actor: sql`CASE WHEN EXISTS (SELECT 1 FROM browser_instances WHERE id = ${input.instanceId} AND user_id = ${user.id} AND desired_state != 'deleted' AND status NOT IN ('deleting', 'purged', 'failed')) THEN ${`user:${user.id}`} ELSE NULL END`,
       action: 'operation.priority_requested', target: `instance:${input.instanceId}`, detail: { operationId: op.id, kind: input.kind }, createdAt: now,
     }));
     if (old) stmts.push(

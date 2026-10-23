@@ -375,7 +375,7 @@ const lifecycle = [
   {
     action: 'stop',
     kind: 'stop',
-    // Not a failed create: its resources go to the reaper, and asleep it would hold (and be charged for) them.
+    // Not a failed create: the reaper releases its resources, and asleep it would keep (and be charged for) them.
     allowed: ['creating', 'starting', 'stopping', 'running', 'sleeping', 'needs_attention', 'waiting_capacity', 'provider_issue', 'deleting'],
     desired: 'stopped',
     description: 'Put a browser to sleep now. Data and IP are kept.',

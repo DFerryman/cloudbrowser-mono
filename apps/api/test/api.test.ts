@@ -327,6 +327,27 @@ describe('browsers', () => {
     expect((await t.call('GET', `/api/v1/instances/${id}`)).body.status).toBe('deleting');
   });
 
+  it('restarts a browser that needs attention, and never puts a failed one to sleep', async () => {
+    const created = await t.call('POST', '/api/v1/instances', { name: 'Work', regionId: 'tyo1', storageGb: 10, priceVersion: await quote('tyo1') }, { 'idempotency-key': 'c1' });
+    await t.settle();
+    const id = created.body.instanceId;
+    const status = (s: string) => t.d1.sqlite.prepare('UPDATE browser_instances SET status = ? WHERE id = ?').run(s, id);
+    const stops = () => t.d1.sqlite.prepare("SELECT count(*) AS n FROM operations WHERE kind = 'stop'").get();
+
+    status('needs_attention');
+    expect((await t.call('POST', `/api/v1/instances/${id}/start`, undefined, { 'idempotency-key': 'restart' })).status).toBe(202);
+    await t.settle();
+    const start = t.d1.sqlite.prepare("SELECT params FROM operations WHERE kind = 'start'").get() as { params: string };
+    expect(JSON.parse(start.params)).toMatchObject({ restart: true });
+    expect((await t.call('GET', `/api/v1/instances/${id}`)).body.status).toBe('running');
+
+    // A failed create: what it allocated goes to the reaper, never to a sleeping browser.
+    status('failed');
+    expect(await t.call('POST', `/api/v1/instances/${id}/stop`, undefined, { 'idempotency-key': 'stop-failed' })).toMatchObject({ status: 409, body: { type: 'invalid_state' } });
+    expect(stops()).toEqual({ n: 0 });
+    expect((await t.call('GET', `/api/v1/instances/${id}`)).body).toMatchObject({ status: 'failed', desiredState: 'running' });
+  });
+
   it('removes public snapshots, rejects old clients and never runs legacy daily snapshots', async () => {
     const created = await t.call('POST', '/api/v1/instances', { name: 'Work', regionId: 'tyo1', storageGb: 10, priceVersion: await quote('tyo1'), backupsEnabled: true }, { 'idempotency-key': 'b1' });
     expect(created.status).toBe(202);
