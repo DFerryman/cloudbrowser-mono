@@ -127,6 +127,8 @@ async function enqueuePriorityOperation(c: Context<AppEnv>, input: EnqueueInput)
     }
     let old = await unfinishedOperation(db, input.instanceId);
     const deletedIntent = owner.desiredState === 'deleted' || ['deleting', 'purged'].includes(owner.status);
+    // A failed create holds nothing to put to sleep; its resources go to the reaper.
+    if (input.priority === 'stop' && !deletedIntent && owner.status === 'failed') throw problem(409, 'invalid_state', 'Cannot stop a browser that is failed.');
     // The worker's delete may already be finished while the reaper has yet to release resources.
     // Such a browser remains deleted; a late stop is only an acknowledgment of that stronger intent.
     if (input.priority === 'stop' && deletedIntent && !['delete', 'purge'].includes(old?.kind ?? '')) {

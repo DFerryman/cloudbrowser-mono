@@ -375,7 +375,8 @@ const lifecycle = [
   {
     action: 'stop',
     kind: 'stop',
-    allowed: ['creating', 'starting', 'stopping', 'running', 'sleeping', 'failed', 'needs_attention', 'waiting_capacity', 'provider_issue', 'deleting'],
+    // Not a failed create: its resources go to the reaper, and asleep it would hold (and be charged for) them.
+    allowed: ['creating', 'starting', 'stopping', 'running', 'sleeping', 'needs_attention', 'waiting_capacity', 'provider_issue', 'deleting'],
     desired: 'stopped',
     description: 'Put a browser to sleep now. Data and IP are kept.',
   },
@@ -422,6 +423,8 @@ for (const l of lifecycle) {
       const params: Record<string, unknown> = { reason: 'user' };
       if (l.action === 'start') {
         const wake = await wakeOperation(db, row); kind = wake.kind; Object.assign(params, wake.params);
+        // Restart browser: its VM may still be running, so the engine reboots it (ensure_running).
+        if (kind === 'start' && row.status === 'needs_attention') params.restart = true;
       }
       const now = new Date();
       const result = await enqueueOperation(c, {

@@ -1,11 +1,11 @@
 import { operationRow, schema, userCaps } from '@cloudbrowser/db';
 import type { ExecutorKind } from '@cloudbrowser/executors';
-import { and, eq, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
 import { readContext, type EngineDeps } from './context.js';
 import { runPending } from './scheduler.js';
 import { deleteLedgerResources, discoverInstanceResources } from './steps.js';
 
-const { browserInstances, operations, resources, driftFindings, events, idempotencyKeys, auditLog, viewerTokens, backups } = schema;
+const { browserInstances, operations, placements, resources, driftFindings, events, idempotencyKeys, auditLog, viewerTokens, backups } = schema;
 
 const ORPHAN_GRACE_MS = 24 * 3_600_000;
 
@@ -130,8 +130,9 @@ export async function reaperTick(deps: EngineDeps) {
     summary.orphans++;
   }
 
-  // 5. Backups past their retention (page 4): snapshots after 7 days (the newest is always kept),
-  //    archives beyond the last 10 unless they are the newest of a day in the last 14 days.
+  // 5. Backups past their retention (page 4): snapshots after 7 days (the newest is always kept;
+  //    a recover's own snapshot goes once the recover ended), archives beyond the last 10 unless
+  //    they are the newest of a day in the last 14 days.
   summary.backupsExpired = await expireBackups(deps, env);
 
   // 6. Housekeeping: the SSE change feed, idempotency keys and viewer tokens live for 24 h.
@@ -149,18 +150,26 @@ const SNAPSHOT_KEEP_DAYS = 7;
 const ARCHIVE_KEEP_LAST = 10;
 const ARCHIVE_DAILY_DAYS = 14;
 
-/** Which of one instance's complete backups are past retention. Pure, so it is unit-tested. */
+/**
+ * Which of one instance's complete backups are past retention. Pure, so it is unit-tested.
+ * `recoverEnded` marks a recover's snapshot whose operation has finished.
+ */
 export function expiredBackups(
-  list: { id: string; kind: string; reason?: string; createdAt: Date }[],
+  list: { id: string; kind: string; reason?: string; createdAt: Date; recoverEnded?: boolean }[],
   now: Date,
   snapshotDays = SNAPSHOT_KEEP_DAYS,
   snapshotsEnabled = true,
 ): string[] {
   const out: string[] = [];
+  // A recover's snapshot only carries the data to the new zone. Once the recover ended, the data
+  // is on the browser's current volume (the new one, or the old one after a failure), so the
+  // snapshot goes; after the retention period at the latest. It is never the newest kept below.
+  const recovery = list.filter((b) => b.kind === 'snapshot' && b.reason === 'recover');
+  out.push(...recovery.filter((b) => b.recoverEnded || now.getTime() - b.createdAt.getTime() > snapshotDays * 86_400_000).map((b) => b.id));
+  list = list.filter((b) => !recovery.includes(b));
   if (!snapshotsEnabled) {
     // Snapshots were turned off: every daily or manual one goes, so they stop being billed.
-    // Snapshots taken by `recover` are ours and follow the normal rule.
-    out.push(...list.filter((b) => b.kind === 'snapshot' && b.reason !== 'recover').map((b) => b.id));
+    out.push(...list.filter((b) => b.kind === 'snapshot').map((b) => b.id));
     list = list.filter((b) => !out.includes(b.id));
   }
   const byNewest = [...list].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
@@ -198,7 +207,20 @@ async function expireBackups(deps: EngineDeps, env: (kind: ExecutorKind) => Para
       .from(browserInstances)
       .where(eq(browserInstances.id, instanceId));
     const days = owner ? ((await userCaps(db, owner.userId)).get('snapshot_retention_days') ?? SNAPSHOT_KEEP_DAYS) : SNAPSHOT_KEEP_DAYS;
-    for (const id of expiredBackups(list, now, days, owner?.backupsEnabled ?? true)) {
+    const recovery = list.filter((b) => b.kind === 'snapshot' && b.reason === 'recover');
+    let entries: (typeof list[number] & { recoverEnded?: boolean })[] = list;
+    if (recovery.length) {
+      // Without a current volume, a recover's snapshot may hold the only copy of the data: it
+      // stays (a purge removes it with the rest).
+      const [current] = await db.select({ volumeId: placements.volumeId }).from(placements)
+        .where(and(eq(placements.instanceId, instanceId), eq(placements.status, 'current')));
+      const ended = new Set((await db.select({ snapshotId: resources.providerId }).from(resources)
+        .innerJoin(operations, eq(operations.id, resources.createdByOp))
+        .where(and(eq(resources.instanceId, instanceId), eq(resources.kind, 'snapshot'), isNotNull(operations.finishedAt))))
+        .flatMap((r) => (r.snapshotId ? [r.snapshotId] : [])));
+      entries = list.filter((b) => !recovery.includes(b) || current?.volumeId).map((b) => ({ ...b, recoverEnded: ended.has(b.location ?? '') }));
+    }
+    for (const id of expiredBackups(entries, now, days, owner?.backupsEnabled ?? true)) {
       const b = list.find((x) => x.id === id)!;
       if (b.kind === 'snapshot') {
         const [r] = await db.select().from(resources).where(and(eq(resources.instanceId, instanceId), eq(resources.providerId, b.location ?? '')));

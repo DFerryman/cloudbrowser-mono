@@ -148,7 +148,7 @@ function attemptSuffix(env: StepEnv, step: 'create_nic' | 'create_volume' | 'cre
   return `${zone ? `z${zone}` : ''}${launch ? `l${launch}` : ''}` || undefined;
 }
 
-async function saveParams(env: StepEnv, patch: Record<string, unknown>) {
+export async function saveParams(env: Pick<StepEnv, 'deps' | 'op'>, patch: Record<string, unknown>) {
   env.op.params = { ...(env.op.params ?? {}), ...patch };
   await env.deps.db.update(operations).set({ params: env.op.params }).where(and(eq(operations.id, env.op.id), operationFence(env)));
 }
@@ -276,35 +276,73 @@ const AGENT_FIRST_BOOT_TIMEOUT_MS = 16 * 60_000;
 /** How long the engine waits for a command reply before giving up on it. */
 const COMMAND_TIMEOUT_MS = 60_000;
 const COMMAND_POLL_MS = 2_000;
+/** After the agent is ready, the binding check and up to three in-Chrome IP checks need this long. */
+const VERIFY_AFTER_BOOT_MS = 4 * 60_000;
+
+const bootBudgetMs = (env: StepEnv) => (env.op.kind === 'create' || env.op.kind === 'recover' ? AGENT_FIRST_BOOT_TIMEOUT_MS : AGENT_START_TIMEOUT_MS);
+
+/**
+ * The boot budget counts from when this operation launched or started the VM, never from when it
+ * was queued: minutes spent waiting for capacity must not be taken from a first boot, which
+ * installs Docker and pulls the images. The deadline moves out with it, so the budget stays whole.
+ */
+async function startBootClock(env: StepEnv, params: Record<string, unknown> = {}) {
+  const at = env.deps.now().getTime();
+  env.op.deadlineAt = new Date(Math.max(env.op.deadlineAt.getTime(), at + bootBudgetMs(env) + VERIFY_AFTER_BOOT_MS));
+  env.op.params = { ...(env.op.params ?? {}), ...params, bootStartedAt: at };
+  await env.deps.db.update(operations).set({ params: env.op.params, deadlineAt: env.op.deadlineAt })
+    .where(and(eq(operations.id, env.op.id), operationFence(env)));
+}
+
+function bootStartedAt(env: StepEnv): number {
+  const at = env.op.params?.bootStartedAt;
+  return typeof at === 'number' ? at : env.op.createdAt.getTime();
+}
+
+/**
+ * Readiness must be reported after this operation began, so a stale report from before a stop
+ * does not count; for a restart, after its VM was stopped, since the old boot's agent may have
+ * reported again before then.
+ */
+function readySince(env: StepEnv): Date {
+  const stopped = env.op.params?.restartStoppedAt;
+  return typeof stopped === 'number' && stopped > env.op.createdAt.getTime() ? new Date(stopped) : env.op.createdAt;
+}
 
 async function awaitAgent(env: StepEnv): Promise<StepOutcome> {
   const p = await loadPlacement(env);
   // A create interrupted by Sleep resumes under a fresh operation, retaining its dedicated
-  // resources and stable create tokens. An already-created VM may still be stopped.
-  if (env.op.kind === 'create' && env.op.params?.resumeCreateFrom) await env.executor.ensureRunning(env.ctx('resume_running'), placementRef(p));
+  // resources and stable create tokens. An already-created VM may still be stopped (create_vm
+  // finds it by its token, too): start it once, then only wait for its agent.
+  if (env.op.kind === 'create' && env.op.params?.resumeCreateFrom && env.op.params.resumedVm !== true) {
+    await env.executor.ensureRunning(env.ctx('resume_running'), placementRef(p));
+    await startBootClock(env, { resumedVm: true });
+  }
   return awaitAgentFor(env, p);
 }
 
 async function awaitAgentFor(env: StepEnv, p: PlacementRow): Promise<StepOutcome> {
-  // The agent must report ready after this operation began, so a stale report from before a stop does not count.
-  const status = await env.agent.status(env.instance.id, p.generation, env.op.createdAt);
+  const status = await env.agent.status(env.instance.id, p.generation, readySince(env));
   if (status === 'ready') return {};
-  const limit = env.op.kind === 'create' || env.op.kind === 'recover' ? AGENT_FIRST_BOOT_TIMEOUT_MS : AGENT_START_TIMEOUT_MS;
-  if (env.deps.now().getTime() - env.op.createdAt.getTime() > limit) {
+  if (env.deps.now().getTime() - bootStartedAt(env) > bootBudgetMs(env)) {
     throw new StepFailed('The browser did not start in time.');
   }
   return { wait: 3_000, reason: 'waiting for the agent' };
 }
 
-/** Sends a command once per step and round, then waits for its reply without blocking the worker. */
+/**
+ * Sends a command once per step and round (and try, when a step repeats it), then waits for its
+ * reply without blocking the worker.
+ */
 async function command(
   env: StepEnv,
   step: string,
   kind: Parameters<StepEnv['agent']['send']>[0]['kind'],
   payload: Record<string, unknown>,
   timeoutMs = COMMAND_TIMEOUT_MS,
+  attempt = 0,
 ) {
-  const id = `${env.op.id}:${step}:${env.round}`;
+  const id = `${env.op.id}:${step}:${env.round}${attempt ? `:${attempt}` : ''}`;
   await env.agent.send({ id, instanceId: env.instance.id, kind, payload });
   const reply = await env.agent.reply(id);
   const timedOut = env.deps.now().getTime() - reply.createdAt.getTime() > timeoutMs;
@@ -345,28 +383,53 @@ async function verifyIpInChrome(env: StepEnv): Promise<StepOutcome> {
   return verifyIpFor(env, await loadPlacement(env));
 }
 
+/** Tries of the in-Chrome IP check before it fails, as long as Chrome saw no other address. */
+const IP_CHECK_TRIES = 3;
+
 async function verifyIpFor(env: StepEnv, p: PlacementRow): Promise<StepOutcome> {
   const { db, now } = env.deps;
-  const { reply, timedOut } = await command(env, 'verify_ip_in_chrome', 'ip_check', { expected: p.ipAddress });
-  if (reply.status === 'pending') {
-    if (timedOut) throw new StepFailed('Network paused: the IP check inside Chrome did not answer.');
-    return { wait: COMMAND_POLL_MS, reason: 'waiting for the IP check' };
-  }
+  const tried = counter(env.op.params?.ipCheckTry);
+  const { reply, timedOut } = await command(env, 'verify_ip_in_chrome', 'ip_check', { expected: p.ipAddress }, COMMAND_TIMEOUT_MS, tried);
+  if (reply.status === 'pending' && !timedOut) return { wait: COMMAND_POLL_MS, reason: 'waiting for the IP check' };
   const observed = Array.isArray(reply.result?.observed) ? (reply.result.observed as string[]) : [];
   const ok = reply.status === 'succeeded' && observed.length > 0 && observed.every((a) => a === p.ipAddress);
+  // Only another address seen by Chrome is an IP incident. A lost reply, or a check that saw no
+  // address at all (the echo endpoint or the page had a bad moment), is tried again while the
+  // deadline leaves time for it.
+  const otherAddress = observed.some((a) => a !== p.ipAddress);
+  if (!ok && !otherAddress && tried + 1 < IP_CHECK_TRIES && now().getTime() + COMMAND_TIMEOUT_MS < env.op.deadlineAt.getTime()) {
+    await saveParams(env, { ipCheckTry: tried + 1 });
+    return { wait: COMMAND_POLL_MS, reason: 'checking the IP again' };
+  }
+  // A browser that was never created has no network to pause: say what went wrong instead.
+  const creating = env.op.kind === 'create';
+  if (reply.status === 'pending') {
+    throw new StepFailed(creating ? `Chrome could not confirm the dedicated IP ${p.ipAddress}.` : 'Network paused: the IP check inside Chrome did not answer.');
+  }
   const lastIpCheck = { ok, expected: p.ipAddress, observed, checkedAt: now().toISOString() };
   await db
     .insert(instanceHealth)
     .values({ instanceId: env.instance.id, lastIpCheck })
     .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastIpCheck } });
   if (!ok) {
-    throw new StepFailed(`Network paused: Chrome saw ${observed.join(', ') || 'no address'} instead of ${p.ipAddress}.`);
+    throw new StepFailed(creating
+      ? otherAddress ? `Chrome saw ${observed.join(', ')} instead of the dedicated IP ${p.ipAddress}.` : `Chrome could not confirm the dedicated IP ${p.ipAddress}.`
+      : `Network paused: Chrome saw ${observed.join(', ') || 'no address'} instead of ${p.ipAddress}.`);
   }
   return { result: { observed } };
 }
 
 async function ensureRunning(env: StepEnv): Promise<StepOutcome> {
   const p = await loadPlacement(env);
+  // A restart (a start from Needs attention) may find the VM still running, with an agent that
+  // reported ready long before and does so only once per connection. Stop the VM first: its
+  // agent reconnects from the fresh boot and reports ready, and the boot resets the VM firewall.
+  // EC2 shuts the VM down normally, which gives Chrome's container its time to close. A retried
+  // step does not stop the VM again.
+  if (env.op.params?.restart === true && typeof env.op.params.restartStoppedAt !== 'number') {
+    await env.executor.ensureStopped(env.ctx('ensure_running', 'restart'), placementRef(p));
+    await saveParams(env, { restartStoppedAt: env.deps.now().getTime() });
+  }
   try {
     await env.executor.ensureRunning(env.ctx('ensure_running'), placementRef(p));
   } catch (e) {
@@ -376,6 +439,7 @@ async function ensureRunning(env: StepEnv): Promise<StepOutcome> {
     }
     throw e;
   }
+  await startBootClock(env);
   return {};
 }
 
@@ -577,9 +641,19 @@ function createTokenOperation(env: StepEnv) {
 
 async function issueBootstrapFor(env: StepEnv, generation: number): Promise<StepOutcome> {
   const token = await bootstrapToken(env.deps.bootstrapSecret, env.instance.id, createTokenOperation(env), generation);
+  const [existing] = await env.deps.db.select().from(agentCredentials).where(eq(agentCredentials.instanceId, env.instance.id));
   if (env.op.kind === 'create' && env.op.params?.resumeCreateFrom) {
-    const [existing] = await env.deps.db.select().from(agentCredentials).where(eq(agentCredentials.instanceId, env.instance.id));
     if (existing?.generation === generation && existing.credentialHash) return { result: { resumed: true } };
+  }
+  // A recover replaces the identity of an agent whose VM stays current until the recover
+  // finishes. Keep what it replaces (before replacing it, so a retried step cannot lose it):
+  // an abandoned recover gives that agent its credential back.
+  if (env.op.kind === 'recover' && !env.op.params?.previousAgent && existing?.generation !== generation) {
+    await saveParams(env, { previousAgent: {
+      generation: existing?.generation ?? env.placement?.generation ?? 1,
+      credentialHash: existing?.credentialHash ?? null,
+      activatedAt: existing?.activatedAt?.getTime() ?? null,
+    } });
   }
   const at = env.deps.now();
   const expiresAt = new Date(at.getTime() + 15 * 60_000);
@@ -646,6 +720,7 @@ async function createVm(env: StepEnv): Promise<StepOutcome> {
       status: 'current',
       created_at: env.deps.now(),
   }, operationFence(env));
+  await startBootClock(env);
   return { result: { vmId: vm.vmId } };
 }
 
@@ -969,7 +1044,9 @@ async function recoverSnapshot(env: StepEnv): Promise<StepOutcome> {
   const snap = await snapshotVolume(env, p, 'recover', env.ctx('snapshot_volume').token);
   const zones = env.executor.zones(p.providerRegion, tierOf(env));
   const [target = p.zone ?? zones[0]!] = await zonesByHealth(env, zones.filter((z) => z !== p.zone));
-  return { result: { snapshotId: snap.snapshotId, sizeGb: snap.sizeGb, zone: target, generation: p.generation + 1 } };
+  // A generation no placement used yet: an abandoned recover leaves its own behind.
+  const [used] = await env.deps.db.select({ last: sql<number | null>`max(${placements.generation})` }).from(placements).where(eq(placements.instanceId, env.instance.id));
+  return { result: { snapshotId: snap.snapshotId, sizeGb: snap.sizeGb, zone: target, generation: Math.max(p.generation, used?.last ?? 0) + 1 } };
 }
 
 function recoverPlan(env: StepEnv) {
@@ -1048,6 +1125,7 @@ async function recoverVm(env: StepEnv): Promise<StepOutcome> {
       status: 'building',
       created_at: env.deps.now(),
   }, operationFence(env));
+  await startBootClock(env);
   return { result: { vmId: vm.vmId } };
 }
 
@@ -1077,20 +1155,45 @@ async function finishRecover(env: StepEnv): Promise<StepOutcome> {
   return finishWithStatus(env, 'running', { lastActiveAt: now() });
 }
 
+/**
+ * What an unfinished recover leaves when it fails or a stop supersedes it, undone: the volume
+ * restored from its snapshot, the new interface and the VM it built are released at once, its
+ * placement is set aside, and the current VM's agent gets back the credential the recover
+ * replaced. The dedicated IP is never released. It may still be associated with the new
+ * interface; the next start's binding check moves it back to the current one. The recover's
+ * snapshot follows backup retention. Statements for the caller's batch, fenced by `env`.
+ */
+export async function abandonRecover(env: StepEnv, recover: { id: string; params: Record<string, unknown> | null }, at: Date) {
+  const { db } = env.deps;
+  const p = await currentPlacement(env);
+  const keep = new Set([p?.vmId, p?.networkId, p?.volumeId, p?.ipAllocationId].filter((x): x is string => !!x));
+  const leftovers = (await db.select().from(resources).where(and(eq(resources.instanceId, env.instance.id), eq(resources.createdByOp, recover.id), eq(resources.state, 'active'))))
+    .filter((r) => r.providerId && !keep.has(r.providerId) && r.kind !== 'snapshot' && r.tags['cb:kind'] !== 'root_volume');
+  const previous = recover.params?.previousAgent as { generation?: unknown; credentialHash?: unknown; activatedAt?: unknown } | undefined;
+  return [
+    ...leftovers.map((r) => db.update(resources).set({ state: r.kind === 'ip' ? 'rejected' : 'superseded', releaseAfter: at })
+      .where(and(eq(resources.id, r.id), operationFence(env)))),
+    db.update(placements).set({ status: 'superseded' })
+      .where(and(eq(placements.instanceId, env.instance.id), eq(placements.status, 'building'), operationFence(env))),
+    // Only while the VM the credential belongs to is still current.
+    ...(typeof previous?.generation === 'number' && p?.generation === previous.generation ? [db.update(agentCredentials).set({
+      generation: previous.generation,
+      credentialHash: typeof previous.credentialHash === 'string' ? previous.credentialHash : null,
+      activatedAt: typeof previous.activatedAt === 'number' ? new Date(previous.activatedAt) : null,
+      bootstrapHash: null,
+      bootstrapExpiresAt: null,
+    }).where(and(eq(agentCredentials.instanceId, env.instance.id), ne(agentCredentials.generation, previous.generation), operationFence(env)))] : []),
+  ];
+}
+
 /** Canceled recovery work must not leave unused paid assets allocated indefinitely. */
 async function finishStop(env: StepEnv): Promise<StepOutcome> {
   const oldId = env.op.params?.preemptedOperationId;
-  const [interrupted] = typeof oldId === 'string' ? await env.deps.db.select({ kind: schema.operations.kind }).from(schema.operations).where(eq(schema.operations.id, oldId)) : [];
+  const [interrupted] = typeof oldId === 'string' ? await env.deps.db.select({ id: schema.operations.id, kind: schema.operations.kind, params: schema.operations.params }).from(schema.operations).where(eq(schema.operations.id, oldId)) : [];
   if (interrupted?.kind === 'recover') {
     await discoverInstanceResources(env, env.instance.id);
-    const p = await currentPlacement(env);
-    const keep = new Set([p?.vmId, p?.networkId, p?.volumeId, p?.ipAllocationId].filter((x): x is string => !!x));
-    const leftovers = await env.deps.db.select().from(resources).where(and(eq(resources.instanceId, env.instance.id), eq(resources.createdByOp, String(oldId)), eq(resources.state, 'active')));
-    for (const r of leftovers) {
-      if (!r.providerId || keep.has(r.providerId) || r.kind === 'snapshot' || r.tags['cb:kind'] === 'root_volume') continue;
-      await env.deps.db.update(resources).set({ state: r.kind === 'ip' ? 'rejected' : 'superseded', releaseAfter: env.deps.now() })
-        .where(and(eq(resources.id, r.id), operationFence(env)));
-    }
+    const undo = await abandonRecover(env, interrupted, env.deps.now());
+    await env.deps.db.batch([undo[0]!, ...undo.slice(1)]);
   }
   // The VM ran from this stop's start (running time was settled then) until ensure_stopped; a
   // stop that found no VM to shut down (skipped) adds nothing.

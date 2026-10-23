@@ -37,6 +37,11 @@ const MAX_METER_STEP_MS = 5 * 60_000;
 const MAX_TRANSITION_MS = 20 * 60_000;
 /** States in which a browser holds its IP and volume and is charged for them. */
 const NOT_BILLED = ['creating', 'failed', 'purged'];
+/**
+ * A create waiting for capacity or for its provider has not run yet (a browser's first run sets
+ * last_active_at): like one still creating, it is not charged.
+ */
+const CREATE_WAITING = sql`${browserInstances.status} IN ('waiting_capacity', 'provider_issue') AND ${browserInstances.lastActiveAt} IS NULL`;
 
 export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: number } = {}) {
   const { db } = deps;
@@ -48,7 +53,7 @@ export async function meterUsage(deps: EngineDeps, options: { minIntervalMs?: nu
   const sheets = await priceSheets(db);
   const rows = await db.select({ inst: browserInstances, health: instanceHealth }).from(browserInstances)
     .leftJoin(instanceHealth, eq(instanceHealth.instanceId, browserInstances.id))
-    .where(notInArray(browserInstances.status, NOT_BILLED));
+    .where(and(notInArray(browserInstances.status, NOT_BILLED), sql`NOT (${CREATE_WAITING})`));
   const actual = new Map((await db.select().from(placements).where(eq(placements.status, 'current'))).map((p) => [p.instanceId, p]));
   const holds = new Map((await db.select().from(browserReservations)).map((h) => [h.instanceId, h]));
   const ids = rows.map((r) => r.inst.id);
