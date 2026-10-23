@@ -22,8 +22,9 @@ type I18n = { locale: Locale; setLocale: (l: Locale) => void; t: Translate; erro
 
 const Ctx = createContext<I18n | null>(null);
 
-export function I18nProvider({ children }: { children: ReactNode }) {
-  const [locale, setLocaleState] = useState<Locale>(initialLocale);
+/** `locale` fixes the language instead of the saved or browser one: the prerendered pages are English. */
+export function I18nProvider({ children, locale: fixed }: { children: ReactNode; locale?: Locale }) {
+  const [locale, setLocaleState] = useState<Locale>(() => fixed ?? initialLocale());
   const setLocale = useCallback((l: Locale) => {
     setLocaleState(l);
     document.documentElement.lang = l;
@@ -50,7 +51,8 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     };
     return { locale, setLocale, t, errorMessage };
   }, [locale, setLocale]);
-  document.documentElement.lang = locale;
+  // No document while prerendering on the server.
+  if (typeof document !== 'undefined') document.documentElement.lang = locale;
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
