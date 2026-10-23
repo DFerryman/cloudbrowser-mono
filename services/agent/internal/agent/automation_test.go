@@ -37,10 +37,17 @@ type bridgeNeko struct {
 	stuck  bool
 	fed    []string
 	typed  strings.Builder
-	done   chan struct{}
+	// onChooser runs when the agent asks whether the file chooser is open.
+	onChooser func()
+	// Each desktop session's end; while gate is set, opening one waits for it.
+	dones []chan struct{}
+	gate  chan struct{}
 }
 
-type bridgeSession struct{ n *bridgeNeko }
+type bridgeSession struct {
+	n    *bridgeNeko
+	done chan struct{}
+}
 
 func protocolIncoming(raw string) protocol.Incoming {
 	var in protocol.Incoming
@@ -56,20 +63,47 @@ func newBridgeNeko(width, height int) *bridgeNeko {
 	img.Set(0, 0, color.RGBA{255, 0, 0, 255})
 	var buf bytes.Buffer
 	_ = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80})
-	return &bridgeNeko{viewer: &inputSession{done: make(chan struct{}), got: make(chan json.RawMessage, 64)}, shot: buf.Bytes(), width: width, height: height, dialog: true, done: make(chan struct{})}
+	return &bridgeNeko{viewer: &inputSession{done: make(chan struct{}), got: make(chan json.RawMessage, 64)}, shot: buf.Bytes(), width: width, height: height, dialog: true}
 }
 
 func (n *bridgeNeko) Open(context.Context, string, func(json.RawMessage)) (NekoSession, error) {
 	return n.viewer, nil
 }
 
-func (n *bridgeNeko) OpenAutomation(_ context.Context, onEvent func(json.RawMessage)) (AutomationSession, error) {
+func (n *bridgeNeko) OpenAutomation(ctx context.Context, onEvent func(json.RawMessage)) (AutomationSession, error) {
+	n.mu.Lock()
+	gate := n.gate
+	n.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	n.mu.Lock()
 	n.events = append(n.events, onEvent)
+	done := make(chan struct{})
+	n.dones = append(n.dones, done)
+	width, height := n.width, n.height
 	n.mu.Unlock()
-	init, _ := json.Marshal(map[string]any{"event": "system/init", "payload": map[string]any{"screen_size": map[string]any{"width": n.width, "height": n.height, "rate": 30}}})
+	init, _ := json.Marshal(map[string]any{"event": "system/init", "payload": map[string]any{"screen_size": map[string]any{"width": width, "height": height, "rate": 30}}})
 	go onEvent(init)
-	return bridgeSession{n}, nil
+	return bridgeSession{n, done}, nil
+}
+
+// endDesktop ends the latest desktop session, as a neko restart would; it returns how many were opened.
+func (n *bridgeNeko) endDesktop() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	close(n.dones[len(n.dones)-1])
+	return len(n.dones)
+}
+
+func (n *bridgeNeko) opened() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.dones)
 }
 
 func (n *bridgeNeko) resize(width, height int) {
@@ -146,11 +180,17 @@ func (n *bridgeNeko) holding(sym int64) bool {
 
 func (n *bridgeNeko) FileChooserOpen(context.Context) (bool, error) {
 	n.mu.Lock()
+	hook := n.onChooser
+	n.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.dialog, nil
 }
 func (s bridgeSession) Close()                {}
-func (s bridgeSession) Done() <-chan struct{} { return s.n.done }
+func (s bridgeSession) Done() <-chan struct{} { return s.done }
 func (s bridgeSession) Screenshot(context.Context, int) ([]byte, error) {
 	s.n.mu.Lock()
 	defer s.n.mu.Unlock()

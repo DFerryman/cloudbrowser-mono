@@ -140,7 +140,8 @@ type Agent struct {
 	engineIP         string // protected by mu
 	firewallMu       sync.Mutex
 	ipFailures       int  // protected by firewallMu
-	ipClosedFirewall bool // protected by firewallMu
+	// Who closed the firewall: "" (open), "check" or "engine"; protected by firewallMu.
+	firewallClosedBy string
 }
 
 func New(cfg Config, b Browser, n Neko, f Firewall, log *slog.Logger) *Agent {
@@ -405,7 +406,7 @@ func (a *Agent) judgeIPCheck(res map[string]any) {
 	switch {
 	case ok:
 		a.ipFailures = 0
-		if a.ipClosedFirewall {
+		if a.firewallClosedBy == "check" {
 			mode = "normal"
 		}
 	case ipMismatch(observed, expected):
@@ -417,14 +418,14 @@ func (a *Agent) judgeIPCheck(res map[string]any) {
 			mode = "closed"
 		}
 	}
-	if mode == "" || (mode == "closed" && a.ipClosedFirewall) {
+	if mode == "" || (mode == "closed" && a.firewallClosedBy != "") {
 		return
 	}
 	if err := a.firewall.SetMode(mode); err != nil {
 		a.log.Error("firewall after an IP check", "mode", mode, "err", err)
 		return
 	}
-	a.ipClosedFirewall = mode == "closed"
+	a.firewallClosedBy = map[string]string{"closed": "check", "normal": ""}[mode]
 	a.log.Warn("firewall after an IP check", "mode", mode, "observed", observed, "expected", expected)
 }
 
@@ -567,7 +568,8 @@ func (a *Agent) command(ctx context.Context, in protocol.Incoming) {
 		if err := a.firewall.SetMode(mode); err != nil {
 			reply.OK, reply.Error = false, err.Error()
 		} else {
-			a.ipClosedFirewall, a.ipFailures = false, 0
+			a.firewallClosedBy = map[string]string{"closed": "engine", "normal": ""}[mode]
+			a.ipFailures = 0
 		}
 		a.firewallMu.Unlock()
 	default:
