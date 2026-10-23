@@ -8,7 +8,7 @@ import { useI18n } from '../lib/i18n.js';
 import { ArticleBody, headings } from './Article.js';
 import { container } from './PublicShell.js';
 
-/** The user guide: a list of articles on the left, one article on the right. */
+/** The user guide: a list of articles on the left, one article (or, at /docs, all of them) on the right. */
 export function DocsPage() {
   const { slug } = useParams();
   const { t, locale } = useI18n();
@@ -19,10 +19,9 @@ export function DocsPage() {
     if (!q) return articles;
     return articles.filter((a) => JSON.stringify(a).toLowerCase().includes(q));
   }, [articles, query]);
-  const article = articles.find((a) => a.slug === slug);
-  if (!slug) return <Navigate to={`/docs/${articles[0]!.slug}`} replace />;
-  if (!article) return <Navigate to="/docs" replace />;
-  const toc = headings(article);
+  const article = slug ? articles.find((a) => a.slug === slug) : undefined;
+  if (slug && !article) return <Navigate to="/docs" replace />;
+  const toc = article ? headings(article) : [];
 
   return (
     <div className={`${container} grid gap-10 py-10 md:grid-cols-[220px_1fr] md:py-16 lg:grid-cols-[220px_1fr_200px] lg:gap-14`}>
@@ -51,11 +50,29 @@ export function DocsPage() {
           {!matches.length ? <p className="px-2.5 text-sm text-subtle">{t('docs.noResults')}</p> : null}
         </nav>
       </aside>
-      <article className="min-w-0 max-w-[68ch]">
-        <h1 className="text-[32px] leading-[1.1] font-semibold tracking-[-0.03em] md:text-[44px] md:leading-[1.08]">{article.title}</h1>
-        <p className="mt-4 mb-10 border-b border-border pb-8 text-lg leading-relaxed text-muted">{article.summary}</p>
-        <ArticleBody article={article} />
-      </article>
+      {article ? (
+        <article className="min-w-0 max-w-[68ch]">
+          <h1 className="text-[32px] leading-[1.1] font-semibold tracking-[-0.03em] md:text-[44px] md:leading-[1.08]">{article.title}</h1>
+          <p className="mt-4 mb-10 border-b border-border pb-8 text-lg leading-relaxed text-muted">{article.summary}</p>
+          <ArticleBody article={article} />
+        </article>
+      ) : (
+        // The guide's own page lists every article, so /docs has content of its own to link and quote.
+        <section className="min-w-0 max-w-[68ch]">
+          <h1 className="text-[32px] leading-[1.1] font-semibold tracking-[-0.03em] md:text-[44px] md:leading-[1.08]">{t('docs.title')}</h1>
+          <p className="mt-4 mb-10 border-b border-border pb-8 text-lg leading-relaxed text-muted">{t('seo.docs.description')}</p>
+          <ul className="divide-y divide-border">
+            {articles.map((a) => (
+              <li key={a.slug} className="py-4 first:pt-0">
+                <h2 className="text-lg font-semibold tracking-tight">
+                  <Link to={`/docs/${a.slug}`} className="hover:underline">{a.title}</Link>
+                </h2>
+                <p className="mt-1 text-sm leading-relaxed text-muted">{a.summary}</p>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {toc.length > 1 ? (
         <nav className="hidden lg:sticky lg:top-24 lg:block lg:self-start" aria-label={t('docs.onThisPage')}>
           <Eyebrow className="mb-4">{t('docs.onThisPage')}</Eyebrow>

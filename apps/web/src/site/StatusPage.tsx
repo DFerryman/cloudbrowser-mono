@@ -23,7 +23,7 @@ export function StatusPage() {
 
   return (
     <>
-      <PublicHero eyebrow={t('nav.status')} title={t('status.title')} />
+      <PublicHero eyebrow={t('nav.status')} title={t('status.title')} subtitle={t('seo.status.description')} />
       <section className={`${container} space-y-6 pb-16`}>
         {status.isPending ? (
           <Skeleton className="h-20" />
