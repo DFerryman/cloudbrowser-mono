@@ -7,7 +7,7 @@ Everything in the control plane runs on Cloudflare. Five Workers share one D1 da
 | `cloudbrowser` (api + web) | `apps/api/wrangler.jsonc` | Yes: your app domain | HTTP, Queue (billing), cron every 5 min | Static assets, D1, Email Service, Queues (producer + billing consumer), Durable Object binding, Rate Limiting |
 | `cloudbrowser-engine` | `apps/engine/wrangler.jsonc` | No | Queue, cron every minute, service binding | D1, Queues (consumer + producer), Durable Object `EventHub`, R2 (presigned archive URLs) |
 | `cloudbrowser-reaper` | `apps/engine/wrangler.reaper.jsonc` | No | cron every minute | D1, Durable Object binding, R2 (deletes archives) |
-| `cloudbrowser-reconciler` | `apps/reconciler/wrangler.jsonc` | No | cron every 5 min | D1 |
+| `cloudbrowser-reconciler` | `apps/reconciler/wrangler.jsonc` | No | cron every 5 min, Queue (`cloudbrowser-aws-provider`) | D1, Queues (producer + consumer) |
 | `cloudbrowser-gateway` | `apps/gateway/wrangler.jsonc` | Yes: `connect.` domain | HTTP (WebSocket: viewers, agent tunnels and coding-agent bridges), Queue | Durable Object `InstanceGateway`, Queues (consumer), service binding to the api's `Internal` entrypoint, D1 |
 
 ## Prerequisites
@@ -53,6 +53,7 @@ pnpm exec wrangler d1 create cloudbrowser
 pnpm exec wrangler queues create cloudbrowser-operations
 pnpm exec wrangler queues create cloudbrowser-agent-commands
 pnpm exec wrangler queues create cloudbrowser-billing
+pnpm exec wrangler queues create cloudbrowser-aws-provider
 pnpm exec wrangler r2 bucket create cloudbrowser-archives
 ```
 
@@ -218,7 +219,7 @@ Deploy the gateway before the API: the API's `GATEWAY` service binding uses the 
 
 Migration `0009` adds `user.two_factor_enabled` and the `two_factor` table. It is additive, so it
 can be applied before the new Workers are deployed; deploy the api and the web build afterwards
-(`pnpm deploy` does both). No new variables or secrets are needed: the second-factor endpoints
+(`pnpm run deploy` does both). No new variables or secrets are needed: the second-factor endpoints
 share `AUTH_LIMITER` (their own per-IP key), and the authenticator secrets and backup codes are
 encrypted with `BETTER_AUTH_SECRET`. **Rotating `BETTER_AUTH_SECRET` therefore invalidates every
 enabled authenticator and backup code** (as well as all sessions): if it ever has to change, reset
@@ -320,8 +321,19 @@ CloudFormation stack, the access keys and the images are in [docs/aws.md](aws.md
 
 ```bash
 pnpm db:migrate:remote
-pnpm deploy   # builds everything, then deploys gateway, engine + reaper, reconciler and api, in that order
+pnpm run deploy   # checks, builds everything, then deploys gateway, engine + reaper, reconciler and api, in that order
 ```
+
+**Apply the migrations before deploying any Worker**, every time. A Worker that reads a table or
+column a pending migration adds fails until it exists, and every Worker shares the one database.
+Write `pnpm run deploy`, not `pnpm deploy`: the latter is pnpm's own command for copying a
+package, not this script. The script first runs `node scripts/deploy-api-main.mjs --check`, which
+stops the deploy unless HEAD is a clean `main` equal to `origin/main` and
+`wrangler d1 migrations list cloudbrowser --remote` reports no pending migrations; the api deploy
+repeats both checks. Only for a deliberate exception (a Worker change that must ship before a
+migration it does not use) set `ALLOW_PENDING_D1_MIGRATIONS=1` for that one command. Deploying a
+single Worker by hand (`pnpm --filter … run deploy`) skips the root check, so run
+`pnpm db:migrate:remote` first then too.
 
 Migration `0034` adds coding-agent access (`docs/agent-access.md`): the per-browser `agent_access`
 and `agent_control` columns and the `automation_clients` and `automation_sessions` tables. It is

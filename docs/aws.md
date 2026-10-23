@@ -102,7 +102,7 @@ this is done, so nothing below affects Basic browsers:
 2. Publish the browser and agent images (GitHub Actions → Images). A VM takes images at first
    boot, so a new image reaches new browsers only.
 3. Apply migration `0029_browser_tiers` and deploy every Worker (`pnpm db:migrate:remote`,
-   `pnpm deploy`). Within five minutes the reconciler lists which zones offer the Premium types
+   `pnpm run deploy`). Within five minutes the reconciler lists which zones offer the Premium types
    and the engine prices them; the console's *Pricing & margin* page shows each region's Premium
    machine and price, and *AWS* shows Premium stock.
 4. Create a Premium browser for yourself first: `INSERT INTO caps (scope, metric, "limit") VALUES
@@ -377,10 +377,10 @@ Then, from the repository root:
 ```bash
 pnpm install
 pnpm db:migrate:remote
-pnpm deploy
+pnpm run deploy
 ```
 
-Check: `pnpm deploy` ends without errors for the engine, reaper, reconciler, api and gateway.
+Check: `pnpm run deploy` ends without errors for the engine, reaper, reconciler, api and gateway.
 
 ## 8. Switch Tokyo to AWS (advanced-project reference)
 
