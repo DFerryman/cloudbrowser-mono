@@ -31,6 +31,11 @@ const mount = () => createRoot(container).render(
 // A prerendered public page (src/prerender) arrives with its content in #root, which the first
 // render replaces. Until a lazily loaded route (docs, policies) is in, the router renders nothing,
 // so keep the prerendered page on screen until then rather than flashing an empty one.
+// A prerendered page's title names that page only: elsewhere the app keeps the shell's title.
+const landing = { path: location.pathname, title: document.title };
+router.subscribe(({ location: at }) => {
+  document.title = at.pathname === landing.path ? landing.title : 'Nevazu';
+});
 if (container.hasChildNodes() && !router.state.initialized) {
   const unsubscribe = router.subscribe((state) => {
     if (!state.initialized) return;
