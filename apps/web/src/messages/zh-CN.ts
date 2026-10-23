@@ -168,7 +168,7 @@ export const zhCN: Messages = {
   'phase.create_storage': '正在创建加密存储',
   'phase.start_chrome': '正在启动 Chrome',
   'phase.check_ip': '正在检查你的 IP',
-  'phase.typical': '首次通常需要 4–9 分钟，之后唤醒约 1 分钟',
+  'phase.typical': '通常需要 3–8 分钟',
 
   'status.creating': '创建中',
   'status.running': '运行中',

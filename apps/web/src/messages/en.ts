@@ -166,7 +166,7 @@ export const en = {
   'phase.create_storage': 'Creating encrypted storage',
   'phase.start_chrome': 'Starting Chrome',
   'phase.check_ip': 'Checking your IP',
-  'phase.typical': 'Usually 4–9 minutes the first time; later wakes take about a minute',
+  'phase.typical': 'Usually 3–8 minutes',
 
   'status.creating': 'Creating',
   'status.running': 'Running',
