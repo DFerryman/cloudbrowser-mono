@@ -153,15 +153,16 @@ Cloudflare deployment.
   endpoint stamped with a screen version and control epoch (a resolution change voids old
   coordinates rather than remapping them), bounded `act` steps (move, click, drag, scroll, keys,
   type, paste, wait) run in order in the VM with cancellation, and a two-stage file workflow (store
-  without control, attach — picker/paste/drop — only under control). The gateway adds
-  `GET /v1/automation/:instanceId` and relays requests, screenshot blobs and control changes through
-  the browser's `InstanceGateway` Durable Object, enforcing the mode and one bridge at a time and
-  sharing the Viewer's credit and authorization lease. The api owns pairing (one-time code, ten
-  minutes, redeemed by the bridge at the public `POST /api/automation/pair` for a long-lived
-  credential; only hashes stored), revocation, the control choice and an audited history. The
-  **bridge** (`packages/bridge`) is the local MCP stdio server (`screenshot`, `act`, `upload_files`,
-  `attach_files`, `get_status`); the credential and channel never enter the model's context, and
-  local file reads are limited to allowed directories. The public site and user docs describe it.
+  without control, attach — picker/paste/drop — only under control). Nothing is installed: the
+  gateway serves a remote MCP server at `POST /mcp/:instanceId` (stateless Streamable HTTP, JSON
+  responses) with the tools `screenshot`, `act`, `upload_file`, `attach_files`, `get_status` and
+  `end_session`, and one-time upload URLs at `PUT /u/:token`. The browser's `InstanceGateway`
+  Durable Object holds the agent's session in storage (lazy open, one driver, serialized calls,
+  screenshots scaled to 1280×800 with coordinates mapped back, idle close after 15 minutes),
+  enforcing the mode and the key's capability and sharing the Viewer's credit lease. The api owns
+  the per-browser access keys (`nvzk_…`, shown once, only hashes stored, optional expiry, view-only
+  keys, at most ten), revocation (also on deletion and on signing out everywhere), the control
+  choice and an audited history. The public site and user docs describe it.
 - **Session gateway** (`apps/gateway`): a Worker on `connect.example.com` plus one `InstanceGateway`
   Durable Object per browser (WebSocket hibernation). Agents authenticate with a single-use
   bootstrap token (swapped for a long-lived credential) or that credential, checked through the

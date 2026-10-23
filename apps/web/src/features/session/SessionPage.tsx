@@ -151,7 +151,7 @@ export function SessionPage() {
   const uploadRef = useRef<HTMLInputElement>(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [inputInterrupted, setInputInterrupted] = useState(false);
-  // A coding agent's bridge (docs/agent-access.md): shown while one is connected; the user's own
+  // A coding agent's session (docs/agent-access.md): shown while one is open; the user's own
   // click takes control, and the banner is where control is handed back or screenshots paused.
   const [automation, setAutomation] = useState<AutomationStatus | null>(null);
   const setControl = useSetControl();
