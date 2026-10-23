@@ -31,7 +31,6 @@ export const ErrorType = z.enum([
   'price_changed',
   'account_frozen',
   'agent_access_off',
-  'pairing_invalid',
   'agent_key_limit',
   'internal',
 ]);
