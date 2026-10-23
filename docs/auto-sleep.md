@@ -61,6 +61,11 @@ stopping does not cancel shutdown; the UI must show the lifecycle state and offe
 it is asleep. Manual sleep, exhausted credit, account freezing, and operator suspension are
 separate stop reasons and are not overridden by idle activity.
 
+A browser that needs attention (a failed operation, or a network paused by an IP check) sleeps
+by the same rules, so its VM does not run unused until someone notices. Its idle window starts
+at the failure at the earliest, so the user has the whole timeout to see why; with Never sleep
+it is one hour. It never sleeps while an operation, such as a restart, is under way.
+
 ## User-visible boundaries
 
 The viewer shows the idle warning during the final 60 seconds and offers Stay awake. The

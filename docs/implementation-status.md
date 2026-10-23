@@ -22,8 +22,13 @@ Cloudflare deployment.
   Durable Object for SSE; `create`, `start`, `stop`, `delete`, `undelete`, `purge`, `restore` and
   `recover` (`change_ip` is retired: a request left by an older API ends without any step)
   with the write-ahead step journal, leases, ledger-before-call, lookup on unknown outcomes, retries
-  per error class, IP screening (never reuse an address), binding check and in-Chrome IP check,
-  honest states (*Waiting for capacity*, *Provider issue*, *Needs attention*, *Failed*), idle sleep,
+  per error class (8 provider errors in a row end an operation and alert; waits for capacity or an
+  outage do not count), IP screening (never reuse an address), binding check and in-Chrome IP check
+  (an empty or failed answer is tried again, up to 3 times), honest states (*Waiting for capacity*,
+  *Provider issue*, *Needs attention*, *Failed*), idle sleep (also for a browser that needs
+  attention, counted from the failure; with Never sleep after an hour), Restart from *Needs
+  attention* that stops and starts the VM, a passing *Check again* that ends an IP pause, a boot
+  time limit counted from the launch or start of the VM,
   5-minute IP checks with fail-closed status, change-IP rollback, and a separate **reaper**
   deployment (permanent user-delete cleanup, system retention purge after 7 days, failed-create cleanup, rejected/superseded IPs after 30 days,
   orphans after 24 h).
@@ -35,7 +40,10 @@ Cloudflare deployment.
   running (the agent swaps the profile and restarts Chrome; a bad archive leaves the profile as it
   was). `recover` snapshots the volume, restores it in another zone, moves the same IP to a new
   interface and builds a new VM there; it runs automatically when a start has waited 30 minutes for
-  capacity. The old VM, interface and volume are released 7 days later; the IP never is. Purge
+  capacity. The old VM, interface and volume are released 7 days later; the IP never is. A recover
+  that fails or that Sleep or Delete supersedes releases what it built at once and gives the current
+  agent its identity back; its snapshot goes once it ended (after 7 days at the latest), never while
+  the browser has no current volume. Purge
   destroys the archive key first, so archives are unreadable before R2 deletes them.
 - **Prices from AWS** (page 6): the engine reads each region's prices from the AWS Price List
   Query API (`pricing:GetProducts`) for its instance type: compute per hour, gp3 storage and
@@ -120,9 +128,11 @@ Cloudflare deployment.
 - **AWS executor** (`packages/executors/src/aws`, guide: `docs/aws.md`): Elastic IP on its own
   network interface, encrypted gp3 data volume, VM from stock Ubuntu 24.04 with IMDSv2 and
   termination protection; ClientToken plus `cb:token` tag lookup for every create; instance-type
-  fallback on capacity; snapshot, restore, volume swap and moving the IP for `recover`; deletes with
+  fallback on capacity (up to 5% above the confirmed price, charged at the tier's price); snapshot,
+  restore, volume swap and moving the IP for `recover`; deletes with
   the reaper user only; listing by tag and Service Quotas for the reconciler. Signed with SigV4
-  (aws4fetch) against the EC2 Query API; tested against an in-memory EC2. A first-boot script
+  (aws4fetch) against the EC2 Query API; tested against an in-memory EC2. A first-boot script (run
+  at every boot until it has finished, so a create put to sleep during its first boot resumes)
   installs Docker and runs the browser image (neko + Chrome, host network, WebRTC advertising the
   static IP) and the agent from `ghcr.io` images built by `.github/workflows/images.yml`. The VM
   firewall restricts only the browser's uid (no private, link-local or metadata addresses).
