@@ -1,6 +1,6 @@
 import type { AgentControlMode, AgentKey, AutomationClient, AutomationStatus, Instance } from '@cloudbrowser/contracts';
-import { Button, cn, Dialog, Hint, Input, Label, Section, Select, useToast } from '@cloudbrowser/ui';
-import { Check, ChevronRight, Copy, Eye, EyeOff, Hand, KeyRound, Play, Trash2 } from 'lucide-react';
+import { Button, cn, Hint, Input, Label, Section, Select, SidePanel, useToast } from '@cloudbrowser/ui';
+import { Bot, Check, ChevronRight, Copy, Eye, EyeOff, Hand, KeyRound, Play, Settings, Trash2 } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 import { DocsLink } from '../../app/DocsLink.js';
@@ -91,13 +91,27 @@ function Choices<T extends string>({ label, options, value, onChange }: {
 
 function Step({ n, title, children }: { n: number; title: string; children: ReactNode }) {
   return (
-    <section className="space-y-2.5">
-      <h3 className="flex items-center gap-2 text-sm font-medium">
-        <span className="grid size-5 shrink-0 place-items-center border border-border-strong font-mono text-[11px]" aria-hidden>{n}</span>
+    <section className="space-y-3">
+      <h3 className="flex items-center gap-2.5 text-[15px] font-semibold tracking-tight">
+        <span className="grid size-6 shrink-0 place-items-center bg-fg font-mono text-xs text-bg" aria-hidden>{n}</span>
         {title}
       </h3>
-      {children}
+      <div className="space-y-3 pl-[34px]">{children}</div>
     </section>
+  );
+}
+
+/** A section folded away until asked for, with an optional summary on its right. */
+function Fold({ title, aside, children, testId }: { title: ReactNode; aside?: ReactNode; children: ReactNode; testId?: string }) {
+  return (
+    <details className="group border border-border bg-bg" data-testid={testId}>
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-sm font-medium select-none transition-colors hover:bg-surface [&::-webkit-details-marker]:hidden">
+        <ChevronRight className="size-4 shrink-0 text-muted transition-transform group-open:rotate-90" aria-hidden />
+        <span className="min-w-0 flex-1 truncate">{title}</span>
+        {aside ? <span className="shrink-0 truncate text-xs font-normal text-subtle">{aside}</span> : null}
+      </summary>
+      <div className="space-y-3 border-t border-border p-3">{children}</div>
+    </details>
   );
 }
 
@@ -164,26 +178,33 @@ function AgentConnect({ instance: i, status }: { instance: Instance; status: Aut
               );
             }}
           >
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
-              <div className="min-w-0">
-                <Label htmlFor={`agent-key-name-${i.id}`}>{t('agents.key.name')}</Label>
-                <Input id={`agent-key-name-${i.id}`} value={name} maxLength={64} placeholder={t('agents.key.namePlaceholder')} onChange={(e) => setName(e.target.value)} />
-              </div>
-              <div>
-                <Label htmlFor={`agent-key-expiry-${i.id}`}>{t('agents.key.expires')}</Label>
-                <Select id={`agent-key-expiry-${i.id}`} value={expiry} onChange={(e) => setExpiry(e.target.value as Expiry)}>
-                  {EXPIRIES.map((d) => <option key={d} value={d}>{t(`agents.key.expires.${d}` as MessageKey)}</option>)}
-                </Select>
-              </div>
-              <div>
-                <Label htmlFor={`agent-key-capability-${i.id}`}>{t('agents.key.capability')}</Label>
-                <Select id={`agent-key-capability-${i.id}`} value={capability} onChange={(e) => setCapability(e.target.value as 'control' | 'view')}>
-                  <option value="control">{t('agents.key.capability.control')}</option>
-                  <option value="view">{t('agents.key.capability.view')}</option>
-                </Select>
+            <div>
+              <Label htmlFor={`agent-key-name-${i.id}`}>{t('agents.key.name')}</Label>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Input id={`agent-key-name-${i.id}`} className="min-w-0 flex-1" value={name} maxLength={64} placeholder={t('agents.key.namePlaceholder')} onChange={(e) => setName(e.target.value)} />
+                <Button type="submit" variant="primary" className="justify-center" disabled={!name.trim() || create.isPending}><KeyRound /> {t('agents.key.create')}</Button>
               </div>
             </div>
-            <Button type="submit" variant="primary" disabled={!name.trim() || create.isPending}><KeyRound /> {t('agents.key.create')}</Button>
+            <Fold
+              title={t('agents.key.options')}
+              aside={`${t(`agents.key.expires.${expiry}` as MessageKey)} · ${t(`agents.key.capability.${capability}`)}`}
+            >
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <Label htmlFor={`agent-key-expiry-${i.id}`}>{t('agents.key.expires')}</Label>
+                  <Select id={`agent-key-expiry-${i.id}`} value={expiry} onChange={(e) => setExpiry(e.target.value as Expiry)}>
+                    {EXPIRIES.map((d) => <option key={d} value={d}>{t(`agents.key.expires.${d}` as MessageKey)}</option>)}
+                  </Select>
+                </div>
+                <div>
+                  <Label htmlFor={`agent-key-capability-${i.id}`}>{t('agents.key.capability')}</Label>
+                  <Select id={`agent-key-capability-${i.id}`} value={capability} onChange={(e) => setCapability(e.target.value as 'control' | 'view')}>
+                    <option value="control">{t('agents.key.capability.control')}</option>
+                    <option value="view">{t('agents.key.capability.view')}</option>
+                  </Select>
+                </div>
+              </div>
+            </Fold>
             {server && status?.clients.length ? <Hint>{t('agents.key.skip', { env: server.env })}</Hint> : null}
           </form>
         )}
@@ -191,51 +212,44 @@ function AgentConnect({ instance: i, status }: { instance: Instance; status: Aut
 
       {server ? (
         <Step n={2} title={t('agents.step.handoff')}>
-          <p className="text-sm leading-relaxed text-muted">{t('agents.handoff.hint', { env: server.env })}</p>
           <CodeBox id="handoff" label={t('agents.handoff.label')} code={agentHandoff(server, i.name)} copy={copy} wrap testId="agent-handoff" />
+          <Hint>{t('agents.handoff.hint', { env: server.env })}</Hint>
         </Step>
       ) : (
         <p className="text-sm text-muted">{t('common.loading')}</p>
       )}
 
       {server && setup ? (
-        <details className="group border border-border" data-testid="agent-manual">
-          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-sm font-medium select-none hover:bg-surface [&::-webkit-details-marker]:hidden">
-            <ChevronRight className="size-4 shrink-0 text-muted transition-transform group-open:rotate-90" aria-hidden />
-            {t('agents.manual.title')}
-          </summary>
-          <div className="space-y-3 border-t border-border p-3">
-            <div>
-              <p className="text-xs text-muted">{t('agents.connect.url')}</p>
-              <div className="mt-1 flex items-center gap-2 border border-border bg-surface px-3 py-1.5">
-                <code className="min-w-0 flex-1 truncate font-mono text-xs" data-testid="mcp-url">{server.url}</code>
-                <CopyButton id="url" text={server.url} copy={copy} />
-              </div>
+        <Fold title={t('agents.manual.title')} testId="agent-manual">
+          <div>
+            <p className="text-xs text-muted">{t('agents.connect.url')}</p>
+            <div className="mt-1 flex items-center gap-2 border border-border bg-surface px-3 py-1.5">
+              <code className="min-w-0 flex-1 truncate font-mono text-xs" data-testid="mcp-url">{server.url}</code>
+              <CopyButton id="url" text={server.url} copy={copy} />
             </div>
-            <Choices
-              label={t('agents.setup.title')}
-              options={setups.map((s) => ({ id: s.client, label: s.client === 'other' ? t('agents.setup.other') : s.label }))}
-              value={setup.client}
-              onChange={setClient}
-            />
-            <CodeBox
-              id={`setup-${setup.client}`}
-              label={setup.client === 'other' ? t('agents.setup.otherWhere') : setup.where === 'Terminal' ? t('agents.setup.terminal') : setup.where}
-              code={setup.code}
-              copy={copy}
-              testId="agent-setup"
-            />
-            <Hint>{t(`agents.setup.hint.${setup.client}` as MessageKey, { env: server.env })}</Hint>
           </div>
-        </details>
+          <Choices
+            label={t('agents.setup.title')}
+            options={setups.map((s) => ({ id: s.client, label: s.client === 'other' ? t('agents.setup.other') : s.label }))}
+            value={setup.client}
+            onChange={setClient}
+          />
+          <CodeBox
+            id={`setup-${setup.client}`}
+            label={setup.client === 'other' ? t('agents.setup.otherWhere') : setup.where === 'Terminal' ? t('agents.setup.terminal') : setup.where}
+            code={setup.code}
+            copy={copy}
+            testId="agent-setup"
+          />
+          <Hint>{t(`agents.setup.hint.${setup.client}` as MessageKey, { env: server.env })}</Hint>
+        </Fold>
       ) : null}
-      <Hint>{t('agents.security')} <DocsLink to="coding-agents" /></Hint>
     </div>
   );
 }
 
 /** The browser's keys (and paired bridges from before), with the connected one marked. */
-function AgentKeys({ instance: i, status }: { instance: Instance; status: AutomationStatus | undefined }) {
+function AgentKeys({ instance: i, status, heading = true }: { instance: Instance; status: AutomationStatus | undefined; heading?: boolean }) {
   const { t, errorMessage, locale } = useI18n();
   const relative = useRelativeTime();
   const toast = useToast();
@@ -251,9 +265,9 @@ function AgentKeys({ instance: i, status }: { instance: Instance; status: Automa
   };
   return (
     <div>
-      <p className="text-sm font-medium">{t('agents.keys')}</p>
+      {heading ? <p className="mb-2 text-sm font-medium">{t('agents.keys')}</p> : null}
       {status?.clients.length ? (
-        <ul className="mt-2 divide-y divide-border text-sm" data-testid="agent-keys">
+        <ul className="divide-y divide-border text-sm" data-testid="agent-keys">
           {status.clients.map((c) => (
             <li key={c.id} className="flex flex-wrap items-center justify-between gap-2 py-2.5">
               <span className="min-w-0">
@@ -272,7 +286,7 @@ function AgentKeys({ instance: i, status }: { instance: Instance; status: Automa
           ))}
         </ul>
       ) : (
-        <p className="mt-2 text-sm text-muted">{status ? t('agents.keys.none') : t('common.loading')}</p>
+        <p className="text-sm text-muted">{status ? t('agents.keys.none') : t('common.loading')}</p>
       )}
     </div>
   );
@@ -348,6 +362,7 @@ export function AgentAccessSection({ instance: i }: { instance: Instance }) {
           <div className="mt-5 border-t border-border pt-5">
             <p className="mb-3 text-sm font-medium">{t('agents.connect.title')}</p>
             <AgentConnect instance={i} status={status.data} />
+            <Hint className="mt-4">{t('agents.security')} <DocsLink to="coding-agents" /></Hint>
           </div>
           <div className="mt-5 border-t border-border pt-5"><AgentKeys instance={i} status={status.data} /></div>
         </>
@@ -356,36 +371,88 @@ export function AgentAccessSection({ instance: i }: { instance: Instance }) {
   );
 }
 
-/** The dashboard's way in: connect an agent to one browser without leaving the list. */
+/** Whether agents may connect, and whether one is connected now: the panel's first answer. */
+function AccessStatus({ instance: i, status }: { instance: Instance; status: AutomationStatus | undefined }) {
+  const { t, errorMessage } = useI18n();
+  const toast = useToast();
+  const update = useUpdateInstance();
+  const session = status?.session ?? null;
+  const connectedName = session ? status?.clients.find((c) => c.id === session.clientId)?.name ?? t('agents.unknownClient') : null;
+  const on = i.agentAccess;
+  const toggle = () => update.mutate(
+    { id: i.id, patch: { agentAccess: !on } },
+    { onSuccess: () => toast(t('settings.saved')), onError: (err) => toast(errorMessage(err), 'error') },
+  );
+  return (
+    <div className={cn('flex items-center gap-3 border p-4', connectedName ? 'border-running/40 bg-running/5' : 'border-border bg-surface')}>
+      <span
+        className={cn('size-2.5 shrink-0 rounded-full', !on ? 'bg-subtle' : connectedName ? 'bg-running' : 'bg-border-strong')}
+        aria-hidden
+      />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold">{connectedName ? t('agents.connected', { name: connectedName }) : on ? t('agents.notConnected') : t('agents.panel.off')}</p>
+        <p className="mt-0.5 text-xs leading-relaxed text-muted">{on ? t('agents.panel.onHint') : t('agents.dialog.off')}</p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label={t('agents.allow')}
+        title={t('agents.allow')}
+        disabled={update.isPending}
+        onClick={toggle}
+        className={cn(
+          'relative h-6 w-11 shrink-0 border transition-colors focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none disabled:opacity-50',
+          on ? 'border-fg bg-fg' : 'border-border-strong bg-surface-2',
+        )}
+      >
+        <span className={cn('absolute top-0.5 left-0.5 size-[18px] shadow-sm transition-transform', on ? 'translate-x-5 bg-bg' : 'bg-fg/60')} />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The dashboard's way in: connect an agent to one browser without leaving the list. A side panel
+ * like the one that creates a browser: the status and the two steps up front, everything else folded.
+ */
 export function AgentConnectDialog({ instance: i, open, onClose }: { instance: Instance; open: boolean; onClose: () => void }) {
   const { t } = useI18n();
   const navigate = useNavigate();
   const status = useAutomation(i.id, open && i.agentAccess);
+  const keys = status.data?.clients.length ?? 0;
   return (
-    <Dialog
+    <SidePanel
       open={open}
       onOpenChange={(next) => { if (!next) onClose(); }}
-      size="lg"
-      title={t('agents.dialog.title', { name: i.name })}
-      description={t('agents.connect.description')}
+      title={t('agents.panel.title')}
+      description={i.name}
+      icon={<Bot />}
+      storageKey="nevazu.agent.width"
+      minWidth={420}
+      maxWidth={900}
+      defaultWidth={560}
+      resizeLabel={t('create.resize')}
       closeLabel={t('common.close')}
       footer={
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <Button variant="ghost" onClick={() => { onClose(); navigate(`/browsers/${i.id}/settings`); }}>{t('agents.dialog.settings')}</Button>
+        <div className="flex items-center justify-between gap-2">
+          <Button variant="ghost" onClick={() => { onClose(); navigate(`/browsers/${i.id}/settings`); }}><Settings /> {t('agents.dialog.settings')}</Button>
           <Button onClick={onClose}>{t('common.close')}</Button>
         </div>
       }
     >
-      <AccessSwitch instance={i} />
-      {i.agentAccess ? (
-        <>
-          {status.data?.session ? <p className="mt-4 text-sm text-running">{t('agents.connected', { name: status.data.clients.find((c) => c.id === status.data!.session!.clientId)?.name ?? t('agents.unknownClient') })}</p> : null}
-          <div className="mt-5 border-t border-border pt-5"><AgentConnect instance={i} status={status.data} /></div>
-          <div className="mt-5 border-t border-border pt-5"><AgentKeys instance={i} status={status.data} /></div>
-        </>
-      ) : (
-        <p className="mt-4 text-sm text-muted">{t('agents.dialog.off')}</p>
-      )}
-    </Dialog>
+      <div className="space-y-7">
+        <AccessStatus instance={i} status={status.data} />
+        {i.agentAccess ? (
+          <>
+            <AgentConnect instance={i} status={status.data} />
+            <Fold title={t('agents.keys')} aside={status.data ? String(keys) : null} testId="agent-keys-fold">
+              <AgentKeys instance={i} status={status.data} heading={false} />
+            </Fold>
+            <Hint>{t('agents.security')} <DocsLink to="coding-agents" newTab /></Hint>
+          </>
+        ) : null}
+      </div>
+    </SidePanel>
   );
 }

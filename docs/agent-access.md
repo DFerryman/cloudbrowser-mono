@@ -240,7 +240,7 @@ so a reconnect or restart never silently returns control to the agent; only an e
 ## Client setup
 
 The agent sets itself up; the user handles only the secret
-(`apps/web/src/features/instances/agent-setup.ts`, shown in the Connect a coding agent dialog):
+(`apps/web/src/features/instances/agent-setup.ts`, shown in the Coding agent panel):
 
 1. The user creates a key and saves it in an environment variable named after the browser,
    `NEVAZU_<BROWSER>_KEY` (`echo 'export …' >> ~/.zshrc`, or `setx` on Windows).
@@ -252,7 +252,7 @@ The agent sets itself up; the user handles only the secret
 
 `<name>` is `nevazu-<browser name>`, so several browsers coexist; every client below reads the key
 from the variable (VS Code instead prompts once and keeps it in its secret storage), so the key is
-never written to a configuration file or seen by the model. The same snippets sit in the dialog's
+never written to a configuration file or seen by the model. The same snippets sit in the panel's
 folded **Set it up by hand** section, filled in for the browser.
 
 <details>
