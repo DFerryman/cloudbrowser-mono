@@ -10,6 +10,7 @@ import {
   BillingState,
   CheckoutBody,
   DATA_KEPT_DAYS,
+  PortalQuery,
   Problem,
   RedirectResult,
   RegionPricing,
@@ -56,6 +57,34 @@ function requireProvider(c: Context<AppEnv>): PaymentProvider {
   return provider;
 }
 
+/**
+ * The customer portals that hold a user's receipts, the provider taking top-ups first (Stripe
+ * first when neither takes them). A provider counts whenever it is configured, also when it no
+ * longer takes top-ups: its invoices stay reachable.
+ */
+async function receiptPortals(c: Context<AppEnv>, userId: string) {
+  const providers = paymentProviders(c.env);
+  const { stripe, creem } = providers;
+  const db = c.get('db');
+  const [stripeCustomer] = stripe ? await db.select().from(stripeCustomers).where(eq(stripeCustomers.userId, userId)) : [];
+  const [creemCustomer] = creem ? await db.select().from(billingCustomers).where(eq(billingCustomers.userId, userId)) : [];
+  const portals: { id: PaymentProvider['id']; open: () => Promise<string | null> }[] = [];
+  if (stripe && stripeCustomer) {
+    portals.push({ id: 'stripe', open: async () => {
+      try {
+        return await stripe.portalUrl(stripeCustomer.stripeCustomerId, `${c.env.APP_URL}/billing`);
+      } catch (e) {
+        // A customer deleted in Stripe, or from the other mode: forget it, the next paid checkout links a new one.
+        if (!(e instanceof StripeError) || e.status !== 400 || e.param !== 'customer') throw e;
+        await db.delete(stripeCustomers).where(eq(stripeCustomers.stripeCustomerId, stripeCustomer.stripeCustomerId));
+        return null;
+      }
+    } });
+  }
+  if (creem && creemCustomer) portals.push({ id: 'creem', open: () => creem.portalUrl(creemCustomer.creemCustomerId) });
+  return checkoutProvider(providers)?.id === 'creem' ? portals.reverse() : portals;
+}
+
 billingRoute.openapi(
   createRoute({
     method: 'get',
@@ -85,6 +114,7 @@ billingRoute.openapi(
       mode: (await entitlementsFor(db, user.id)).billing,
       enabled: provider !== null,
       provider: provider?.id ?? null,
+      receipts: (await receiptPortals(c, user.id)).map((p) => p.id),
       balanceMicros: account.balanceMicros,
       reservedMicros: account.reservedMicros,
       availableMicros: account.availableMicros,
@@ -201,32 +231,16 @@ billingRoute.openapi(
     method: 'post',
     path: '/billing/portal',
     tags: ['billing'],
-    description: 'The payment provider’s customer portal: receipts and invoices for top-ups. Stripe’s when it takes top-ups and the user has paid through it, else Creem’s.',
+    description: 'A payment provider’s customer portal: receipts and invoices for top-ups. `provider` picks Stripe’s or Creem’s; by default the one taking top-ups, else the other one the user paid through.',
+    request: { query: PortalQuery },
     responses: { 200: json(RedirectResult, 'Customer portal URL'), ...problems },
   }),
   async (c) => {
-    const active = requireProvider(c);
     const { stripe, creem } = paymentProviders(c.env);
-    const db = c.get('db');
-    const userId = c.get('user').id;
-    const [stripeCustomer] = stripe ? await db.select().from(stripeCustomers).where(eq(stripeCustomers.userId, userId)) : [];
-    const [creemCustomer] = creem ? await db.select().from(billingCustomers).where(eq(billingCustomers.userId, userId)) : [];
-    // The provider taking top-ups first; someone who only ever paid the other one still gets its receipts.
-    const portals = [
-      stripe && stripeCustomer ? async () => {
-        try {
-          return await stripe.portalUrl(stripeCustomer.stripeCustomerId, `${c.env.APP_URL}/billing`);
-        } catch (e) {
-          // A customer deleted in Stripe, or from the other mode: forget it, the next paid checkout links a new one.
-          if (!(e instanceof StripeError) || e.status !== 400 || e.param !== 'customer') throw e;
-          await db.delete(stripeCustomers).where(eq(stripeCustomers.stripeCustomerId, stripeCustomer.stripeCustomerId));
-          return null;
-        }
-      } : null,
-      creem && creemCustomer ? () => creem.portalUrl(creemCustomer.creemCustomerId) : null,
-    ];
-    for (const portal of active.id === 'stripe' ? portals : [...portals].reverse()) {
-      const url = portal ? await portal() : null;
+    if (!stripe && !creem) throw problem(503, 'billing_unavailable', 'Billing is not set up on this deployment.');
+    const { provider } = c.req.valid('query');
+    for (const portal of (await receiptPortals(c, c.get('user').id)).filter((p) => !provider || p.id === provider)) {
+      const url = await portal.open();
       if (url) return c.json({ url }, 200);
     }
     throw problem(409, 'invalid_state', 'You have not bought credit yet.');

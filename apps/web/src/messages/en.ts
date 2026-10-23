@@ -453,6 +453,7 @@ export const en = {
   'billing.noTopUps': 'No top-ups are available yet.',
   'billing.unavailable': 'Payments are not set up on this deployment yet.',
   'billing.receipts': 'Receipts',
+  'billing.receiptsFrom': '{provider} receipts',
   'billing.thisMonth': "Charged this month",
   'billing.monthTotal': '{amount} in {month}',
   'billing.item.compute': 'Compute',

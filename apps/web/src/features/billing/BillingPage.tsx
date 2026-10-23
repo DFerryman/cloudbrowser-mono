@@ -103,8 +103,17 @@ function BalanceCard({ state }: { state: BillingState }) {
     <Card id="top-up" className="flex scroll-mt-6 flex-col p-5 md:p-6">
       <div className="flex items-start justify-between gap-3">
         <Eyebrow as="h2">{t('billing.balance')}</Eyebrow>
-        {state.enabled ? (
-          <Button variant="ghost" size="sm" className="-mt-1 -mr-2 text-muted" disabled={portal.isPending} onClick={() => portal.mutate(undefined, { onError: (e) => toast(errorMessage(e), 'error') })}>
+        {state.receipts.length > 1 ? (
+          // Paid through both providers: each keeps its own receipts and invoices.
+          <div className="-mt-1 -mr-2 flex">
+            {state.receipts.map((p) => (
+              <Button key={p} variant="ghost" size="sm" className="text-muted" disabled={portal.isPending} onClick={() => portal.mutate(p, { onError: (e) => toast(errorMessage(e), 'error') })}>
+                <ExternalLink /> {t('billing.receiptsFrom', { provider: p === 'stripe' ? 'Stripe' : 'Creem' })}
+              </Button>
+            ))}
+          </div>
+        ) : state.enabled || state.receipts.length ? (
+          <Button variant="ghost" size="sm" className="-mt-1 -mr-2 text-muted" disabled={portal.isPending} onClick={() => portal.mutate(state.receipts[0], { onError: (e) => toast(errorMessage(e), 'error') })}>
             <ExternalLink /> {t('billing.receipts')}
           </Button>
         ) : null}

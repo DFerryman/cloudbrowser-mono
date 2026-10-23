@@ -246,7 +246,9 @@ pnpm exec wrangler secret put STRIPE_TOPUP_PRICES      # price_…,price_… (co
    Without a USD bank account a typical international card costs about 6% + 20p in all, so a fee
    setting of 600 bps + 27 cents is a cautious start.
 9. **Policies:** the Terms, Privacy and Refund pages name both providers. As the seller, also
-   publish the company's legal name, registered number, registered office and VAT number.
+   publish the company's legal name, registered number, registered office and VAT number. The
+   Terms (section 9) promise notice of material changes before they take effect: email existing
+   users about the updated Terms, Privacy and Refund policies when this release goes out.
 
 To return to Creem, delete only the prices (`pnpm exec wrangler secret delete STRIPE_TOPUP_PRICES`);
 keep `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` so later refunds and chargebacks of Stripe

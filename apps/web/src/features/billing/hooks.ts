@@ -1,4 +1,4 @@
-import type { AccountUsage, BalanceTransaction, BillingState, RegionPricing } from '@cloudbrowser/contracts';
+import type { AccountUsage, BalanceTransaction, BillingState, PaymentProviderId, RegionPricing } from '@cloudbrowser/contracts';
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { api, ApiError } from '../../lib/api.js';
 import { keys, queryClient } from '../../lib/query.js';
@@ -33,7 +33,7 @@ export function useCheckout() {
 
 export function usePortal() {
   return useMutation({
-    mutationFn: () => api<{ url: string }>('POST', '/billing/portal'),
+    mutationFn: (provider?: PaymentProviderId) => api<{ url: string }>('POST', provider ? `/billing/portal?provider=${provider}` : '/billing/portal'),
     onSuccess: ({ url }) => window.location.assign(url),
   });
 }

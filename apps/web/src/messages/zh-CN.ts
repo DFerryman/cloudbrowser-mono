@@ -455,6 +455,7 @@ export const zhCN: Messages = {
   'billing.noTopUps': '暂未提供充值。',
   'billing.unavailable': '此部署尚未开通支付。',
   'billing.receipts': '收据',
+  'billing.receiptsFrom': '{provider} 收据',
   'billing.thisMonth': "本月已扣费",
   'billing.monthTotal': '{month}：{amount}',
   'billing.item.compute': '计算费用',

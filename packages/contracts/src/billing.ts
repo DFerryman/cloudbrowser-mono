@@ -52,6 +52,8 @@ export const BillingState = z.object({
   enabled: z.boolean(),
   /** The provider top-ups go to; null when `enabled` is false. */
   provider: PaymentProviderId.nullable(),
+  /** Providers whose customer portal holds this user's receipts and invoices, the one taking top-ups first. */
+  receipts: z.array(PaymentProviderId),
   /** Total unspent prepaid credit, including the fixed-resource deposit. */
   balanceMicros: z.number().int(),
   reservedMicros: z.number().int().nonnegative(),
@@ -91,6 +93,8 @@ export const BalanceTransaction = z.object({
 export type BalanceTransaction = z.infer<typeof BalanceTransaction>;
 
 export const CheckoutBody = z.object({ productId: z.string().min(1).max(128) });
+/** Whose receipts to open; by default the provider taking top-ups, else the other. */
+export const PortalQuery = z.object({ provider: PaymentProviderId.optional() });
 export const RedirectResult = z.object({ url: z.string().url() });
 
 /** Account-level usage for a month: every browser, including deleted ones. */

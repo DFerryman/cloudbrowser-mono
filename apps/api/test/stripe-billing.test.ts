@@ -294,6 +294,36 @@ describe('choosing the payment provider', () => {
     expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ provider: 'stripe', topUps: expect.arrayContaining([expect.objectContaining({ productId: 'price_10usd00001' })]) });
   });
 
+  it('offers Stripe’s prices again at once when top-ups come back from Creem', async () => {
+    const hour = Math.ceil(Date.now() / 3_600_000) * 3_600_000; // the next xx:00, when the cron refreshes products
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(hour + 30_000);
+      expect((await t.call('GET', '/api/v1/billing')).body.topUps).toHaveLength(3);
+      // Handed back to Creem; the hourly refresh turns Stripe's stored prices off.
+      Object.assign(t.env, { STRIPE_TOPUP_PRICES: '' });
+      await billingSweep(t.env as never, db(), paymentProviders(t.env as never), new Date(hour + 60_000), { nightly: false });
+      expect(sql("SELECT count(*) AS n FROM topup_packs WHERE provider = 'stripe' AND active = 1")).toEqual({ n: 0 });
+      expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ provider: 'creem', topUps: [{ productId: 'prod_creem10' }] });
+      // Back to Stripe later the same hour, long before the next hourly refresh.
+      Object.assign(t.env, STRIPE_CONFIG);
+      vi.setSystemTime(hour + 30 * 60_000);
+      const b = (await t.call('GET', '/api/v1/billing')).body;
+      expect(b.provider).toBe('stripe');
+      expect(b.topUps.map((p: { productId: string }) => p.productId)).toEqual(['price_10usd00001', 'price_anyusd0001', 'price_25usd00001']);
+      expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'price_10usd00001' })).status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('offers only the prices configured now', async () => {
+    await t.call('GET', '/api/v1/billing');
+    Object.assign(t.env, { STRIPE_TOPUP_PRICES: 'price_25usd00001' });
+    expect((await t.call('GET', '/api/v1/billing')).body.topUps.map((p: { productId: string }) => p.productId)).toEqual(['price_25usd00001']);
+    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'price_10usd00001' })).body.type).toBe('validation_failed');
+  });
+
   it('answers 503 when neither provider is configured', async () => {
     Object.assign(t.env, { STRIPE_SECRET_KEY: undefined, CREEM_API_KEY: undefined });
     expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ enabled: false, provider: null, topUps: [] });
@@ -587,8 +617,15 @@ describe('Creem beside Stripe', () => {
     await creemWebhook({ id: 'creem_evt_2', eventType: 'refund.created', object: { id: 'ref_c1', refund_amount: 550, refund_currency: 'USD', status: 'succeeded', order: { id: order } } });
     expect(await balance()).toBe(5_000_000);
 
-    // After a Stripe payment, Stripe's portal comes first.
+    expect((await t.call('GET', '/api/v1/billing')).body.receipts).toEqual(['creem']);
+    // After a Stripe payment, Stripe's portal comes first, and Creem's receipts stay one click away.
     await paidTopUp();
+    expect((await t.call('GET', '/api/v1/billing')).body.receipts).toEqual(['stripe', 'creem']);
+    expect((await t.call('POST', '/api/v1/billing/portal')).body.url).toBe('https://billing.stripe.test/p/session/cus_new1');
+    expect((await t.call('POST', '/api/v1/billing/portal?provider=creem')).body.url).toBe('https://creem-portal.test/cust_creem1');
+    // Stripe kept only for its earlier payments, with Creem gone: Stripe's receipts still open.
+    Object.assign(t.env, { STRIPE_TOPUP_PRICES: '', CREEM_API_KEY: undefined });
+    expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ enabled: false, receipts: ['stripe'] });
     expect((await t.call('POST', '/api/v1/billing/portal')).body.url).toBe('https://billing.stripe.test/p/session/cus_new1');
     expect(sql("SELECT count(*) AS n FROM webhook_events WHERE processed_at IS NULL")).toEqual({ n: 0 });
   });

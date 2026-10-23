@@ -165,15 +165,21 @@ export async function refreshTopupPacks(db: Db, provider: PaymentProvider, now: 
 }
 
 /**
- * The top-ups on offer from the provider taking top-ups; read from it the first time (afterwards
- * the billing cron refreshes them hourly). None when no provider is configured.
+ * The top-ups on offer from the provider taking top-ups: only the products configured now. The
+ * billing cron refreshes them hourly; they are read at once when a configured product was never
+ * read, or is off and was not read in the last ten minutes (removed from the configuration and
+ * added back, e.g. when top-ups return to Stripe from Creem). None when no provider is configured.
  */
 export async function offeredTopupPacks(db: Db, provider: PaymentProvider | null, now = new Date()): Promise<TopUpPack[]> {
   if (!provider) return [];
-  if ((await db.select({ id: topupPacks.productId }).from(topupPacks).where(eq(topupPacks.provider, provider.id)).limit(1)).length === 0) {
-    await refreshTopupPacks(db, provider, now).catch((e) => console.error('top-up refresh failed', e));
-  }
-  return activeTopupPacks(db, provider.id);
+  const configured = provider.client.topupProductIds;
+  const stored = await db.select({ productId: topupPacks.productId, active: topupPacks.active, fetchedAt: topupPacks.fetchedAt }).from(topupPacks).where(eq(topupPacks.provider, provider.id));
+  const unread = configured.some((id) => {
+    const row = stored.find((r) => r.productId === id);
+    return !row || (!row.active && now.getTime() - row.fetchedAt.getTime() > 10 * 60_000);
+  });
+  if (unread) await refreshTopupPacks(db, provider, now).catch((e) => console.error('top-up refresh failed', e));
+  return (await activeTopupPacks(db, provider.id)).filter((p) => configured.includes(p.productId));
 }
 
 export async function activeTopupPacks(db: Db, provider: PaymentProviderId): Promise<TopUpPack[]> {
