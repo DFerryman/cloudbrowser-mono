@@ -194,7 +194,7 @@ export function RegionPicker({ open, regions, loading, pricing, value, onChange,
       <p className="mt-2 flex gap-2 text-xs leading-relaxed text-subtle">
         <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
         <span>
-          {t('create.region.latencyHelp')} {t('create.permanent')} <DocsLink to="browsers#regions" />
+          {t('create.region.latencyHelp')} {t('create.permanent')} <DocsLink to="browsers#regions" newTab />
         </span>
       </p>
     </div>
@@ -236,7 +236,9 @@ function RegionRow({ region, place, checked, disabled, recommended, onChange, re
           {reason ? (
             <>
               <span aria-hidden>·</span>
-              <span className="shrink-0">{reason}</span>
+              {/* A long reason (a translated one, or one with the untested note) shrinks with the row
+                  instead of pushing the price out of it; the whole of it shows on hover. */}
+              <span className="min-w-0 truncate" title={reason}>{reason}</span>
             </>
           ) : null}
           <span aria-hidden>·</span>

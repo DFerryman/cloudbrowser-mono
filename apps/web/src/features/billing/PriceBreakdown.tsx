@@ -72,7 +72,7 @@ export function PriceBreakdown({ pricing, storageGb }: { pricing: RegionPricing;
       </div>
       <Hint>{t('price.example', { amount: m(e.runningHour * 60 + e.alwaysOnMonth) })}</Hint>
       <Hint>
-        {t('price.reserve', { amount: m(retentionReserve(r, { storageGb: gb, rootVolumeGb: pricing.rootVolumeGb, backups: false })) })} <DocsLink to="billing#held" />
+        {t('price.reserve', { amount: m(retentionReserve(r, { storageGb: gb, rootVolumeGb: pricing.rootVolumeGb, backups: false })) })} <DocsLink to="billing#held" newTab />
       </Hint>
       <PriceSource pricing={pricing} />
     </div>

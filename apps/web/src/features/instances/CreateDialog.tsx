@@ -2,7 +2,7 @@ import { CreateInstanceBody, DEFAULT_REGION, TIERS, browserEstimate, retentionRe
 import { Button, cn, Hint, Input, Label, SidePanel } from '@cloudbrowser/ui';
 import { DocsLink } from '../../app/DocsLink.js';
 import { AlertCircle, Bot, ChevronDown, ChevronRight, Gauge, Monitor } from 'lucide-react';
-import { useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { useI18n } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
@@ -43,9 +43,13 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
   // The cost stays folded away so the panel reads cleanly; one click shows the whole estimate.
   const [costOpen, setCostOpen] = useState(false);
 
+  /** The user typed a name since the dialog opened: the default no longer replaces it. */
+  const nameEdited = useRef(false);
+
   useEffect(() => {
     if (open) {
       setCostOpen(false);
+      nameEdited.current = false;
       setName(initialInstance?.name ?? `Browser ${(instances.data?.length ?? 0) + 1}`);
       if (initialInstance) setRegionId(initialInstance.regionId);
       setTier(initialInstance?.tier ?? 'basic');
@@ -53,6 +57,12 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
       setError(null);
     }
   }, [open, initialInstance?.id]);
+
+  // Opened before the browsers loaded (a visit straight to /browsers/new), the default was
+  // "Browser 1" whatever the count: number it again once they have, unless the user typed a name.
+  useEffect(() => {
+    if (open && !initialInstance && !nameEdited.current && instances.data) setName(`Browser ${instances.data.length + 1}`);
+  }, [open, instances.data?.length]);
 
   const b = billing.data;
   const atLimit = me.data ? me.data.usage.browsers >= me.data.entitlements.maxBrowsers : false;
@@ -135,7 +145,10 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
       <form id={formId} onSubmit={submit} className="space-y-6">
         <div>
           <Label htmlFor="name">{t('create.name')}</Label>
-          <Input id="name" value={name} maxLength={64} required onChange={(e) => setName(e.target.value)} />
+          <Input id="name" value={name} maxLength={64} required onChange={(e) => {
+            nameEdited.current = true;
+            setName(e.target.value);
+          }} />
         </div>
 
         {premiumOffer ? (
@@ -149,7 +162,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
                 title={t('tier.premium')}
                 hint={`${t('create.machine.hint', { vcpu: TIERS.premium.vcpu, memory: TIERS.premium.memoryGb })} ${t('create.machine.premiumHint')}`} />
             </div>
-            {machine === 'premium' ? <Hint className="mt-2">{t('create.machine.premiumNote')} <DocsLink to="browsers#premium" /></Hint> : null}
+            {machine === 'premium' ? <Hint className="mt-2">{t('create.machine.premiumNote')} <DocsLink to="browsers#premium" newTab /></Hint> : null}
           </fieldset>
         ) : null}
 
@@ -173,7 +186,7 @@ export function CreateDialog({ open, initialInstance, onClose, onCreated }: { op
             <input type="checkbox" className="mt-0.5 size-4 accent-[var(--color-fg)]" checked={agentAccess} onChange={(e) => setAgentAccess(e.target.checked)} />
             <span className="min-w-0">
               <span className="flex items-center gap-1.5 text-sm font-medium"><Bot className="size-4 text-muted" aria-hidden /> {t('create.agentAccess')}</span>
-              <span className="mt-0.5 block text-xs leading-relaxed text-subtle">{t('create.agentAccess.hint')} <DocsLink to="coding-agents" /></span>
+              <span className="mt-0.5 block text-xs leading-relaxed text-subtle">{t('create.agentAccess.hint')} <DocsLink to="coding-agents" newTab /></span>
             </span>
           </label>
         </fieldset>
