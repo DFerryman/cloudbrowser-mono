@@ -429,7 +429,7 @@ describe('gateway internal API and live view', () => {
     return created.body.instanceId as string;
   }
 
-  it('swaps a bootstrap token once for a long-lived agent credential', async () => {
+  it('swaps a bootstrap token for a long-lived agent credential, until the agent first uses one', async () => {
     const id = await createRunning();
     const row = t.d1.sqlite.prepare(`SELECT attrs FROM fake_provider_resources WHERE kind = 'vm'`).get() as { attrs: string };
     const { bootstrapToken } = JSON.parse(row.attrs).userData;
@@ -437,8 +437,15 @@ describe('gateway internal API and live view', () => {
 
     const first = await api.authenticateAgent({ instanceId: id, bootstrap: bootstrapToken });
     expect(first.ok && first.credential).toBeTruthy();
+    // The first credential never reached the agent (a refused tunnel, a lost welcome): the token
+    // still works and issues a replacement; the undelivered credential stops working.
+    const second = await api.authenticateAgent({ instanceId: id, bootstrap: bootstrapToken });
+    expect(second.ok && second.credential).toBeTruthy();
+    expect(await api.authenticateAgent({ instanceId: id, credential: first.ok ? first.credential : '' })).toEqual({ ok: false, reason: 'invalid_token' });
+    expect(await api.authenticateAgent({ instanceId: id, credential: second.ok ? second.credential : '' })).toEqual({ ok: true, generation: 1 });
+    // Once the agent has connected with its credential, the bootstrap token is spent.
     expect(await api.authenticateAgent({ instanceId: id, bootstrap: bootstrapToken })).toEqual({ ok: false, reason: 'invalid_token' });
-    expect(await api.authenticateAgent({ instanceId: id, credential: first.ok ? first.credential : '' })).toEqual({ ok: true, generation: 1 });
+    expect(await api.authenticateAgent({ instanceId: id, credential: second.ok ? second.credential : '' })).toEqual({ ok: true, generation: 1 });
     expect((await api.authenticateAgent({ instanceId: id, credential: 'nope' })).ok).toBe(false);
   });
 
