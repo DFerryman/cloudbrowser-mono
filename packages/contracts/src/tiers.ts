@@ -13,11 +13,17 @@ export interface TierSpec {
   /** vCPUs and memory every launch candidate of the tier has (AWS: DEFAULT_TIER_INSTANCE_TYPES). */
   vcpu: number;
   memoryGb: number;
+  /**
+   * The most desktop pixels the live view asks for (width × height). Chrome's software
+   * compositing and x264 both cost about in proportion to pixels: 1080p scrolling keeps about
+   * 1.3 of Basic's 2 vCPUs busy (docs/aws.md), so 1440p (1.78× the pixels) would leave none.
+   */
+  maxScreenPixels: number;
 }
 
 export const TIERS: Record<BrowserTier, TierSpec> = {
-  basic: { vcpu: 2, memoryGb: 4 },
-  premium: { vcpu: 4, memoryGb: 8 },
+  basic: { vcpu: 2, memoryGb: 4, maxScreenPixels: 1920 * 1080 },
+  premium: { vcpu: 4, memoryGb: 8, maxScreenPixels: 2560 * 1440 },
 };
 
 /** The live view every browser streams, whatever its tier. */

@@ -139,6 +139,29 @@
   --cb-starting: #f59e0b;
   --cb-error: #f87171;
   color-scheme: dark;
+  /*
+   * @theme declares the colours on :root, where each var(--cb-*) resolves to the page theme's
+   * value and is inherited as that colour: the overrides above alone changed nothing below, and in
+   * the light theme the session's buttons were drawn white on white. Declared again here, the
+   * colours resolve against this element's own --cb-* values.
+   */
+  --color-bg: var(--cb-bg);
+  --color-surface: var(--cb-surface);
+  --color-surface-2: var(--cb-surface-2);
+  --color-border: var(--cb-border);
+  --color-border-strong: var(--cb-border-strong);
+  --color-fg: var(--cb-fg);
+  --color-muted: var(--cb-muted);
+  --color-subtle: var(--cb-subtle);
+  --color-accent: var(--cb-accent);
+  --color-running: var(--cb-running);
+  --color-starting: var(--cb-starting);
+  --color-sleeping: var(--cb-subtle);
+  --color-error: var(--cb-error);
+  --color-chart-1: var(--cb-accent);
+  --color-chart-2: color-mix(in oklab, var(--cb-accent) 62%, var(--cb-bg));
+  --color-chart-3: color-mix(in oklab, var(--cb-accent) 36%, var(--cb-bg));
+  --color-chart-4: color-mix(in oklab, var(--cb-accent) 18%, var(--cb-bg));
 }
 
 @layer base {

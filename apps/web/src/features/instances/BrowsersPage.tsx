@@ -162,7 +162,7 @@ export function BrowsersPage() {
                     aria-selected={filter === f}
                     onClick={() => setFilter(f)}
                     className={cn(
-                      'flex h-7 min-w-0 flex-1 items-center justify-center gap-1.5 px-2.5 text-[13px] font-medium whitespace-nowrap transition-colors sm:flex-none',
+                      'flex h-7 min-w-0 flex-auto items-center justify-center gap-1 px-1.5 text-[13px] font-medium whitespace-nowrap transition-colors sm:flex-none sm:gap-1.5 sm:px-2.5',
                       filter === f ? 'bg-bg text-fg shadow-[0_0_0_1px_var(--color-border)]' : 'text-muted hover:text-fg',
                       f === 'attention' && counts.attention > 0 && filter !== f && 'text-error',
                     )}

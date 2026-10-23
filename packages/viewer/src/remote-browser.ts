@@ -31,9 +31,9 @@ export interface RemoteBrowserOptions {
   onStats?: (stats: ViewerStats) => void;
   /** A CSS `cursor` value for the remote cursor, drawn locally (page 5). */
   onCursor?: (css: string) => void;
-  /** Text the remote Chrome put on its clipboard. */
+  /** Text the remote Chrome put on its clipboard. Report a successful local copy with clipboardCopied. */
   onClipboard?: (text: string) => void;
-  /** A pasted or dropped file transfer started, progressed or ended. */
+  /** A pasted or dropped file transfer started, progressed or ended; also a text paste refused as too large (`files` 0). */
   onTransfer?: (update: TransferUpdate) => void;
   /** Delivery was interrupted; discard old input and require an explicit reconnect. */
   onInputError?: (reason: InputFailure) => void;
@@ -46,6 +46,8 @@ export interface RemoteBrowserOptions {
   /** The level neko streams now, whenever it changes. */
   onVideo?: (quality: VideoQuality) => void;
   statsIntervalMs?: number;
+  /** The most desktop pixels to ask for (TIERS[tier].maxScreenPixels); unbounded by default. */
+  maxScreenPixels?: number;
   /** Maximum time per token fetch or transport/WebRTC handshake before retrying. Defaults to 20 s. */
   connectionTimeoutMs?: number;
   /** Total consecutive failed attempts, including the initial one. Defaults to three. */
@@ -68,6 +70,16 @@ const MAX_MEDIA_SAMPLE_AGE_MS = 5000;
 const SOFTWARE_SHIFTED = new Set([...`~!@#$%^&*()_+{}|:"<>?`]);
 const SHIFTED_KEYSYMS = new Map([...'`1234567890-=[]\\;\',./'].map((character, index) =>
   [character.charCodeAt(0), [...SOFTWARE_SHIFTED][index]!.charCodeAt(0)]));
+/**
+ * The most text one paste carries, in UTF-8. The gateway closes a viewer socket for a frame above
+ * 256 KiB (apps/gateway MAX_FRAME_BYTES), and JSON can double text full of quotes or newlines.
+ */
+const MAX_PASTE_BYTES = 128 * 1024;
+/** Committed text longer than this, in characters, goes as one paste (typeSoftwareText). */
+const LONG_TYPED_TEXT = 100;
+/** How long a clipboard/updated matching text typed through the remote clipboard counts as its echo. */
+const TYPED_ECHO_MS = 3000;
+const encoder = new TextEncoder();
 const modifierKeysym = (sym: number) => sym >= 0xffe1 && sym <= 0xffee;
 const shiftedKeysym = (sym: number) => sym >= 0x61 && sym <= 0x7a ? sym - 0x20 : SHIFTED_KEYSYMS.get(sym) ?? sym;
 
@@ -130,6 +142,12 @@ export class RemoteBrowser {
   private offeredVideos: string[] = [];
   private counters: { lost: number; received: number; freezes: number; frames: number; at: number } | null = null;
   private readonly files: FileTransfers;
+  /** Text the remote clipboard last reported (clipboard/updated); null once typing went through it. */
+  private remoteClipboard: string | null = null;
+  /** The remote clipboard changed, and the page has not reported copying it to the local one. */
+  private remoteClipboardNewer = false;
+  /** Text recently typed through the remote clipboard, whose clipboard/updated is only an echo. */
+  private typedPastes: { text: string; at: number }[] = [];
 
   constructor(private readonly opts: RemoteBrowserOptions) {
     this.files = new FileTransfers({
@@ -147,12 +165,7 @@ export class RemoteBrowser {
       transport: () => this.ws,
       ready: () => this.inputReady && !this.stopped,
       held: () => this.transportKeys.size > 0 || this.transportButtons.size > 0,
-      failed: (reason) => {
-        this.inputReady = false;
-        this.stopped = true;
-        this.releaseTransportKeys();
-        this.opts.onInputError?.(reason);
-      },
+      failed: (reason) => this.inputFailed(reason),
       sent: (data) => {
         const frame = JSON.parse(data) as { data: NekoMessage<{ keysym?: number; code?: number }> };
         const { event, payload } = frame.data;
@@ -171,6 +184,11 @@ export class RemoteBrowser {
   /** The remote desktop in its own pixels; the video may be a downscaled picture of it. */
   get screenSize(): { width: number; height: number } | null {
     return this.remoteScreen ? { width: this.remoteScreen.width, height: this.remoteScreen.height } : null;
+  }
+
+  /** neko's current mode with its refresh rate, for input diagnostics. */
+  get screenMode(): ScreenConfiguration | null {
+    return this.remoteScreen ? { ...this.remoteScreen } : null;
   }
 
   /** A changed preference applies at once to a live stream, without reconnecting. */
@@ -268,9 +286,10 @@ export class RemoteBrowser {
     ws.onclose = () => {
       if (this.ws !== ws) return;
       this.inputReady = false;
-      this.inputQueue.interrupt('disconnected');
       // Capture the peer and its last bounded sample before teardown advances its sequence.
       if (!this.stopped && this.state !== 'taken-over') this.diagnostic('failed', 'transport_closed');
+      this.inputQueue.interrupt('disconnected');
+      if (this.ws !== ws) return; // The interruption lost input and ended the connection.
       this.ws = null;
       this.clearConnectionTimer();
       this.teardownPeer();
@@ -282,6 +301,12 @@ export class RemoteBrowser {
 
   disconnect() {
     this.diagnostic('closed', 'canceled');
+    this.end();
+    this.setState('closed');
+  }
+
+  /** Ends the connection for good: only connect() starts another. */
+  private end() {
     this.connectSequence++;
     this.cancelConnectInfo?.();
     this.stopped = true;
@@ -295,7 +320,23 @@ export class RemoteBrowser {
     const ws = this.ws;
     this.ws = null;
     ws?.close();
+    if (this.cursorUrl) {
+      URL.revokeObjectURL(this.cursorUrl);
+      this.cursorUrl = null;
+      // The page must not keep drawing a cursor whose image is gone.
+      this.opts.onCursor?.('default');
+    }
+  }
+
+  /**
+   * Input may have been lost. The connection ends here rather than carrying on with input the
+   * user believes was delivered: an open socket and peer would also keep reporting a live,
+   * watched desktop (and keep the browser awake) behind the page's interruption notice.
+   */
+  private inputFailed(reason: InputFailure) {
+    this.end();
     this.setState('closed');
+    this.opts.onInputError?.(reason);
   }
 
   /** A renderer calls this only after observing a frame from this attempt's video stream. */
@@ -364,9 +405,13 @@ export class RemoteBrowser {
     this.releaseSoftwareKeys();
   }
 
-  /** Presses and releases a combination such as ['Control', 't'] (toolbar Keys menu). */
-  sendCombo(names: string[]) {
-    this.sendChord(names);
+  /**
+   * Presses and releases a combination such as ['Control', 't'] (toolbar Keys menu). Held modifiers
+   * stay down; `exact` lifts those the combination does not name for its duration, all but Shift,
+   * which extends a selection (a Mac's Option+← arrives with Alt held and goes out as Ctrl+←).
+   */
+  sendCombo(names: string[], exact = false) {
+    this.sendChord(names, exact);
   }
 
   /** IME commits share the input FIFO and work in browser chrome as well as web pages. */
@@ -394,6 +439,13 @@ export class RemoteBrowser {
 
   /** Types into the focused X11 window, including Chrome's address bar and menus. */
   typeSoftwareText(text: string) {
+    const normalized = text.replace(/\r\n?/g, '\n');
+    // A long or multi-line commit (dictation, a text replacement) goes as one paste. Typed out key
+    // by key it overflowed the input queue at about 2,000 characters, and each newline became
+    // Enter, which sends a chat message or submits a form halfway through the text. A commit of
+    // only line breaks and tabs is still typed: those are the keys themselves.
+    const whole = [...normalized].length > LONG_TYPED_TEXT || (normalized.includes('\n') && /\S/.test(normalized));
+    if (whole && !this.fitsPaste(normalized)) return;
     // Native input is a committed text operation, never a continuation of a held key.
     // Missing mobile keyups must not change its casing or keep the last character repeating.
     this.releaseSoftwareKeys();
@@ -404,11 +456,13 @@ export class RemoteBrowser {
     const flush = () => {
       if (paste) {
         this.sendInput({ event: EV.CONTROL_PASTE, payload: { text: paste } });
+        this.typedThroughClipboard(paste);
         pasted = true;
       }
       paste = '';
     };
-    for (const character of text.replace(/\r\n?/g, '\n')) {
+    if (whole) paste = normalized;
+    else for (const character of normalized) {
       const cp = character.codePointAt(0)!;
       if (cp >= 0x80) {
         paste += character;
@@ -443,7 +497,7 @@ export class RemoteBrowser {
 
   /** Neko waits for the clipboard write and then pastes inside this single ordered command. */
   paste(text: string) {
-    if (!text) return;
+    if (!text || !this.fitsPaste(text)) return;
     const keys = new Set([...this.pressed, ...this.softwarePressed]);
     const buttons = [...this.pressedButtons];
     this.sendInput({ event: EV.CONTROL_PASTE, payload: { text } });
@@ -451,6 +505,28 @@ export class RemoteBrowser {
     // preceded this operation before later keyups or shortcuts pass through the FIFO.
     for (const keysym of keys) this.sendInput({ event: EV.CONTROL_KEYDOWN, payload: { keysym } });
     for (const code of buttons) this.sendInput({ event: EV.CONTROL_BUTTONDOWN, payload: { code } });
+  }
+
+  /**
+   * A local Ctrl+V (Cmd+V) carrying the local clipboard's `text`. Sending it (paste) also replaces
+   * the remote clipboard, which may hold what the local one cannot: an image copied in the remote
+   * Chrome (neko reports text only), or text the page could not copy out. So the remote page pastes
+   * its own clipboard (a plain Ctrl+V) unless the text is new: not empty, not what the remote
+   * clipboard last reported, and not older than a remote copy that never reached the local clipboard.
+   */
+  pasteClipboard(text: string) {
+    if (!text || text === this.remoteClipboard || this.remoteClipboardNewer) this.sendChord(['Control', 'v']);
+    else this.paste(text);
+  }
+
+  /** The page put `text`, from onClipboard, on the local clipboard. */
+  clipboardCopied(text: string) {
+    if (text === this.remoteClipboard) this.remoteClipboardNewer = false;
+  }
+
+  /** The page lost focus: whatever is copied elsewhere meanwhile is newer than the remote clipboard. */
+  pageBlurred() {
+    this.remoteClipboardNewer = false;
   }
 
   /**
@@ -537,6 +613,7 @@ export class RemoteBrowser {
     this.connectionAttempts = 0;
     this.inputReady = true;
     this.inputQueue.flush();
+    if (this.stopped) return; // Queued input could not be delivered (inputFailed).
     this.setState('live');
     this.startStats();
     if (this.pendingViewport) this.applyScreen();
@@ -592,6 +669,7 @@ export class RemoteBrowser {
     // input must pause visibly instead of following the retry into another session.
     this.inputReady = false;
     this.inputQueue.interrupt('disconnected');
+    if (this.stopped) return; // The interruption lost input and ended the connection.
     this.ws = null;
     this.clearConnectionTimer();
     this.teardownPeer();
@@ -613,14 +691,15 @@ export class RemoteBrowser {
     this.sendInput({ event: down ? EV.CONTROL_KEYDOWN : EV.CONTROL_KEYUP, payload: { keysym } });
   }
 
-  private sendChord(names: string[]) {
+  private sendChord(names: string[], exact = false) {
     const held = new Set([...this.pressed, ...this.softwarePressed]);
     const shift = names.includes('Shift') || held.has(KEYSYM.Shift_L) || held.has(0xffe2);
     const syms = names.map(keysymForName).filter((sym): sym is number => sym !== null)
       .map((sym) => shift ? shiftedKeysym(sym) : sym);
-    // Held modifiers remain down. A held character still needs a fresh stroke to trigger
-    // a toolbar shortcut, then returns to its original held state after the chord.
-    const suspended = [...held].filter((sym) => !modifierKeysym(sym));
+    // Held modifiers remain down unless `exact` lifts them. A held character still needs a fresh
+    // stroke to trigger a toolbar shortcut, then returns to its original held state after the chord.
+    const suspended = [...held].filter((sym) => !modifierKeysym(sym)
+      || (exact && sym !== KEYSYM.Shift_L && sym !== 0xffe2 && !syms.includes(sym)));
     for (const keysym of [...suspended].reverse()) this.sendInput({ event: EV.CONTROL_KEYUP, payload: { keysym } });
     const added = syms.filter((sym) => !modifierKeysym(sym) || !held.has(sym));
     for (const keysym of added) this.sendInput({ event: EV.CONTROL_KEYDOWN, payload: { keysym } });
@@ -647,6 +726,26 @@ export class RemoteBrowser {
     const sym = held.get(id)!.sym;
     held.delete(id);
     return sym;
+  }
+
+  /** Refuses text too large for one gateway frame, and says so (onTransfer), rather than lose the connection over it. */
+  private fitsPaste(text: string): boolean {
+    const bytes = encoder.encode(text).byteLength;
+    if (bytes <= MAX_PASTE_BYTES) return true;
+    this.opts.onTransfer?.({ id: `text-${Date.now().toString(36)}`, action: 'paste', files: 0, bytes, received: 0, state: 'error', reason: 'too_large' });
+    return false;
+  }
+
+  /**
+   * Typed text went through the remote clipboard. neko reports it back (clipboard/updated) as if it
+   * had been copied, which put every IME commit on the local clipboard: that echo is dropped. The
+   * remote clipboard now holds nothing the user copied, so a local paste sends its own text.
+   */
+  private typedThroughClipboard(text: string) {
+    const now = Date.now();
+    this.typedPastes = [...this.typedPastes.filter((typed) => now - typed.at < TYPED_ECHO_MS), { text, at: now }].slice(-16);
+    this.remoteClipboard = null;
+    this.remoteClipboardNewer = false;
   }
 
   private sendInput(msg: NekoMessage): boolean {
@@ -729,6 +828,8 @@ export class RemoteBrowser {
           // An offline notification with no user input pauses the queue without failing it.
           // A returning agent must make a fresh, empty queue usable on this same socket.
           this.inputQueue.resume();
+          // The returning agent gets a whole deadline to renegotiate, not what its absence left.
+          this.clearConnectionTimer();
           this.startConnectionTimer(ws);
         }
         return;
@@ -736,6 +837,7 @@ export class RemoteBrowser {
         this.diagnostic('failed', 'agent_offline');
         this.inputReady = false;
         this.inputQueue.interrupt('disconnected');
+        if (this.stopped) return; // The interruption lost input and ended the connection.
         this.clearConnectionTimer();
         this.teardownPeer();
         this.signalRequested = false;
@@ -779,9 +881,12 @@ export class RemoteBrowser {
       case EV.SYSTEM_INIT: {
         this.diagnostic('desktop_ready');
         const init = msg.payload as { screen_size?: unknown; webrtc?: { videos?: unknown } } | undefined;
-        this.remoteScreen = screenOf(init?.screen_size) ?? this.remoteScreen;
+        // Each system/init comes from a fresh neko session: an unknown screen is better than one
+        // carried over from a relay that ended (input then maps to the picture's own pixels).
+        this.remoteScreen = screenOf(init?.screen_size);
         this.offeredVideos = Array.isArray(init?.webrtc?.videos) ? init.webrtc.videos.filter((v): v is string => typeof v === 'string') : [];
         this.requestSignal(ws);
+        this.qualityController?.screenChanged(Date.now());
         return;
       }
       case EV.SYSTEM_ADMIN: {
@@ -791,9 +896,13 @@ export class RemoteBrowser {
         this.applyScreen();
         return;
       }
-      case EV.SCREEN_UPDATED:
-        this.remoteScreen = screenOf(msg.payload) ?? this.remoteScreen;
+      case EV.SCREEN_UPDATED: {
+        const screen = screenOf(msg.payload);
+        if (!screen) return;
+        this.remoteScreen = screen;
+        this.qualityController?.screenChanged(Date.now());
         return;
+      }
       case EV.SIGNAL_PROVIDE:
         this.videoChanged((msg.payload as unknown as SignalProvide).video?.id);
         await this.answer(msg.payload as unknown as SignalProvide, ws);
@@ -818,7 +927,16 @@ export class RemoteBrowser {
       }
       case EV.CLIPBOARD_UPDATED: {
         const text = (msg.payload as { text?: unknown } | undefined)?.text;
-        if (typeof text === 'string') this.opts.onClipboard?.(text);
+        if (typeof text !== 'string') return;
+        const now = Date.now();
+        const echo = this.typedPastes.findIndex((typed) => typed.text === text && now - typed.at < TYPED_ECHO_MS);
+        if (echo >= 0) {
+          this.typedPastes.splice(echo, 1);
+          return;
+        }
+        this.remoteClipboard = text;
+        this.remoteClipboardNewer = true;
+        this.opts.onClipboard?.(text);
         return;
       }
       case EV.CURSOR_IMAGE: {
@@ -885,9 +1003,8 @@ export class RemoteBrowser {
         this.startStats();
         this.becomeLive();
       } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-        this.inputReady = false;
-        this.inputQueue.interrupt('disconnected');
-        // An ICE failure (e.g. a network change): start over with a fresh token.
+        // An ICE failure (e.g. a network change): start over with a fresh token. Pending input
+        // is interrupted there, after the failure is recorded.
         this.reconnect(ws);
       }
     };
@@ -930,7 +1047,7 @@ export class RemoteBrowser {
     if (!viewport || (!live && (!this.screenConfigurations.length || !this.signalRequested || this.ws?.readyState !== 1))) return;
     // Neko advertises the actual X11 modes, including their refresh rates. A familiar size
     // such as 1600×900 can support 25 Hz without supporting 30 Hz.
-    const s = fitScreen(viewport.width, viewport.height, this.screenConfigurations, STREAM.maxRefreshRate)
+    const s = fitScreen(viewport.width, viewport.height, this.screenConfigurations, STREAM.maxRefreshRate, this.opts.maxScreenPixels)
       ?? { ...fitScreen(viewport.width, viewport.height), rate: 60 }; // Neko v3's default for clients without capabilities.
     const key = `${s.width}x${s.height}@${s.rate}`;
     if (key === this.appliedScreen) return;

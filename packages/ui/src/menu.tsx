@@ -3,7 +3,23 @@ import type { ReactNode } from 'react';
 import { cn } from './cn.js';
 import { useFullscreenElement } from './fullscreen.js';
 
-export function Menu({ trigger, children, align = 'end', className }: { trigger: ReactNode; children: ReactNode; align?: 'start' | 'end'; className?: string }) {
+export function Menu({
+  trigger,
+  children,
+  align = 'end',
+  className,
+  onCloseAutoFocus,
+}: {
+  trigger: ReactNode;
+  children: ReactNode;
+  align?: 'start' | 'end';
+  className?: string;
+  /**
+   * Runs as the menu closes, before focus returns to the trigger. preventDefault() keeps focus
+   * where the handler puts it, e.g. back on a live view that should keep taking the keyboard.
+   */
+  onCloseAutoFocus?: (event: Event) => void;
+}) {
   const container = useFullscreenElement();
   return (
     <M.Root>
@@ -12,6 +28,7 @@ export function Menu({ trigger, children, align = 'end', className }: { trigger:
         <M.Content
           align={align}
           sideOffset={4}
+          onCloseAutoFocus={onCloseAutoFocus}
           collisionPadding={8}
           className={cn(
             'z-50 max-h-[var(--radix-dropdown-menu-content-available-height)] min-w-48 overflow-y-auto overscroll-contain border border-border bg-bg p-1 shadow-pop [animation:cb-in_150ms_var(--ease-out)]',
@@ -30,11 +47,13 @@ export function MenuItem({
   onSelect,
   danger,
   disabled,
+  className,
 }: {
   children: ReactNode;
   onSelect: () => void;
   danger?: boolean;
   disabled?: boolean;
+  className?: string;
 }) {
   return (
     <M.Item
@@ -43,6 +62,7 @@ export function MenuItem({
       className={cn(
         'flex cursor-default items-center gap-2.5 px-2.5 py-2 text-sm outline-none select-none transition-colors data-[disabled]:opacity-40 data-[highlighted]:bg-surface-2 [&_svg]:size-4 [&_svg]:shrink-0',
         danger ? 'text-error data-[highlighted]:bg-error/8' : '[&_svg]:text-subtle data-[highlighted]:[&_svg]:text-fg',
+        className,
       )}
     >
       {children}
@@ -50,9 +70,9 @@ export function MenuItem({
   );
 }
 
-export const MenuSeparator = () => <M.Separator className="-mx-1 my-1 h-px bg-border" />;
+export const MenuSeparator = ({ className }: { className?: string }) => <M.Separator className={cn('-mx-1 my-1 h-px bg-border', className)} />;
 
 /** A small heading inside a menu, e.g. a continent above its regions. */
-export const MenuLabel = ({ children }: { children: ReactNode }) => (
-  <M.Label className="px-2.5 pt-2.5 pb-1 text-[11px] font-semibold tracking-[0.12em] text-subtle uppercase">{children}</M.Label>
+export const MenuLabel = ({ children, className }: { children: ReactNode; className?: string }) => (
+  <M.Label className={cn('px-2.5 pt-2.5 pb-1 text-[11px] font-semibold tracking-[0.12em] text-subtle uppercase', className)}>{children}</M.Label>
 );

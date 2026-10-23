@@ -5,7 +5,7 @@ import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react
 import { fundedHours, isLowBalance, runwayLabel } from '../features/billing/access.js';
 import { BillingBanner } from '../features/billing/BillingBanner.js';
 import { useBilling } from '../features/billing/hooks.js';
-import { money } from '../lib/money.js';
+import { money, moneyShort } from '../lib/money.js';
 import { useMe } from '../features/instances/hooks.js';
 import { usePromotions } from '../features/promotions/hooks.js';
 import { api, isUnauthenticated } from '../lib/api.js';
@@ -251,7 +251,7 @@ export function AppShell() {
             </div>
           ) : me.data && b && collapsed ? (
             <Link to="/billing" title={`${t('nav.balanceLabel')}: ${money(b.balanceMicros, locale)}`} className={cn('grid h-10 place-items-center border border-border bg-bg text-[11px] font-semibold tabular-nums transition-colors hover:border-border-strong', isLowBalance(b) ? 'text-error' : 'text-fg')}>
-              {money(b.balanceMicros, locale).replace(/\.\d+$/, '')}
+              {moneyShort(b.balanceMicros, locale)}
             </Link>
           ) : (
             <Skeleton className={cn('h-4', collapsed ? 'mx-1' : 'mx-2.5')} />

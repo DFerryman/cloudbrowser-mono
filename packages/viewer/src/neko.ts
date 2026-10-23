@@ -127,11 +127,10 @@ export function x11Button(domButton: number): number | null {
   return ({ 0: 1, 1: 2, 2: 3, 3: 8, 4: 9 } as Record<number, number>)[domButton] ?? null;
 }
 
-/** Remote screen sizes the server can apply (page 5, "Screen-size policy"). */
+/** Remote screen sizes the server can apply (page 5, "Screen-size policy"); all 16:9 (squarePixels). */
 export const SCREEN_SIZES = [
   [1280, 720],
   [1366, 768],
-  [1440, 900],
   [1536, 864],
   [1600, 900],
   [1920, 1080],
@@ -153,25 +152,57 @@ export function screenOf(value: unknown): ScreenConfiguration | null {
     && typeof rate === 'number' && Number.isInteger(rate) && rate > 0 ? { width, height, rate } : null;
 }
 
+/**
+ * Whether neko streams a desktop of this shape with square pixels. Its X server keeps the physical
+ * size of its first, 16:9 mode through every RandR change; GStreamer's ximagesrc derives a pixel
+ * aspect ratio from that size and x264 writes it into the stream, so a 16:10, 4:3 or 5:4 desktop
+ * is tagged 11:10. Chrome ignores the tag. Safari honours it: it painted a 1280×800 desktop as
+ * 1408×800 (aspect 1.76) inside the 1280×800 box the viewer laid out and mapped input to, and
+ * taps landed up to 36 px off. ximagesrc keeps 1:1 within about 3% of 16:9.
+ */
+export const squarePixels = (s: { width: number; height: number }) =>
+  s.width > 0 && s.height > 0 && Math.abs((s.width * 9) / (s.height * 16) - 1) < 0.03;
+
 /** Whether neko would end up on the same mode: Xorg rounds widths down to a multiple of 8. */
 export const sameScreen = (a: ScreenConfiguration, b: ScreenConfiguration) =>
   a.height === b.height && a.rate === b.rate && a.width - (a.width % 8) === b.width - (b.width % 8);
 
 /**
+ * Xorg widths are multiples of 8 (sameScreen), so a mode up to 7 px wider than the viewport still
+ * counts as fitting: a 1366 px wide view takes 1368×768 at 99.9% rather than 1280×720 enlarged.
+ */
+const WIDTH_SLACK = 8;
+
+/**
  * The largest supported size that fits the viewport, at the highest refresh rate up to `maxRate`
  * that neko offers for it: Chrome draws no faster than the desktop, so the rate caps the frame
- * rate (STREAM.maxRefreshRate).
+ * rate (STREAM.maxRefreshRate). Sizes offered at such a rate come before larger ones offered only
+ * faster. `maxPixels` bounds the desktop's area (TIERS[tier].maxScreenPixels).
  */
 export function fitScreen(width: number, height: number): { width: number; height: number };
-export function fitScreen(width: number, height: number, configurations: readonly ScreenConfiguration[], maxRate?: number): ScreenConfiguration | null;
-export function fitScreen(width: number, height: number, configurations?: readonly ScreenConfiguration[], maxRate = 30) {
+export function fitScreen(width: number, height: number, configurations: readonly ScreenConfiguration[], maxRate?: number, maxPixels?: number): ScreenConfiguration | null;
+export function fitScreen(width: number, height: number, configurations?: readonly ScreenConfiguration[], maxRate = 30, maxPixels = Infinity) {
   if (configurations) {
     if (configurations.length === 0) return null;
+    // Only shapes neko streams with square pixels, whenever it offers one: besides its 16:9 modes,
+    // Xorg adds its default VESA and CVT modes (1280×800, 1280×960, 1280×1024, …), and an iPad's
+    // 1366-wide view fitted 1280×800 at 60 Hz.
+    const square = configurations.filter(squarePixels);
+    const shaped = square.length > 0 ? square : configurations;
     // Keep the existing 720p–1440p policy when the server supports it. For smaller viewports,
     // use the smallest supported desktop and let the video scale down.
-    const policy = configurations.filter((s) => s.width >= 1280 && s.height >= 720 && s.width <= 2560 && s.height <= 1440);
-    const available = policy.length > 0 ? policy : configurations;
-    const fits = available.filter((s) => s.width <= width && s.height <= height);
+    const policy = shaped.filter((s) => s.width >= 1280 && s.height >= 720 && s.width <= 2560 && s.height <= 1440);
+    const sized = policy.length > 0 ? policy : shaped;
+    // The tier's budget, unless no mode is within it.
+    const capped = sized.filter((s) => s.width * s.height <= maxPixels);
+    const budgeted = capped.length > 0 ? capped : sized;
+    // A size neko offers only above `maxRate` (2048×1152 at 60 Hz) would have Chrome draw twice the
+    // frames the stream carries, on the browser's own CPU: a smaller size at a bounded rate is
+    // better, and only without one does the rate give way.
+    const paced = budgeted.filter((s) => budgeted.some((o) => o.width === s.width && o.height === s.height && o.rate <= maxRate));
+    const available = paced.length > 0 ? paced : budgeted;
+    // ResizeObserver reports fractional sizes: a 719.6 px tall box still shows a 720 px desktop.
+    const fits = available.filter((s) => s.width < width + WIDTH_SLACK && s.height <= Math.round(height));
     const sizes = fits.length > 0 ? fits : available;
     const best = sizes.reduce((a, b) => {
       const difference = b.width * b.height - a.width * a.height;

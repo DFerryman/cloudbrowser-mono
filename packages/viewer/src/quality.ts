@@ -76,8 +76,17 @@ const LATENCY_MIN_READINGS = 3;
  * are downscaled pictures (75% or 50%), the viewer stays at full rather than blur the text.
  */
 export const MIN_LEGIBLE_SCALE = 0.9;
-/** Consecutive readings below MIN_LEGIBLE_SCALE before a level is ruled out; a resize can mislead one. */
+/** Consecutive readings below MIN_LEGIBLE_SCALE before a level is ruled out. */
 const ILLEGIBLE_READINGS = 2;
+/**
+ * How long after the desktop changes size the picture's scale says nothing about a level. neko
+ * reports the new size at once, while frames of the old size keep arriving until its encoder has
+ * restarted (and the receiver's statistics lag those): a reduced level then reads as a small
+ * picture and was ruled out for the rest of the session, pinning the lowest level allowed above
+ * what a congested path carries. Ignoring the scale for a while keeps the rule for what it is
+ * for, an older image whose lower levels really are downscaled pictures, which stays so.
+ */
+const SCREEN_SETTLE_MS = 10_000;
 
 /**
  * Chooses the live view's picture level from what the viewer receives. neko 3.0.8's own
@@ -105,6 +114,8 @@ export class QualityController {
   /** Index of the lowest level allowed: a level whose picture proved too small to read is ruled out. */
   private floor = VIDEO_QUALITIES.length - 1;
   private illegible = 0;
+  /** Scale readings before this mean nothing: the desktop changed size (screenChanged). */
+  private scaleSettleUntil = -Infinity;
   /** The least the path carried while congested in the current run of bad readings, kbit/s. */
   private carried: number | null = null;
 
@@ -127,13 +138,20 @@ export class QualityController {
     this.settleUntil = now + SETTLE_MS;
   }
 
+  /** The remote desktop changed size (or a new session reported its own): see SCREEN_SETTLE_MS. */
+  screenChanged(now: number) {
+    this.scaleSettleUntil = now + SCREEN_SETTLE_MS;
+    this.illegible = 0;
+  }
+
   /** Returns the level to switch to, or null to stay. */
   observe(s: QualitySample): VideoQuality | null {
     const bestRtt = this.rtts.length ? Math.min(...this.rtts) : null;
     if (s.rttMs !== null) this.rtts = [...this.rtts, s.rttMs].slice(-RTT_WINDOW);
     this.updateLatencyCap();
     if (s.at < this.settleUntil) return null;
-    if (s.scale != null && s.scale < MIN_LEGIBLE_SCALE && this.level > 0) {
+    const scale = s.at < this.scaleSettleUntil ? null : s.scale;
+    if (scale != null && scale < MIN_LEGIBLE_SCALE && this.level > 0) {
       if (++this.illegible >= ILLEGIBLE_READINGS) {
         this.floor = Math.min(this.floor, this.level - 1);
         this.illegible = 0;

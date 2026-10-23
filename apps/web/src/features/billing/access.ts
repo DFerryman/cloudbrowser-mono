@@ -2,9 +2,15 @@ import type { BillingState, Instance } from '@cloudbrowser/contracts';
 import type { Translate } from '../../lib/i18n.js';
 
 export const minimumSpendBalance = (billing: BillingState) => Math.max(1, billing.minBalanceMicros);
-export const canSpend = (billing: BillingState | undefined, additionalReserve = 0) => !!billing && !billing.frozen && billing.availableMicros >= minimumSpendBalance(billing) + additionalReserve;
+/**
+ * Whether the account may start paid work. The pilot is free: the api asks for no balance there
+ * (apps/api limits.ts), only an account frozen by a payment dispute is refused.
+ */
+export const canSpend = (billing: BillingState | undefined, additionalReserve = 0) =>
+  !!billing && !billing.frozen && (billing.mode === 'pilot' || billing.availableMicros >= minimumSpendBalance(billing) + additionalReserve);
 export function canUseBrowser(billing: BillingState | undefined, instance: Instance) {
   if (!billing || billing.frozen) return false;
+  if (billing.mode === 'pilot') return true;
   return billing.availableMicros >= (instance.status === 'running' ? 1 : minimumSpendBalance(billing));
 }
 /**

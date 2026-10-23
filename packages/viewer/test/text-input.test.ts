@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TextInputController, type TextKeyEvent } from '../src/text-input.js';
 
-function setup(mode: 'desktop' | 'software' = 'desktop') {
+function setup(mode: 'desktop' | 'software' = 'desktop', mac = false) {
   const callbacks = {
     mode: vi.fn(() => mode),
     key: vi.fn((_down: boolean, event: TextKeyEvent) => !['Unidentified', 'Process', 'Dead'].includes(event.key)),
@@ -9,12 +9,86 @@ function setup(mode: 'desktop' | 'software' = 'desktop') {
     sendCombo: vi.fn(),
     releaseAllKeys: vi.fn(),
     activity: vi.fn(),
+    mac,
   };
   return { controller: new TextInputController(callbacks), ...callbacks };
 }
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
+
+const strokes = (key: ReturnType<typeof setup>['key']) => key.mock.calls.map(([down, event]) => [down, event.key]);
+
+describe('keyboards with their own rules', () => {
+  it('sends a key pressed with Cmd on a Mac as one stroke, since macOS never sends its keyup', () => {
+    const { controller, key } = setup('desktop', true);
+    expect(controller.keyDown({ key: 'Meta', code: 'MetaLeft', metaKey: true })).toBe(true);
+    expect(controller.keyDown({ key: 'c', code: 'KeyC', metaKey: true })).toBe(true);
+    expect(controller.keyUp({ key: 'Meta', code: 'MetaLeft' })).toBe(true);
+    expect(strokes(key)).toEqual([[true, 'Meta'], [true, 'c'], [false, 'c'], [false, 'Meta']]);
+    key.mockClear();
+    // The next C is a press of its own, not a repeat of a key that was never released.
+    expect(controller.keyDown({ key: 'c', code: 'KeyC' })).toBe(true);
+    expect(controller.keyUp({ key: 'c', code: 'KeyC' })).toBe(true);
+    expect(strokes(key)).toEqual([[true, 'c'], [false, 'c']]);
+  });
+
+  it('releases a key that was down before Cmd when Cmd goes up on a Mac', () => {
+    const { controller, key } = setup('desktop', true);
+    controller.keyDown({ key: 'a', code: 'KeyA' });
+    controller.keyDown({ key: 'Shift', code: 'ShiftLeft', shiftKey: true });
+    controller.keyDown({ key: 'Meta', code: 'MetaLeft', metaKey: true, shiftKey: true });
+    controller.keyUp({ key: 'Meta', code: 'MetaLeft', shiftKey: true });
+    expect(strokes(key)).toEqual([[true, 'a'], [true, 'Shift'], [true, 'Meta'], [false, 'a'], [false, 'Meta']]);
+    expect(controller.keyUp({ key: 'a', code: 'KeyA' })).toBe(false);
+  });
+
+  it('tracks Cmd and Ctrl chords as usual elsewhere', () => {
+    const { controller, key } = setup('desktop');
+    controller.keyDown({ key: 'Meta', code: 'MetaLeft', metaKey: true });
+    controller.keyDown({ key: 'c', code: 'KeyC', metaKey: true });
+    expect(strokes(key)).toEqual([[true, 'Meta'], [true, 'c']]);
+  });
+
+  it('types an AltGr character rather than sending Ctrl+Alt with it', () => {
+    const { controller, key, typeText } = setup('desktop');
+    const altGraph = (k: string, code: string): TextKeyEvent => ({ key: k, code, ctrlKey: true, altKey: true, getModifierState: (m) => m === 'AltGraph' });
+    // Windows: a Control press precedes AltGraph, both reported as held with the character.
+    expect(controller.keyDown({ key: 'Control', code: 'ControlLeft', ctrlKey: true })).toBe(true);
+    expect(controller.keyDown(altGraph('AltGraph', 'AltRight'))).toBe(false);
+    expect(controller.keyDown(altGraph('@', 'KeyQ'))).toBe(true);
+    expect(typeText.mock.calls).toEqual([['@']]);
+    expect(controller.keyUp(altGraph('@', 'KeyQ'))).toBe(false);
+    expect(controller.keyUp({ key: 'AltGraph', code: 'AltRight' })).toBe(false);
+    expect(controller.keyUp({ key: 'Control', code: 'ControlLeft' })).toBe(true);
+    expect(strokes(key)).toEqual([[true, 'Control'], [false, 'Control']]);
+  });
+
+  it.each([
+    [{ key: 'ArrowLeft', code: 'ArrowLeft', altKey: true }, ['Control', 'ArrowLeft']],
+    [{ key: 'ArrowRight', code: 'ArrowRight', altKey: true, shiftKey: true }, ['Control', 'ArrowRight']],
+    [{ key: 'ArrowLeft', code: 'ArrowLeft', metaKey: true }, ['Home']],
+    [{ key: 'ArrowRight', code: 'ArrowRight', metaKey: true, shiftKey: true }, ['End']],
+    [{ key: 'ArrowUp', code: 'ArrowUp', metaKey: true }, ['Control', 'Home']],
+    [{ key: 'ArrowDown', code: 'ArrowDown', metaKey: true }, ['Control', 'End']],
+  ] as [TextKeyEvent, string[]][])('sends a Mac\'s caret motion %j as the PC keys for it', (event, combo) => {
+    const { controller, key, sendCombo } = setup('desktop', true);
+    expect(controller.keyDown(event)).toBe(true);
+    expect(sendCombo.mock.calls).toEqual([[combo, true]]);
+    expect(key).not.toHaveBeenCalled();
+    expect(controller.keyUp(event)).toBe(false);
+  });
+
+  it('leaves Alt+arrow alone off a Mac and Option+Up on one', () => {
+    const pc = setup('desktop');
+    pc.controller.keyDown({ key: 'ArrowLeft', code: 'ArrowLeft', altKey: true });
+    expect(pc.sendCombo).not.toHaveBeenCalled();
+    expect(strokes(pc.key)).toEqual([[true, 'ArrowLeft']]);
+    const mac = setup('desktop', true);
+    mac.controller.keyDown({ key: 'ArrowUp', code: 'ArrowUp', altKey: true });
+    expect(mac.sendCombo).not.toHaveBeenCalled();
+  });
+});
 
 describe('viewer text input', () => {
   it('keeps desktop keydown immediate and pairs keyup with the original key', () => {

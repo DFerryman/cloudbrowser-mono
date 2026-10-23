@@ -6,6 +6,7 @@ import { useI18n } from '../../lib/i18n.js';
 import { money } from '../../lib/money.js';
 import type { MessageKey } from '../../messages/en.js';
 import { useNeverSleepQuote, useRegionInfo, useUpdateInstance } from './hooks.js';
+import { LoadError } from '../../app/LoadError.js';
 
 /**
  * Turning on Never sleep shows what 24 hours of continuous running costs in the browser's region
@@ -30,7 +31,9 @@ export function NeverSleepDialog({ instance: i, open, onClose }: { instance: Ins
     );
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()} title={t('neverSleep.title', { name: i.name })} description={t('neverSleep.body')} closeLabel={t('common.cancel')}>
-      {!q ? (
+      {!q && quote.isError ? (
+        <LoadError error={quote.error} onRetry={() => void quote.refetch()} />
+      ) : !q ? (
         <Skeleton className="h-32" />
       ) : (
         <div className="space-y-4 text-sm" data-testid="never-sleep-quote">

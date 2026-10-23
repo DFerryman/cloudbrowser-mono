@@ -1,4 +1,5 @@
 // The live session's menus on a touch screen (iPad): opening one must never take the picture away.
+// On a phone held upright the toolbar's tools are in More, and the frame stays dark in the light theme.
 // Uses the real web build with entirely local API/WebSocket/WebRTC fixtures; never opens a VM.
 // Build apps/web, then: node apps/web/e2e/session-touch-menu.mjs   (WEB_DIST, PLAYWRIGHT_PATH optional)
 import assert from 'node:assert/strict';
@@ -25,10 +26,10 @@ const mime = { '.html': 'text/html', '.js': 'application/javascript', '.css': 't
 const PICTURE = [0, 200, 120];
 const results = [];
 
-async function fixture({ isMobile }) {
+async function fixture({ isMobile, viewport = { width: 1366, height: 867 }, colorScheme = 'dark' }) {
   // iPad Safari: touch, a 2× screen, the visible area below the browser's own bars.
   const context = await browser.newContext({
-    viewport: { width: 1366, height: 867 }, hasTouch: true, isMobile, deviceScaleFactor: 2, locale: 'en-US', colorScheme: 'dark',
+    viewport, hasTouch: true, isMobile, deviceScaleFactor: 2, locale: 'en-US', colorScheme,
   });
   await context.addInitScript((picture) => {
     window.fixture = { sockets: 0, peers: 0 };
@@ -115,7 +116,7 @@ async function fixture({ isMobile }) {
     return route.fulfill({ contentType: mime[extname(file)] ?? 'application/octet-stream', body: readFileSync(file) });
   });
   await page.goto(`${origin}/b/i1`);
-  await page.getByRole('button', { name: 'Send keys', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'More', exact: true }).waitFor();
   await page.waitForFunction(() => { const v = document.querySelector('video'); return !!v && v.readyState >= 2 && v.videoWidth > 0; });
   return { context, page, errors };
 }
@@ -182,6 +183,36 @@ try {
     assert.deepEqual(left, ['', ''], 'leaving the session restores the page’s own html and body styles');
     results.push(`${label}: leaving the session restores html and body`);
 
+    assert.deepEqual(errors, []);
+    await context.close();
+  }
+  {
+    const label = 'Phone, upright, light theme';
+    const { context, page, errors } = await fixture({ isMobile: true, viewport: { width: 390, height: 844 }, colorScheme: 'light' });
+    await assertPicture(page, `${label}: live`);
+    assert.equal(await page.getByRole('button', { name: 'Send keys', exact: true }).isVisible(), false, 'the toolbar has no room for Send keys');
+    await page.getByRole('button', { name: 'More', exact: true }).tap();
+    const items = await page.getByRole('menuitem').allTextContents();
+    for (const name of ['Paste from your clipboard', 'Upload files', 'Turn sound on', 'Ctrl+T', 'Alt+Left']) {
+      assert.ok(items.some((item) => item.includes(name)), `More offers ${name} (it has: ${items.join(', ')})`);
+    }
+    await page.getByRole('menuitem', { name: 'Turn sound on' }).tap();
+    await page.getByRole('menu').waitFor({ state: 'detached' });
+    assert.equal(await page.locator('video').evaluate((v) => v.muted), false, 'More turns the sound on');
+    results.push(`${label}: More holds paste, upload, sound and key combinations`);
+
+    // The frame's colour tokens are its own, not the page theme's: a light page drew its buttons white on white.
+    const frameColors = await page.evaluate(() => {
+      const probe = document.createElement('span');
+      probe.className = 'bg-bg text-fg border border-border';
+      document.querySelector('.cb-dark').append(probe);
+      const style = getComputedStyle(probe);
+      const colors = [style.backgroundColor, style.color, style.borderTopColor];
+      probe.remove();
+      return colors;
+    });
+    assert.deepEqual(frameColors, ['rgb(10, 10, 10)', 'rgb(250, 250, 250)', 'rgb(34, 34, 34)'], 'the frame is dark in the light theme');
+    results.push(`${label}: the frame keeps its dark colours`);
     assert.deepEqual(errors, []);
     await context.close();
   }

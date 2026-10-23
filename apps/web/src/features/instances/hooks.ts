@@ -2,7 +2,7 @@ import { REGION_INFO } from '@cloudbrowser/contracts';
 import type { Accepted, AgentControlMode, AgentKey, AutomationStatus, CreateAgentKeyBody, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, NeverSleepQuote, Region } from '@cloudbrowser/contracts';
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { useRef } from 'react';
-import { api } from '../../lib/api.js';
+import { api, ApiError } from '../../lib/api.js';
 import { keys, queryClient } from '../../lib/query.js';
 import { refreshChangedPrices } from '../billing/hooks.js';
 
@@ -10,7 +10,13 @@ export const useMe = () => useQuery({ queryKey: keys.me, queryFn: () => api<Me>(
 export const useRegions = () => useQuery({ queryKey: keys.regions, queryFn: () => api<Region[]>('GET', '/regions'), staleTime: 30_000, refetchInterval: 30_000 });
 export const useInstances = () => useQuery({ queryKey: keys.instances, queryFn: () => api<Instance[]>('GET', '/instances') });
 export const useInstance = (id: string) =>
-  useQuery({ queryKey: keys.instance(id), queryFn: () => api<Instance>('GET', `/instances/${id}`) });
+  useQuery({
+    queryKey: keys.instance(id),
+    queryFn: () => api<Instance>('GET', `/instances/${id}`),
+    // Events refresh a loaded browser; a load that failed (a network error, a busy api) has nothing
+    // else to bring it back. A browser that is gone or not the user's stays an error.
+    refetchInterval: (query) => query.state.status === 'error' && !(query.state.error instanceof ApiError && [403, 404].includes(query.state.error.status)) ? 10_000 : false,
+  });
 
 export type RecentSession = { id: string; startedAt: string; endedAt: string | null; country: string | null; userAgent: string | null };
 /** One page of viewer sessions, newest first; one extra row tells whether a next page exists. */

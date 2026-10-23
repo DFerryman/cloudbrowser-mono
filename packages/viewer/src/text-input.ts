@@ -10,6 +10,8 @@ export interface TextKeyEvent {
   shiftKey?: boolean;
   isComposing?: boolean;
   keyCode?: number;
+  /** KeyboardEvent's own; the controller asks it for AltGraph. */
+  getModifierState?: (key: string) => boolean;
 }
 
 export interface TextInputEvent {
@@ -23,9 +25,12 @@ export interface TextInputCallbacks {
   mode: () => 'desktop' | 'software';
   key: (down: boolean, event: TextKeyEvent) => boolean;
   typeText: (text: string) => void;
-  sendCombo: (names: string[]) => void;
+  /** `exact`: modifiers held but not named are lifted for the combination (RemoteBrowser.sendCombo). */
+  sendCombo: (names: string[], exact?: boolean) => void;
   releaseAllKeys: () => void;
   activity?: () => void;
+  /** A Mac's (or an iPad's) keyboard, whose Cmd and Option the remote reads as Control and Alt: see keyDown. */
+  mac?: boolean;
 }
 
 type Edit = { kind: 'backspace' | 'delete' | 'enter'; combo: string[] };
@@ -50,6 +55,22 @@ function keyEdit(key: string): Edit | null {
 }
 
 const modifierKey = (key: string) => ['Shift', 'Control', 'Alt', 'Meta', 'AltGraph'].includes(key);
+
+/**
+ * A Mac moves the caret by word with Option and to the ends of the line or the text with Cmd. On
+ * the remote PC those would arrive as Alt+← (Chrome's Back) and Ctrl+←: the PC's own keys for the
+ * same motion go out instead. Shift still selects.
+ */
+function macMotion(event: TextKeyEvent): string[] | null {
+  if (event.ctrlKey || !!event.altKey === !!event.metaKey) return null;
+  switch (event.key) {
+    case 'ArrowLeft': return event.altKey ? ['Control', 'ArrowLeft'] : ['Home'];
+    case 'ArrowRight': return event.altKey ? ['Control', 'ArrowRight'] : ['End'];
+    case 'ArrowUp': return event.metaKey ? ['Control', 'Home'] : null;
+    case 'ArrowDown': return event.metaKey ? ['Control', 'End'] : null;
+    default: return null;
+  }
+}
 
 /**
  * A DOM-independent controller for the viewer's textarea.
@@ -91,6 +112,31 @@ export class TextInputController {
       return this.softwareStroke(event);
     }
 
+    // Windows types an AltGr character (@ on a German keyboard) with Control and Alt held, which the
+    // remote US layout would take as a Ctrl+Alt shortcut: type the character itself. The AltGraph
+    // key stays local.
+    if (event.key === 'AltGraph') return false;
+    if (!event.metaKey && [...event.key].length === 1 && event.getModifierState?.('AltGraph')) {
+      this.callbacks.typeText(event.key);
+      this.callbacks.activity?.();
+      return true;
+    }
+    const motion = this.callbacks.mac ? macMotion(event) : null;
+    if (motion) {
+      this.callbacks.sendCombo(motion, true);
+      this.callbacks.activity?.();
+      return true;
+    }
+    // macOS sends no keyup for a key pressed while Cmd is held. Tracked, the key would stay down on
+    // the remote, where X11 repeats it, and its next press would read as a repeat. Send the stroke at once.
+    if (this.callbacks.mac && event.metaKey && !modifierKey(event.key)) {
+      if (!this.callbacks.key(true, event)) return false;
+      this.callbacks.key(false, event);
+      if (edit) this.rememberEdit(edit.kind);
+      this.callbacks.activity?.();
+      return true;
+    }
+
     // Neko/X11 already repeats a held key. Repeated keydowns would replace the original
     // mapping when Shift or the input layout changes, leaving the first keysym held forever.
     if (matchingKeyIdentity(this.forwarded, event) !== null) {
@@ -127,6 +173,14 @@ export class TextInputController {
     }
     const down = this.forwarded.get(id)!;
     this.forwarded.delete(id);
+    if (this.callbacks.mac && down.key === 'Meta') {
+      // A key that was already down when Cmd was pressed lost its keyup as well (see keyDown).
+      for (const [other, held] of [...this.forwarded]) {
+        if (modifierKey(held.key)) continue;
+        this.forwarded.delete(other);
+        this.callbacks.key(false, held);
+      }
+    }
     // Use the original mapping if the OS changed key/modifier fields before keyup.
     return this.callbacks.key(false, down);
   }

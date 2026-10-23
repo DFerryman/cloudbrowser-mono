@@ -14,13 +14,14 @@ import { BalanceRequired } from '../billing/BalanceRequired.js';
 /** The browser management area (page 1): one header and three tabs, Settings, Storage and Usage. */
 export function BrowserLayout() {
   const { id = '' } = useParams();
-  const { t } = useI18n();
+  const { t, errorMessage } = useI18n();
   const navigate = useNavigate();
   const instance = useInstance(id);
   const billing = useBilling();
   const region = useRegionInfo(instance.data?.regionId ?? '');
   if (instance.isPending) return <Skeleton className="h-96" />;
-  if (instance.isError) return <p className="text-sm text-error">{t('error.not_found')}</p>;
+  // A failed refetch keeps the browser loaded before: only a browser that never loaded is an error.
+  if (!instance.data) return <p className="text-sm text-error">{errorMessage(instance.error)}</p>;
   const i = instance.data;
   const tabs = [
     { to: 'settings', label: t('manage.settings') },
