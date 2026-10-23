@@ -137,7 +137,7 @@ func (c *CDP) Call(ctx context.Context, sessionID, method string, params any, ou
 // cleanupLimit bounds a call that tidies up after another (closing a hidden page, detaching):
 // it runs when the caller's own context may have ended, and a Chrome that stopped answering must
 // not hold the IP check or the input that made it forever.
-const cleanupLimit = 5 * time.Second
+var cleanupLimit = 5 * time.Second
 
 // cleanup sends one tidying call on its own bound, whatever happened to the caller's context.
 func (c *CDP) cleanup(method string, params any) {
