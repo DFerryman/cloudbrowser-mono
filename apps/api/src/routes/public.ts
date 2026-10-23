@@ -3,7 +3,7 @@
  * GET only, no session, the same answer for every visitor, cacheable for a minute. Nothing about a single user or browser is exposed.
  */
 import { DATA_KEPT_DAYS, costRates, tierSheet, type ComponentStatus, type PublicPricing, type PublicStatus } from '@cloudbrowser/contracts';
-import { priceSheets, pricingSettings, schema, signupCreditMicros, userCaps } from '@cloudbrowser/db';
+import { priceSheets, pricingSettings, schema, signupCreditMicros, userCaps, type Db } from '@cloudbrowser/db';
 import { desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { regionViews } from '../availability.js';
@@ -23,8 +23,11 @@ publicRoute.use('*', async (c, next) => {
   if (c.res.ok) c.header('cache-control', 'public, max-age=60');
 });
 
-publicRoute.get('/pricing', async (c) => {
-  const db = c.get('db');
+/**
+ * The public price list: every enabled, priced region with its rates, the published pricing model
+ * and the account terms. Also read by the prerendered public pages (src/site.ts).
+ */
+export async function publicPricing(db: Db): Promise<PublicPricing> {
   // The same answer for everyone (it is cached): no latency estimate from the caller's location.
   const listed = (await regionViews(db, null)).filter((r) => r.enabled);
   const prices = new Map((await allRegionPricing(db, null)).map((p) => [p.regionId, p]));
@@ -53,8 +56,10 @@ publicRoute.get('/pricing', async (c) => {
     retentionDays: DATA_KEPT_DAYS,
     signupCreditMicros: await signupCreditMicros(db),
   };
-  return c.json(out);
-});
+  return out;
+}
+
+publicRoute.get('/pricing', async (c) => c.json(await publicPricing(c.get('db'))));
 
 publicRoute.get('/status', async (c) => {
   const db = c.get('db');

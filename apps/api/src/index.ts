@@ -21,6 +21,7 @@ import { problem, ProblemError } from './problem.js';
 import { promotionSweep } from './promotions.js';
 import { adminRoute } from './routes/admin.js';
 import { publicRoute } from './routes/public.js';
+import { siteRoute } from './site.js';
 import { v1 } from './routes/v1.js';
 import { redeemPairing } from './automation.js';
 import { RedeemPairingBody } from '@cloudbrowser/contracts';
@@ -47,6 +48,9 @@ app.get('/assets/*', async (c) => {
   }
   return response;
 });
+
+/** Prerendered public pages and texts with live prices (run_worker_first in wrangler.jsonc). */
+app.route('/', siteRoute);
 
 app.use('/api/*', async (c, next) => {
   // The administrator host exposes only its own API. Its identity never comes from Better Auth.
