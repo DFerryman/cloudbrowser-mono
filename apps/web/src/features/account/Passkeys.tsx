@@ -6,6 +6,7 @@ import { api } from '../../lib/api.js';
 import { useI18n } from '../../lib/i18n.js';
 import { PAGE_SIZE, usePagerLabels } from '../../lib/paging.js';
 import { queryClient } from '../../lib/query.js';
+import { LoadError } from '../../app/LoadError.js';
 
 type Passkey = { id: string; name?: string | null; createdAt: string };
 const KEY = ['passkeys'] as const;
@@ -32,6 +33,7 @@ export function Passkeys() {
   });
   const remove = useMutation({
     mutationFn: (id: string) => api('POST', '/api/auth/passkey/delete-passkey', { body: { id } }),
+    onError: (e) => toast(errorMessage(e), 'error'),
     onSettled: () => void queryClient.invalidateQueries({ queryKey: KEY }),
   });
   const supported = typeof window !== 'undefined' && 'PublicKeyCredential' in window;
@@ -43,7 +45,9 @@ export function Passkeys() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <h3 className="text-sm font-medium">{t('passkeys.title')}</h3>
-          {list.data?.length ? null : <Hint className="mt-1">{t('passkeys.none')}</Hint>}
+          {list.data?.length ? null : !list.data && list.isError ? (
+            <LoadError className="mt-1" error={list.error} onRetry={() => void list.refetch()} />
+          ) : <Hint className="mt-1">{t('passkeys.none')}</Hint>}
         </div>
         <Button size="sm" className="self-start" disabled={!supported || add.isPending} onClick={() => add.mutate()}>
           <KeyRound /> {t('passkeys.add')}

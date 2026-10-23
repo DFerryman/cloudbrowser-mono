@@ -9,6 +9,7 @@ import { currentMonth, monthLabel, recentMonths, usePricing } from '../billing/h
 import { RateRow } from '../billing/RateRow.js';
 import { useManagedInstance } from './BrowserLayout.js';
 import { useInstanceUsage } from './hooks.js';
+import { LoadError } from '../../app/LoadError.js';
 
 /** The Usage tab: what this one browser used and cost in a month, and what it costs right now. */
 export function UsagePage() {
@@ -42,7 +43,9 @@ export function UsagePage() {
         </Card>
         <Card className="p-5 md:p-6 lg:col-span-2">
           <Eyebrow as="h2">{t('usage.ratesTitle')}</Eyebrow>
-          {!u ? (
+          {!u && usage.isError ? (
+            <LoadError className="mt-3" error={usage.error} onRetry={() => void usage.refetch()} />
+          ) : !u ? (
             <Skeleton className="mt-3 h-20" />
 
           ) : u.now.hourMicros === 0 && u.now.alwaysOnMonthMicros === 0 ? (
@@ -65,7 +68,9 @@ export function UsagePage() {
       <Section title={t('usage.title')}>
         {usage.isPending ? (
           <Skeleton className="h-32" />
-        ) : !u || !u.items.some((row) => row.quantity > 0) ? (
+        ) : !u ? (
+          <LoadError error={usage.error} onRetry={() => void usage.refetch()} />
+        ) : !u.items.some((row) => row.quantity > 0) ? (
           <p className="text-sm text-muted">{t('usage.none')}</p>
         ) : (
           <table className="w-full text-sm">

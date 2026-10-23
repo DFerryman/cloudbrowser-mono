@@ -12,6 +12,7 @@ import { useRegionInfo } from '../instances/hooks.js';
 import { fundedHours, isLowBalance, runwayLabel } from './access.js';
 import { DailyCharges } from './DailyCharges.js';
 import { currentMonth, monthLabel, recentMonths, useAccountUsage, useBilling, useCheckout, usePortal, useTransactions } from './hooks.js';
+import { LoadError } from '../../app/LoadError.js';
 
 /** One ramp of the accent, strongest for the largest item, so the breakdown reads as one family. */
 const ITEM_COLOR: Record<UsageItem, string> = {
@@ -48,7 +49,9 @@ export function BillingPage() {
           <UsageByBrowser month={month} setMonth={setMonth} />
           <Transactions />
         </div>
-      ) : null}
+      ) : (
+        <LoadError error={billing.error} onRetry={() => void billing.refetch()} />
+      )}
     </>
   );
 }
@@ -229,6 +232,8 @@ function UsageByBrowser({ month, setMonth }: { month: string; setMonth: (m: stri
       </div>
       {usage.isPending ? (
         <Skeleton className="h-24" />
+      ) : !usage.data ? (
+        <LoadError error={usage.error} onRetry={() => void usage.refetch()} />
       ) : rows.length === 0 ? (
         <p className="text-sm text-muted">{t('billing.byBrowserEmpty')}</p>
       ) : (
@@ -311,7 +316,9 @@ function Transactions() {
     <Section title={t('billing.transactions')}>
       {tx.isPending ? (
         <Skeleton className="h-16" />
-      ) : !tx.rows?.length ? (
+      ) : !tx.rows ? (
+        <LoadError error={tx.error} onRetry={() => void tx.refetch()} />
+      ) : !tx.rows.length ? (
         <p className="text-sm text-muted">{t('billing.noTransactions')}</p>
       ) : (
         <ul className={cn('divide-y divide-border text-sm transition-opacity', tx.isPlaceholderData && 'opacity-60')}>

@@ -9,6 +9,7 @@ import { canSpend } from '../billing/access.js';
 import { BalanceRequired } from '../billing/BalanceRequired.js';
 import { useManagedInstance } from './BrowserLayout.js';
 import { useResizeStorage, useStorage } from './hooks.js';
+import { LoadError } from '../../app/LoadError.js';
 
 /** Current storage capacity, filesystem usage, and a confirmed quote before growing the volume. */
 export function StoragePage() {
@@ -34,6 +35,7 @@ function StorageCard({ instance: i, pricing }: { instance: Instance; pricing: Re
   const [error, setError] = useState<string | null>(null);
   useEffect(() => setSize((s) => Math.max(s, i.storageGb + 1)), [i.storageGb]);
   const s = storage.data;
+  if (!s && storage.isError) return <LoadError error={storage.error} onRetry={() => void storage.refetch()} />;
   if (!s) return <Skeleton className="h-64" />;
   const rate = pricing?.rates?.storage ?? null;
   const m = (v: number) => money(v, locale);
