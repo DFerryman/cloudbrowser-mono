@@ -141,7 +141,7 @@ check('the agent setup reads unfolded as markdown, with each client’s configur
   assert.ok(read('llms.txt').includes('https://nevazu.com/docs/agent-setup.md'), 'llms.txt links the setup');
 });
 
-check('files with live slots run the api Worker first', () => {
+check('files with live slots, and every text file, run the api Worker first', () => {
   const config = JSON.parse(readFileSync(wrangler, 'utf8').replace(/^\s*\/\/.*$/gm, ''));
   const first = config.assets.run_worker_first;
   const slotted = { 'home.html': '/', 'pricing.html': '/pricing', 'index.md': '/index.md', 'pricing.md': '/pricing.md', 'llms.txt': '/llms.txt', 'llms-full.txt': '/llms-full.txt' };
@@ -149,6 +149,8 @@ check('files with live slots run the api Worker first', () => {
     assert.match(read(file), /<!--live:[a-z-]+-->[\s\S]+?<!--\/live:[a-z-]+-->/, `${file} has a live slot`);
     assert.ok(first.includes(route), `run_worker_first lacks ${route}`);
   }
+  // Text files go through the Worker too, which adds the charset the assets binding leaves out.
+  for (const route of ['/*.md', '/robots.txt', '/llms.txt', '/llms-full.txt']) assert.ok(first.includes(route), `run_worker_first lacks ${route}`);
   // Nothing else carries a slot the Worker would never fill.
   for (const route of routes.filter((r) => !['/', '/pricing'].includes(r))) assert.doesNotMatch(read(fileFor(route)), /<!--live:/, route);
 });

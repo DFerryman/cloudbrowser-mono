@@ -35,6 +35,21 @@ app.onError((err) => {
 app.notFound((c) => (c.req.path.startsWith('/api/') ? problem(404, 'not_found').toResponse() : c.env.ASSETS.fetch(c.req.raw)));
 
 /**
+ * Text files say they are UTF-8. The assets binding sends text/markdown and text/plain without a
+ * charset, and clients then guess, many as Latin-1 (Python's requests does, for any text/*), which
+ * garbles every quote and non-English letter; for markdown the charset is required (RFC 7763).
+ * run_worker_first in wrangler.jsonc brings the markdown twins, robots.txt and the llms texts here.
+ */
+app.use('*', async (c, next) => {
+  await next();
+  const type = c.res.headers.get('content-type');
+  if (!type || !/^text\/(?:markdown|plain)\b/i.test(type) || /;\s*charset=/i.test(type)) return;
+  const headers = new Headers(c.res.headers);
+  headers.set('content-type', `${type}; charset=utf-8`);
+  c.res = new Response(c.res.body, { status: c.res.status, statusText: c.res.statusText, headers });
+});
+
+/**
  * Hashed build files (run_worker_first in wrangler.jsonc): after a deployment, a page still open
  * asks for files that no longer exist. The assets binding would answer with index.html (its
  * single-page-application fallback); a plain 404 lets the app reload itself instead of parsing

@@ -391,7 +391,8 @@ without running JavaScript.
 | `pricing.html` | `/pricing` | api Worker, with the live price table and offers |
 | `docs.html`, `docs/<slug>.html`, `terms.html`, `privacy.html`, `refunds.html`, `contact.html`, `status.html` | `/docs`, `/docs/<slug>`, … | static assets (`html_handling` *auto-trailing-slash* serves `x.html` at `/x`; `/x/` and `/x.html` redirect there) |
 | `index.md`, `pricing.md`, `llms.txt`, `llms-full.txt` | the same paths | api Worker, with live prices in markdown |
-| `docs.md`, `docs/<slug>.md`, `terms.md`, … , `robots.txt`, `sitemap.xml` | the same paths | static assets (`text/markdown`, `text/plain`, `application/xml`) |
+| `docs.md`, `docs/<slug>.md`, `terms.md`, … , `robots.txt` | the same paths | api Worker passing the asset on (`run_worker_first`), adding the `charset=utf-8` the assets binding leaves out (`text/markdown; charset=utf-8`, `text/plain; charset=utf-8`) |
+| `sitemap.xml` | the same path | static assets (`application/xml`; its XML declaration names UTF-8) |
 
 Each page has its own title, description, canonical URL (`https://nevazu.com/...`), Open Graph and
 Twitter tags, a `rel="alternate"` link to its markdown and schema.org JSON-LD (Organization,
@@ -438,6 +439,7 @@ curl -sA "ClaudeBot" https://nevazu.com/pricing | grep -c 'AggregateOffer'  # 1 
 curl -sA "PerplexityBot" https://nevazu.com/docs/faq | grep -o '<h1[^>]*>[^<]*'
 curl -s https://nevazu.com/robots.txt | head -8                           # ours, no managed Disallow lines first
 curl -sI https://nevazu.com/llms.txt | grep -i content-type                # text/plain; charset=utf-8
+curl -sI https://nevazu.com/docs/agent-setup.md | grep -i content-type     # text/markdown; charset=utf-8
 curl -s https://nevazu.com/pricing.md | head -20                          # the live price table
 curl -sI https://nevazu.com/browsers | grep -i x-robots-tag                # noindex
 ```

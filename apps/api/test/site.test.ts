@@ -5,16 +5,20 @@ import { ORIGIN, setup, SIMULATED_SHEET } from './helpers.js';
 
 /**
  * The prerendered public pages with live prices (src/site.ts). The assets binding is stood in for
- * by files shaped like apps/web's prerender output: slots between live markers and a JSON-LD graph.
+ * by files shaped like apps/web's prerender output: slots between live markers and a JSON-LD graph,
+ * with the content types it really sends (text files without a charset).
  */
 const LD = '<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","@id":"https://nevazu.com/#organization"},{"@type":"WebApplication","@id":"https://nevazu.com/#app","name":"Nevazu"}]}</script>';
 const FILES: Record<string, { body: string; type: string }> = {
   '/home': { body: `<html><head>${LD}</head><body><div id="root"><h1>Home</h1><!--live:summary--><p>See pricing.</p><!--/live:summary--></div></body></html>`, type: 'text/html; charset=utf-8' },
   '/pricing': { body: `<html><head>${LD}</head><body><div id="root"><h1>Pricing</h1><!--live:prices--><p>See pricing.md.</p><!--/live:prices--></div></body></html>`, type: 'text/html; charset=utf-8' },
-  '/pricing.md': { body: '# Pricing\n\n<!--live:prices-md-->See https://nevazu.com/pricing.<!--/live:prices-md-->\n', type: 'text/markdown; charset=utf-8' },
-  '/index.md': { body: '# Nevazu\n\n<!--live:summary-md-->See pricing.<!--/live:summary-md-->\n', type: 'text/markdown; charset=utf-8' },
-  '/llms.txt': { body: '# Nevazu\n\n> A cloud browser.\n\n<!--live:summary-md-->See pricing.<!--/live:summary-md-->\n', type: 'text/plain; charset=utf-8' },
-  '/llms-full.txt': { body: '# Nevazu\n\n<!--live:summary-md-->a<!--/live:summary-md-->\n\n<!--live:prices-md-->b<!--/live:prices-md-->\n', type: 'text/plain; charset=utf-8' },
+  '/pricing.md': { body: '# Pricing\n\n<!--live:prices-md-->See https://nevazu.com/pricing.<!--/live:prices-md-->\n', type: 'text/markdown' },
+  '/index.md': { body: '# Nevazu\n\n<!--live:summary-md-->See pricing.<!--/live:summary-md-->\n', type: 'text/markdown' },
+  '/llms.txt': { body: '# Nevazu\n\n> A cloud browser.\n\n<!--live:summary-md-->See pricing.<!--/live:summary-md-->\n', type: 'text/plain' },
+  '/llms-full.txt': { body: '# Nevazu\n\n<!--live:summary-md-->a<!--/live:summary-md-->\n\n<!--live:prices-md-->b<!--/live:prices-md-->\n', type: 'text/plain' },
+  '/docs/agent-setup.md': { body: '# Coding agent setup\n\nIt’s for agents — 编程智能体.\n', type: 'text/markdown' },
+  '/robots.txt': { body: '# Nevazu welcomes search engines\nUser-agent: *\n', type: 'text/plain' },
+  '/sitemap.xml': { body: '<?xml version="1.0" encoding="UTF-8"?><urlset/>', type: 'application/xml' },
   '/': { body: '<html><body><div id="root"></div>app shell</body></html>', type: 'text/html; charset=utf-8' },
 };
 
@@ -132,6 +136,29 @@ describe('prerendered pages with live prices', () => {
     const res = await app.fetch(new Request('https://admin.example.com/'), t.env as never, t.ctx);
     expect(await res.text()).toContain('app shell');
     expect(new URL(assetRequests[0]!.url).pathname).toBe('/');
+  });
+});
+
+describe('text files', () => {
+  it('say they are UTF-8, which the assets binding leaves out', async () => {
+    for (const [path, type] of [['/docs/agent-setup.md', 'text/markdown; charset=utf-8'], ['/robots.txt', 'text/plain; charset=utf-8'], ['/index.md', 'text/markdown; charset=utf-8'], ['/llms-full.txt', 'text/plain; charset=utf-8']]) {
+      const res = await get(path!);
+      expect(res.status, path).toBe(200);
+      expect(res.headers.get('content-type'), path).toBe(type);
+      // The asset's other headers (the _headers rules) and its body pass through unchanged.
+      expect(res.headers.get('content-security-policy'), path).toBe("default-src 'self'");
+    }
+    expect((await get('/docs/agent-setup.md')).text).toBe('# Coding agent setup\n\nIt’s for agents — 编程智能体.\n');
+    expect((await get('/robots.txt', { method: 'HEAD' })).headers.get('content-type')).toBe('text/plain; charset=utf-8');
+  });
+
+  it('leaves other types, and a charset already given, as they are', async () => {
+    expect((await get('/sitemap.xml')).headers.get('content-type')).toBe('application/xml');
+    expect((await get('/browsers')).headers.get('content-type')).toBe('text/html');
+    expect((await get('/')).headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect((await t.call('GET', '/api/public/pricing')).status).toBe(200);
+    const api = await app.fetch(new Request(new URL('/api/public/pricing', ORIGIN)), t.env as never, t.ctx);
+    expect(api.headers.get('content-type')).toMatch(/^application\/json/);
   });
 });
 
