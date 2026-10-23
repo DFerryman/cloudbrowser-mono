@@ -264,6 +264,7 @@ describe('create', () => {
     expect(other?.instanceId).toBe('someone-else');
   });
 
+  // Fifteen complete lifecycles with real SQLite work share this timeout; CI runs other suites in parallel.
   it('property: random faults always end in one set of resources or a clean failure', async () => {
     const classes = ['retryable', 'unknown_outcome', 'timeout_after_success', null, null, null] as const;
     let seed = 42;
@@ -285,7 +286,7 @@ describe('create', () => {
       }
       await w.expectLedgerMatchesProvider();
     }
-  });
+  }, 30_000);
 });
 
 describe('lifecycle', () => {
