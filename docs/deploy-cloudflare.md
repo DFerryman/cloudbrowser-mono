@@ -445,6 +445,38 @@ curl -sI https://nevazu.com/browsers | grep -i x-robots-tag                # noi
 A `403`, a challenge page or `Disallow` lines for AI crawlers at the top of `robots.txt` mean one
 of the settings above still blocks them. Locally, `node apps/web/e2e/seo.mjs` checks the build.
 
+### IndexNow notifications
+
+IndexNow is enabled for `nevazu.com`. `deploy/indexnow.json` identifies its ownership key, and
+the matching UTF-8 `<key>.txt` file in `apps/web/public` is served at the website root. This is
+separate from `BingSiteAuth.xml`; the key file must stay publicly readable without a challenge.
+The edge exception is included in `deploy/cloudflare-auth-security.json`.
+
+Both `pnpm run deploy` and the API-only deploy command notify IndexNow **after** a successful
+API/assets release. `scripts/indexnow.mjs` compares the built public pages with the previous
+deployment's `/indexnow-manifest.json`. It submits added, changed and removed canonical HTML
+URLs, excluding private app paths, APIs, query strings and other hosts. Compiled JS/CSS filename
+changes alone do not cause notifications. The initial deployment notifies all public pages.
+The manifest contains only public URLs and content hashes; it is marked `noindex` and `no-store`.
+
+Submissions go to `https://api.indexnow.org/indexnow`, which shares them with participating
+search engines. HTTP 200 means received; HTTP 202 means received with key validation pending.
+Neither guarantees crawling, indexing, ranking or AI citations. Keep the XML sitemap submitted
+in Google Search Console and Bing Webmaster Tools.
+
+If notification fails, deployment remains live, the deploy command reports the notification
+failure, and `.wrangler/indexnow-pending.json` retains the URLs for retry (including removed
+pages). Run `pnpm indexnow:retry` without redeploying. A subsequent deployment from this checkout
+also carries pending URLs forward. Preserve that retry file when moving a failed run between
+machines or CI jobs. `pnpm indexnow:submit --dry-run` previews all current sitemap URLs;
+`pnpm indexnow:submit` manually notifies them, for example after a substantial pricing change.
+Avoid repeatedly submitting unchanged pages. Runtime price/availability refreshes are not
+deployment events and do not automatically trigger notifications in this integration.
+
+Validation: `pnpm test:indexnow` covers URL restrictions, meaningful content changes, removals,
+failed-submission recovery, deployment identity and ownership checks. `pnpm test` includes it.
+Protocol: <https://www.indexnow.org/documentation>.
+
 ## 6. Invite pilot users
 
 ```bash

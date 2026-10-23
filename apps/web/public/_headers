@@ -16,6 +16,11 @@
 /build-info.json
   Cache-Control: no-store
 
+# Deployment comparison state for IndexNow; public page URLs and hashes only.
+/indexnow-manifest.json
+  Cache-Control: no-store
+  X-Robots-Tag: noindex
+
 # The app's private pages are not for search indexes. Rules match the requested path, so they also
 # apply where the app shell (index.html) is served as the single-page-application fallback; the
 # shell itself carries <meta name="robots" content="noindex"> for any other unknown path.

@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { pendingMigrations } from './d1-migrations.mjs';
+import { prepareIndexNow, submitIndexNow } from './indexnow.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const api = fileURLToPath(new URL('../apps/api/', import.meta.url));
@@ -61,7 +62,15 @@ try {
     if (info.commit !== commit || info.branch !== 'main' || info.dirty) {
       throw new Error('The frontend build does not belong to this clean main commit.');
     }
+    const changedPages = prepareIndexNow(fileURLToPath(new URL('../apps/web/dist/', import.meta.url)));
     run('pnpm', ['exec', 'wrangler', 'deploy', '--keep-vars', '--message', `Deploy origin/main ${commit}`], api);
+    try {
+      await submitIndexNow(changedPages, { commit });
+    } catch (error) {
+      console.error(`Deployment succeeded, but IndexNow notification failed: ${error.message}`);
+      console.error('Retry with pnpm indexnow:retry; no deployment rollback is needed.');
+      process.exitCode = 1;
+    }
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);

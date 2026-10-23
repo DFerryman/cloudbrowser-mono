@@ -8,7 +8,10 @@
   "scripts": {
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
-    "test": "turbo run test",
+    "test": "node scripts/indexnow.test.mjs && turbo run test",
+    "indexnow:submit": "node scripts/indexnow.mjs --all",
+    "indexnow:retry": "node scripts/indexnow.mjs --retry",
+    "test:indexnow": "node scripts/indexnow.test.mjs",
     "dev": "turbo run dev --parallel",
     "db:generate": "pnpm --filter @cloudbrowser/db generate",
     "db:migrate:local": "pnpm --filter @cloudbrowser/api exec wrangler d1 migrations apply cloudbrowser --local --persist-to ../../.wrangler/state",
