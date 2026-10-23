@@ -38,6 +38,21 @@ export function message(key: MessageKey, vars: Record<string, string | number> =
 
 export const POLICY_SLUGS: readonly PolicySlug[] = ['terms', 'privacy', 'refunds'];
 
+/**
+ * An article's meta description: its summary, and where that is short, its opening paragraph or
+ * else what its sections cover, so a search result or an assistant has something to quote.
+ */
+export function articleDescription(article: Article, max = 200): string {
+  if (article.summary.length >= 110) return article.summary;
+  const first = article.blocks[0];
+  const more = first && 'p' in first
+    ? first.p
+    : `It covers: ${article.blocks.flatMap((b) => ('h' in b ? [b.h] : [])).join('; ')}.`;
+  const text = `${article.summary} ${more}`;
+  if (text.length <= max) return text;
+  return `${text.slice(0, text.lastIndexOf(' ', max - 1)).replace(/[\s,;:]+$/, '')}…`;
+}
+
 export function publicPages(): PublicPage[] {
   return [
     // The home page is not dist/index.html: that file is also the app's fallback for every private
@@ -49,14 +64,14 @@ export function publicPages(): PublicPage[] {
       path: `/docs/${article.slug}`,
       kind: 'doc',
       title: message('seo.doc.title', { title: article.title }),
-      description: article.summary,
+      description: articleDescription(article),
       file: `docs/${article.slug}.html`,
       markdown: `/docs/${article.slug}.md`,
       article,
     })),
     ...POLICY_SLUGS.map((slug): PublicPage => {
       const article = POLICIES.en[slug];
-      return { path: `/${slug}`, kind: 'policy', title: message('seo.policy.title', { title: article.title }), description: article.summary, file: `${slug}.html`, markdown: `/${slug}.md`, article };
+      return { path: `/${slug}`, kind: 'policy', title: message('seo.policy.title', { title: article.title }), description: articleDescription(article), file: `${slug}.html`, markdown: `/${slug}.md`, article };
     }),
     { path: '/contact', kind: 'contact', title: message('seo.contact.title'), description: message('seo.contact.description'), file: 'contact.html', markdown: '/contact.md' },
     { path: '/status', kind: 'status', title: message('seo.status.title'), description: message('seo.status.description'), file: 'status.html', markdown: null },

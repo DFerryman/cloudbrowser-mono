@@ -23,6 +23,12 @@ describe('public pages', () => {
     expect(canonicalUrl(page('/'))).toBe(`${SITE_URL}/`);
   });
 
+  it('describes a short article by its opening or its sections, within 200 characters', () => {
+    expect(page('/docs/troubleshooting').description).toBe('What to do when something does not work. It covers: I did not get a sign-in code; My browser will not open; The network is paused; The picture is slow or blurry.');
+    for (const p of pages) expect(p.description.length).toBeLessThanOrEqual(200);
+    expect(page('/docs/billing').description).toMatch(/[^,;: ]…$/);
+  });
+
   it('has an FAQ in both languages, question for question', () => {
     const ids = (locale: 'en' | 'zh-CN') => DOCS[locale].find((a) => a.slug === 'faq')!.blocks.flatMap((b) => ('h' in b ? [b.id] : []));
     expect(ids('en').length).toBeGreaterThanOrEqual(10);
