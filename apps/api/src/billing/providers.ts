@@ -1,11 +1,14 @@
 /**
  * Which payment provider does what (page 6). Stripe and Creem are both supported, each configured
  * on its own:
- *  - new top-ups and the receipts button use Stripe when its settings are valid (./stripe.ts,
- *    `stripeFrom`), otherwise Creem when its settings are set, otherwise top-ups are off;
+ *  - new top-ups and the receipts button use Stripe when its key, webhook secret and top-up prices
+ *    are all valid (./stripe.ts, `stripeFrom`), otherwise Creem when its settings are set,
+ *    otherwise top-ups are off;
  *  - each provider keeps processing its own webhooks, checkouts, refunds and disputes whenever it
- *    is configured, also while the other one takes new top-ups. Switching providers therefore
- *    never strands a payment that is already under way.
+ *    is configured (Stripe: key and webhook secret), also while the other one takes new top-ups.
+ *    Switching providers therefore never strands a payment that is already under way, and
+ *    removing only STRIPE_TOPUP_PRICES hands top-ups back to Creem while Stripe's chargebacks still
+ *    freeze accounts.
  */
 import { schema, type Db } from '@cloudbrowser/db';
 import { eq } from 'drizzle-orm';
@@ -30,9 +33,9 @@ export function paymentProviders(env: Env): PaymentProviders {
   return { stripe: stripeFrom(env), creem: creemFrom(env) };
 }
 
-/** Where new top-ups go: Stripe first, then Creem; null when neither is configured. */
+/** Where new top-ups go: Stripe when it has top-up prices, then Creem; null when neither can take them. */
 export function checkoutProvider(p: PaymentProviders): PaymentProvider | null {
-  if (p.stripe) return { id: 'stripe', client: p.stripe };
+  if (p.stripe?.topupProductIds.length) return { id: 'stripe', client: p.stripe };
   if (p.creem) return { id: 'creem', client: p.creem };
   return null;
 }

@@ -67,7 +67,10 @@ export interface StripeReversal {
 export interface Stripe {
   /** Live or test mode, from the key; events from the other mode are ignored. */
   livemode: boolean;
-  /** The top-up prices configured for this deployment (STRIPE_TOPUP_PRICES). */
+  /**
+   * The top-up prices configured for this deployment (STRIPE_TOPUP_PRICES). Empty when that is
+   * missing or not valid: Stripe then takes no new top-ups but still applies its own events.
+   */
   topupProductIds: string[];
   getProduct(id: string): Promise<CreemProduct>;
   createCheckout(input: { priceId: string; attemptId: string; userId: string; email: string; customerId: string | null; appUrl: string }): Promise<{ id: string; url: string; termsCheckbox: boolean }>;
@@ -169,11 +172,15 @@ export function parseReversal(o: Record<string, unknown>): StripeReversal {
   };
 }
 
-/** Null unless the secret key, the webhook secret and every top-up price id are valid: Creem is used then. */
+/**
+ * Null unless the secret key and the webhook secret are valid. Stripe takes new top-ups only when
+ * every top-up price id is valid too (./providers.ts); without them it still applies the refunds,
+ * disputes and late payments of earlier Stripe top-ups and opens their receipts.
+ */
 export function stripeFrom(env: Env): Stripe | null {
   const key = env.STRIPE_SECRET_KEY?.trim();
-  const prices = topupPrices(env);
-  if (!key || !SECRET_KEY.test(key) || !stripeWebhookSecret(env) || !prices) return null;
+  if (!key || !SECRET_KEY.test(key) || !stripeWebhookSecret(env)) return null;
+  const prices = topupPrices(env) ?? [];
   const automaticTax = env.STRIPE_AUTOMATIC_TAX?.trim().toLowerCase() !== 'off';
 
   async function call<T extends Record<string, unknown>>(method: 'GET' | 'POST', path: string, params: Record<string, unknown> = {}, idempotencyKey?: string): Promise<T> {

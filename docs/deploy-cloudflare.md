@@ -167,12 +167,15 @@ fully configured; until then `/v1/billing/checkout` answers 503.
   (`sk_live_…` or `rk_live_…`, `whsec_…`, `price_…` ids), **Stripe** takes every new top-up and the
   *Receipts* button opens Stripe's customer portal (Creem's, for someone who only ever paid through Creem).
 - Otherwise **Creem** takes them, as before, when its four settings are set.
-- Each provider processes its own webhooks, refunds and disputes whenever it is configured, also while
-  the other one takes top-ups. Keep Creem configured after Stripe takes over: Creem payments can
-  still be refunded or disputed months later. Deleting or breaking any one Stripe secret switches new
-  top-ups back to Creem at once; Stripe events that arrive meanwhile are kept and applied once Stripe
-  is configured again (with `STRIPE_WEBHOOK_SECRET` gone, Stripe's deliveries are refused and Stripe
-  retries them for three days).
+- Each provider processes its own webhooks, refunds and disputes whenever it is configured (Stripe:
+  `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`), also while the other one takes top-ups. Keep
+  Creem configured after Stripe takes over: Creem payments can still be refunded or disputed months
+  later. Likewise, to hand top-ups back to Creem, delete **only** `STRIPE_TOPUP_PRICES` and keep the
+  key, the webhook secret and Stripe's webhook endpoint for as long as Stripe payments can be
+  refunded or disputed (about 120 days, longer for some cards): Stripe's refunds and disputes are
+  then still applied and its customers still reach their receipts. Without the key or the webhook
+  secret, Stripe events are kept unapplied until both are back (with the webhook secret gone,
+  Stripe's deliveries are refused and Stripe retries them for three days).
 - `GET /api/v1/billing` reports the active one in `provider` (`stripe`, `creem` or `null`).
 
 ### Stripe (UK account)
@@ -245,7 +248,9 @@ pnpm exec wrangler secret put STRIPE_TOPUP_PRICES      # price_…,price_… (co
 9. **Policies:** the Terms, Privacy and Refund pages name both providers. As the seller, also
    publish the company's legal name, registered number, registered office and VAT number.
 
-To return to Creem, delete one Stripe secret (`pnpm exec wrangler secret delete STRIPE_TOPUP_PRICES`).
+To return to Creem, delete only the prices (`pnpm exec wrangler secret delete STRIPE_TOPUP_PRICES`);
+keep `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` so later refunds and chargebacks of Stripe
+payments are still applied.
 
 Stripe also offers *Managed Payments*, in which Stripe is the merchant of record (available to UK
 businesses after a review, 3.5% on top of the payment fees). It forbids the tax, invoice and

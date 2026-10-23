@@ -49,8 +49,9 @@ export interface Env {
   BILLING?: Queue<{ eventId: string }>;
   /**
    * Stripe (page 6; src/billing/stripe.ts). Takes every new top-up when the key, the webhook
-   * secret and at least one price id are all valid; otherwise Creem does. Set as secrets, never
-   * in wrangler.jsonc `vars` (those override values kept from the dashboard on every deploy).
+   * secret and at least one price id are all valid; otherwise Creem does. With only the key and the
+   * webhook secret, Stripe still applies its own refunds and disputes. Set as secrets, never in
+   * wrangler.jsonc `vars` (those override values kept from the dashboard on every deploy).
    * `sk_live_…` / `rk_live_…` (or `_test_` for test mode).
    */
   STRIPE_SECRET_KEY?: string;

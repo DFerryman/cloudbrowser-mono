@@ -549,10 +549,25 @@ describe('Creem beside Stripe', () => {
     expect(sql("SELECT count(*) AS n FROM webhook_events WHERE processed_at IS NULL")).toEqual({ n: 0 });
   });
 
+  it('still applies Stripe refunds and chargebacks after top-ups are handed back to Creem', async () => {
+    const { pi } = await paidTopUp('price_25usd00001', { tax: 0 });
+    Object.assign(t.env, { STRIPE_TOPUP_PRICES: '' }); // the documented way back to Creem
+    expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ provider: 'creem', topUps: [{ productId: 'prod_creem10' }] });
+    stripe.refund(pi, 500);
+    await stripeWebhook(event('refund.created', { id: stripe.refunds[0]!.id }));
+    expect(await balance()).toBe(20_000_000);
+    await stripeWebhook(event('charge.dispute.created', { id: stripe.dispute(pi, 2000) }));
+    expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ frozen: true, balanceMicros: 0 });
+    // The receipts of Stripe payments stay reachable.
+    expect((await t.call('POST', '/api/v1/billing/portal')).body.url).toBe('https://billing.stripe.test/p/session/cus_new1');
+    // A Stripe price is no longer sold.
+    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'price_25usd00001' })).body.type).toBe('validation_failed');
+  });
+
   it('keeps a Stripe event until Stripe is configured, then applies it', async () => {
     const id = await checkout();
     stripe.pay(id);
-    Object.assign(t.env, { STRIPE_TOPUP_PRICES: '' }); // Stripe off: Creem takes top-ups
+    Object.assign(t.env, { STRIPE_SECRET_KEY: undefined }); // Stripe off entirely: Creem takes top-ups
     expect(await stripeWebhook(event('checkout.session.completed', { id }))).toBe(200);
     expect(await balance()).toBe(0);
     const later = new Date(Date.now() + 120_000);
