@@ -1,5 +1,30 @@
 import { describe, expect, it } from 'vitest';
-import { elementPoint } from '../src/mapping.js';
+import { elementPoint, pictureRect, toRemotePoint } from '../src/mapping.js';
+
+describe('picture layout and input share the same rectangle', () => {
+  it.each([
+    { width: 1280, height: 720 },
+    { width: 1280, height: 800 },
+    { width: 800, height: 1280 },
+    { width: 640, height: 400 },
+  ])('maps the painted corners and center after a resize to $width×$height', (video) => {
+    const box = { left: 0, top: 39, width: 1366, height: 829 };
+    const painted = pictureRect(box, video);
+    for (const fraction of [0, 0.25, 0.5, 0.99]) {
+      const point = toRemotePoint(painted.left + painted.width * fraction, painted.top + painted.height * fraction, box, video, null)!;
+      expect(point.x).toBeCloseTo(video.width * fraction);
+      expect(point.y).toBeCloseTo(video.height * fraction);
+    }
+    expect(toRemotePoint(painted.left - 1, painted.top, box, video, null)).toBeNull();
+    expect(toRemotePoint(painted.left, painted.top - 1, box, video, null)).toBeNull();
+  });
+
+  it('handles missing metadata and an unlaid-out box', () => {
+    const box = { left: 0, top: 39, width: 1366, height: 829 };
+    expect(pictureRect(box, { width: 0, height: 0 })).toEqual(box);
+    expect(toRemotePoint(0, 0, { ...box, width: 0, height: 0 }, { width: 0, height: 0 }, null)).toBeNull();
+  });
+});
 
 describe('elementPoint', () => {
   const element = { getBoundingClientRect: () => ({ left: 10, top: 44, width: 800, height: 600 }), clientLeft: 0, clientTop: 0 };

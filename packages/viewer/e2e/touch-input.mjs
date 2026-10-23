@@ -234,6 +234,88 @@ try {
   assert.notEqual(state.active, 'textarea');
   assert.equal(state.focusChanges.filter((e) => e.event === 'focusin' && e.target === 'textarea').length, 0);
   check('keyboard stays closed after subsequent picture tap');
+  // Match the supplied iPad geometry and a decoder retaining its previous 16:9 ratio.
+  // Native pointer events must agree with the explicit CSS picture, including after resize.
+  await page.setViewportSize({ width: 1366, height: 867 });
+  await page.evaluate(async (engine) => {
+    const box = document.querySelector('.remote-screen');
+    box.style.top = '39px';
+    const video = box.querySelector('video');
+    const canvas = document.createElement('canvas');
+    canvas.width = 1280;
+    canvas.height = 720;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#222';
+    ctx.fillRect(0, 0, 1280, 720);
+    ctx.fillStyle = '#00ff00';
+    ctx.fillRect(108, 52, 40, 40);
+    if (engine === 'chromium') {
+      video.srcObject = canvas.captureStream(1);
+      await video.play();
+    } else {
+      // Linux WPE cannot run this canvas media stream; exercise its replaced-element layout
+      // and native input with the same pixels as a poster. Real media is covered in Chromium.
+      video.poster = canvas.toDataURL();
+    }
+    window.fixturePictureSize = { width: 1280, height: 720 };
+    Object.defineProperties(video, {
+      videoWidth: { configurable: true, get: () => window.fixturePictureSize.width },
+      videoHeight: { configurable: true, get: () => window.fixturePictureSize.height },
+    });
+  }, engine);
+  for (const size of [{ width: 1280, height: 720 }, { width: 1280, height: 800 }, { width: 800, height: 1280 }]) {
+    await page.evaluate((size) => {
+      window.fixturePictureSize = size;
+      document.querySelector('video').dispatchEvent(new Event('resize'));
+    }, size);
+    await settle(page);
+    const geometry = await page.locator('video').evaluate((video) => {
+      const rect = video.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, fit: getComputedStyle(video).objectFit };
+    });
+    const scale = Math.min(1366 / size.width, 828 / size.height);
+    assert.equal(geometry.fit, 'fill', 'The decoder must not apply a second contain fit');
+    assert.ok(Math.abs(geometry.width - size.width * scale) < 1);
+    assert.ok(Math.abs(geometry.height - size.height * scale) < 1);
+    const shot = await page.screenshot();
+    const pixel = await page.evaluate(async ({ image, x, y }) => {
+      const img = new Image();
+      img.src = image;
+      await img.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      return [...ctx.getImageData(Math.round(x), Math.round(y), 1, 1).data];
+    }, { image: `data:image/png;base64,${shot.toString('base64')}`, x: geometry.x + geometry.width * 0.1, y: geometry.y + geometry.height * 0.1 });
+    assert.ok(pixel[1] > 200 && pixel[0] < 30, 'The video pixel must be painted at the same point sent by input');
+    for (const [fx, fy] of [[0.1, 0.1], [0.9, 0.1], [0.5, 0.5], [0.1, 0.9], [0.9, 0.9]]) {
+      await clear(page);
+      await page.touchscreen.tap(geometry.x + geometry.width * fx, geometry.y + geometry.height * fy);
+      await settle(page);
+      const moves = inputCalls(await snapshot(page), 'move');
+      const [x, y] = moves.at(-1).args;
+      assert.ok(Math.abs(x - size.width * fx) < 2, `Picture x must match input: ${x}`);
+      assert.ok(Math.abs(y - size.height * fy) < 2, `Picture y must match input: ${y}`);
+    }
+    if (geometry.y > 40) {
+      await clear(page);
+      await page.touchscreen.tap(683, 40);
+      await settle(page);
+      assert.equal(inputCalls(await snapshot(page), 'button').length, 0, 'Letterbox taps must not reach the remote desktop');
+    }
+  }
+  await page.getByTestId('rotate-toggle').click();
+  await settle(page);
+  const turnedPicture = await page.locator('video').boundingBox();
+  await clear(page);
+  await page.touchscreen.tap(turnedPicture.x + turnedPicture.width * 0.25, turnedPicture.y + turnedPicture.height * 0.75);
+  await settle(page);
+  const [turnedX, turnedY] = inputCalls(await snapshot(page), 'move').at(-1).args;
+  assert.ok(Math.abs(turnedX - 600) < 2);
+  assert.ok(Math.abs(turnedY - 960) < 2);
+  check('iPad picture layout and native taps agree across decoder aspect changes, letterboxes and rotation');
   assert.deepEqual(touch.errors, []);
   await touch.context.close();
 

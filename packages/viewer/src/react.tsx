@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type CSSProperties } from 'react';
 import { isMac } from './keyboard.js';
-import { elementPoint, toRemotePoint, unrotate, type PositionedEvent } from './mapping.js';
+import { elementPoint, pictureRect, toRemotePoint, unrotate, type PositionedEvent } from './mapping.js';
 import type { ConnectionDiagnostic, VideoQuality } from '@cloudbrowser/contracts';
 import type { VideoPreference } from './quality.js';
 import { RemoteBrowser, type AutomationStatus, type ConnectInfo, type ViewerState } from './remote-browser.js';
@@ -96,6 +96,9 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   const [cursor, setCursor] = useState('default');
   const [dragging, setDragging] = useState(false);
   const [boxSize, setBoxSize] = useState<{ width: number; height: number } | null>(null);
+  const [pictureSize, setPictureSize] = useState({ width: 0, height: 0 });
+  const pictureSizeRef = useRef(pictureSize);
+  pictureSizeRef.current = pictureSize;
   const rotatedRef = useRef(rotated);
   rotatedRef.current = rotated;
   const debugRef = useRef(debug);
@@ -215,6 +218,20 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     if (video) browserRef.current?.setVideoPreference(video);
   }, [video?.quality, video?.auto]);
 
+  useEffect(() => {
+    const element = videoRef.current;
+    if (!element) return;
+    const update = () => setPictureSize((previous) => previous.width === element.videoWidth && previous.height === element.videoHeight
+      ? previous : { width: element.videoWidth, height: element.videoHeight });
+    update();
+    element.addEventListener('resize', update);
+    element.addEventListener('loadedmetadata', update);
+    return () => {
+      element.removeEventListener('resize', update);
+      element.removeEventListener('loadedmetadata', update);
+    };
+  }, []);
+
   // The remote screen follows the viewport (page 5, "Screen-size policy"), turned with the view.
   const fitViewport = (size: { width: number; height: number }) => {
     // Keyboard animations resize the local view; they must not keep resizing remote Chrome.
@@ -255,8 +272,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     return { x, y, frame };
   };
   const remoteAt = (x: number, y: number, frame: { left: number; top: number; width: number; height: number }) => {
-    const video = videoRef.current!;
-    return toRemotePoint(x, y, frame, { width: video.videoWidth, height: video.videoHeight }, browserRef.current?.screenSize ?? null);
+    return toRemotePoint(x, y, frame, pictureSizeRef.current, browserRef.current?.screenSize ?? null);
   };
   const toRemote = (event: PositionedEvent) => {
     const point = elementPoint(event, boxRef.current!);
@@ -298,12 +314,14 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       const video = videoRef.current!;
       const screen = browserRef.current?.screenSize;
       const vv = window.visualViewport;
+      const painted = video.getBoundingClientRect();
       const n = (value: number) => value.toFixed(0);
       setDebugInfo({ x: point.x, y: point.y, lines: [
         `${kind} ${e.pointerType} client ${n(e.clientX)},${n(e.clientY)} offset ${n(e.offsetX)},${n(e.offsetY)} page ${n(e.pageX)},${n(e.pageY)} target ${e.target === box ? 'box' : 'other'}`,
         `box point ${n(point.x)},${n(point.y)} → remote ${remote ? `${n(remote.x)},${n(remote.y)}` : 'outside the picture'}`,
         `box ${box.clientWidth}×${box.clientHeight} rect ${n(rect.left)},${n(rect.top)} ${n(rect.width)}×${n(rect.height)} rotated ${rotatedRef.current}`,
         `video ${video.videoWidth}×${video.videoHeight} screen ${screen ? `${screen.width}×${screen.height}` : '?'}`,
+        `picture rect ${n(painted.left)},${n(painted.top)} ${n(painted.width)}×${n(painted.height)} fit fill`,
         `viewport ${vv ? `offset ${n(vv.offsetLeft)},${n(vv.offsetTop)} page ${n(vv.pageLeft)},${n(vv.pageTop)} ${n(vv.width)}×${n(vv.height)} scale ${vv.scale.toFixed(2)}` : 'none'}`,
         `scroll ${window.scrollX},${window.scrollY} inner ${window.innerWidth}×${window.innerHeight} client ${document.documentElement.clientWidth}×${document.documentElement.clientHeight}`,
       ] });
@@ -520,6 +538,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     },
   }));
 
+  const fitted = boxSize ? pictureRect({ left: 0, top: 0, width: rotated ? boxSize.height : boxSize.width, height: rotated ? boxSize.width : boxSize.height }, pictureSize) : null;
+
   return (
     // The caller positions the box (e.g. `absolute inset-0`); an inline `position` here would override it.
     <div
@@ -542,7 +562,9 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
           ? { position: 'absolute', left: '50%', top: '50%', width: boxSize.height, height: boxSize.width, transform: 'translate(-50%, -50%) rotate(90deg)', pointerEvents: 'none' }
           : { position: 'absolute', inset: 0, pointerEvents: 'none' }}
       >
-        <video ref={videoRef} autoPlay playsInline muted={muted} style={{ width: '100%', height: '100%', objectFit: 'contain', pointerEvents: 'none' }} />
+        {/* Share the input mapping's fit instead of letting the video compositor choose a
+            separate intrinsic fit during a WebRTC resize. */}
+        <video ref={videoRef} autoPlay playsInline muted={muted} style={{ position: 'absolute', display: 'block', ...(fitted ? { left: fitted.left, top: fitted.top, width: fitted.width, height: fitted.height } : { inset: 0, width: '100%', height: '100%' }), maxWidth: 'none', objectFit: 'fill', pointerEvents: 'none' }} />
       </div>
       {dragging ? <div aria-hidden style={{ position: 'absolute', inset: 0, pointerEvents: 'none', outline: '2px dashed currentColor', outlineOffset: -6, opacity: 0.6 }} /> : null}
       {debug && debugInfo ? (
