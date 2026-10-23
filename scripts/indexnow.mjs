@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const config = JSON.parse(readFileSync(join(root, 'deploy/indexnow.json'), 'utf8'));
@@ -15,7 +16,7 @@ if (config.host !== 'nevazu.com' || !/^[a-f0-9]{32}$/.test(config.key)) throw ne
 // curl honors the deployment environment's HTTPS proxy and CA settings, including on Node 22.
 function request(url, body) {
   const args = ['--silent', '--show-error', '--connect-timeout', '10', '--max-time', '25',
-    '--user-agent', 'Nevazu-IndexNow/1.0', '--write-out', '\n%{http_code}'];
+    '--user-agent', 'Nevazu-IndexNow/1.0', '--header', 'Cache-Control: no-cache', '--write-out', '\n%{http_code}'];
   if (body) args.push('--header', 'Content-Type: application/json; charset=utf-8', '--data-binary', '@-');
   args.push(url);
   const result = spawnSync('curl', args, { input: body && JSON.stringify(body), encoding: 'utf8', timeout: 30_000, maxBuffer: 5_000_000 });
@@ -99,7 +100,7 @@ export function prepareIndexNow(dist, { transport = request, retryFile = pending
 }
 
 /** Persist before contacting IndexNow; an unsuccessful request can be retried without redeploying. */
-export function submitIndexNow(urls, { commit, dryRun = false, transport = request, retryFile = pendingPath } = {}) {
+export async function submitIndexNow(urls, { commit, dryRun = false, transport = request, retryFile = pendingPath, sleep = delay } = {}) {
   urls = [...new Set(urls.map(validateUrl))].sort();
   if (!urls.length) { console.log('IndexNow: no public content changes.'); return; }
   if (urls.length > 10_000) throw new Error('IndexNow batch exceeds 10,000 URLs.');
@@ -107,8 +108,14 @@ export function submitIndexNow(urls, { commit, dryRun = false, transport = reque
   mkdirSync(dirname(retryFile), { recursive: true });
   writeFileSync(retryFile, JSON.stringify({ urls, commit, createdAt: new Date().toISOString() }, null, 2) + '\n');
   if (commit) {
-    const live = transport(origin + '/build-info.json');
-    if (live.status !== 200 || JSON.parse(live.body).commit !== commit) throw new Error('Live build does not match the deployed commit; notification deferred.');
+    let ready = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await sleep(2000);
+      const live = transport(origin + '/build-info.json?indexnow=' + encodeURIComponent(commit));
+      try { ready = live.status === 200 && JSON.parse(live.body).commit === commit; } catch { ready = false; }
+      if (ready) break;
+    }
+    if (!ready) throw new Error('Live build does not match the deployed commit; notification deferred.');
   }
   const keyLocation = `${origin}/${config.key}.txt`;
   const keyFile = transport(keyLocation);
@@ -131,6 +138,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       if (sitemap.status !== 200) throw new Error(`Live sitemap HTTP ${sitemap.status}`);
       urls = [...new Set([...pendingUrls(), ...sitemapUrls(sitemap.body)])];
     } else urls = pendingUrls();
-    submitIndexNow(urls, { dryRun: args.includes('--dry-run') });
+    await submitIndexNow(urls, { dryRun: args.includes('--dry-run') });
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

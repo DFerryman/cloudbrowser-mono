@@ -65,7 +65,7 @@ try {
     const changedPages = prepareIndexNow(fileURLToPath(new URL('../apps/web/dist/', import.meta.url)));
     run('pnpm', ['exec', 'wrangler', 'deploy', '--keep-vars', '--message', `Deploy origin/main ${commit}`], api);
     try {
-      submitIndexNow(changedPages, { commit });
+      await submitIndexNow(changedPages, { commit });
     } catch (error) {
       console.error(`Deployment succeeded, but IndexNow notification failed: ${error.message}`);
       console.error('Retry with pnpm indexnow:retry; no deployment rollback is needed.');

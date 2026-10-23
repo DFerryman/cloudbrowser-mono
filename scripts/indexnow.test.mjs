@@ -52,43 +52,60 @@ test('deploy preparation compares the live manifest and carries unsubmitted URLs
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('failed IndexNow requests keep a retry record; successful requests clear it', () => {
+test('failed IndexNow requests keep a retry record; successful requests clear it', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'indexnow-'));
   const retryFile = join(dir, 'pending.json');
   let status = 429;
   const calls = [];
   const transport = (url, body) => {
     calls.push({ url, body });
-    if (url.endsWith('/build-info.json')) return { status: 200, body: JSON.stringify({ commit: 'deployed' }) };
+    if (url.includes('/build-info.json')) return { status: 200, body: JSON.stringify({ commit: 'deployed' }) };
     if (url.endsWith('.txt')) return { status: 200, body: config.key + '\n' };
     return { status, body: 'test response' };
   };
   try {
-    assert.throws(() => submitIndexNow([origin + '/docs'], { commit: 'deployed', transport, retryFile }), /HTTP 429/);
+    await assert.rejects(() => submitIndexNow([origin + '/docs'], { commit: 'deployed', transport, retryFile }), /HTTP 429/);
     assert.deepEqual(JSON.parse(readFileSync(retryFile, 'utf8')).urls, [origin + '/docs']);
     status = 200;
-    submitIndexNow([origin + '/docs', origin + '/docs'], { commit: 'deployed', transport, retryFile });
+    await submitIndexNow([origin + '/docs', origin + '/docs'], { commit: 'deployed', transport, retryFile });
     assert.equal(existsSync(retryFile), false);
     assert.deepEqual(calls.at(-1).body.urlList, [origin + '/docs']);
     assert.equal(calls.at(-1).url, 'https://api.indexnow.org/indexnow');
     status = 202;
-    submitIndexNow([origin + '/docs'], { transport, retryFile });
+    await submitIndexNow([origin + '/docs'], { transport, retryFile });
     assert.equal(existsSync(retryFile), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('a stale deployment or an invalid ownership file prevents notification and preserves retry', () => {
+test('a stale deployment or an invalid ownership file prevents notification and preserves retry', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'indexnow-'));
   const retryFile = join(dir, 'pending.json');
   const calls = [];
   const transport = (url) => { calls.push(url); return { status: 200, body: JSON.stringify({ commit: 'old' }) }; };
   try {
-    assert.throws(() => submitIndexNow([origin + '/'], { commit: 'new', transport, retryFile }), /does not match/);
-    assert.equal(calls.length, 1);
+    await assert.rejects(() => submitIndexNow([origin + '/'], { commit: 'new', transport, retryFile, sleep: async () => {} }), /does not match/);
+    assert.equal(calls.length, 3);
     assert.equal(existsSync(retryFile), true);
     calls.length = 0;
-    assert.throws(() => submitIndexNow([origin + '/'], { transport, retryFile }), /ownership file/);
+    await assert.rejects(() => submitIndexNow([origin + '/'], { transport, retryFile }), /ownership file/);
     assert.equal(calls.length, 1);
     assert.equal(existsSync(retryFile), true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('notification waits for deployment propagation before contacting IndexNow', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'indexnow-'));
+  let buildReads = 0;
+  let submissions = 0;
+  const transport = (url) => {
+    if (url.includes('/build-info.json')) return { status: 200, body: JSON.stringify({ commit: ++buildReads === 1 ? 'old' : 'new' }) };
+    if (url.endsWith('.txt')) return { status: 200, body: config.key };
+    submissions++;
+    return { status: 200, body: '' };
+  };
+  try {
+    await submitIndexNow([origin + '/'], { commit: 'new', transport, retryFile: join(dir, 'pending.json'), sleep: async () => {} });
+    assert.equal(buildReads, 2);
+    assert.equal(submissions, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
