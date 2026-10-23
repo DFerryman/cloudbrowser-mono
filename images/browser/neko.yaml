@@ -43,7 +43,11 @@ capture:
           bitrate: "3000"            # ... never above this many kbit/s
           vbv-buf-capacity: "100"    # ms of the cap: no frame bigger than a tenth of a second's worth
           key-int-max: "9000"        # 5 minutes: keyframes come when a viewer needs one (see above)
-          threads: "4"
+          # One thread. zerolatency makes x264 thread by slices, and each slice thread's VBV share
+          # depends on how far the others got: under the 100 ms buffer that undershot the cap and
+          # smeared text while scrolling (dense 1080p page at 3 Mbit/s: PSNR 16-24 dB with 4
+          # threads, 28 dB with one), and less CPU. One thread encodes 1080p in about 9 ms.
+          threads: "1"
           byte-stream: "true"
           tune: zerolatency          # no lookahead or B-frames: each frame leaves as it is encoded
           speed-preset: superfast
