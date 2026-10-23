@@ -88,9 +88,9 @@ type Config struct {
 	Host           Host   // optional: disk and network reports, file system growth
 	// Files viewers paste or drop (files.go): written to UploadDir, which Chrome sees as
 	// UploadBrowserDir; both empty disables them. Clipboard is needed for pastes.
-	UploadDir         string
-	UploadBrowserDir  string
-	Clipboard         Clipboard
+	UploadDir        string
+	UploadBrowserDir string
+	Clipboard        Clipboard
 	// FileChooser tells whether Chrome's file chooser is open, for picker attaches (optional).
 	FileChooser FileChooser
 	EchoURLs    []string
@@ -98,7 +98,7 @@ type Config struct {
 	// PublicIP reads the VM's public address from the instance metadata (optional): the address
 	// periodic checks expect until the engine names one in an ip_check command.
 	PublicIP          func(ctx context.Context) (string, error)
-	Generation        int    // placement generation, from user data
+	Generation        int // placement generation, from user data
 	Heartbeat         time.Duration
 	IPCheckEvery      time.Duration
 	ViewerOpenTimeout time.Duration // total bound, in addition to the relay's stage deadlines

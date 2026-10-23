@@ -1,6 +1,8 @@
 [Unit]
 Description=CloudBrowser browser container (neko + Chrome)
-Requires=docker.service cloudbrowser-data.service
+# The browser never runs without its firewall (nftables loads /etc/nftables.conf, the normal
+# rules): if they fail to load, Chrome does not start with unfenced egress.
+Requires=docker.service cloudbrowser-data.service nftables.service
 After=docker.service cloudbrowser-data.service network-online.target nftables.service
 Wants=network-online.target
 

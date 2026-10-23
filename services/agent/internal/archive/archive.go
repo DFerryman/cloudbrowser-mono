@@ -21,6 +21,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,6 +174,41 @@ func Unpack(r io.Reader, key []byte, dir string) error {
 	return err
 }
 
+// TransferError is a failed archive upload or download, said without its presigned URL: the
+// URL's query is the credential for the object, and the error reaches the agent's journal and the
+// engine's reply. Only the operation, the storage host and the HTTP status (or the kind of
+// failure) remain.
+type TransferError struct {
+	Op     string // upload | download
+	Host   string
+	Status int    // 0 when no response came
+	Cause  string // without a response: timeout, canceled or unreachable
+}
+
+func (e *TransferError) Error() string {
+	if e.Status != 0 {
+		return fmt.Sprintf("%s %s: HTTP %d", e.Op, e.Host, e.Status)
+	}
+	return fmt.Sprintf("%s %s: %s", e.Op, e.Host, e.Cause)
+}
+
+// transferFailure describes err (from building or sending the request to rawURL) safely.
+func transferFailure(op, rawURL string, err error) error {
+	host := "storage"
+	if u, perr := url.Parse(rawURL); perr == nil && u.Host != "" {
+		host = u.Host
+	}
+	cause := "unreachable"
+	var uerr *url.Error
+	switch {
+	case errors.Is(err, context.Canceled):
+		cause = "canceled"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &uerr) && uerr.Timeout():
+		cause = "timeout"
+	}
+	return &TransferError{Op: op, Host: host, Cause: cause}
+}
+
 // Upload packs dir into a temporary file (R2 needs the length up front) and PUTs it to the
 // presigned URL. It returns the archive's size.
 func Upload(ctx context.Context, dir string, key []byte, putURL string) (int64, error) {
@@ -198,17 +234,17 @@ func Upload(ctx context.Context, dir string, key []byte, putURL string) (int64, 
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, putURL, tmp)
 	if err != nil {
-		return 0, err
+		return 0, transferFailure("upload", putURL, err)
 	}
 	req.ContentLength = size
 	req.Header.Set("Content-Type", "application/octet-stream")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, transferFailure("upload", putURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return 0, fmt.Errorf("upload: HTTP %d", resp.StatusCode)
+		return 0, &TransferError{Op: "upload", Host: req.URL.Host, Status: resp.StatusCode}
 	}
 	return size, nil
 }
@@ -218,15 +254,15 @@ func Upload(ctx context.Context, dir string, key []byte, putURL string) (int64, 
 func Restore(ctx context.Context, getURL string, key []byte, dir string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, getURL, nil)
 	if err != nil {
-		return err
+		return transferFailure("download", getURL, err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return transferFailure("download", getURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("download: HTTP %d", resp.StatusCode)
+		return &TransferError{Op: "download", Host: req.URL.Host, Status: resp.StatusCode}
 	}
 	staging, old := dir+".restore", dir+".old"
 	_ = os.RemoveAll(staging)

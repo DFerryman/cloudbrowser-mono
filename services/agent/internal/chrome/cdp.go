@@ -116,6 +116,9 @@ func (c *CDP) Call(ctx context.Context, sessionID, method string, params any, ou
 	}
 	select {
 	case <-ctx.Done():
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
 		return ctx.Err()
 	case resp, ok := <-ch:
 		if !ok {
@@ -129,6 +132,18 @@ func (c *CDP) Call(ctx context.Context, sessionID, method string, params any, ou
 		}
 		return nil
 	}
+}
+
+// cleanupLimit bounds a call that tidies up after another (closing a hidden page, detaching):
+// it runs when the caller's own context may have ended, and a Chrome that stopped answering must
+// not hold the IP check or the input that made it forever.
+const cleanupLimit = 5 * time.Second
+
+// cleanup sends one tidying call on its own bound, whatever happened to the caller's context.
+func (c *CDP) cleanup(method string, params any) {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupLimit)
+	defer cancel()
+	_ = c.Call(ctx, "", method, params, nil)
 }
 
 // Chrome implements agent.Browser. Chrome itself runs in the browser container (neko image);
@@ -213,7 +228,7 @@ func (c *Chrome) ObservedIPs(ctx context.Context, echoURLs []string) ([]string, 
 	if err := c.CDP.Call(ctx, "", "Target.createBrowserContext", map[string]any{"disposeOnDetach": true}, &bc); err != nil {
 		return nil, err
 	}
-	defer c.CDP.Call(context.Background(), "", "Target.disposeBrowserContext", map[string]any{"browserContextId": bc.BrowserContextID}, nil)
+	defer c.CDP.cleanup("Target.disposeBrowserContext", map[string]any{"browserContextId": bc.BrowserContextID})
 
 	var out []string
 	for _, u := range echoURLs {
@@ -236,7 +251,7 @@ func (c *Chrome) ObservedIPs(ctx context.Context, echoURLs []string) ([]string, 
 		}
 		expr := fmt.Sprintf(`fetch(%q, {cache: "no-store"}).then(r => r.text())`, u)
 		err = c.CDP.Call(ctx, s.SessionID, "Runtime.evaluate", map[string]any{"expression": expr, "awaitPromise": true, "returnByValue": true}, &r)
-		_ = c.CDP.Call(context.Background(), "", "Target.closeTarget", map[string]any{"targetId": targetID}, nil)
+		c.CDP.cleanup("Target.closeTarget", map[string]any{"targetId": targetID})
 		if err != nil {
 			return out, err
 		}
@@ -274,7 +289,7 @@ func (c *Chrome) InsertText(ctx context.Context, text string) error {
 		if err := c.CDP.Call(ctx, "", "Target.attachToTarget", map[string]any{"targetId": t.TargetID, "flatten": true}, &s); err != nil {
 			return err
 		}
-		defer c.CDP.Call(context.Background(), "", "Target.detachFromTarget", map[string]any{"sessionId": s.SessionID}, nil)
+		defer c.CDP.cleanup("Target.detachFromTarget", map[string]any{"sessionId": s.SessionID})
 		return c.CDP.Call(ctx, s.SessionID, "Input.insertText", map[string]any{"text": text}, nil)
 	}
 	return errors.New("no page to type into")
@@ -303,7 +318,7 @@ func (c *Chrome) DropFiles(ctx context.Context, x, y int, paths []string) (bool,
 	var sessions []string
 	defer func() {
 		for _, s := range sessions {
-			_ = c.CDP.Call(context.Background(), "", "Target.detachFromTarget", map[string]any{"sessionId": s}, nil)
+			c.CDP.cleanup("Target.detachFromTarget", map[string]any{"sessionId": s})
 		}
 	}()
 	for _, t := range targets.TargetInfos {

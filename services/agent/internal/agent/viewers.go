@@ -201,10 +201,32 @@ func (a *Agent) finishViewerOpen(p *viewerOpen) {
 	}()
 }
 
+// The gateway closes the agent's tunnel on a frame over gatewayFrameLimit, which would end every
+// session of the browser. A neko message over maxViewerMessage (a large clipboard, a long
+// system/init) is not relayed, nor one whose frame grew past the limit with its envelope and JSON
+// escaping.
+const (
+	maxViewerMessage  = 192 << 10
+	gatewayFrameLimit = 256 << 10
+)
+
 func (a *Agent) forwardViewer(p *viewerOpen, msg json.RawMessage) {
-	if !a.clipboardEchoed(msg) {
-		_ = a.write(p.ctx, protocol.ToViewer{T: "viewer", SessionID: p.sessionID, RelayID: p.relayID, Data: msg})
+	if a.clipboardEchoed(msg) {
+		return
 	}
+	frame, err := json.Marshal(protocol.ToViewer{T: "viewer", SessionID: p.sessionID, RelayID: p.relayID, Data: msg})
+	if err != nil || len(msg) > maxViewerMessage || len(frame) > gatewayFrameLimit {
+		// Only the size and the event's name: the payload is the user's content.
+		var m struct {
+			Event string `json:"event"`
+		}
+		_ = json.Unmarshal(msg, &m)
+		a.log.Warn("neko message too large for the gateway; dropped", "sessionId", p.sessionID, "event", m.Event, "bytes", len(msg))
+		return
+	}
+	// Not the viewer's own context: it ends when the viewer closes, possibly mid-write, and a
+	// write whose context ends closes the whole tunnel (write).
+	_ = a.write(context.WithoutCancel(p.ctx), json.RawMessage(frame))
 }
 
 func (a *Agent) sendViewerError(p *viewerOpen, reason string) {

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -51,7 +52,7 @@ func main() {
 		gateway      = flag.String("gateway", "", "override the gateway URL from user data")
 		uploadDir    = flag.String("upload-dir", "", "where files viewers paste or drop are written; empty disables them")
 		uploadInside = flag.String("upload-browser-dir", "", "the same directory as Chrome sees it in the browser container")
-		clipboard    = flag.String("clipboard-exec", "", "command prefix that runs a command in the browser container (xclip sets its clipboard), e.g. docker exec -i -u neko browser")
+		clipboard    = flag.String("clipboard-exec", "", "command prefix that runs a command in the browser container (xclip sets its clipboard, xdotool finds Chrome's file chooser), e.g. docker exec -i -u neko browser")
 	)
 	flag.Parse()
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -97,7 +98,7 @@ func main() {
 		nk = nekoAdapter{&neko.Relay{URL: *nekoWS}}
 	}
 
-	a := agent.New(agent.Config{
+	cfg := agent.Config{
 		InstanceID:       ud.InstanceID,
 		GatewayURL:       ud.GatewayURL,
 		BootstrapToken:   ud.BootstrapToken,
@@ -111,7 +112,13 @@ func main() {
 		UploadDir:        *uploadDir,
 		UploadBrowserDir: *uploadInside,
 		Clipboard:        clipboardFor(*clipboard),
-	}, browser, nk, fw, log)
+		FileChooser:      fileChooserFor(*clipboard),
+	}
+	if *fakeEgressIP == "" {
+		// The VM's own address, for periodic IP checks before the engine names one.
+		cfg.PublicIP = host.IMDS{}.PublicIPv4
+	}
+	a := agent.New(cfg, browser, nk, fw, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -221,6 +228,34 @@ func (c execClipboard) SetClipboard(ctx context.Context, mime string, data []byt
 		return fmt.Errorf("xclip: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// execFileChooser asks xdotool in the browser container whether Chrome's file chooser is open:
+// the GTK dialog an upload button opens is a window titled "Open File" ("Open Files" when the
+// page takes several), the name neko's own dialog handling searches for. xdotool exits 1 when no
+// window matches.
+type execFileChooser struct{ prefix []string }
+
+func fileChooserFor(prefix string) agent.FileChooser {
+	if fields := strings.Fields(prefix); len(fields) > 0 {
+		return execFileChooser{fields}
+	}
+	return nil
+}
+
+func (c execFileChooser) FileChooserOpen(ctx context.Context) (bool, error) {
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	args := append(append([]string{}, c.prefix[1:]...), "xdotool", "search", "--onlyvisible", "--name", "^Open Files?$")
+	out, err := exec.CommandContext(cctx, c.prefix[0], args...).CombinedOutput()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return len(strings.TrimSpace(string(out))) > 0, nil
+	case errors.As(err, &exit) && exit.ExitCode() == 1:
+		return false, nil
+	}
+	return false, fmt.Errorf("xdotool: %v: %s", err, strings.TrimSpace(string(out)))
 }
 
 // hostFor is the VM itself, except in local development runs (no data volume to grow).
