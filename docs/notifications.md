@@ -26,9 +26,13 @@ deleted, a browser stopped by someone else) is never held back; it is already ra
 | Already registered | Legacy registration-link request for an existing account | Points to sign-in; does not sign the recipient in |
 | Credit lasts < 24 h / 6 h / 1 h | Funded time at current spending crosses each mark | Once per mark while credit falls; re-armed only at 1.25× the mark |
 | Low balance | Available credit drops below the console's low-balance threshold | Once per dip; skipped if a funded-time warning already went out; **at most once per 3 days** (`LOW_BALANCE_COOLDOWN_MS`) |
-| Credit ran out / deletion reminders | Usable credit is gone | Exactly three: at the time, after 3 days, 1 day before deletion |
-| Browser stopped / network paused | Engine stopped a browser (admin, suspension, frozen) or paused its network | Once per event |
+| Credit ran out / deletion reminders | Usable credit is gone; never during a payment-dispute hold, which stops browsers but pauses deletion | Exactly three: at the time, after 3 days, 1 day before deletion |
+| Browser stopped / network paused | Engine stopped a browser (admin, suspension, frozen) or paused its network | Once per event; a failed send is retried for up to a day (`NOTICE_RETRY_MS`) |
 | **Reward credited** (new) | A promotion reward reached the balance | Rewards are collected for 10 minutes and confirmed in **one** email; **at most one per 24 h** (`REWARD_COOLDOWN_MS`) — later rewards wait and join the next email, none is lost |
+
+Funded-time warnings, credit-ran-out and deletion reminders (the final one too), browser notices
+and reward emails count as sent only once the email went out; a failed one is sent again by the
+next sweep. Without an `EMAIL` binding (local development) they are recorded as before.
 
 Rewards credited before this release are marked as already notified by migration `0028`, so the
 deploy does not email past rewards.
