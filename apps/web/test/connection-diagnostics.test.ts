@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import type { ConnectionDiagnostic, ConnectionMediaSnapshot } from '@cloudbrowser/contracts';
-import { connectionDiagnosticReporter } from '../src/features/session/diagnostics.js';
+import type { ConnectionDiagnostic, ConnectionMediaSnapshot, LiveQualityReport } from '@cloudbrowser/contracts';
+import { connectionDiagnosticReporter, liveQualityReporter } from '../src/features/session/diagnostics.js';
 
 afterEach(() => vi.useRealTimers());
 const diagnostic = (stage: ConnectionDiagnostic['stage'] = 'token_start'): ConnectionDiagnostic => ({
@@ -124,5 +124,58 @@ it('retains evidence for a new peer on a long-lived socket after an earlier peer
   await vi.advanceTimersByTimeAsync(0);
   expect(send).toHaveBeenCalledTimes(23);
   expect(send.mock.calls.at(-1)?.[0]).toMatchObject({ stage: 'failed', peerSequence: 3, code: 'connection_timeout' });
+  reporter.dispose();
+});
+
+const quality: LiveQualityReport = {
+  attemptId: '658338e1-5c61-4933-a886-1554d138e613', durationMs: 60_000, readings: 30, rttMs: 290, gatewayRttMs: 40,
+  fps: 24, kbps: 2400, loss: 0.01, freezes: 0, freezeMs: 0, jitterBufferMs: 50, decodeMs: 5, framesDropped: 0,
+  quality: 'high', width: 1920, height: 1080, localCandidateType: 'relay', relayProtocol: 'udp',
+};
+
+it('sends one quality report at a time, drops one that cannot go now, and gives up on a slow request', async () => {
+  vi.useFakeTimers();
+  const pending: { resolve: () => void; signal: AbortSignal }[] = [];
+  // As fetch does, an aborted request rejects.
+  const send = vi.fn((_value: LiveQualityReport, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
+    pending.push({ resolve, signal });
+    signal.addEventListener('abort', () => reject(signal.reason));
+  }));
+  const reporter = liveQualityReporter('session', send);
+  expect(reporter.report(quality)).toBe(true);
+  await Promise.resolve();
+  // A minute later the first is still in flight: the next is dropped, not queued.
+  expect(reporter.report({ ...quality, rttMs: 300 })).toBe(false);
+  pending[0]!.resolve();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(reporter.report({ ...quality, rttMs: 310 })).toBe(true);
+  await Promise.resolve();
+  expect(send.mock.calls.map(([value]) => value.rttMs)).toEqual([290, 310]);
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(pending[1]!.signal.aborted).toBe(true);
+  // The page disposes the reporter before the view below it disconnects and sends its last
+  // interval: that report is still taken and not cut off, and nothing is taken after it.
+  reporter.dispose();
+  expect(reporter.report(quality)).toBe(true);
+  await Promise.resolve();
+  expect(pending[2]!.signal.aborted).toBe(false);
+  pending[2]!.resolve();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(reporter.report(quality)).toBe(false);
+  expect(send).toHaveBeenCalledTimes(3);
+});
+
+it('drops quality reports outside the contract before any request is sent', async () => {
+  const send = vi.fn(async () => {});
+  const reporter = liveQualityReporter('session', send);
+  for (const value of [
+    { ...quality, address: '203.0.113.7' },
+    { ...quality, rttMs: Number.NaN },
+    { ...quality, fps: 500 },
+    { ...quality, loss: -0.1 },
+    { ...quality, durationMs: 500 },
+  ]) expect(reporter.report(value as never)).toBe(false);
+  await Promise.resolve();
+  expect(send).not.toHaveBeenCalled();
   reporter.dispose();
 });

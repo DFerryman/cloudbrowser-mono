@@ -38,6 +38,8 @@ export interface Env {
     automationControl?(instanceId: string, mode: 'agent' | 'user' | 'privacy', access: boolean): Promise<void>;
     revokeAutomation?(instanceId: string, clientId?: string): Promise<void>;
   };
+  /** Workers Analytics Engine: a minute of live-view quality per data point (POST /sessions/:id/quality). */
+  LIVE_QUALITY?: AnalyticsEngineDataset;
   /** Ed25519 private key (JWK JSON) that signs 60 s viewer tokens. Secret. */
   VIEWER_TOKEN_PRIVATE_KEY?: string;
   /** Cloudflare Realtime TURN key: viewers and neko get short-lived credentials from it. */

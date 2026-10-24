@@ -482,10 +482,10 @@ describe('gateway internal API and live view', () => {
     const second = await api.authenticateAgent({ instanceId: id, bootstrap: bootstrapToken });
     expect(second.ok && second.credential).toBeTruthy();
     expect(await api.authenticateAgent({ instanceId: id, credential: first.ok ? first.credential : '' })).toEqual({ ok: false, reason: 'invalid_token' });
-    expect(await api.authenticateAgent({ instanceId: id, credential: second.ok ? second.credential : '' })).toEqual({ ok: true, generation: 1 });
+    expect(await api.authenticateAgent({ instanceId: id, credential: second.ok ? second.credential : '' })).toEqual({ ok: true, generation: 1, location: 'apac-ne' });
     // Once the agent has connected with its credential, the bootstrap token is spent.
     expect(await api.authenticateAgent({ instanceId: id, bootstrap: bootstrapToken })).toEqual({ ok: false, reason: 'invalid_token' });
-    expect(await api.authenticateAgent({ instanceId: id, credential: second.ok ? second.credential : '' })).toEqual({ ok: true, generation: 1 });
+    expect(await api.authenticateAgent({ instanceId: id, credential: second.ok ? second.credential : '' })).toEqual({ ok: true, generation: 1, location: 'apac-ne' });
     expect((await api.authenticateAgent({ instanceId: id, credential: 'nope' })).ok).toBe(false);
   });
 
@@ -540,6 +540,8 @@ describe('gateway internal API and live view', () => {
 
     const claims = await verifyViewerToken(keys.publicJwk, info.token);
     expect(claims?.iid).toBe(id);
+    // Tokyo's gateway object is created in north-east Asia, not wherever the first viewer is.
+    expect(claims?.loc).toBe('apac-ne');
     expect(await verifyViewerToken(keys.publicJwk, info.token, Date.now() + 61_000)).toBeNull();
     // Change actual signature bits; the last base64url character also has unused padding bits.
     const signatureStart = info.token.indexOf('.') + 1;

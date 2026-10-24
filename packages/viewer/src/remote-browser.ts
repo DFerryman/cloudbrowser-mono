@@ -1,9 +1,10 @@
-import type { ControlState, GatewayToViewer, IceServer } from '@cloudbrowser/contracts';
+import type { ControlState, GatewayToViewer, IceServer, LiveQualityReport } from '@cloudbrowser/contracts';
 import { ConnectionDiagnostic, ConnectionMediaSnapshot, STREAM, VIDEO_QUALITIES, type VideoQuality } from '@cloudbrowser/contracts';
 import { decode, EV, fitScreen, sameScreen, screenOf, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
 import { QualityController, type VideoPreference } from './quality.js';
 import { KEYSYM, keyIdentity, keysymFor, keysymForName, matchingKeyIdentity, unidentifiedKey, type KeyIdentityEvent } from './keyboard.js';
 import { readStats, type ViewerStats } from './stats.js';
+import { QualityWindow } from './quality-report.js';
 import { ScrollAccumulator } from './scroll.js';
 import { InputQueue, type InputFailure } from './input-queue.js';
 import { FileTransfers, type TransferAction, type TransferFile, type TransferUpdate } from './file-transfer.js';
@@ -39,6 +40,14 @@ export interface RemoteBrowserOptions {
   /** Playback state for this exact peer only; diagnostics never read pixels or page content. */
   getPlaybackState?: (attemptId: string, frameSequence: number) => ConnectionMediaSnapshot['playback'];
   onStats?: (stats: ViewerStats) => void;
+  /**
+   * About a minute of the live picture's quality (medians and totals), for baselines by region;
+   * a shorter interval when the view ends, is hidden or the page freezes first. Never sent while
+   * the view is not live or not shown.
+   */
+  onQualityReport?: (report: LiveQualityReport) => void;
+  /** How long one quality report covers; a minute by default. */
+  qualityReportIntervalMs?: number;
   /** A CSS `cursor` value for the remote cursor, drawn locally (page 5). */
   onCursor?: (css: string) => void;
   /** Text the remote Chrome put on its clipboard. Report a successful local copy with clipboardCopied. */
@@ -104,6 +113,9 @@ const ACK_PING_DELAY_MS = 250;
 const ICE_GRACE_MS = 4_000;
 /** How long an ICE restart (neko's signal/restart) may take before the connection starts over. */
 const ICE_RESTART_MS = 12_000;
+const QUALITY_REPORT_MS = 60_000;
+/** A quality report covers at least this much; a shorter interval says too little to be worth one. */
+const MIN_QUALITY_REPORT_MS = 10_000;
 /** Characters that require Shift on the remote US X11 keyboard. */
 const SOFTWARE_SHIFTED = new Set([...`~!@#$%^&*()_+{}|:"<>?`]);
 const SHIFTED_KEYSYMS = new Map([...'`1234567890-=[]\\;\',./'].map((character, index) =>
@@ -119,6 +131,7 @@ const LONG_TYPED_TEXT = 100;
 const TYPED_ECHO_MS = 3000;
 const encoder = new TextEncoder();
 const modifierKeysym = (sym: number) => sym >= 0xffe1 && sym <= 0xffee;
+const hasRelay = (servers: IceServer[]) => servers.some((s) => s.urls.some((u) => u.startsWith('turn:') || u.startsWith('turns:')));
 const shiftedKeysym = (sym: number) => sym >= 0x61 && sym <= 0x7a ? sym - 0x20 : SHIFTED_KEYSYMS.get(sym) ?? sym;
 
 /**
@@ -181,6 +194,13 @@ export class RemoteBrowser {
   /** neko's videos (system/init). Browsers on an image older than the quality ladder offer one. */
   private offeredVideos: string[] = [];
   private counters: { lost: number; received: number; freezes: number; frames: number; at: number } | null = null;
+  /** The live picture's readings and gateway round trips since the last quality report. */
+  private readonly qualityWindow = new QualityWindow();
+  /**
+   * A peer made as soon as the TURN credentials arrive, so its relay is allocated while the socket
+   * opens and neko prepares its offer; the first offer on that socket answers with it (answer).
+   */
+  private warmPeer: { pc: RTCPeerConnection; servers: IceServer[] } | null = null;
   private readonly files: FileTransfers;
   /** Text the remote clipboard last reported (clipboard/updated); null once typing went through it. */
   private remoteClipboard: string | null = null;
@@ -291,6 +311,8 @@ export class RemoteBrowser {
     const now = Date.now();
     if (!visible) {
       this.hiddenAt = now;
+      // A hidden page draws no picture and its timers run late: what it measured so far is reported.
+      this.endQualityWindow();
       if (this.deferred) this.resumeDeferred();
       return;
     }
@@ -376,6 +398,7 @@ export class RemoteBrowser {
     if (this.stopped || sequence !== this.connectSequence) return;
     this.diagnostic('token_ok');
     this.iceServers = info.iceServers;
+    this.warmUp(info.iceServers);
     this.signalRequested = false;
     const WS = this.opts.WebSocketImpl ?? WebSocket;
     const sep = info.gatewayUrl.includes('?') ? '&' : '?';
@@ -1186,9 +1209,13 @@ export class RemoteBrowser {
       ? this.iceServers
       : (provide.iceservers ?? []).map((s) => ({ ...s, urls: Array.isArray(s.urls) ? s.urls : [s.urls] }));
     // Media goes through the TURN relay when we have one: the VM accepts no inbound connections (page 5).
-    const relayOnly = servers.some((s) => s.urls.some((u) => u.startsWith('turn:') || u.startsWith('turns:')));
-    const PC = this.opts.RTCPeerConnectionImpl ?? RTCPeerConnection;
-    const pc = new PC({ iceServers: servers, iceTransportPolicy: relayOnly ? 'relay' : 'all' });
+    const relayOnly = hasRelay(servers);
+    const warm = this.warmPeer;
+    this.warmPeer = null;
+    // Only an untouched peer made with these same servers: its relay is already allocated.
+    const pc = warm && warm.servers === servers && relayOnly && warm.pc.connectionState === 'new'
+      ? warm.pc
+      : (warm?.pc.close(), new (this.opts.RTCPeerConnectionImpl ?? RTCPeerConnection)({ iceServers: servers, iceTransportPolicy: relayOnly ? 'relay' : 'all' }));
     this.pc = pc;
     const frameSequence = this.frameSequence;
     let mediaStream: MediaStream | null = null;
@@ -1302,7 +1329,7 @@ export class RemoteBrowser {
     const pc = this.pc;
     const ws = this.ws;
     const frameSequence = this.frameSequence;
-    if (!pc || !ws || !this.mediaConnected || this.statsTimer || (!this.opts.onStats && !this.opts.onDiagnostic && !this.video.auto)) return;
+    if (!pc || !ws || !this.mediaConnected || this.statsTimer || (!this.opts.onStats && !this.opts.onDiagnostic && !this.opts.onQualityReport && !this.video.auto)) return;
     let previous: { bytes: number; at: number } | null = null;
     let pending = false;
     const interval = this.opts.statsIntervalMs ?? 2000;
@@ -1330,9 +1357,11 @@ export class RemoteBrowser {
         previous = { bytes: reading.bytes, at: Date.now() };
         if (spansFreeze) {
           this.counters = null;
+          this.endQualityWindow();
           return;
         }
         this.adapt(reading.stats, reading.counters);
+        this.observeQuality(sampledAt, reading);
         this.opts.onStats?.(reading.stats);
       } finally {
         pending = false;
@@ -1366,7 +1395,59 @@ export class RemoteBrowser {
     if (next) this.selectVideo(next);
   }
 
+  /** A live, shown picture's reading goes into the quality report, sent once it covers the interval. */
+  private observeQuality(at: number, reading: Awaited<ReturnType<typeof readStats>>) {
+    const attemptId = this.diagnosticAttempt?.id;
+    if (!this.opts.onQualityReport || !attemptId) return;
+    if (this.state !== 'live' || !this.visible) {
+      this.endQualityWindow();
+      return;
+    }
+    this.qualityWindow.add(attemptId, at, reading.stats, reading.counters, reading.media);
+    const startedAt = this.qualityWindow.startedAt;
+    if (startedAt !== null && at - startedAt >= (this.opts.qualityReportIntervalMs ?? QUALITY_REPORT_MS)) {
+      this.sendQualityReport(this.qualityWindow.take(0, this.videoId));
+    }
+  }
+
+  /** The picture stopped being measured (gone, hidden, frozen): what the window holds is reported, if enough. */
+  private endQualityWindow() {
+    const report = this.qualityWindow.take(MIN_QUALITY_REPORT_MS, this.videoId);
+    this.qualityWindow.reset();
+    this.sendQualityReport(report);
+  }
+
+  private sendQualityReport(report: LiveQualityReport | null) {
+    if (!report) return;
+    try {
+      this.opts.onQualityReport?.(report);
+    } catch { /* Reporting must not affect the viewer. */ }
+  }
+
+  /**
+   * Starts allocating the TURN relay as soon as its credentials arrive (iceCandidatePoolSize),
+   * rather than when neko's offer does: the allocation's round trips to the relay then overlap the
+   * socket's handshake and neko's start, instead of delaying the first frame. Each attempt's peer
+   * replaces the last one's.
+   */
+  private warmUp(servers: IceServer[]) {
+    this.closeWarmPeer();
+    if (!hasRelay(servers)) return;
+    try {
+      const PC = this.opts.RTCPeerConnectionImpl ?? RTCPeerConnection;
+      this.warmPeer = { pc: new PC({ iceServers: servers, iceTransportPolicy: 'relay', iceCandidatePoolSize: 1 }), servers };
+    } catch { /* The offer makes its own peer. */ }
+  }
+
+  private closeWarmPeer() {
+    const warm = this.warmPeer;
+    this.warmPeer = null;
+    warm?.pc.close();
+  }
+
   private teardownPeer(preserveCandidates = false) {
+    // What this peer's picture measured is reported before its sequence ends.
+    this.endQualityWindow();
     this.inputReady = false;
     this.peerConnected = false;
     this.firstFrame = false;
@@ -1392,7 +1473,11 @@ export class RemoteBrowser {
     this.pc = null;
     pc?.close();
     // A new offer on the same socket keeps the screen applied for it; a new socket starts afresh.
-    if (!preserveCandidates) this.appliedScreen = '';
+    if (!preserveCandidates) {
+      this.appliedScreen = '';
+      // An agent that went offline, or a socket that closed, before the offer came.
+      this.closeWarmPeer();
+    }
   }
 
   // --- liveness (PING) and the media path ---------------------------------------------------
@@ -1464,6 +1549,8 @@ export class RemoteBrowser {
     if (this.ws !== ws) return;
     const ping = this.pings.shift();
     if (!ping) return;
+    // A ping sent before the page was last hidden or frozen timed the pause, not the network.
+    if (ping.at >= this.resumedAt && this.visible) this.qualityWindow.gatewayRtt(Date.now() - ping.at);
     this.inputQueue.acknowledge(ping.frames);
     if (ping.probe) this.releaseInput();
     // Input sent after that ping is confirmed by the next one.

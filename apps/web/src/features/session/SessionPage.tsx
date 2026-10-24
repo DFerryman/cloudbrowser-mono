@@ -39,7 +39,8 @@ import { keys, queryClient } from '../../lib/query.js';
 import { CreateProgress } from '../instances/CreateProgress.js';
 import { useInstance, useLifecycle, useSetControl, useVerifyIp } from '../instances/hooks.js';
 import { shownStatus, STATUS_TONE, statusKey } from '../instances/status.js';
-import { connectionDiagnosticReporter } from './diagnostics.js';
+import { useRegionLatency } from '../instances/latency.js';
+import { connectionDiagnosticReporter, liveQualityReporter } from './diagnostics.js';
 import { sessionHeartbeat, viewingPresence } from './heartbeat.js';
 
 /** Whether this web browser decodes H.264 over WebRTC, which the live view needs. Unknown counts as yes. */
@@ -74,6 +75,15 @@ const UNSTABLE_DROPS = 3;
 /** A round trip slower than this for SLOW_READINGS stats readings in a row (2 s each) is worth a word. */
 const SLOW_RTT_MS = 250;
 const SLOW_READINGS = 3;
+/**
+ * The picture's round trip against the user's own to the browser's region (as web pages travel):
+ * this much more, and at least twice it, means the picture takes another way. A VPN or proxy
+ * carries the page but not the video (WebRTC over UDP), and from mainland China the relay is
+ * reached in the US.
+ */
+const DETOUR_MIN_RTT_MS = 150;
+const DETOUR_EXTRA_MS = 100;
+const detour = (rtt: number, region: number) => rtt >= DETOUR_MIN_RTT_MS && rtt >= 2 * region && rtt - region >= DETOUR_EXTRA_MS;
 /** Viewer tokens expire 60 s after issue; a prefetched one is handed over only while well inside that. */
 const PREFETCHED_TOKEN_MAX_AGE_MS = 30_000;
 
@@ -139,9 +149,13 @@ export function SessionPage() {
   const networkDrops = useRef<number[]>([]);
   const lastViewerState = useRef<ViewerState>('connecting');
   const [unstableDrops, setUnstableDrops] = useState(0);
-  /** A sustained slow round trip (ms), told once until the user dismisses it. */
+  /**
+   * A sustained slow round trip (ms), told once until the user dismisses it; `region`: the user's
+   * own round trip to the browser's region, when the picture's is far longer (detour).
+   */
   const slowReadings = useRef(0);
-  const [slowRtt, setSlowRtt] = useState<number | null>(null);
+  const [slowRtt, setSlowRtt] = useState<{ rtt: number; region: number | null } | null>(null);
+  const regionRtt = useRef<number | null>(null);
   const [slowDismissed, setSlowDismissed] = useState(false);
   const heartbeat = useRef<ReturnType<typeof sessionHeartbeat<HeartbeatResult>> | null>(null);
   // Effect recreation (including StrictMode) must never reuse a sequence for this session.
@@ -153,6 +167,15 @@ export function SessionPage() {
   const [diagnosticId, setDiagnosticId] = useState<string | null>(null);
   const diagnostics = useRef<{ sessionId: string; reporter: ReturnType<typeof connectionDiagnosticReporter> } | null>(null);
   const pendingDiagnostics = useRef<{ sessionId: string; diagnostic: ConnectionDiagnostic }[]>([]);
+  const quality = useRef<{ sessionId: string; reporter: ReturnType<typeof liveQualityReporter> } | null>(null);
+  useEffect(() => {
+    if (!session) return;
+    const current = { sessionId: session.id, reporter: liveQualityReporter(session.id) };
+    quality.current = current;
+    // The view's last report comes after this cleanup (React cleans up the page before the view
+    // below it): the reporter stays in place to take it, and refuses reports once disposed.
+    return () => current.reporter.dispose();
+  }, [session?.id]);
   useEffect(() => {
     if (!session) return;
     const current = { sessionId: session.id, reporter: connectionDiagnosticReporter(session.id) };
@@ -464,6 +487,7 @@ export function SessionPage() {
   const i = instance.data;
   const region = useRegionInfo(i?.regionId ?? '');
   const regionName = region.name;
+  regionRtt.current = useRegionLatency(region, i?.status === 'running');
   const idleLeft = sleepAt ? sleepAt - now : Infinity;
 
   // The session page replaces itself in history: Back from the browsers list must not reopen it.
@@ -908,8 +932,14 @@ export function SessionPage() {
             }}
             onStats={(reading) => {
               setStats(reading);
-              slowReadings.current = reading.rttMs !== null && reading.rttMs > SLOW_RTT_MS ? slowReadings.current + 1 : 0;
-              setSlowRtt(slowReadings.current >= SLOW_READINGS ? reading.rttMs : null);
+              const rtt = reading.rttMs;
+              const own = regionRtt.current;
+              const far = rtt !== null && own !== null && detour(rtt, own);
+              slowReadings.current = rtt !== null && (rtt > SLOW_RTT_MS || far) ? slowReadings.current + 1 : 0;
+              setSlowRtt(slowReadings.current >= SLOW_READINGS && rtt !== null ? { rtt, region: far ? own : null } : null);
+            }}
+            onQualityReport={(report) => {
+              if (quality.current?.sessionId === session.id) quality.current.reporter.report(report);
             }}
             onVideo={setStreaming}
             onInput={() => (hadInput.current = true)}
@@ -934,7 +964,7 @@ export function SessionPage() {
         ) : null}
         {agentShown && agentNotice ? <AgentNotice state={agentNotice} raised={maximized} onDismiss={() => setAgentNotice(null)} /> : null}
         {live && slowRtt !== null && !slowDismissed && !(agentShown && agentNotice) ? (
-          <SlowConnectionNotice rtt={slowRtt} raised={maximized} onDismiss={() => setSlowDismissed(true)} />
+          <SlowConnectionNotice rtt={slowRtt.rtt} region={slowRtt.region} raised={maximized} onDismiss={() => setSlowDismissed(true)} />
         ) : null}
         {session && !takenOver && i?.status === 'running' && sleepReason === 'idle' && idleLeft < IDLE_WARNING_MS ? (
           <div role="status" className="absolute inset-x-4 bottom-4 z-20 flex flex-wrap items-center justify-center gap-3 border border-amber-500/50 bg-zinc-950 p-4 text-sm text-zinc-100">
@@ -1050,13 +1080,17 @@ function IssueNote({ issue, drops }: { issue: ConnectionIssue | null; drops: num
   );
 }
 
-/** A round trip slow enough that taps visibly lag, said once and closable, beside the picture's edge. */
-function SlowConnectionNotice({ rtt, raised, onDismiss }: { rtt: number; raised: boolean; onDismiss: () => void }) {
+/**
+ * A round trip slow enough that taps visibly lag, said once and closable, beside the picture's
+ * edge. With `region`, the user's own round trip to the browser's region: the picture takes a
+ * longer way than the page, and the notice says why that usually is.
+ */
+function SlowConnectionNotice({ rtt, region, raised, onDismiss }: { rtt: number; region: number | null; raised: boolean; onDismiss: () => void }) {
   const { t } = useI18n();
   return (
     <div role="status" data-testid="slow-connection" className={cn('absolute left-1/2 z-20 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-2 border border-l-2 border-zinc-700 border-l-amber-500 bg-zinc-950/90 py-1 pr-1 pl-3 text-xs text-zinc-100 shadow-pop backdrop-blur', raised ? 'bottom-16' : 'bottom-3')}>
       <Gauge className="size-3.5 shrink-0 text-amber-400" aria-hidden />
-      <span className="min-w-0">{t('session.slowConnection', { rtt })}</span>
+      <span className="min-w-0">{region !== null ? t('session.slowConnectionDetour', { rtt, region }) : t('session.slowConnection', { rtt })}</span>
       <button type="button" className="grid size-6 shrink-0 place-items-center text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={t('session.slowConnectionDismiss')} onClick={onDismiss}>
         <X className="size-3.5" />
       </button>

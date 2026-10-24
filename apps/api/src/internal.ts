@@ -4,17 +4,18 @@
  * RPC entrypoint of this Worker, reachable only through the gateway's service binding, never from
  * the internet.
  */
-import { AgentFrame, AgentViewerFailureCode, NEVER_SLEEP_TIMEOUT_S, type GatewayToAgent, type ViewerTokenClaims } from '@cloudbrowser/contracts';
+import { AgentFrame, AgentViewerFailureCode, NEVER_SLEEP_TIMEOUT_S, objectLocationHint, type GatewayToAgent, type ObjectLocationHint, type ViewerTokenClaims } from '@cloudbrowser/contracts';
 import { createDb, eventRow, schema, sha256Hex, unwrapArchiveKey, type Db } from '@cloudbrowser/db';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Env } from './env.js';
 import { turnIceServers } from './turn.js';
 import { authenticateMcp, endAutomationSession, openAutomationSession, recordControlState } from './automation.js';
 
-const { placements, archiveKeys, agentCredentials, agentCommands, instanceHealth, browserInstances, operations, viewerSessions, viewerTokens, auditLog, events } = schema;
+const { placements, archiveKeys, agentCredentials, agentCommands, instanceHealth, browserInstances, operations, viewerSessions, viewerTokens, auditLog, events, regions } = schema;
 
 export type AgentAuth =
-  | { ok: true; generation: number; credential?: string }
+  /** `location`: where the browser's gateway object belongs (objectLocationHint), for an agent that reaches it first. */
+  | { ok: true; generation: number; credential?: string; location?: ObjectLocationHint }
   | { ok: false; reason: 'unknown_instance' | 'invalid_token' | 'expired' };
 
 function randomSecret() {
@@ -35,8 +36,13 @@ export async function authenticateAgent(
   now = new Date(),
 ): Promise<AgentAuth> {
   const [row] = await db.select().from(agentCredentials).where(eq(agentCredentials.instanceId, input.instanceId));
-  const [inst] = await db.select({ status: browserInstances.status, desiredState: browserInstances.desiredState }).from(browserInstances).where(eq(browserInstances.id, input.instanceId));
+  const [inst] = await db.select({ status: browserInstances.status, desiredState: browserInstances.desiredState, providerRegion: regions.providerRegion })
+    .from(browserInstances).leftJoin(regions, eq(regions.id, browserInstances.regionId)).where(eq(browserInstances.id, input.instanceId));
   if (!row || !inst || inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) return { ok: false, reason: 'unknown_instance' };
+  // The gateway object is created near wherever its first request arrives, and where a VM's
+  // network meets Cloudflare is not always near the VM: two Bangkok browsers' objects are in Frankfurt.
+  const location = objectLocationHint(inst.providerRegion);
+  const placed = location ? { location } : {};
 
   if (input.credential) {
     const hash = await sha256Hex(input.credential);
@@ -46,7 +52,7 @@ export async function authenticateAgent(
       await db.update(agentCredentials).set({ bootstrapHash: null })
         .where(and(eq(agentCredentials.instanceId, input.instanceId), eq(agentCredentials.credentialHash, hash)));
     }
-    return { ok: true, generation: row.generation };
+    return { ok: true, generation: row.generation, ...placed };
   }
   if (input.bootstrap) {
     if (!row.bootstrapHash || row.bootstrapHash !== (await sha256Hex(input.bootstrap))) return { ok: false, reason: 'invalid_token' };
@@ -59,7 +65,7 @@ export async function authenticateAgent(
       .returning({ instanceId: agentCredentials.instanceId });
     // A deletion or another bootstrap activation may have won after the read above.
     if (!activated.length) return { ok: false, reason: 'invalid_token' };
-    return { ok: true, generation: row.generation, credential };
+    return { ok: true, generation: row.generation, credential, ...placed };
   }
   return { ok: false, reason: 'invalid_token' };
 }

@@ -207,5 +207,11 @@ export const ViewerTokenClaims = z.object({
   iid: z.string(),
   uid: z.string(),
   exp: z.number().int(),
+  /**
+   * Where the browser's gateway object belongs (objectLocationHint), for a viewer that reaches it
+   * first. Any string is accepted: a hint this gateway does not know is ignored, never a reason to
+   * refuse the token.
+   */
+  loc: z.string().max(16).optional(),
 });
 export type ViewerTokenClaims = z.infer<typeof ViewerTokenClaims>;

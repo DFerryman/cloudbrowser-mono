@@ -83,7 +83,7 @@ describe('coding-agent access', () => {
 
     const api = internalApi(t.env as never);
     const auth = await api.authenticateMcp({ instanceId, key, ip: '203.0.113.5', client: 'claude-code/2.1.0' });
-    expect(auth).toEqual({ ok: true, clientId: made.body.clientId, userId: expect.any(String), generation: 1, capability: 'control', name: 'Claude Code' });
+    expect(auth).toEqual({ ok: true, clientId: made.body.clientId, userId: expect.any(String), generation: 1, capability: 'control', name: 'Claude Code', location: 'apac-ne' });
     const seen = t.d1.sqlite.prepare(`SELECT last_seen_at, last_client, last_ip FROM automation_clients WHERE id = ?`).get(made.body.clientId) as { last_seen_at: number };
     expect(seen).toMatchObject({ last_client: 'claude-code/2.1.0', last_ip: '203.0.113.5', last_seen_at: expect.any(Number) });
     // Within a minute the row is not written again.

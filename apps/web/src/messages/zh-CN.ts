@@ -241,6 +241,7 @@ export const zhCN: Messages = {
   'overlay.issue.desktop': '云端浏览器自身的连接短暂中断，与你的网络无关。',
   'overlay.issue.unstable': '最近几分钟连接已中断 {count} 次，你的网络不稳定。换用更稳定的网络（信号好的 Wi-Fi、关闭 VPN）会有帮助。',
   'session.slowConnection': '连接较慢：到云端浏览器往返 {rtt} 毫秒，点击和输入的反馈会比快速网络晚一些出现。',
+  'session.slowConnectionDetour': '连接较慢：到云端浏览器往返 {rtt} 毫秒，而你的网络到该地区只需约 {region} 毫秒。实时画面不经过大多数 VPN 和代理，从中国大陆出发时会绕经美国，因此换一个地区的浏览器可能响应更快。',
   'session.slowConnectionDismiss': '关闭',
   'overlay.waking': '正在启动你的浏览器…',
   'overlay.wakingHint': '通常需要约一分钟。',

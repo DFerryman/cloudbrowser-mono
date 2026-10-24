@@ -1,4 +1,4 @@
-import { ConnectionDiagnostic } from '@cloudbrowser/contracts';
+import { ConnectionDiagnostic, LiveQualityReport } from '@cloudbrowser/contracts';
 import { api } from '../../lib/api.js';
 
 const REQUEST_TIMEOUT_MS = 3000;
@@ -64,6 +64,45 @@ export function connectionDiagnosticReporter(
       for (const controller of active) controller.abort();
       active.clear();
       seen.clear();
+    },
+  };
+}
+
+/**
+ * Sends the viewer's quality reports (about one a minute), one at a time and best-effort: a report
+ * that arrives while another is in flight, or fails, is dropped rather than queued.
+ */
+export function liveQualityReporter(
+  sessionId: string,
+  send: (report: LiveQualityReport, signal: AbortSignal) => Promise<unknown> = (report, signal) =>
+    // keepalive: the last report is often sent as the page goes away.
+    api('POST', `/sessions/${encodeURIComponent(sessionId)}/quality`, { body: report, signal, keepalive: true }),
+) {
+  let disposed = false;
+  let active: AbortController | null = null;
+  return {
+    report(value: LiveQualityReport): boolean {
+      if (disposed || active) return false;
+      const parsed = LiveQualityReport.safeParse(value);
+      if (!parsed.success) return false;
+      const controller = new AbortController();
+      active = controller;
+      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      void Promise.resolve().then(() => send(parsed.data, controller.signal)).catch(() => {
+        // Quality reports are statistics; a lost one changes nothing for the user.
+      }).finally(() => {
+        clearTimeout(timeout);
+        if (active === controller) active = null;
+      });
+      return true;
+    },
+    /**
+     * Refuses reports from the end of this task on. The view reports its last interval as it
+     * disconnects, in a cleanup React runs after the page's: that report is still taken, and it
+     * and one in flight finish within their timeout rather than being cut off.
+     */
+    dispose() {
+      queueMicrotask(() => { disposed = true; });
     },
   };
 }

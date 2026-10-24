@@ -415,6 +415,115 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
+  it('starts allocating the TURN relay when the connect info arrives and answers the first offer with that peer', async () => {
+    const turn = [{ urls: ['turn:turn.cloudflare.com:3478?transport=udp'], username: 'u', credential: 'c' }];
+    const { b } = setup(turn);
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    // Before the socket has said anything: the relay is gathered while neko starts.
+    const warm = FakePC.last;
+    expect(warm.config).toEqual({ iceServers: turn, iceTransportPolicy: 'relay', iceCandidatePoolSize: 1 });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await tick();
+    expect(FakePC.last).toBe(warm);
+    expect(warm.remote).toEqual({ type: 'offer', sdp: 'offer-sdp' });
+    expect(ws.neko('signal/answer')).toEqual([{ sdp: 'answer-sdp' }]);
+    // A later offer on the same socket (neko renegotiating) gets a peer of its own.
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-2' } } });
+    await tick();
+    expect(FakePC.last).not.toBe(warm);
+    expect(warm.closed).toBe(true);
+    expect(FakePC.last.config).toEqual({ iceServers: turn, iceTransportPolicy: 'relay' });
+    b.disconnect();
+  });
+
+  it('closes a relay peer no offer came for, and makes none without a TURN server', async () => {
+    vi.useFakeTimers();
+    const { b } = setup([{ urls: ['turns:turn.cloudflare.com:443?transport=tcp'], username: 'u', credential: 'c' }]);
+    await b.connect();
+    const warm = FakePC.last;
+    FakeWS.all[0]!.close(1006);
+    expect(warm.closed).toBe(true);
+    await vi.advanceTimersByTimeAsync(600);
+    // The next attempt warms up its own, with its own credentials.
+    expect(FakeWS.all).toHaveLength(2);
+    expect(FakePC.last).not.toBe(warm);
+    expect(FakePC.last.closed).toBe(false);
+    b.disconnect();
+    expect(FakePC.last.closed).toBe(true);
+
+    const before = FakePC.last;
+    const plain = setup([{ urls: ['stun:stun.cloudflare.com:3478'] }]);
+    await plain.b.connect();
+    expect(FakePC.last).toBe(before);
+    plain.b.disconnect();
+  });
+
+  it('reports a minute of the live picture\'s quality, and what it measured when the page is hidden', async () => {
+    vi.useFakeTimers();
+    const onQualityReport = vi.fn();
+    const { b } = setup([], { onQualityReport });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp', video: { id: 'high' } } } });
+    await vi.advanceTimersByTimeAsync(0);
+    let received = 0;
+    let freezeSeconds = 0;
+    FakePC.last.getStats = async () => {
+      received += 500;
+      return new Map<string, unknown>([
+        ['v', {
+          id: 'v', type: 'inbound-rtp', kind: 'video', transportId: 't', packetsReceived: received, packetsLost: received / 100,
+          bytesReceived: received * 1200, framesDecoded: received / 50, freezeCount: Math.floor(received / 5000), totalFreezesDuration: (freezeSeconds += 0.01),
+          jitterBufferDelay: received / 1000, jitterBufferEmittedCount: received / 50, totalDecodeTime: received / 10_000, framesDropped: received / 1000,
+          frameWidth: 1920, frameHeight: 1080,
+        }],
+        ['t', { id: 't', type: 'transport', selectedCandidatePairId: 'pair' }],
+        ['pair', { id: 'pair', type: 'candidate-pair', localCandidateId: 'local', currentRoundTripTime: 0.29 }],
+        ['local', { id: 'local', type: 'local-candidate', candidateType: 'relay', relayProtocol: 'udp' }],
+      ]);
+    };
+    FakePC.last.connect();
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(onQualityReport).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(onQualityReport).toHaveBeenCalledTimes(1);
+    const report = onQualityReport.mock.calls[0]![0];
+    expect(report).toEqual({
+      attemptId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      durationMs: 60_000,
+      readings: 30,
+      rttMs: 290,
+      // The keepalive pings, answered at once by the fake gateway.
+      gatewayRttMs: 0,
+      fps: 5,
+      kbps: 2400,
+      loss: 0.0099,
+      freezes: 3,
+      freezeMs: 300,
+      jitterBufferMs: 50,
+      decodeMs: 5,
+      framesDropped: 15,
+      quality: 'high',
+      width: 1920,
+      height: 1080,
+      localCandidateType: 'relay',
+      relayProtocol: 'udp',
+    });
+    // Hidden 20 s into the next minute: those 20 s are reported now, and nothing while hidden.
+    await vi.advanceTimersByTimeAsync(20_000);
+    b.setVisible(false);
+    expect(onQualityReport).toHaveBeenCalledTimes(2);
+    expect(onQualityReport.mock.calls[1]![0]).toMatchObject({ durationMs: 20_000, readings: 10 });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(onQualityReport).toHaveBeenCalledTimes(2);
+    // Shown again, and closed after less than the shortest report: nothing more is sent.
+    b.setVisible(true);
+    await vi.advanceTimersByTimeAsync(8_000);
+    b.disconnect();
+    expect(onQualityReport).toHaveBeenCalledTimes(2);
+  });
+
   it('types an address using ordered Neko keys with explicit Shift for capitals and US punctuation', async () => {
     const { b } = setup();
     await b.connect();
