@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { STREAM } from '@cloudbrowser/contracts';
-import { QualityController, type QualitySample } from '../src/quality.js';
+import { levelMemory, QualityController, startingQuality, type QualitySample } from '../src/quality.js';
 
 const good = (at: number, fps: number | null = 25): QualitySample => ({ at, stalled: false, fps, lossRate: 0, freezes: 0, rttMs: 40 });
 const bad = (at: number): QualitySample => ({ at, stalled: false, fps: 6, lossRate: 0.12, freezes: 1, rttMs: 40 });
@@ -78,10 +78,101 @@ describe('picture quality controller', () => {
   });
 
   it('steps down after two readings when no frame is decoded or a fifth of the packets are lost', () => {
+    // Past the starting level's trial (see below).
     const frozen = new QualityController('full', 0);
-    expect(run(frozen, 10_000, 6, (at) => ({ ...good(at, 0), lossRate: 0.03 }))).toEqual([[12, 'high']]);
+    expect(run(frozen, 30_000, 6, (at) => ({ ...good(at, 0), lossRate: 0.03 }))).toEqual([[32, 'high']]);
     const lossy = new QualityController('full', 0);
-    expect(run(lossy, 10_000, 6, (at) => ({ ...good(at), lossRate: 0.25 }))).toEqual([[12, 'high']]);
+    expect(run(lossy, 30_000, 6, (at) => ({ ...good(at), lossRate: 0.25 }))).toEqual([[32, 'high']]);
+    // A frozen decoder alone is not more sent than the path carries: still two readings at the start.
+    const waiting = new QualityController('full', 0);
+    expect(run(waiting, 4_000, 6, (at) => good(at, 0))).toEqual([[6, 'high']]);
+  });
+
+  it('ends a starting level the path plainly cannot carry at its first reading', () => {
+    // Full on a 2 Mbit/s path (measured): 86% of packets lost, 1.6 Mbit/s arriving. Medium fits in
+    // 90% of that, high does not; it goes there while still settling instead of two readings later.
+    const c = new QualityController('full', 0);
+    expect(c.observe({ at: 2_000, stalled: false, fps: 2, lossRate: 0.86, freezes: 2, kbps: 1600, rttMs: 260 })).toBe('medium');
+    // Ordinary trouble at the start still needs its usual readings.
+    const d = new QualityController('full', 0);
+    expect(run(d, 2_000, 8, bad)).toEqual([[8, 'high']]);
+  });
+
+  it('undoes a failed step up at its first overloaded reading, settling or not', () => {
+    // Full tried on a 2 Mbit/s path (measured): a third lost, 1.6 Mbit/s arriving, 2 s in. Down
+    // to medium, which fits in 90% of that, instead of waiting out the settling time.
+    const c = new QualityController('full', 0, 'high');
+    expect(run(c, 10_000, 14, good)).toEqual([[22, 'full']]);
+    expect(c.observe({ ...good(24_000), fps: 6, lossRate: 0.35, kbps: 1600 })).toBe('medium');
+    // With nothing known of what arrived, back to the level it came from.
+    const d = new QualityController('full', 0, 'high');
+    run(d, 10_000, 14, good);
+    expect(d.observe({ ...good(24_000), lossRate: 0.35 })).toBe('high');
+    // A settling reading that is merely bad waits, as before.
+    const e = new QualityController('full', 0, 'high');
+    run(e, 10_000, 14, good);
+    expect(e.observe(bad(24_000))).toBeNull();
+  });
+
+  it('keeps a failed level\'s longer wait when a level below it steps up and holds', () => {
+    const c = new QualityController('full', 0, 'high');
+    let t = 10_000;
+    const advance = (seconds: number, sample: (at: number) => QualitySample) => { const s = run(c, t, seconds, sample); t += seconds * 1000; return s; };
+    expect(advance(14, good)).toEqual([[22, 'full']]);
+    // Full fails at once: back to high, and full now waits 24 s.
+    expect(c.observe({ ...good(24_000), lossRate: 0.4 })).toBe('high');
+    t = 26_000;
+    // The failed try's backlog troubles high too: down to medium after the usual three readings.
+    expect(advance(8, bad)).toEqual([[32, 'medium']]);
+    // Medium → high after 12 s, and high holds. Full still waits its 24 s (once 12 s, so a 2 Mbit/s
+    // path retried full every 50 s or so).
+    expect(advance(60, good)).toEqual([[48, 'high'], [76, 'full']]);
+  });
+
+  it('starts one below full unless this device held a level in the last hour, never above the preference', () => {
+    expect(startingQuality('full', null)).toBe('high');
+    expect(startingQuality('full', 'full')).toBe('full');
+    expect(startingQuality('full', 'low')).toBe('low');
+    expect(startingQuality('medium', null)).toBe('medium');
+    expect(startingQuality('medium', 'full')).toBe('medium');
+    expect(startingQuality('low', null)).toBe('low');
+  });
+
+  it('holds a level carried 20 s without trouble past its trial', () => {
+    const c = new QualityController('full', 0);
+    run(c, 4_000, 14, good);
+    expect(c.held(16_000)).toBeNull(); // still the starting level's trial
+    run(c, 18_000, 8, good);
+    expect(c.held(24_000)).toBe('full');
+    // Any trouble starts the count again.
+    c.observe(bad(26_000));
+    expect(c.held(26_000)).toBeNull();
+    // A lower preference says nothing of what the path carries.
+    const capped = new QualityController('high', 0);
+    run(capped, 4_000, 40, good);
+    expect(capped.held(44_000)).toBeNull();
+  });
+
+  it('remembers the held level for an hour where storage allows', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) });
+    try {
+      levelMemory.write('medium', 1_000_000);
+      expect(levelMemory.read(1_000_000 + 59 * 60_000)).toBe('medium');
+      expect(levelMemory.read(1_000_000 + 61 * 60_000)).toBeNull();
+      // Written again at most once a minute while it stays the same.
+      levelMemory.write('medium', 1_030_000);
+      expect(JSON.parse(store.get('cloudbrowser.viewer.level')!).at).toBe(1_000_000);
+      levelMemory.write('medium', 1_060_000);
+      expect(JSON.parse(store.get('cloudbrowser.viewer.level')!).at).toBe(1_060_000);
+      store.set('cloudbrowser.viewer.level', JSON.stringify({ quality: 'ultra', at: 1_000_000 }));
+      expect(levelMemory.read(1_000_000)).toBeNull();
+      vi.stubGlobal('localStorage', { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } });
+      expect(levelMemory.read(1_000_000)).toBeNull();
+      expect(() => levelMemory.write('low', 2_000_000)).not.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('goes back at the first bad reading when a step up turns out too much', () => {

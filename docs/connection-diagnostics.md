@@ -206,7 +206,9 @@ browser did not report it; an empty blob means unknown.
 | `double18`, `double19` | Keyframes decoded, picture level changes |
 
 `double15` to `double19` read 0 in reports from viewers older than them; `blob11` is empty in
-those, so tell them apart by it (`blob11 != ''`).
+those, so tell them apart by it (`blob11 != ''`). `double16` stays 0 with neko, which resends a
+lost packet on the video's own SSRC rather than as RTX; NACKs (`double15`) are the measure of
+repaired loss. `double7` counts only what was never repaired.
 
 Median picture round trip and frame rate by region and country over the last day, with the
 [SQL API](https://developers.cloudflare.com/analytics/analytics-engine/sql-api/):
