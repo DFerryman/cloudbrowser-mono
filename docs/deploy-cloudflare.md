@@ -445,16 +445,36 @@ pnpm db:migrate:remote
 pnpm run deploy   # checks, builds everything, then deploys gateway, engine + reaper, reconciler and api, in that order
 ```
 
-The gateway, engine, reaper and reconciler are deployed only when something they are built from
-changed since the commit their live version came from (`scripts/deploy-workers.mjs`): their own
-directory, the workspace packages they depend on, the lockfile and the shared build settings. Each
-deploy records `Deploy origin/main <commit>` as its version message for the next comparison; a
-live version without one (a rollback, a hand deploy) is always replaced. A gateway deploy restarts
-every `InstanceGateway` object, and as the update reaches each one over the next few minutes it
-drops that browser's agent tunnel and live views (the picture is back about 7 seconds later), so a
-docs or frontend change no longer does that. The api is always deployed. `DEPLOY_ALL_WORKERS=1
-pnpm run deploy` deploys all of them; `node scripts/deploy-workers.mjs --dry-run` prints what
-would be deployed.
+The gateway, engine, reaper and reconciler are deployed only when what Wrangler would upload for
+them changed (`scripts/deploy-workers.mjs`). The script builds each one with
+`wrangler deploy --dry-run` and hashes the bundled modules (not their source maps) together with
+the Worker's `wrangler*.jsonc`. Each deploy records `Deploy origin/main <commit> bundle <hash>` as
+its version message, and the next run compares against it. So an edit to a shared package that a
+Worker doesn't import, like the Terms version in `packages/contracts/src/legal.ts`, leaves that
+Worker alone. A live version without a label (a rollback, a hand `wrangler deploy`) is always
+replaced. The api is always deployed. `DEPLOY_ALL_WORKERS=1` redeploys the engine, reaper and
+reconciler even when unchanged. `node scripts/deploy-workers.mjs --dry-run` prints what would
+happen.
+
+### The gateway deploy window
+
+A gateway deploy restarts every `InstanceGateway` object. As the update reaches each object over
+the next few minutes, it drops that browser's agent tunnel and every live view on it; the picture
+comes back about 7 seconds later. So **gateway changes are always batched into a single deploy
+window, never deployed one at a time**: every pending gateway change goes out in one combined
+deploy, and live views drop once.
+
+- Outside the window, `pnpm run deploy` (and `pnpm --filter @cloudbrowser/gateway run deploy`)
+  holds a changed gateway. It prints `held for the gateway deploy window` with the commits waiting
+  for it, then deploys everything else.
+- The window belongs to one owner: the latency thread in the Claude project, or whoever the project
+  names. Merge your gateway change, then tell the owner it is waiting. The owner announces the
+  window to the other threads, runs `DEPLOY_GATEWAY_WINDOW=1 pnpm run deploy` from `main`, and
+  reports the new gateway version and its rollback.
+- Until the window, keep api and other Worker changes working with the gateway that is live. The
+  api's calls to the gateway's `Internal` entrypoint catch their errors, so a method the live
+  gateway lacks fails soft; make new calls do the same. If an api change can't work without the
+  new gateway code, don't merge it until the window, and ship both in it.
 
 **Apply the migrations before deploying any Worker**, every time. A Worker that reads a table or
 column a pending migration adds fails until it exists, and every Worker shares the one database.
