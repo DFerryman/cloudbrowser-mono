@@ -28,7 +28,7 @@ import {
   VolumeX,
   X,
 } from 'lucide-react';
-import { COMBOS, qualityLevel, type AutomationStatus, type TransferUpdate, type ViewerState, type ViewerStats } from '@cloudbrowser/viewer';
+import { COMBOS, qualityLevel, type AutomationStatus, type ConnectionIssue, type TransferUpdate, type ViewerState, type ViewerStats } from '@cloudbrowser/viewer';
 import { RemoteBrowserView, type RemoteBrowserHandle } from '@cloudbrowser/viewer/react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
@@ -68,6 +68,12 @@ const appleTouch = () => /iPad|iPhone|iPod/.test(navigator.platform) || (navigat
 const maximizesInPage = () => typeof document === 'undefined' || appleTouch() || window.matchMedia('(pointer: coarse)').matches
   || !document.fullscreenEnabled || typeof HTMLElement.prototype.requestFullscreen !== 'function';
 const SESSION_REQUEST_TIMEOUT_MS = 20_000;
+/** Drops the user's network caused within this window, at least UNSTABLE_DROPS of them, mean it is unstable rather than unlucky. */
+const UNSTABLE_WINDOW_MS = 5 * 60_000;
+const UNSTABLE_DROPS = 3;
+/** A round trip slower than this for SLOW_READINGS stats readings in a row (2 s each) is worth a word. */
+const SLOW_RTT_MS = 250;
+const SLOW_READINGS = 3;
 /** Viewer tokens expire 60 s after issue; a prefetched one is handed over only while well inside that. */
 const PREFETCHED_TOKEN_MAX_AGE_MS = 30_000;
 
@@ -116,6 +122,8 @@ export function SessionPage() {
   const [connectionError, setConnectionError] = useState<unknown>(null);
   const [takenOver, setTakenOver] = useState(false);
   const [inputInterrupted, setInputInterrupted] = useState(false);
+  /** Why input delivery was interrupted, when the viewer could tell. */
+  const [inputIssue, setInputIssue] = useState<ConnectionIssue | null>(null);
   const [sleepAt, setSleepAt] = useState<number | null>(null);
   /** `balance`: the prepaid balance ran out; input does not keep the browser awake. */
   const [sleepReason, setSleepReason] = useState<'idle' | 'balance'>('idle');
@@ -126,7 +134,15 @@ export function SessionPage() {
   /** Any touch screen, an iPad with a trackpad included: the on-screen keyboard and the visual viewport behave the same. */
   const [touchScreen] = useState(() => typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0);
   const viewerRef = useRef<RemoteBrowserHandle>(null);
-  const [viewer, setViewer] = useState<{ state: ViewerState; attempt: number }>({ state: 'connecting', attempt: 0 });
+  const [viewer, setViewer] = useState<{ state: ViewerState; attempt: number; issue: ConnectionIssue | null }>({ state: 'connecting', attempt: 0, issue: null });
+  /** When the user's network dropped a live view lately (UNSTABLE_WINDOW_MS), and how many times. */
+  const networkDrops = useRef<number[]>([]);
+  const lastViewerState = useRef<ViewerState>('connecting');
+  const [unstableDrops, setUnstableDrops] = useState(0);
+  /** A sustained slow round trip (ms), told once until the user dismisses it. */
+  const slowReadings = useRef(0);
+  const [slowRtt, setSlowRtt] = useState<number | null>(null);
+  const [slowDismissed, setSlowDismissed] = useState(false);
   const heartbeat = useRef<ReturnType<typeof sessionHeartbeat<HeartbeatResult>> | null>(null);
   // Effect recreation (including StrictMode) must never reuse a sequence for this session.
   const presenceSequence = useRef(0);
@@ -202,7 +218,7 @@ export function SessionPage() {
         setInputInterrupted(false);
         setSleepAt(null);
         setSleepReason('idle');
-        setViewer({ state: 'connecting', attempt: 0 });
+        setViewer({ state: 'connecting', attempt: 0, issue: null });
         setDiagnosticId(null);
         void queryClient.invalidateQueries({ queryKey: keys.instance(id) });
       } catch (e) {
@@ -464,7 +480,7 @@ export function SessionPage() {
     // A browser that stopped since says so below instead, with the way to wake it.
     overlay = <Overlay message={t('overlay.elsewhere')} action={<Button variant="primary" onClick={() => void open(true)}>{t('overlay.useHere')}</Button>} />;
   } else if (inputInterrupted) {
-    overlay = <Overlay message={t('overlay.inputInterrupted')} action={<Button onClick={() => {
+    overlay = <Overlay message={t('overlay.inputInterrupted')} body={inputIssue ? <IssueNote issue={inputIssue} drops={unstableDrops} /> : undefined} action={<Button onClick={() => {
       setInputInterrupted(false);
       viewerRef.current?.reconnect();
     }}>{t('overlay.retryNow')}</Button>} />;
@@ -527,10 +543,11 @@ export function SessionPage() {
         if (connect.data?.mode === 'webrtc' && viewer.state === 'failed') {
           overlay = <Overlay
             message={t('overlay.connectionFailed')}
-            body={<>
+            body={<div className="flex flex-col items-center gap-2 text-center">
+              <IssueNote issue={viewer.issue} drops={unstableDrops} />
               {connectionError ? <p className="text-sm text-zinc-400">{connectionErrorMessage(connectionError)}</p> : null}
               {diagnosticId ? <p className="font-mono text-xs text-zinc-400">{t('overlay.connectionReference', { id: diagnosticId })}</p> : null}
-            </>}
+            </div>}
             action={<Button onClick={() => {
               setConnectionError(null);
               viewerRef.current?.reconnect();
@@ -540,6 +557,7 @@ export function SessionPage() {
           overlay = (
             <Overlay
               message={t('overlay.reconnecting', { attempt: viewer.attempt })}
+              body={viewer.issue ? <IssueNote issue={viewer.issue} drops={unstableDrops} /> : undefined}
               busy
               action={<Button onClick={() => viewerRef.current?.reconnect()}>{t('overlay.retryNow')}</Button>}
             />
@@ -840,7 +858,10 @@ export function SessionPage() {
           <RemoteBrowserView
             key={session.id}
             ref={viewerRef}
-            onInputError={() => setInputInterrupted(true)}
+            onInputError={(_reason, issue) => {
+              setInputIssue(issue);
+              setInputInterrupted(true);
+            }}
             onTransfer={onTransfer}
             rotated={rotated}
             debug={debugInput}
@@ -869,14 +890,27 @@ export function SessionPage() {
                 throw e;
               }
             }}
-            onState={(state, attempt) => setViewer({ state, attempt })}
+            onState={(state, attempt, issue) => {
+              // A live view the user's own network dropped: several within a few minutes say it is unstable.
+              if (lastViewerState.current === 'live' && state !== 'live' && (issue === 'network' || issue === 'offline')) {
+                const at = Date.now();
+                networkDrops.current = [...networkDrops.current.filter((drop) => at - drop < UNSTABLE_WINDOW_MS), at];
+                setUnstableDrops(networkDrops.current.length);
+              }
+              lastViewerState.current = state;
+              setViewer({ state, attempt, issue });
+            }}
             onDiagnostic={(diagnostic) => {
               if (currentSessionId.current !== session.id) return;
               setDiagnosticId(diagnostic.attemptId);
               if (diagnostics.current?.sessionId === session.id) diagnostics.current.reporter.report(diagnostic);
               else if (pendingDiagnostics.current.length < 32) pendingDiagnostics.current.push({ sessionId: session.id, diagnostic });
             }}
-            onStats={setStats}
+            onStats={(reading) => {
+              setStats(reading);
+              slowReadings.current = reading.rttMs !== null && reading.rttMs > SLOW_RTT_MS ? slowReadings.current + 1 : 0;
+              setSlowRtt(slowReadings.current >= SLOW_READINGS ? reading.rttMs : null);
+            }}
             onVideo={setStreaming}
             onInput={() => (hadInput.current = true)}
             onKeyboardChange={setKeyboardOpen}
@@ -899,6 +933,9 @@ export function SessionPage() {
           <div aria-hidden data-testid="agent-frame" data-control={AGENT_SIDE[agentKey]} className={cn('pointer-events-none absolute inset-0 z-10 transition-shadow duration-300', AGENT_FRAME[agentKey])} />
         ) : null}
         {agentShown && agentNotice ? <AgentNotice state={agentNotice} raised={maximized} onDismiss={() => setAgentNotice(null)} /> : null}
+        {live && slowRtt !== null && !slowDismissed && !(agentShown && agentNotice) ? (
+          <SlowConnectionNotice rtt={slowRtt} raised={maximized} onDismiss={() => setSlowDismissed(true)} />
+        ) : null}
         {session && !takenOver && i?.status === 'running' && sleepReason === 'idle' && idleLeft < IDLE_WARNING_MS ? (
           <div role="status" className="absolute inset-x-4 bottom-4 z-20 flex flex-wrap items-center justify-center gap-3 border border-amber-500/50 bg-zinc-950 p-4 text-sm text-zinc-100">
             <span>{t('overlay.idle', { seconds: Math.max(0, Math.ceil(idleLeft / 1000)) })}</span>
@@ -996,6 +1033,37 @@ function AgentNotice({ state, raised, onDismiss }: { state: AgentState; raised: 
   );
 }
 
+/**
+ * Why the live view is reconnecting or failed, as the viewer could tell (packages/viewer
+ * ConnectionIssue), and when the user's network keeps dropping it, that it is unstable.
+ */
+function IssueNote({ issue, drops }: { issue: ConnectionIssue | null; drops: number }) {
+  const { t } = useI18n();
+  const unstable = drops >= UNSTABLE_DROPS && (issue === 'network' || issue === 'offline');
+  if (!issue) return null;
+  return (
+    <div className="flex max-w-sm flex-col gap-1.5 text-center text-sm leading-relaxed text-zinc-400" data-testid="connection-issue" data-issue={issue}>
+      <p>{t(`overlay.issue.${issue}` as MessageKey)}</p>
+      {issue === 'network' && !unstable ? <p>{t('overlay.issue.networkHint')}</p> : null}
+      {unstable ? <p className="text-amber-300">{t('overlay.issue.unstable', { count: drops })}</p> : null}
+    </div>
+  );
+}
+
+/** A round trip slow enough that taps visibly lag, said once and closable, beside the picture's edge. */
+function SlowConnectionNotice({ rtt, raised, onDismiss }: { rtt: number; raised: boolean; onDismiss: () => void }) {
+  const { t } = useI18n();
+  return (
+    <div role="status" data-testid="slow-connection" className={cn('absolute left-1/2 z-20 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-2 border border-l-2 border-zinc-700 border-l-amber-500 bg-zinc-950/90 py-1 pr-1 pl-3 text-xs text-zinc-100 shadow-pop backdrop-blur', raised ? 'bottom-16' : 'bottom-3')}>
+      <Gauge className="size-3.5 shrink-0 text-amber-400" aria-hidden />
+      <span className="min-w-0">{t('session.slowConnection', { rtt })}</span>
+      <button type="button" className="grid size-6 shrink-0 place-items-center text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={t('session.slowConnectionDismiss')} onClick={onDismiss}>
+        <X className="size-3.5" />
+      </button>
+    </div>
+  );
+}
+
 /** ● 32 ms, colored by quality; details on hover (page 5, "Quality telemetry"). */
 function ConnectionIndicator({ stats, picture }: { stats: ViewerStats; picture: string | null }) {
   const level = qualityLevel(stats);
@@ -1013,11 +1081,18 @@ function ConnectionIndicator({ stats, picture }: { stats: ViewerStats; picture: 
     .filter(Boolean)
     .join(' · ');
   return (
-    <span className="mr-2 hidden items-center gap-1.5 font-mono text-xs text-zinc-300 md:inline-flex" title={details} data-testid="connection-indicator">
-      <span className={cn('size-2 rounded-full', color)} aria-hidden />
-      {stats.rttMs !== null ? `${stats.rttMs} ms` : '—'}
-      {stats.fps !== null ? <span className="text-zinc-500">· {stats.fps} fps</span> : null}
-    </span>
+    <>
+      {/* Phones and narrow tablets: the quality at a glance, and the round trip when it is poor. */}
+      <span className="mr-1 inline-flex items-center gap-1 font-mono text-[11px] text-zinc-400 md:hidden" title={details}>
+        <span className={cn('size-2 rounded-full', color)} aria-hidden />
+        {level === 'poor' && stats.rttMs !== null ? `${stats.rttMs} ms` : null}
+      </span>
+      <span className="mr-2 hidden items-center gap-1.5 font-mono text-xs text-zinc-300 md:inline-flex" title={details} data-testid="connection-indicator">
+        <span className={cn('size-2 rounded-full', color)} aria-hidden />
+        {stats.rttMs !== null ? `${stats.rttMs} ms` : '—'}
+        {stats.fps !== null ? <span className="text-zinc-500">· {stats.fps} fps</span> : null}
+      </span>
+    </>
   );
 }
 
