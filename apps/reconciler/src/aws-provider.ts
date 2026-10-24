@@ -125,7 +125,7 @@ export async function syncAwsProvider(env: Env, opts: { force?: boolean; trigger
     const [oldest] = await db.all<{ checked_at: number | null }>(sql`SELECT MIN(a.checked_at) AS checked_at FROM aws_provider_regions a JOIN regions r ON r.id=a.region_id WHERE r.enabled=1 AND a.status='ready'`);
     const summary = {
       runId, trigger: opts.trigger ?? 'manual', force, lagMs, startedAt: now.toISOString(), finishedAt: new Date().toISOString(), ms: Date.now()-now.getTime(),
-      regions: discovered.length, refreshed: outcome.refreshed.length, fresh: outcome.fresh, failed: outcome.failed, taken: outcome.taken, deferred: outcome.deferred, resting: outcome.resting,
+      regions: discovered.length, refreshed: outcome.refreshed.length, fresh: outcome.fresh, failed: outcome.failed, taken: outcome.taken, deferred: outcome.deferred, resting: outcome.resting, disabled: outcome.disabled,
       slowest: outcome.refreshed.sort((a,b)=>b.ms-a.ms).slice(0,3),
       oldestReadyAgeMs: oldest?.checked_at ? Date.now()-oldest.checked_at : null,
     };
@@ -157,7 +157,9 @@ export async function refreshRegions(db: Db, discovered: { code: string; optIn: 
   const started = clock();
   const existing = new Map((await db.select().from(regions).where(eq(regions.executor,'aws-ec2'))).map((r)=>[r.providerRegion,r]));
   const known = new Map((await db.select().from(catalog)).map((r)=>[r.providerRegion,r]));
-  const out = { refreshed: [] as { region: string; ms: number }[], failed: [] as { region: string; error: string; failures: number; unusable: boolean }[], fresh: 0, taken: [] as string[], deferred: [] as string[], resting: [] as string[] };
+  // Regions with a browser that still exists there (its starts need the region's inventory).
+  const occupied = new Set((await db.all<{ region_id: string }>(sql`SELECT DISTINCT region_id FROM browser_instances WHERE status <> 'purged'`)).map((r)=>r.region_id));
+  const out = { refreshed: [] as { region: string; ms: number }[], failed: [] as { region: string; error: string; failures: number; unusable: boolean }[], fresh: 0, taken: [] as string[], deferred: [] as string[], resting: [] as string[], disabled: [] as string[] };
   // Oldest first: when AWS is slow and the budget runs out, the regions closest to expiring were refreshed.
   const pending = [...discovered].sort((a,b)=>(known.get(a.code)?.checkedAt?.getTime() ?? 0)-(known.get(b.code)?.checkedAt?.getTime() ?? 0));
   const refreshAfter = () => clock()-REGION_REFRESH_MS;
@@ -166,6 +168,10 @@ export async function refreshRegions(db: Db, discovered: { code: string; optIn: 
       const row = known.get(r.code);
       const previous = existing.get(r.code);
       const regionId = previous?.id ?? row?.regionId ?? r.code;
+      // Disabled by the operator, with no browser in it: nothing can be created or started there,
+      // so its inventory is not read, and an AWS region in trouble costs no requests or run time.
+      // It is read again once enabled, or on a forced refresh.
+      if (!deps.force && previous && !previous.enabled && !occupied.has(regionId)) { out.disabled.push(r.code); continue; }
       // A forced refresh, a new region, a changed opt-in and the daily catalog refresh read it even when fresh.
       const due = deps.force || !row || row.optInStatus!==r.optIn || deps.catalogDue;
       if (!due && row.checkedAt && row.checkedAt.getTime() >= refreshAfter()) { out.fresh++; continue; }

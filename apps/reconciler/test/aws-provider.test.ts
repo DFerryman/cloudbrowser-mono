@@ -10,7 +10,7 @@ function setup() {
   const d1 = createTestD1();
   const db = createDb(d1);
   const now = Date.now();
-  d1.sqlite.exec(`UPDATE regions SET executor='aws-ec2'`);
+  d1.sqlite.exec(`UPDATE regions SET executor='aws-ec2', enabled=1`);
   const regions = (d1.sqlite.prepare('SELECT id, provider_region AS code FROM regions').all() as { id: string; code: string }[]);
   const catalog = (id: string, checkedAt: number | null, extra = '') => d1.sqlite.exec(`INSERT INTO aws_provider_regions (region_id,provider_region,opt_in_status,status,capacity,checked_at)
     SELECT id,provider_region,'opted-in','ready',5,${checkedAt ?? 'NULL'} FROM regions WHERE id='${id}'; ${extra}`);
@@ -129,4 +129,27 @@ it('reads a region that keeps failing only every half hour, unless a refresh is 
   await db.update(schema.awsProviderRegions).set({ syncFailures: FAILING_REGION_FAILURES, lastErrorAt: new Date(now - FAILING_REGION_RETRY_MS - MIN), checkedAt: new Date(now - 60 * MIN) });
   expect((await refreshRegions(db, discovered, deps(Date.now, observe))).refreshed).toHaveLength(1);
   expect(seen).toEqual([a!.code, a!.code]);
+});
+
+it('reads no inventory for a region the operator disabled, unless a browser is still there or a refresh is forced', async () => {
+  const { d1, db, now, regions, catalog, deps, observedAt } = setup();
+  const [a, b] = regions;
+  // A browser asleep in b, made before b had inventory (which new browsers now need).
+  d1.sqlite.exec(`UPDATE regions SET enabled=0 WHERE id IN ('${a!.id}','${b!.id}');
+    INSERT INTO user (id, name, email, created_at, updated_at) VALUES ('u1', 'U', 'u@example.com', 0, 0);
+    INSERT INTO browser_instances (id, user_id, name, region_id, status, desired_state, idle_timeout_s, locale, screen, fingerprint, created_at, updated_at)
+      VALUES ('i1', 'u1', 'B', '${b!.id}', 'sleeping', 'stopped', 900, 'en-US', 'auto', '{}', 0, 0);`);
+  catalog(a!.id, now - 60 * MIN);
+  catalog(b!.id, now - 60 * MIN);
+  const discovered = [a!, b!].map((r) => ({ code: r.code, optIn: 'opted-in' }));
+  const seen: string[] = [];
+  const observe = (code: string, id: string) => { seen.push(code); return observedAt(Date.now)(code, id); };
+  // A disabled region with a browser asleep in it is still read: starting it needs the inventory.
+  expect(await refreshRegions(db, discovered, deps(Date.now, observe))).toMatchObject({ disabled: [a!.code] });
+  expect(seen).toEqual([b!.code]);
+  await db.update(schema.awsProviderRegions).set({ checkedAt: new Date(now - 60 * MIN) });
+  expect((await refreshRegions(db, discovered, { ...deps(Date.now, observe), force: true })).disabled).toEqual([]);
+  d1.sqlite.exec(`UPDATE regions SET enabled=1 WHERE id='${a!.id}'`);
+  await db.update(schema.awsProviderRegions).set({ checkedAt: new Date(now - 60 * MIN) });
+  expect((await refreshRegions(db, discovered, deps(Date.now, observe))).refreshed.map((r) => r.region).sort()).toEqual([a!.code, b!.code].sort());
 });

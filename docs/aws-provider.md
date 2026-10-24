@@ -39,9 +39,12 @@ A failed read keeps the last snapshot (`last_error`, `last_error_at`, `sync_fail
 it expires; only an answer that the region cannot host browsers (no network, no supported machine)
 withdraws it at once. A region whose reads failed six times in a row (one AWS never answers in time,
 one without the browser network) is read again every 30 minutes rather than every run, and at once
-on a forced refresh. Each run logs JSON lines (`aws_sync.start` with the cron's start delay,
-`aws_sync.region_failed`, `aws_sync.billing_skipped`, `aws_sync.done` with refreshed, failed, taken,
-deferred and resting regions and the oldest snapshot's age) and stores its summary in
+on a forced refresh. A region an operator disabled (`regions.enabled = 0`) with no browser left in
+it is not read at all until it is enabled again or a refresh is forced: nothing can be created or
+started there, and inventory alerts cover enabled regions only. Each run logs JSON lines
+(`aws_sync.start` with the cron's start delay, `aws_sync.region_failed`, `aws_sync.billing_skipped`,
+`aws_sync.done` with refreshed, failed, taken, deferred, resting and disabled regions and the
+oldest snapshot's age) and stores its summary in
 `aws_provider_state.last_run`. Manual refreshes run through `cloudbrowser-aws-provider` rather than
 an HTTP request's background lifetime.
 The API reaches the private reconciler through a service binding. There is no public sync URL.
