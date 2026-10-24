@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import worker from '../src/index.js';
 import { resetBlocks } from '../src/mcp/http.js';
 import { TOOLS } from '../src/mcp/tools.js';
 import { FakeVm, gatewayFixture, KEY, OTHER_KEY } from './fixture.js';
@@ -109,7 +110,7 @@ describe('the MCP endpoint', () => {
     expect((await fx.post(rpc('ping'), { headers: { 'cf-connecting-ip': '198.51.100.7' } })).status).toBe(429);
     expect(fx.env.API.authenticateMcp).toHaveBeenCalledTimes(calls);
     expect((await fx.post(rpc('ping'), { headers: { 'cf-connecting-ip': '198.51.100.8' } })).status).toBe(200);
-    expect(limit).toHaveBeenLastCalledWith({ key: `mcp:${KEY.slice(0, 11)}` });
+    expect(limit).toHaveBeenLastCalledWith({ key: 'mcp:client1' });
     limit.mockResolvedValue({ success: false });
     expect((await fx.post(rpc('ping'), { headers: { 'cf-connecting-ip': '198.51.100.9' } })).status).toBe(429);
   });
@@ -136,5 +137,84 @@ describe('the MCP endpoint', () => {
     expect(badStep).toMatchObject({ isError: true, text: expect.stringContaining('Step 0 is not valid: steps.0.type') });
     const badArgs = await fx.call('screenshot', { quality: 5 });
     expect(badArgs).toMatchObject({ isError: true, text: expect.stringContaining('Invalid arguments for screenshot: quality') });
+  });
+});
+
+describe('OAuth sign-in on the MCP endpoint', () => {
+  const TOKEN = `nvza_${'D'.repeat(43)}`;
+  const get = (path: string, method = 'GET') => worker.fetch!(new Request(`https://connect.test${path}`, { method }), fx.env, {} as ExecutionContext);
+  const on = () => Object.assign(fx.env, { MCP_OAUTH: 'on', OAUTH_ISSUER: 'https://nevazu.test/' });
+
+  it('keeps the plain key challenge and serves no metadata while it is off', async () => {
+    for (const vars of [{}, { MCP_OAUTH: 'off', OAUTH_ISSUER: 'https://nevazu.test' }, { MCP_OAUTH: 'on' }]) {
+      Object.assign(fx.env, { MCP_OAUTH: undefined, OAUTH_ISSUER: undefined }, vars);
+      const response = await fx.post(rpc('tools/list'), { key: null });
+      expect(response.status).toBe(401);
+      expect(response.headers.get('www-authenticate')).toBe('Bearer realm="nevazu"');
+      expect(await response.json()).toMatchObject({ error: { message: expect.stringContaining('Create one in the browser') } });
+      expect((await get('/.well-known/oauth-protected-resource/mcp/browser1')).status).toBe(404);
+    }
+  });
+
+  it('names the protected-resource metadata when no key is sent, and never to a key', async () => {
+    on();
+    const none = await fx.post(rpc('tools/list'), { key: null });
+    expect(none.status).toBe(401);
+    expect(none.headers.get('www-authenticate')).toBe(
+      'Bearer realm="nevazu", resource_metadata="https://connect.test/.well-known/oauth-protected-resource/mcp/browser1", scope="browser:control"');
+    expect(await none.json()).toMatchObject({ error: { message: expect.stringContaining('sign in to Nevazu') } });
+    const slash = await fx.post(rpc('tools/list'), { key: null, path: '/mcp/browser1/' });
+    expect(slash.headers.get('www-authenticate')).toContain('resource_metadata="https://connect.test/.well-known/oauth-protected-resource/mcp/browser1/"');
+    const basic = await fx.post(rpc('tools/list'), { key: null, headers: { authorization: 'Basic dXNlcjpwYXNz' } });
+    expect(basic.headers.get('www-authenticate')).toContain('resource_metadata=');
+    // A key that fails keeps the plain challenge: a key user is never pushed into a sign-in.
+    for (const key of [`nvzk_${'Z'.repeat(43)}`, 'nvzk_short', 'f'.repeat(64)]) {
+      const refused = await fx.post(rpc('tools/list'), { key });
+      expect(refused.status).toBe(401);
+      expect(refused.headers.get('www-authenticate')).toBe('Bearer realm="nevazu"');
+    }
+  });
+
+  it('takes a sign-in\'s access token like a key and says when it has expired', async () => {
+    on();
+    vi.mocked(fx.env.API.authenticateMcp).mockResolvedValueOnce({ ok: true, clientId: 'grant1', userId: 'owner1', generation: 1, capability: 'control', name: 'Claude Code' });
+    const limit = vi.fn(async () => ({ success: true }));
+    fx.env.MCP_LIMITER = { limit } as unknown as RateLimit;
+    expect((await fx.post(rpc('tools/list'), { key: TOKEN })).status).toBe(200);
+    expect(fx.env.API.authenticateMcp).toHaveBeenLastCalledWith(expect.objectContaining({ instanceId: 'browser1', key: TOKEN }));
+    expect(limit).toHaveBeenLastCalledWith({ key: 'mcp:grant1' });
+    // An expired or disconnected token is invalid_token, so the client refreshes or signs in again.
+    vi.mocked(fx.env.API.authenticateMcp).mockResolvedValueOnce({ ok: false, reason: 'expired' });
+    const expired = await fx.post(rpc('tools/list'), { key: TOKEN });
+    expect(expired.status).toBe(401);
+    expect(expired.headers.get('www-authenticate')).toBe(
+      'Bearer realm="nevazu", resource_metadata="https://connect.test/.well-known/oauth-protected-resource/mcp/browser1", scope="browser:control", error="invalid_token"');
+    expect(await expired.json()).toMatchObject({ error: { message: expect.stringContaining('access token has expired') } });
+    const revoked = await fx.post(rpc('tools/list'), { key: TOKEN });
+    expect(await revoked.json()).toMatchObject({ error: { message: expect.stringContaining('sign in again') } });
+    // Malformed tokens never reach the api.
+    const calls = vi.mocked(fx.env.API.authenticateMcp).mock.calls.length;
+    expect((await fx.post(rpc('tools/list'), { key: 'nvza_short' })).status).toBe(401);
+    expect(fx.env.API.authenticateMcp).toHaveBeenCalledTimes(calls);
+  });
+
+  it('serves the same metadata for any well-formed browser id while it is on', async () => {
+    on();
+    const response = await get('/.well-known/oauth-protected-resource/mcp/browser1');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('access-control-allow-origin')).toBe('*');
+    expect(await response.json()).toEqual({
+      resource: 'https://connect.test/mcp/browser1',
+      authorization_servers: ['https://nevazu.test'],
+      scopes_supported: ['browser:control', 'browser:view'],
+      bearer_methods_supported: ['header'],
+      resource_name: 'Nevazu cloud browser',
+      resource_documentation: 'https://nevazu.test/docs/coding-agents',
+    });
+    expect(await (await get('/.well-known/oauth-protected-resource/mcp/browser1/')).json()).toMatchObject({ resource: 'https://connect.test/mcp/browser1/' });
+    expect(await (await get('/.well-known/oauth-protected-resource/mcp/browser9')).json()).toMatchObject({ resource: 'https://connect.test/mcp/browser9' });
+    expect((await get('/.well-known/oauth-protected-resource/mcp/not-an-id!')).status).toBe(404);
+    expect((await get('/.well-known/oauth-protected-resource/mcp/browser1', 'OPTIONS')).status).toBe(204);
+    expect((await get('/.well-known/oauth-protected-resource/mcp/browser1', 'POST')).status).toBe(405);
   });
 });

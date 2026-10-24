@@ -32,6 +32,7 @@ export const ErrorType = z.enum([
   'account_frozen',
   'agent_access_off',
   'agent_key_limit',
+  'agent_grant_limit',
   'internal',
 ]);
 export type ErrorType = z.infer<typeof ErrorType>;

@@ -5,7 +5,8 @@
  *  - `GET /v1/stream/:instanceId?token=`: a viewer, with a 60 s single-use Ed25519 token that is
  *    verified here and redeemed once through the api.
  *  - `POST /mcp/:instanceId`: a coding agent's remote MCP server, authenticated by the browser's
- *    access key (docs/agent-access.md), and `PUT /u/:token`, its one-time upload URLs.
+ *    access key or an OAuth sign-in (docs/agent-access.md), `PUT /u/:token`, its one-time upload
+ *    URLs, and, while MCP_OAUTH is on, `GET /.well-known/oauth-protected-resource/mcp/:instanceId`.
  * All of them land in the instance's InstanceGateway Durable Object. It also consumes the
  * `cloudbrowser-agent-commands` queue to deliver engine commands to connected agents.
  */
@@ -14,7 +15,7 @@ import type { AgentCommandsMessage } from '@cloudbrowser/db';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import type { Env } from './env.js';
 import { connectionAttempt, connectionLog } from './connection-log.js';
-import { failedAttempt, handleMcp, isBlocked, stub } from './mcp/http.js';
+import { failedAttempt, handleMcp, isBlocked, oauthOn, protectedResourceMetadata, stub } from './mcp/http.js';
 import { parseUploadToken } from './mcp/session.js';
 
 export { InstanceGateway } from './instance-gateway.js';
@@ -80,6 +81,12 @@ export default {
     if (mcp) {
       if (!INSTANCE_ID.test(mcp[1]!)) return text('not found', 404);
       return handleMcp(req, env, ctx, mcp[1]!);
+    }
+    // OAuth discovery for that server (RFC 9728), only while sign-in is on.
+    const metadata = url.pathname.match(/^\/\.well-known\/oauth-protected-resource\/mcp\/([^/]*)(\/?)$/);
+    if (metadata) {
+      if (!oauthOn(env) || !INSTANCE_ID.test(metadata[1]!)) return text('not found', 404);
+      return protectedResourceMetadata(req, env, metadata[1]!, metadata[2] === '/');
     }
     const uploadUrl = url.pathname.match(/^\/u\/([^/]+)$/);
     if (uploadUrl) return upload(req, env, uploadUrl[1]!);

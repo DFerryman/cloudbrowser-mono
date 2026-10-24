@@ -74,7 +74,7 @@ describe('coding-agent access', () => {
     expect(status.body).toMatchObject({ enabled: true, mcpUrl: `https://connect.test/mcp/${instanceId}`, session: null });
     expect(status.body.clients).toEqual([{
       id: made.body.clientId, name: 'Claude Code', kind: 'key', keyPrefix: key.slice(0, 11), capability: 'control',
-      createdAt: expect.any(String), expiresAt: made.body.expiresAt, lastSeenAt: null, lastClient: null,
+      createdAt: expect.any(String), expiresAt: made.body.expiresAt, lastSeenAt: null, lastClient: null, verifiedHost: null,
     }]);
     expect(JSON.stringify(status.body)).not.toContain(key.slice(11));
     await t.settle();

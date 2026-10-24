@@ -11,7 +11,11 @@
     "VIEWER_TOKEN_PUBLIC_KEY": "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"9Qt3463-fc1wkrbVJ3I1AuwwLmyp_27PuwkJJpM3ras\"}",
     // Browser origins (comma-separated scheme://host) allowed to call the MCP endpoint. Coding
     // agents send no Origin; empty refuses every web page (docs/agent-access.md).
-    "MCP_ALLOWED_ORIGINS": ""
+    "MCP_ALLOWED_ORIGINS": "",
+    // "on": coding agents may sign in with OAuth (docs/agent-access.md, "OAuth sign-in"); the 401
+    // then names /.well-known/oauth-protected-resource/mcp/<id>, which points to OAUTH_ISSUER.
+    "MCP_OAUTH": "off",
+    "OAUTH_ISSUER": "https://nevazu.com"
   },
   // MCP calls per access key, and failed authentications and upload URL guesses per address.
   "ratelimits": [{ "name": "MCP_LIMITER", "namespace_id": "1101", "simple": { "limit": 120, "period": 60 } }],

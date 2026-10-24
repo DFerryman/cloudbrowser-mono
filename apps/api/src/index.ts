@@ -25,6 +25,8 @@ import { publicRoute } from './routes/public.js';
 import { siteRoute } from './site.js';
 import { v1 } from './routes/v1.js';
 import { revokeUserClients } from './automation.js';
+import { oauthPublicRoute, oauthSweep } from './oauth.js';
+import { oauthRoute } from './routes/oauth.js';
 
 const app = new OpenAPIHono<AppEnv>();
 
@@ -133,6 +135,9 @@ async function revokeAgentKeysToo(c: Context<AppEnv>, next: Next) {
 app.route('/api/auth', signInRoute);
 app.on(['GET', 'POST'], '/api/auth/*', (c) => c.get('auth').handler(c.req.raw));
 
+/** Coding agents' OAuth sign-in (oauth.ts): metadata, registration, token and revocation, for apps. */
+app.route('/', oauthPublicRoute);
+
 /**
  * IP echo for the agent's in-Chrome IP check (page 3): hosted on Cloudflare, outside the browser
  * provider, it returns the address the request came from.
@@ -204,6 +209,7 @@ app.use('/api/v1/*', sameOrigin, async (c, next) => {
 }, limitWrites);
 app.route('/api/v1/admin', adminRoute);
 app.route('/api/v1', v1);
+app.route('/api/v1', oauthRoute);
 
 export default {
   fetch: app.fetch,
@@ -234,6 +240,7 @@ export default {
     console.log('reward emails', await rewardNotices(env, db, new Date()).catch((e) => String(e)));
     // Admin watchers raise alerts; deliver afterwards so they go out in the same run.
     console.log('admin notifications', JSON.stringify(await adminSweep(db, new Date())));
+    if (nightly) console.log('oauth sweep', JSON.stringify(await oauthSweep(db, at).catch((e) => ({ error: String(e) }))));
     console.log('alerts delivered', await deliverAlerts(env, db));
   },
 } satisfies ExportedHandler<Env, { eventId: string }>;

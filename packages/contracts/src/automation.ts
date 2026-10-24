@@ -292,18 +292,30 @@ export type AgentKey = z.infer<typeof AgentKey>;
 export const AutomationClient = z.object({
   id: z.string(),
   name: z.string(),
-  /** `key`: an access key; `bridge`: a credential of the retired local bridge, accepted as a key. */
-  kind: z.enum(['key', 'bridge']),
+  /**
+   * `key`: an access key; `bridge`: a credential of the retired local bridge, accepted as a key;
+   * `oauth`: a sign-in the owner approved in the browser (its name is the app's).
+   */
+  kind: z.enum(['key', 'bridge', 'oauth']),
   keyPrefix: z.string().nullable(),
   capability: AgentKeyCapability,
   createdAt: z.string(),
-  /** Null for keys that never expire; an expired key stays listed until it is revoked. */
+  /**
+   * Null for keys that never expire; an expired key stays listed until it is revoked. A sign-in
+   * always ends; an ended one is listed for a day more, since it can never work again.
+   */
   expiresAt: z.string().nullable(),
   lastSeenAt: z.string().nullable(),
   /** The coding agent that last used the key (its MCP client name and version, or user agent). */
   lastClient: z.string().nullable(),
+  /** A sign-in's verified domain (the host of its Client ID Metadata Document); null for keys and registered apps. */
+  verifiedHost: z.string().nullable(),
 });
 export type AutomationClient = z.infer<typeof AutomationClient>;
+
+/** Every key and sign-in of the user's browsers (the account page's Connected agents). */
+export const AgentConnection = AutomationClient.extend({ instanceId: z.string(), instanceName: z.string() });
+export type AgentConnection = z.infer<typeof AgentConnection>;
 
 export const AutomationStatus = z.object({
   /** The owner's setting: whether coding agents may connect at all. */
@@ -318,3 +330,61 @@ export const AutomationStatus = z.object({
 export type AutomationStatus = z.infer<typeof AutomationStatus>;
 
 export const SetControlBody = z.object({ mode: AgentControlMode });
+
+// --- api: OAuth sign-in (docs/agent-access.md, "OAuth sign-in") --------------------------------
+
+/** How long a sign-in lasts, chosen on the approval page and counted from approval; it never moves. */
+export const AGENT_GRANT_DAYS = [1, 7, 30, 90] as const;
+export const DEFAULT_AGENT_GRANT_DAYS = 7;
+export const AgentGrantDays = z.union([z.literal(1), z.literal(7), z.literal(30), z.literal(90)]);
+
+/** OAuth scopes of a browser's MCP server: `browser:control` includes everything `browser:view` allows. */
+export const AGENT_OAUTH_SCOPES = { control: 'browser:control', view: 'browser:view' } as const satisfies Record<AgentKeyCapability, string>;
+
+/** The parameters of an authorization request (`/oauth/authorize?…`), exactly as the approval page received them. */
+export const OAuthAuthorizeParams = z.record(z.string().max(64), z.string().max(4096));
+
+export const OAuthCheckBody = z.object({ params: OAuthAuthorizeParams });
+export type OAuthCheckBody = z.infer<typeof OAuthCheckBody>;
+
+const OAuthBrowser = z.object({ id: z.string(), name: z.string(), agentAccess: z.boolean() });
+
+/**
+ * What the approval page shows, or why the request cannot be approved. `redirect` is where a
+ * refusal may be sent back to the app: null when the app or its callback is unknown, which must
+ * never be redirected to.
+ */
+export const OAuthAuthorizeCheck = z.discriminatedUnion('ok', [
+  z.object({
+    ok: z.literal(true),
+    /** What the app calls itself, and its verified domain when it has one. */
+    client: z.object({ name: z.string(), verifiedHost: z.string().nullable() }),
+    /** Where approving sends the user: an app on this computer, an installed app's scheme, or a website. */
+    redirect: z.object({ kind: z.enum(['loopback', 'app', 'web']), label: z.string() }),
+    /** The most the app asked for; the user may lower it. */
+    capability: AgentKeyCapability,
+    /** The browser the app named, or null when it named none and the user picks one of `browsers`. */
+    browser: OAuthBrowser.nullable(),
+    browsers: z.array(OAuthBrowser),
+    grantDays: z.array(z.number().int()),
+    defaultGrantDays: z.number().int(),
+  }),
+  z.object({ ok: z.literal(false), error: z.string(), description: z.string(), redirect: z.string().nullable() }),
+]);
+export type OAuthAuthorizeCheck = z.infer<typeof OAuthAuthorizeCheck>;
+
+export const OAuthDecisionBody = z.object({
+  params: OAuthAuthorizeParams,
+  approve: z.boolean(),
+  /** The browser, when the app named none. */
+  instanceId: z.string().min(1).max(64).optional(),
+  capability: AgentKeyCapability.optional(),
+  grantDays: AgentGrantDays.default(DEFAULT_AGENT_GRANT_DAYS),
+  /** Turns coding-agent access on for the browser as part of approving. */
+  enableAccess: z.boolean().default(false),
+});
+export type OAuthDecisionBody = z.infer<typeof OAuthDecisionBody>;
+
+/** Where the approval page sends the browser next: the app's callback, with a code or an error. */
+export const OAuthDecision = z.object({ redirect: z.string() });
+export type OAuthDecision = z.infer<typeof OAuthDecision>;

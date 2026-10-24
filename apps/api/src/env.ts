@@ -17,6 +17,8 @@ export interface Env {
   /** Workers Rate Limiting bindings: sign-in attempts per IP/email, and API writes per user. */
   AUTH_LIMITER?: RateLimit;
   API_LIMITER?: RateLimit;
+  /** Coding agents' OAuth (oauth.ts): app registrations per address, token and revocation calls per app. */
+  OAUTH_LIMITER?: RateLimit;
   /** Public origin of the app, e.g. https://app.example.com. */
   APP_URL: string;
   BETTER_AUTH_SECRET: string;
