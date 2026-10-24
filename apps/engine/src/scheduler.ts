@@ -134,17 +134,35 @@ export async function idleStops(deps: EngineDeps): Promise<string[]> {
   return stopped;
 }
 
-type IpCheckRecord = { ok: boolean; expected: string | null; observed: string[]; checkedAt: string; detail?: string };
+/** okAt: the last check that passed, kept on a failed one; a passing check is its own. */
+type IpCheckRecord = { ok: boolean; expected: string | null; observed: string[]; checkedAt: string; detail?: string; okAt?: string };
 
 /** No successful check for this long while running pauses the network (page 3, "Fail-closed"). */
 const IP_CHECK_STALE_MS = 15 * 60_000;
 const ON_DEMAND_TIMEOUT_MS = 15_000;
 
 /**
- * Stores a check and, if it failed on a running browser, shows Needs attention. A different IP is
- * never assigned automatically.
+ * Chrome saw an address, and not (only) the expected one: an IP incident, which pauses at once.
+ * A check that saw nothing (Chrome or the echo did not answer) says nothing about the address; it
+ * pauses only once no check has passed for IP_CHECK_STALE_MS, about when the agent closes the VM
+ * firewall after its third such check in a row.
  */
-async function recordIpCheck(deps: EngineDeps, inst: { id: string; userId: string; status: string }, check: IpCheckRecord) {
+function sawOtherAddress(check: IpCheckRecord | null | undefined) {
+  return !!check && !check.ok && check.observed.length > 0;
+}
+
+/** When a check last passed, or when the agent last became ready, whichever is later. */
+function lastPassAt(check: IpCheckRecord | null | undefined, agentReadyAt: Date | null | undefined) {
+  const ok = check?.ok ? check.checkedAt : check?.okAt;
+  return Math.max(ok ? Date.parse(ok) : 0, agentReadyAt?.getTime() ?? 0);
+}
+
+/**
+ * Stores a check and, if it failed on a running browser, shows Needs attention: at once for an
+ * incident (the binding failed, or Chrome saw another address), else once no check has passed for
+ * IP_CHECK_STALE_MS. A different IP is never assigned automatically.
+ */
+async function recordIpCheck(deps: EngineDeps, inst: { id: string; userId: string; status: string }, check: IpCheckRecord, incident: boolean, stale: boolean) {
   const { db } = deps;
   const at = deps.now();
   const stmts = [
@@ -154,20 +172,26 @@ async function recordIpCheck(deps: EngineDeps, inst: { id: string; userId: strin
       .onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastIpCheck: check } }),
     db.insert(events).values(eventRow(inst.userId, 'instance.updated', { instanceId: inst.id }, at)),
   ] as const;
-  if (!check.ok && inst.status === 'running') {
+  if (!check.ok && (incident || stale) && inst.status === 'running') {
     await db.batch([...stmts, ...pauseNetwork(deps, inst.id, check, at)]);
-    await ipAlert(deps, inst.id, { ...check }, at);
+    await ipAlert(deps, inst.id, { ...check }, at, incident);
   } else {
     await db.batch(stmts);
   }
   deps.notify(inst.userId);
 }
 
-/** A failed IP check is an IP-integrity incident until an operator looks at it (page 3). */
-function ipAlert(deps: EngineDeps, instanceId: string, detail: Record<string, unknown>, at: Date) {
+/**
+ * A failed IP check is an IP-integrity incident until an operator looks at it (page 3). One that
+ * could not run (Chrome did not answer, nothing was seen) is a browser that stopped responding:
+ * still paused, but not reported as a wrong address.
+ */
+function ipAlert(deps: EngineDeps, instanceId: string, detail: Record<string, unknown>, at: Date, incident: boolean) {
   return raiseAlert(
     deps.db,
-    { source: 'engine', severity: 'critical', title: `IP check failed for ${instanceId}: network paused`, detail, dedupeKey: `ip:${instanceId}` },
+    incident
+      ? { source: 'engine', severity: 'critical', title: `IP check failed for ${instanceId}: network paused`, detail, dedupeKey: `ip:${instanceId}` }
+      : { source: 'engine', severity: 'warning', title: `No IP check passed for ${instanceId} in 15 minutes (Chrome or its agent is not answering): network paused`, detail, dedupeKey: `ip:${instanceId}` },
     at,
   );
 }
@@ -202,6 +226,7 @@ export async function checkInstanceIp(deps: EngineDeps, instanceId: string, opts
     .where(and(eq(placements.instanceId, instanceId), eq(placements.status, 'current')));
   const [inst] = await db.select().from(browserInstances).where(eq(browserInstances.id, instanceId));
   if (!p || !inst) return null;
+  const [health] = await db.select().from(instanceHealth).where(eq(instanceHealth.instanceId, instanceId));
   const kind = p.executor as ExecutorKind;
   const ref = placementRef(p);
   const binding = await deps.executor(kind).verifyEgress(readContext('ip-check', deps.envName), ref);
@@ -222,8 +247,11 @@ export async function checkInstanceIp(deps: EngineDeps, instanceId: string, opts
     : reply.status === 'pending'
       ? 'the IP check inside Chrome did not answer'
       : undefined;
-  const check: IpCheckRecord = { ok, expected: p.ipAddress, observed, checkedAt: deps.now().toISOString(), ...(detail ? { detail } : {}) };
-  await recordIpCheck(deps, inst, check);
+  const prev = health?.lastIpCheck;
+  const okAt = ok ? undefined : prev?.ok ? prev.checkedAt : prev?.okAt;
+  const check: IpCheckRecord = { ok, expected: p.ipAddress, observed, checkedAt: deps.now().toISOString(), ...(detail ? { detail } : {}), ...(okAt ? { okAt } : {}) };
+  const stale = deps.now().getTime() - lastPassAt(check, health?.agentReadyAt) > IP_CHECK_STALE_MS;
+  await recordIpCheck(deps, inst, check, !binding.ok || sawOtherAddress(check), stale);
   if (ok && opts.requestedByUser && inst.status === 'needs_attention' && inst.statusReason === NETWORK_PAUSED) await resumeNetwork(deps, inst, kind);
   return check;
 }
@@ -269,8 +297,8 @@ async function resumeNetwork(deps: EngineDeps, inst: { id: string; userId: strin
 /**
  * Every 5 minutes while running (page 3, "Verification"). Real agents check from inside Chrome on
  * their own and report; here the engine checks the provider-side binding and pauses the network if
- * the agent's last report failed or is older than 15 minutes. The fake agent cannot report, so the
- * engine runs the whole check for it.
+ * the agent's last report saw another address, or no report has passed for 15 minutes. The fake
+ * agent cannot report, so the engine runs the whole check for it.
  */
 export async function periodicIpChecks(deps: EngineDeps) {
   const { db } = deps;
@@ -299,15 +327,16 @@ export async function periodicIpChecks(deps: EngineDeps) {
     }
     const binding = await deps.executor(kind).verifyEgress(readContext('ip-check', deps.envName), placementRef(placement));
     const last = health?.lastIpCheck;
-    const reference = Math.max(last ? Date.parse(last.checkedAt) : 0, health?.agentReadyAt?.getTime() ?? 0);
-    const stale = deps.now().getTime() - reference > IP_CHECK_STALE_MS;
-    if (!binding.ok || (last && !last.ok) || stale) {
+    // A failed check that saw nothing does not count as a recent check: Chrome stopped answering.
+    const stale = deps.now().getTime() - lastPassAt(last, health?.agentReadyAt) > IP_CHECK_STALE_MS;
+    const incident = !binding.ok || sawOtherAddress(last);
+    if (incident || stale) {
       const at = deps.now();
       await db.batch([
         ...pauseNetwork(deps, inst.id, { binding: binding.ok, lastCheck: last ?? null, stale }, at),
         db.insert(events).values(eventRow(inst.userId, 'instance.updated', { instanceId: inst.id }, at)),
       ]);
-      await ipAlert(deps, inst.id, { binding: binding.ok, lastCheck: last ?? null, stale }, at);
+      await ipAlert(deps, inst.id, { binding: binding.ok, lastCheck: last ?? null, stale }, at, incident);
       deps.notify(inst.userId);
     }
   }

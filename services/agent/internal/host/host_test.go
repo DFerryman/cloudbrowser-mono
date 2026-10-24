@@ -47,3 +47,38 @@ func TestCPUTimesSplitsBusyStealAndIdle(t *testing.T) {
 		t.Fatal("a file without the cpu line must fail")
 	}
 }
+
+func TestMemoryReadsMeminfoAndPressure(t *testing.T) {
+	dir := t.TempDir()
+	meminfo := filepath.Join(dir, "meminfo")
+	pressure := filepath.Join(dir, "memory")
+	if err := os.WriteFile(meminfo, []byte("MemTotal:        3936000 kB\nMemFree:           60000 kB\nMemAvailable:      98400 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pressure, []byte("some avg10=71.25 avg60=40.00 avg300=12.00 total=1\nfull avg10=55.50 avg60=30.00 avg300=9.00 total=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Linux{ProcMeminfo: meminfo, ProcPressure: pressure}.Memory()
+	if err != nil || m.TotalBytes != 3936000*1024 || m.AvailableBytes != 98400*1024 || m.SwapFreeBytes != nil {
+		t.Fatalf("got %+v, %v", m, err)
+	}
+	if !m.PSI || m.SomeAvg10 != 71.25 || m.FullAvg10 != 55.5 {
+		t.Fatalf("pressure: got %+v", m)
+	}
+
+	// Swap is reported when there is some; a kernel without PSI reports no pressure.
+	if err := os.WriteFile(meminfo, []byte("MemTotal: 100 kB\nMemAvailable: 50 kB\nSwapTotal: 40 kB\nSwapFree: 10 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err = Linux{ProcMeminfo: meminfo, ProcPressure: filepath.Join(dir, "none")}.Memory()
+	if err != nil || m.SwapFreeBytes == nil || *m.SwapFreeBytes != 10*1024 || m.PSI {
+		t.Fatalf("got %+v, %v", m, err)
+	}
+
+	if err := os.WriteFile(meminfo, []byte("MemFree: 1 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Linux{ProcMeminfo: meminfo}).Memory(); err == nil {
+		t.Fatal("a meminfo without MemTotal and MemAvailable must fail")
+	}
+}

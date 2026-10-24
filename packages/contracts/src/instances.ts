@@ -67,6 +67,8 @@ export const IpCheck = z.object({
   observed: z.array(z.string()),
   checkedAt: z.string(),
   detail: z.string().optional(),
+  /** On a failed check: when a check last passed. */
+  okAt: z.string().optional(),
 });
 export type IpCheck = z.infer<typeof IpCheck>;
 

@@ -250,6 +250,7 @@ export const en = {
   'overlay.useHere': 'Use here',
   'overlay.networkPaused': 'We are checking your dedicated IP. We paused the network so that no other IP is ever used.',
   'overlay.checkStatus': 'Check again',
+  'overlay.notResponding': 'Your browser stopped responding, so we could not check its dedicated IP. We paused the network so that no other IP is ever used. Restarting the browser usually fixes this.',
   'overlay.idle': 'Going to sleep in {seconds} s.',
   'overlay.stayAwake': 'Stay awake',
   'overlay.asleep': 'Sleeping to save resources. Your sign-ins are saved.',

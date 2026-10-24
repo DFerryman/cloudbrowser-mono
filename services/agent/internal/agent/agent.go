@@ -25,6 +25,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/archive"
+	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/host"
 	"github.com/dferryman/cloudbrowser-mono/services/agent/internal/protocol"
 )
 
@@ -46,8 +47,9 @@ import (
 // the gateway in the next hello why the previous tunnel ended. 0.7.0 tells a touch viewer where the
 // keyboard focus went after each tap, so its on-screen keyboard opens for a text field (focus.go).
 // 0.8.0 reports what the VM saw of the live view in each heartbeat while a viewer is connected
-// (stream.go).
-const Version = "0.8.0"
+// (stream.go). 0.9.0 reports the VM's memory in heartbeats and failed IP checks, and names the
+// DevTools call a check that timed out was waiting for.
+const Version = "0.9.0"
 
 // Tunnel keepalive, with a gateway whose welcome says keepalive (it answers {"t":"ping"} with
 // {"t":"pong"} without waking its object): a tunnel the gateway has sent nothing on for
@@ -400,11 +402,40 @@ func (a *Agent) loops(ctx context.Context) {
 	}
 }
 
-// hostReport adds the data volume's usage (storage page) and the bytes sent since boot (metered
-// as data transfer, page 6) to a heartbeat.
+// memoryReader is a Host that reads the VM's memory (host.Linux).
+type memoryReader interface {
+	Memory() (host.Memory, error)
+}
+
+// memoryReport is the VM's memory for a heartbeat or a failed IP check (contracts
+// AgentMemoryReport), or nil when the host cannot read it.
+func (a *Agent) memoryReport() map[string]any {
+	h, ok := a.cfg.Host.(memoryReader)
+	if !ok {
+		return nil
+	}
+	m, err := h.Memory()
+	if err != nil {
+		return nil
+	}
+	r := map[string]any{"totalBytes": m.TotalBytes, "availableBytes": m.AvailableBytes}
+	if m.SwapFreeBytes != nil {
+		r["swapFreeBytes"] = *m.SwapFreeBytes
+	}
+	if m.PSI {
+		r["someAvg10"], r["fullAvg10"] = m.SomeAvg10, m.FullAvg10
+	}
+	return r
+}
+
+// hostReport adds the data volume's usage (storage page), the bytes sent since boot (metered
+// as data transfer, page 6) and the VM's memory to a heartbeat.
 func (a *Agent) hostReport(data map[string]any) {
 	if a.cfg.Host == nil {
 		return
+	}
+	if m := a.memoryReport(); m != nil {
+		data["memory"] = m
 	}
 	if a.cfg.DataDir != "" {
 		if used, total, err := a.cfg.Host.DiskUsage(a.cfg.DataDir); err == nil {
@@ -425,6 +456,10 @@ func (a *Agent) checkIP(ctx context.Context, expected string) map[string]any {
 	if err != nil {
 		res["ok"] = false
 		res["detail"] = err.Error()
+		// A check that could not run is most often a VM out of memory: say how much was left.
+		if m := a.memoryReport(); m != nil {
+			res["memory"] = m
+		}
 		return res
 	}
 	ok := len(observed) > 0

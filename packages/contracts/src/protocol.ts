@@ -95,10 +95,25 @@ export const AgentStreamReport = z.object({
 }).strict();
 export type AgentStreamReport = z.infer<typeof AgentStreamReport>;
 
+/**
+ * The VM's memory (agent 0.9.0), in a heartbeat and a failed IP check: /proc/meminfo's total, available and
+ * free swap, and the share of the last 10 s in which some or all tasks waited for memory
+ * (/proc/pressure/memory). Tells a VM out of memory from one whose browser hung for another reason.
+ */
+const memoryBytes = z.number().int().nonnegative().max(2 ** 50);
+export const AgentMemoryReport = z.object({
+  totalBytes: memoryBytes,
+  availableBytes: memoryBytes,
+  swapFreeBytes: memoryBytes.optional(),
+  someAvg10: z.number().min(0).max(100).optional(),
+  fullAvg10: z.number().min(0).max(100).optional(),
+}).strict();
+export type AgentMemoryReport = z.infer<typeof AgentMemoryReport>;
+
 export const AgentEvent = z.object({
   t: z.literal('event'),
   kind: AgentEventKind,
-  /** ready: { chromeMajor, agentVersion }, heartbeat: { viewers, lastInputAt, disk: { usedBytes, totalBytes }, netTxBytes, stream?: AgentStreamReport }, ip_check: IpCheckResult */
+  /** ready: { chromeMajor, agentVersion }, heartbeat: { viewers, lastInputAt, disk: { usedBytes, totalBytes }, netTxBytes, memory?: AgentMemoryReport, stream?: AgentStreamReport }, ip_check: IpCheckResult & { memory?: AgentMemoryReport } */
   data: z.record(z.string(), z.unknown()).default({}),
 });
 export const AgentReply = z.object({

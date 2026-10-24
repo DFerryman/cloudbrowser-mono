@@ -252,6 +252,7 @@ export const zhCN: Messages = {
   'overlay.useHere': '在此使用',
   'overlay.networkPaused': '我们正在检查你的独享 IP，并已暂停网络，确保不会使用任何其他 IP。',
   'overlay.checkStatus': '重新检查',
+  'overlay.notResponding': '你的浏览器没有响应，因此无法检查其独享 IP。我们已暂停网络，确保不会使用任何其他 IP。重启浏览器通常可以解决。',
   'overlay.idle': '{seconds} 秒后进入休眠。',
   'overlay.stayAwake': '保持唤醒',
   'overlay.asleep': '为节省资源已进入休眠。你的登录状态已保存。',
