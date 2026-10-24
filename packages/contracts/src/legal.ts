@@ -3,7 +3,7 @@
  * the date either last changed (ISO date, with .2, .3… for later changes the same day). Consent is
  * recorded against it, so change it whenever the text of either changes.
  */
-export const TERMS_VERSION = '2026-10-24.6';
+export const TERMS_VERSION = '2026-10-24.7';
 
 /**
  * SHA-256 (hex) of the document a user agrees to before paying for TERMS_VERSION: the Terms of
@@ -13,7 +13,7 @@ export const TERMS_VERSION = '2026-10-24.6';
  * that document with the version the first time someone accepts it, so each acceptance points at
  * the exact text the user was shown.
  */
-export const TERMS_SHA256 = '701438663159a6eadf1f6233c3d0b6f59655b204eb2055c2e325ddc71e4d7bef';
+export const TERMS_SHA256 = '402e626bfbc4b92f0d0b37b0c22e1cca0fc910bc39a369bcd5bd54b563509cad';
 
 /** Where the web build publishes a version's document: Terms and Privacy Policy (JSON, every language). */
 export const termsDocumentPath = (version: string) => `/legal/terms-${version}.json`;

@@ -75,7 +75,9 @@ export function siteFiles({ template, builtAt, modified }: { template: string; b
   const files = new Map<string, string>();
   for (const page of pages) {
     const body = renderPage(page.path);
-    if (!body.includes('<h1')) throw new Error(`prerender: ${page.path} rendered no heading`);
+    // The Terms intentionally start with their update date and summary, without a page title.
+    const hasContent = page.path === '/terms' ? body.includes('<article') : body.includes('<h1');
+    if (!hasContent) throw new Error(`prerender: ${page.path} rendered no page content`);
     files.set(page.file, fillTemplate(template, headTags(page, structuredData(page, { modified })), body));
     const markdown = pageMarkdown(page);
     if (page.markdown && markdown) files.set(page.markdown.slice(1), markdown);
