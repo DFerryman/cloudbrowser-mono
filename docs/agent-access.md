@@ -314,19 +314,26 @@ on the app host and `/.well-known/oauth-protected-resource/` on the gateway host
 - **Tokens** (`POST /api/oauth/token`): the code lasts 60 s and is used once; a code presented again
   revokes the sign-in it made. The sign-in is an `automation_clients` row of kind `oauth` for one
   browser, with its end (`expires_at`, never moved). Access tokens (`nvza_` + 43 base62) last an
-  hour and never past the end; refresh tokens (`nvzr_` + 43) rotate on every use. The token a
-  refresh replaced is forgiven for 30 s (a retry in flight); later it is a stolen copy and the
-  whole sign-in is revoked. Only hashes are stored, each under its own label
+  hour and never past the end; refresh tokens (`nvzr_` + 43) rotate on every use. Every token a
+  refresh replaced is kept (hashed, in `oauth_spent_refresh_tokens`) until the sign-in is over:
+  presented again within 30 s it is a retry in flight; later it is a stolen copy, however many
+  refreshes ago it was replaced, and the whole sign-in is revoked. The sign-in is made from its
+  code in one batch, only from a code still unused and only while the browser has room, so neither
+  a revoke-all nor two approvals at once get past it. Only hashes are stored, each under its own label
   (`sha256('oauth-access:' + token)` in `credential_hash`, `oauth-refresh:` in `refresh_hash`,
   `oauth-code:` for codes), and the gateway checks the access token on every request through
   `authenticateMcp`, exactly like a key, so a revoke takes effect at once.
 - **Revocation**: the app's own sign-out (`POST /api/oauth/revoke`, RFC 7009), Disconnect in the
   browser's panel or on the account page (`GET`/`DELETE /api/v1/agent-connections[/{id}]`,
   every key and sign-in of every browser, or all at once), deleting the browser, and "Sign out
-  everywhere". A sign-in that ended is listed for one more day.
-- **Housekeeping**: nightly, codes expired over a day ago and apps that never got a sign-in within
-  a week are deleted (some clients register on every connect). Token and revocation calls are
-  rate limited per app, registration per address (`OAUTH_LIMITER`).
+  everywhere". Disconnect all, sign-out-everywhere and deletion also spend approvals whose code
+  was not exchanged yet. A sign-in that ended is listed for one more day.
+- **Housekeeping**: nightly, codes expired over a day ago, replaced refresh tokens of sign-ins that
+  are over, and apps that never got a sign-in within a week are deleted (some clients register on
+  every connect). Rate limits (`OAUTH_LIMITER`): registration per address, refreshes per sign-in,
+  and failed token and revocation calls per address, which then is refused for a minute. Working
+  calls are never counted per app or per address, so the many users of a hosted client (claude.ai
+  calls from a few shared addresses) do not share one budget.
 
 ## Tests
 

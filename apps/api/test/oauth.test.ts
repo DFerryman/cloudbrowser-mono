@@ -2,7 +2,7 @@ import { createDb, sha256Hex } from '@cloudbrowser/db';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import app from '../src/index.js';
 import { internalApi } from '../src/internal.js';
-import { callbackAllowed, callbackMatches, oauthSweep } from '../src/oauth.js';
+import { callbackAllowed, callbackMatches, oauthSweep, resetOAuthBlocks } from '../src/oauth.js';
 import { ORIGIN, setup, signIn } from './helpers.js';
 
 let t: ReturnType<typeof setup>;
@@ -30,6 +30,7 @@ beforeEach(async () => {
   resource = `https://connect.test/mcp/${instanceId}`;
   t.d1.sqlite.prepare(`INSERT OR IGNORE INTO agent_credentials (instance_id, generation, created_at) VALUES (?, 1, 0)`).run(instanceId);
   CHALLENGE = await challengeOf(VERIFIER);
+  resetOAuthBlocks();
 });
 
 afterEach(async () => { await t.settle(); t.d1.sqlite.close(); vi.unstubAllGlobals(); vi.useRealTimers(); });
@@ -257,11 +258,14 @@ describe('OAuth sign-in for coding agents', () => {
     // The old token again, within seconds: a retry, not a theft.
     expect((await refresh(clientId, first)).body).toMatchObject({ error: 'invalid_grant' });
     expect(await mcp(access2)).toMatchObject({ ok: true });
-    // Later, it is a copy: the whole sign-in ends.
-    t.d1.sqlite.prepare(`UPDATE automation_clients SET refresh_rotated_at = ? WHERE id = ?`).run(Date.now() - 31_000, grantId);
+    // Later, it is a copy: the whole sign-in ends, however many refreshes ago it was replaced.
+    const third = (await refresh(clientId, second)).body as { access_token: string; refresh_token: string };
+    const fourth = (await refresh(clientId, third.refresh_token)).body as { access_token: string; refresh_token: string };
+    expect(t.d1.sqlite.prepare(`SELECT count(*) AS n FROM oauth_spent_refresh_tokens WHERE grant_id = ?`).get(grantId)).toEqual({ n: 3 });
+    t.d1.sqlite.prepare(`UPDATE oauth_spent_refresh_tokens SET spent_at = ? WHERE grant_id = ?`).run(Date.now() - 31_000, grantId);
     expect((await refresh(clientId, first)).body).toMatchObject({ error: 'invalid_grant' });
-    expect(await mcp(access2)).toEqual({ ok: false, reason: 'invalid_token' });
-    expect((await refresh(clientId, second)).body).toMatchObject({ error: 'invalid_grant' });
+    expect(await mcp(fourth.access_token)).toEqual({ ok: false, reason: 'invalid_token' });
+    expect((await refresh(clientId, fourth.refresh_token)).body).toMatchObject({ error: 'invalid_grant' });
     expect((t.d1.sqlite.prepare(`SELECT detail FROM audit_log WHERE action = 'automation.client_revoked'`).get() as { detail: string }).detail).toContain('refresh_reused');
   });
 
@@ -360,7 +364,12 @@ describe('OAuth sign-in for coding agents', () => {
     expect((await t.call('POST', `/api/v1/instances/${instanceId}/automation/keys`, { name: 'laptop', capability: 'control', expiresInDays: 30 })).status).toBe(201);
     // An ended sign-in no longer counts.
     t.d1.sqlite.prepare(`UPDATE automation_clients SET expires_at = 1 WHERE id = 'grant0'`).run();
-    expect((await decide(clientId)).status).toBe(200);
+    // Two approvals made while there is room for one: only the first exchange becomes a sign-in.
+    const a = codeOf((await decide(clientId)).body.redirect);
+    const b = codeOf((await decide(clientId)).body.redirect);
+    expect((await exchange(clientId, a)).status).toBe(200);
+    expect((await exchange(clientId, b)).body).toMatchObject({ error: 'invalid_grant', error_description: expect.stringContaining('10 active sign-ins') });
+    expect(t.d1.sqlite.prepare(`SELECT count(*) AS n FROM automation_clients WHERE kind = 'oauth' AND revoked_at IS NULL AND expires_at > ?`).get(Date.now())).toEqual({ n: 10 });
   });
 
   it('lists every key and sign-in on the account and disconnects one or all', async () => {
@@ -399,12 +408,28 @@ describe('OAuth sign-in for coding agents', () => {
     expect(audit.detail).toContain('disconnect_all');
   });
 
-  it('ends sign-ins on sign out everywhere, and when the browser is deleted', async () => {
-    const { access, clientId, refresh: token } = await signedIn();
+  it('ends sign-ins, and approvals not yet exchanged, on disconnect all, sign out everywhere and deletion', async () => {
+    const one = await signedIn();
+    const pending = codeOf((await decide(one.clientId)).body.redirect);
+    expect((await t.call('DELETE', '/api/v1/agent-connections')).body).toEqual({ revoked: 1 });
+    expect((await exchange(one.clientId, pending)).body).toMatchObject({ error: 'invalid_grant', error_description: expect.stringContaining('already used') });
+    expect(t.d1.sqlite.prepare(`SELECT count(*) AS n FROM automation_clients WHERE kind = 'oauth' AND revoked_at IS NULL`).get()).toEqual({ n: 0 });
+
+    const two = await signedIn();
+    const later = codeOf((await decide(two.clientId)).body.redirect);
     expect((await t.call('POST', '/api/auth/revoke-sessions', {})).status).toBe(200);
     await t.settle();
-    expect(await mcp(access)).toEqual({ ok: false, reason: 'invalid_token' });
-    expect((await refresh(clientId, token)).body).toMatchObject({ error: 'invalid_grant' });
+    expect(await mcp(two.access)).toEqual({ ok: false, reason: 'invalid_token' });
+    expect((await refresh(two.clientId, two.refresh)).body).toMatchObject({ error: 'invalid_grant' });
+    expect((await exchange(two.clientId, later)).body).toMatchObject({ error: 'invalid_grant' });
+  });
+
+  it('spends a deleted browser\'s approvals in the deletion itself', async () => {
+    const clientId: string = (await register()).body.client_id;
+    const code = codeOf((await decide(clientId)).body.redirect);
+    expect((await t.call('DELETE', `/api/v1/instances/${instanceId}`, undefined, { 'idempotency-key': 'delete-oauth' })).status).toBe(202);
+    expect(t.d1.sqlite.prepare(`SELECT used_at FROM oauth_authorization_codes`).get()).toEqual({ used_at: expect.any(Number) });
+    expect((await exchange(clientId, code)).body).toMatchObject({ error: 'invalid_grant' });
   });
 
   it('limits registration and token calls, and sweeps spent codes and apps that never signed in', async () => {
@@ -415,11 +440,29 @@ describe('OAuth sign-in for coding agents', () => {
     const old = Date.now() - 8 * 86_400_000;
     t.d1.sqlite.prepare(`UPDATE oauth_clients SET created_at = ?, last_used_at = NULL WHERE id IN (?, ?)`).run(old, used.clientId, stale);
     t.d1.sqlite.prepare(`UPDATE oauth_authorization_codes SET expires_at = ?`).run(Date.now() - 2 * 86_400_000);
-    expect(await oauthSweep(createDb(t.d1 as never))).toEqual({ codes: 2, apps: 1 });
+    const rotated = (await refresh(used.clientId, used.refresh)).body as { refresh_token: string };
+    expect(await oauthSweep(createDb(t.d1 as never))).toEqual({ codes: 2, spentTokens: 0, apps: 1 });
     expect(t.d1.sqlite.prepare(`SELECT id FROM oauth_clients ORDER BY id`).all()).toEqual([{ id: used.clientId }]);
+    // Replaced refresh tokens go once their sign-in is over.
+    t.d1.sqlite.prepare(`UPDATE automation_clients SET expires_at = ? WHERE id = ?`).run(Date.now() - 1, used.grantId);
+    expect(await oauthSweep(createDb(t.d1 as never))).toMatchObject({ spentTokens: 1 });
+    t.d1.sqlite.prepare(`UPDATE automation_clients SET expires_at = ? WHERE id = ?`).run(Date.now() + 86_400_000, used.grantId);
 
+    // Refreshes are counted per sign-in, so an app's other users and a shared address are unaffected.
+    const keys: string[] = [];
+    Object.assign(t.env, { OAUTH_LIMITER: { limit: async ({ key }: { key: string }) => { keys.push(key); return { success: !key.startsWith('oauth-refresh:') }; } } });
+    expect((await refresh(used.clientId, rotated.refresh_token)).status).toBe(429);
+    expect(keys).toEqual([`oauth-refresh:${used.grantId}`]);
+    // Failed calls are counted per address; over budget, the address is refused for a minute.
+    Object.assign(t.env, { OAUTH_LIMITER: { limit: async ({ key }: { key: string }) => { keys.push(key); return { success: !key.startsWith('oauth-fail:') }; } } });
+    const fromIp = { headers: { 'cf-connecting-ip': '198.51.100.9' } };
+    expect((await raw('POST', '/api/oauth/token', { grant_type: 'refresh_token', refresh_token: `nvzr_${'x'.repeat(43)}`, client_id: used.clientId }, fromIp)).status).toBe(400);
+    expect(keys.at(-1)).toBe('oauth-fail:198.51.100.9');
+    expect((await raw('POST', '/api/oauth/token', { grant_type: 'refresh_token', refresh_token: rotated.refresh_token, client_id: used.clientId }, fromIp)).status).toBe(429);
+    expect((await raw('POST', '/api/oauth/revoke', { token: 'x', client_id: used.clientId }, fromIp)).status).toBe(429);
+    // Another address is not affected.
+    expect((await refresh(used.clientId, rotated.refresh_token)).status).toBe(200);
     Object.assign(t.env, { OAUTH_LIMITER: { limit: async () => ({ success: false }) } });
     expect(await register()).toMatchObject({ status: 429, body: { error: 'temporarily_unavailable' } });
-    expect((await refresh(used.clientId, used.refresh)).status).toBe(429);
   });
 });

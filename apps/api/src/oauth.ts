@@ -10,12 +10,14 @@
  * - A sign-in is an `automation_clients` row of kind `oauth` bound to one browser. Its access token
  *   lasts an hour and is checked on every MCP request like a key (authenticateMcp), so revoking
  *   works at once; its refresh token rotates on every use until the end the owner chose, which
- *   never moves. A refresh token or code presented again revokes the sign-in.
+ *   never moves. A code, or any refresh token it ever replaced, presented again revokes the sign-in.
+ * - A sign-in is made from its code in one batch, so it cannot slip past a revoke-all (which spends
+ *   the user's codes first) or the per-browser limit.
  * - Only hashes of codes and tokens are stored, each under its own label.
  */
 import { AGENT_GRANT_DAYS, AGENT_OAUTH_SCOPES, DEFAULT_AGENT_GRANT_DAYS, type AgentKeyCapability, type OAuthAuthorizeCheck, type OAuthDecision, type OAuthDecisionBody } from '@cloudbrowser/contracts';
 import { eventRow, newId, schema, sha256Hex, type Db } from '@cloudbrowser/db';
-import { and, asc, eq, gt, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, eq, getTableColumns, gt, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { isAdminOrigin } from './admin/access.js';
 import { accessTokenHash, MAX_AGENT_KEYS, mcpUrl, newSecret, refreshTokenHash, revokeClientById, setAccess, unavailable, verifiedHostOf } from './automation.js';
@@ -24,7 +26,7 @@ import { sendToUser } from './notifications/send.js';
 import { agentSignInMessage } from './notifications/user.js';
 import { problem } from './problem.js';
 
-const { automationClients, browserInstances, oauthClients, oauthAuthorizationCodes, auditLog, events } = schema;
+const { automationClients, browserInstances, oauthClients, oauthAuthorizationCodes, oauthSpentRefreshTokens, auditLog, events } = schema;
 
 type OAuthClient = typeof oauthClients.$inferSelect;
 
@@ -33,6 +35,8 @@ const ACCESS_TOKEN_MS = 3_600_000;
 const CODE_MS = 60_000;
 /** A refresh token presented again this soon after it was replaced is a duplicate in flight, not a stolen copy. */
 const REFRESH_GRACE_MS = 30_000;
+/** An address over its budget of failed token or revocation requests is refused for this long (per isolate). */
+const BLOCK_MS = 60_000;
 /** How long a metadata document is trusted before it is read again. */
 const METADATA_TTL_MS = 86_400_000;
 const METADATA_MAX_BYTES = 5_120;
@@ -417,11 +421,7 @@ async function exchangeCode(db: Db, env: Env, form: URLSearchParams, now: Date):
   const hash = await codeHash(code);
   const [row] = await db.select().from(oauthAuthorizationCodes).where(eq(oauthAuthorizationCodes.codeHash, hash));
   if (!row) return oauthError('invalid_grant', 'The authorization code is not valid.');
-  if (row.usedAt) {
-    // A code is used once; seen again, whatever was made with it may be in the wrong hands.
-    if (row.grantId) await revokeClientById(db, env, row.grantId, `automation:${row.grantId}`, 'code_reused', now);
-    return oauthError('invalid_grant', 'The authorization code was already used.');
-  }
+  if (row.usedAt) return codeReused(db, env, row, now);
   if (row.expiresAt <= now) return oauthError('invalid_grant', 'The authorization code has expired; approve again.');
   if (form.get('client_id') !== row.clientId) return oauthError('invalid_grant', 'The authorization code was issued to another app.');
   if (form.get('redirect_uri') !== row.redirectUri) return oauthError('invalid_grant', 'redirect_uri does not match the authorization request.');
@@ -429,10 +429,6 @@ async function exchangeCode(db: Db, env: Env, form: URLSearchParams, now: Date):
   if (!CODE_VERIFIER.test(verifier) || (await pkceChallenge(verifier)) !== row.codeChallenge) return oauthError('invalid_grant', 'PKCE verification failed.');
   const resource = form.get('resource');
   if (resource && resourceInstance(env, resource) !== row.instanceId) return oauthError('invalid_target', 'The resource is not the browser that was approved.');
-  // Used once, even when two exchanges race.
-  const claimed = await db.update(oauthAuthorizationCodes).set({ usedAt: now })
-    .where(and(eq(oauthAuthorizationCodes.codeHash, hash), isNull(oauthAuthorizationCodes.usedAt))).returning({ codeHash: oauthAuthorizationCodes.codeHash });
-  if (!claimed.length) return oauthError('invalid_grant', 'The authorization code was already used.');
   if (!(await instanceAlive(db, row.instanceId, row.userId))) return oauthError('invalid_grant', 'The browser was deleted.');
   const [app] = await db.select({ name: oauthClients.name }).from(oauthClients).where(eq(oauthClients.id, row.clientId));
   const grantEnd = new Date(now.getTime() + row.grantDays * 86_400_000);
@@ -440,19 +436,44 @@ async function exchangeCode(db: Db, env: Env, form: URLSearchParams, now: Date):
   const access = newSecret('nvza_');
   const refresh = newSecret('nvzr_');
   const grantId = newId(now.getTime());
+  // One batch: the sign-in is made only from a code still unused (a revoke-all, a deletion or a
+  // concurrent exchange spends it first) and only while the browser has room; the code is then
+  // spent and linked to it.
+  // Every column of the new row, in the table's own order, for INSERT … SELECT.
+  const grant: Partial<Record<keyof typeof automationClients.$inferInsert, SQL>> = {
+    id: sql`${grantId}`, instanceId: sql`instance_id`, userId: sql`user_id`, name: sql`${(app?.name ?? 'Coding agent').slice(0, 64)}`,
+    credentialHash: sql`${await accessTokenHash(access)}`, kind: sql`'oauth'`, expiresAt: sql`${grantEnd.getTime()}`, capability: sql`capability`,
+    createdAt: sql`${now.getTime()}`, activatedAt: sql`${now.getTime()}`, oauthClientId: sql`client_id`,
+    refreshHash: sql`${await refreshTokenHash(refresh)}`, accessExpiresAt: sql`${accessEnd.getTime()}`,
+  };
+  const columns = sql.join(Object.keys(getTableColumns(automationClients)).map((k) => grant[k as keyof typeof grant] ?? sql`NULL`), sql`, `);
   await db.batch([
-    db.insert(automationClients).values({
-      id: grantId, instanceId: row.instanceId, userId: row.userId, name: (app?.name ?? 'Coding agent').slice(0, 64), kind: 'oauth', capability: row.capability,
-      credentialHash: await accessTokenHash(access), refreshHash: await refreshTokenHash(refresh), accessExpiresAt: accessEnd, expiresAt: grantEnd,
-      oauthClientId: row.clientId, createdAt: now, activatedAt: now,
-    }),
-    db.update(oauthAuthorizationCodes).set({ grantId }).where(eq(oauthAuthorizationCodes.codeHash, hash)),
+    db.insert(automationClients).select(sql`SELECT ${columns} FROM ${oauthAuthorizationCodes}
+      WHERE code_hash = ${hash} AND used_at IS NULL
+        AND (SELECT count(*) FROM ${automationClients} WHERE instance_id = ${row.instanceId} AND kind = 'oauth' AND revoked_at IS NULL
+          AND expires_at > ${now.getTime()}) < ${MAX_AGENT_KEYS}`),
+    db.update(oauthAuthorizationCodes).set({ usedAt: now, grantId })
+      .where(and(eq(oauthAuthorizationCodes.codeHash, hash), isNull(oauthAuthorizationCodes.usedAt), sql`EXISTS (SELECT 1 FROM ${automationClients} WHERE id = ${grantId})`)),
+  ]);
+  const [made] = await db.select({ id: automationClients.id }).from(automationClients).where(eq(automationClients.id, grantId));
+  if (!made) {
+    const [after] = await db.select().from(oauthAuthorizationCodes).where(eq(oauthAuthorizationCodes.codeHash, hash));
+    if (after?.usedAt) return codeReused(db, env, after, now);
+    return oauthError('invalid_grant', `This browser already has ${MAX_AGENT_KEYS} active sign-ins. Disconnect one in Nevazu, then sign in again.`);
+  }
+  await db.batch([
     db.update(oauthClients).set({ lastUsedAt: now }).where(eq(oauthClients.id, row.clientId)),
     db.insert(auditLog).values({ actor: `automation:${grantId}`, action: 'automation.oauth_connected', target: `instance:${row.instanceId}`,
       detail: { clientId: grantId, app: row.clientId, capability: row.capability, expiresAt: grantEnd.toISOString() }, createdAt: now }),
     db.insert(events).values(eventRow(row.userId, 'instance.updated', { instanceId: row.instanceId }, now)),
   ]);
   return tokenResponse(access, refresh, accessEnd, now, row.capability);
+}
+
+/** A code is used once; seen again, whatever was made with it may be in the wrong hands. */
+async function codeReused(db: Db, env: Env, row: typeof oauthAuthorizationCodes.$inferSelect, now: Date) {
+  if (row.grantId) await revokeClientById(db, env, row.grantId, `automation:${row.grantId}`, 'code_reused', now);
+  return oauthError('invalid_grant', 'The authorization code was already used.');
 }
 
 /** A new access token and a new refresh token for the current one, until the sign-in's end. */
@@ -463,11 +484,10 @@ async function refreshTokens(db: Db, env: Env, form: URLSearchParams, now: Date)
   const [grant] = await db.select().from(automationClients)
     .where(and(eq(automationClients.refreshHash, hash), eq(automationClients.kind, 'oauth'), isNull(automationClients.revokedAt)));
   if (!grant) {
-    // The token this one was replaced by is in use: a late duplicate is forgiven, anything later is a copy.
-    const [replaced] = await db.select({ id: automationClients.id, rotatedAt: automationClients.refreshRotatedAt }).from(automationClients)
-      .where(and(eq(automationClients.prevRefreshHash, hash), isNull(automationClients.revokedAt)));
-    if (replaced && (!replaced.rotatedAt || now.getTime() - replaced.rotatedAt.getTime() >= REFRESH_GRACE_MS)) {
-      await revokeClientById(db, env, replaced.id, `automation:${replaced.id}`, 'refresh_reused', now);
+    // A token the sign-in already replaced: a late duplicate is forgiven, anything later is a copy.
+    const [spent] = await db.select().from(oauthSpentRefreshTokens).where(eq(oauthSpentRefreshTokens.tokenHash, hash));
+    if (spent && now.getTime() - spent.spentAt.getTime() >= REFRESH_GRACE_MS) {
+      await revokeClientById(db, env, spent.grantId, `automation:${spent.grantId}`, 'refresh_reused', now);
     }
     return oauthError('invalid_grant', 'The refresh token is not valid; sign in again.');
   }
@@ -475,26 +495,35 @@ async function refreshTokens(db: Db, env: Env, form: URLSearchParams, now: Date)
   if (!grant.expiresAt || grant.expiresAt <= now) return oauthError('invalid_grant', 'This sign-in has ended; sign in again.');
   const resource = form.get('resource');
   if (resource && resourceInstance(env, resource) !== grant.instanceId) return oauthError('invalid_target', 'The resource is not the browser this sign-in is for.');
+  // Per sign-in, so neither an app's other users nor a shared address use up its budget.
+  if (await limited(env, `oauth-refresh:${grant.id}`)) return tooMany();
   if (!(await instanceAlive(db, grant.instanceId, grant.userId))) return oauthError('invalid_grant', 'The browser was deleted.');
   const accessEnd = new Date(Math.min(now.getTime() + ACCESS_TOKEN_MS, grant.expiresAt.getTime()));
   const access = newSecret('nvza_');
   const refresh = newSecret('nvzr_');
-  const rotated = await db.update(automationClients).set({
-    credentialHash: await accessTokenHash(access), refreshHash: await refreshTokenHash(refresh), prevRefreshHash: hash, refreshRotatedAt: now, accessExpiresAt: accessEnd,
-  }).where(and(eq(automationClients.id, grant.id), eq(automationClients.refreshHash, hash), isNull(automationClients.revokedAt))).returning({ id: automationClients.id });
+  const [rotated] = await db.batch([
+    db.update(automationClients).set({ credentialHash: await accessTokenHash(access), refreshHash: await refreshTokenHash(refresh), accessExpiresAt: accessEnd })
+      .where(and(eq(automationClients.id, grant.id), eq(automationClients.refreshHash, hash), isNull(automationClients.revokedAt))).returning({ id: automationClients.id }),
+    db.insert(oauthSpentRefreshTokens).values({ tokenHash: hash, grantId: grant.id, spentAt: now }).onConflictDoNothing(),
+  ]);
   if (!rotated.length) return oauthError('invalid_grant', 'The refresh token is not valid; sign in again.');
   return tokenResponse(access, refresh, accessEnd, now, grant.capability);
 }
 
-/** RFC 7009: the app's own sign-out. Either token ends the whole sign-in; unknown tokens are answered the same way. */
-async function revokeToken(db: Db, env: Env, form: URLSearchParams, now: Date) {
+/**
+ * RFC 7009: the app's own sign-out. Either token ends the whole sign-in; unknown tokens are
+ * answered the same way. Whether the token was one of the app's, for counting failures.
+ */
+async function revokeToken(db: Db, env: Env, form: URLSearchParams, now: Date): Promise<boolean> {
   const token = form.get('token') ?? '';
   const where = REFRESH_TOKEN.test(token) ? eq(automationClients.refreshHash, await refreshTokenHash(token))
     : ACCESS_TOKEN.test(token) ? eq(automationClients.credentialHash, await accessTokenHash(token)) : null;
-  if (!where) return;
+  if (!where) return false;
   const [grant] = await db.select({ id: automationClients.id, app: automationClients.oauthClientId }).from(automationClients)
     .where(and(where, eq(automationClients.kind, 'oauth'), isNull(automationClients.revokedAt)));
-  if (grant && grant.app === form.get('client_id')) await revokeClientById(db, env, grant.id, `automation:${grant.id}`, 'app_signed_out', now);
+  if (!grant || grant.app !== form.get('client_id')) return false;
+  await revokeClientById(db, env, grant.id, `automation:${grant.id}`, 'app_signed_out', now);
+  return true;
 }
 
 /** RFC 7591 for public clients: callbacks checked by callbackAllowed, everything else is the app's say. */
@@ -529,11 +558,31 @@ async function register(db: Db, body: unknown, now: Date): Promise<Response> {
   }, 201);
 }
 
-/** Over budget: registrations per address, token and revocation calls per app (or address). */
+/** Over budget: registrations per address, refreshes per sign-in, failed token and revocation calls per address. */
 async function limited(env: Env, key: string) {
   if (!env.OAUTH_LIMITER) return false;
   const { success } = await env.OAUTH_LIMITER.limit({ key }).catch(() => ({ success: true }));
   return !success;
+}
+
+/**
+ * Addresses whose failed token or revocation calls went over budget, refused without a database
+ * read for a minute. Only failures count, so the many users of a hosted client behind one address
+ * are not throttled together for working calls.
+ */
+const blocked = new Map<string, number>();
+function isBlocked(ip: string, now: number) {
+  const until = blocked.get(ip);
+  if (until && until > now) return true;
+  if (until) blocked.delete(ip);
+  return false;
+}
+async function failed(env: Env, ip: string, now: number) {
+  if (await limited(env, `oauth-fail:${ip}`)) blocked.set(ip, now + BLOCK_MS);
+}
+/** For tests. */
+export function resetOAuthBlocks() {
+  blocked.clear();
 }
 
 /**
@@ -564,32 +613,39 @@ oauthPublicRoute.post('/api/oauth/register', async (c) => {
 });
 
 oauthPublicRoute.post('/api/oauth/token', async (c) => {
-  const form = await readParams(c.req.raw);
-  if (!form) return oauthError('invalid_request', 'Send the parameters as application/x-www-form-urlencoded.');
-  if (await limited(c.env, `oauth-token:${form.get('client_id') || c.req.header('cf-connecting-ip') || 'unknown'}`)) return tooMany();
+  const ip = c.req.header('cf-connecting-ip') ?? 'unknown';
   const now = new Date();
-  switch (form.get('grant_type')) {
-    case 'authorization_code': return exchangeCode(c.get('db'), c.env, form, now);
-    case 'refresh_token': return refreshTokens(c.get('db'), c.env, form, now);
-    default: return oauthError('unsupported_grant_type', 'Use authorization_code or refresh_token.');
-  }
+  if (isBlocked(ip, now.getTime())) return tooMany();
+  const form = await readParams(c.req.raw);
+  const response = !form ? oauthError('invalid_request', 'Send the parameters as application/x-www-form-urlencoded.')
+    : form.get('grant_type') === 'authorization_code' ? await exchangeCode(c.get('db'), c.env, form, now)
+    : form.get('grant_type') === 'refresh_token' ? await refreshTokens(c.get('db'), c.env, form, now)
+    : oauthError('unsupported_grant_type', 'Use authorization_code or refresh_token.');
+  if (response.status === 400) await failed(c.env, ip, now.getTime());
+  return response;
 });
 
 oauthPublicRoute.post('/api/oauth/revoke', async (c) => {
+  const ip = c.req.header('cf-connecting-ip') ?? 'unknown';
+  const now = new Date();
+  if (isBlocked(ip, now.getTime())) return tooMany();
   const form = await readParams(c.req.raw);
   if (!form) return oauthError('invalid_request', 'Send the parameters as application/x-www-form-urlencoded.');
-  if (await limited(c.env, `oauth-token:${form.get('client_id') || c.req.header('cf-connecting-ip') || 'unknown'}`)) return tooMany();
-  await revokeToken(c.get('db'), c.env, form, new Date());
+  if (!(await revokeToken(c.get('db'), c.env, form, now))) await failed(c.env, ip, now.getTime());
   return new Response(null, { status: 200, headers: { 'cache-control': 'no-store', ...CORS } });
 });
 
 /**
- * Nightly: spent codes, and apps that never got a sign-in (some clients register again on every
- * connect). An app with any sign-in, even a revoked one, stays for the audit trail.
+ * Nightly: spent codes, replaced refresh tokens of sign-ins that are over, and apps that never got
+ * a sign-in (some clients register again on every connect). An app with any sign-in, even a
+ * revoked one, stays for the audit trail.
  */
 export async function oauthSweep(db: Db, now = new Date()) {
   const codes = await db.delete(oauthAuthorizationCodes).where(lt(oauthAuthorizationCodes.expiresAt, new Date(now.getTime() - 86_400_000)))
     .returning({ codeHash: oauthAuthorizationCodes.codeHash });
+  // A sign-in that ended or was revoked refuses every token anyway.
+  const spent = await db.delete(oauthSpentRefreshTokens).where(sql`${oauthSpentRefreshTokens.grantId} IN (SELECT id FROM ${automationClients}
+    WHERE revoked_at IS NOT NULL OR expires_at < ${now.getTime()})`).returning({ tokenHash: oauthSpentRefreshTokens.tokenHash });
   const before = new Date(now.getTime() - UNUSED_CLIENT_MS);
   const apps = await db.delete(oauthClients).where(and(
     lt(oauthClients.createdAt, before),
@@ -597,5 +653,5 @@ export async function oauthSweep(db: Db, now = new Date()) {
     sql`not exists (select 1 from ${automationClients} where ${automationClients.oauthClientId} = ${oauthClients.id})`,
     sql`not exists (select 1 from ${oauthAuthorizationCodes} where ${oauthAuthorizationCodes.clientId} = ${oauthClients.id})`,
   )).returning({ id: oauthClients.id });
-  return { codes: codes.length, apps: apps.length };
+  return { codes: codes.length, spentTokens: spent.length, apps: apps.length };
 }

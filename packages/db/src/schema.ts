@@ -571,11 +571,11 @@ export const automationClients = sqliteTable(
     revokedAt: ts('revoked_at'),
     /** A sign-in's app. */
     oauthClientId: text('oauth_client_id').references(() => oauthClients.id),
-    /** `sha256('oauth-refresh:' + token)` of a sign-in's current refresh token; replaced on every refresh. */
+    /**
+     * `sha256('oauth-refresh:' + token)` of a sign-in's current refresh token; replaced on every
+     * refresh, the spent one going to `oauth_spent_refresh_tokens`.
+     */
     refreshHash: text('refresh_hash'),
-    /** The refresh token it replaced, to tell a late duplicate from a stolen copy. */
-    prevRefreshHash: text('prev_refresh_hash'),
-    refreshRotatedAt: ts('refresh_rotated_at'),
     /** When the current access token stops working: an hour after it was issued, never past `expires_at`. */
     accessExpiresAt: ts('access_expires_at'),
   },
@@ -584,8 +584,24 @@ export const automationClients = sqliteTable(
     uniqueIndex('automation_clients_pairing_idx').on(t.pairingHash),
     index('automation_clients_credential_idx').on(t.credentialHash),
     uniqueIndex('automation_clients_refresh_idx').on(t.refreshHash),
-    index('automation_clients_prev_refresh_idx').on(t.prevRefreshHash),
   ],
+);
+
+/**
+ * Every refresh token a sign-in has replaced, until the sign-in ends: one presented again more than
+ * a few seconds after it was replaced is a stolen copy, and revokes the sign-in, however many
+ * refreshes ago it was spent. Owner: api; pruned nightly once the sign-in has ended.
+ */
+export const oauthSpentRefreshTokens = sqliteTable(
+  'oauth_spent_refresh_tokens',
+  {
+    tokenHash: text('token_hash').primaryKey(),
+    grantId: text('grant_id')
+      .notNull()
+      .references(() => automationClients.id),
+    spentAt: ts('spent_at').notNull(),
+  },
+  (t) => [index('oauth_spent_refresh_tokens_grant_idx').on(t.grantId)],
 );
 
 /** One coding-agent session the gateway opened. Owner: api (through the gateway's RPCs). */

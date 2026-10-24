@@ -13,7 +13,7 @@ import { agentKeyCreatedMessage } from './notifications/user.js';
 import { sendToUser } from './notifications/send.js';
 import { problem } from './problem.js';
 
-const { browserInstances, automationClients, automationSessions, agentCredentials, auditLog, events, regions, oauthClients } = schema;
+const { browserInstances, automationClients, automationSessions, agentCredentials, auditLog, events, regions, oauthClients, oauthAuthorizationCodes } = schema;
 
 /** What the gateway learns about a key on an MCP request; no session is opened by it. */
 export type McpAuth =
@@ -58,7 +58,7 @@ export function newSecret(prefix: string, chars = KEY_CHARS): string {
 export const isKeyFormat = (key: string) => KEY_FORMAT.test(key) || ACCESS_TOKEN_FORMAT.test(key);
 
 /** What a revoked key or sign-in keeps: no secret of any kind still matches it. */
-const revokedFields = (now: Date) => ({ revokedAt: now, credentialHash: null, pairingHash: null, refreshHash: null, prevRefreshHash: null });
+const revokedFields = (now: Date) => ({ revokedAt: now, credentialHash: null, pairingHash: null, refreshHash: null });
 
 /** An ended sign-in is listed for this long after its end, then only in the audit log. */
 const ENDED_SIGN_IN_LISTED_MS = 86_400_000;
@@ -183,11 +183,14 @@ async function revokeClientWhere(db: Db, env: Pick<Env, 'GATEWAY'>, actor: strin
 }
 
 /**
- * Statements that revoke every key of a browser and end its sessions, for the deletion
- * transaction: a deleted browser keeps no coding-agent access, even through the restore window.
+ * Statements that revoke every key and sign-in of a browser, spend its unexchanged sign-in codes
+ * and end its sessions, for the deletion transaction: a deleted browser keeps no coding-agent
+ * access, even through the restore window.
  */
 export function revokeInstanceClientsStatements(db: Db, instanceId: string, now: Date) {
   return [
+    db.update(oauthAuthorizationCodes).set({ usedAt: now })
+      .where(and(eq(oauthAuthorizationCodes.instanceId, instanceId), isNull(oauthAuthorizationCodes.usedAt))),
     db.update(automationClients).set(revokedFields(now))
       .where(and(eq(automationClients.instanceId, instanceId), isNull(automationClients.revokedAt))),
     db.update(automationSessions).set({ endedAt: now, endReason: 'browser_deleted' })
@@ -201,6 +204,9 @@ export function revokeInstanceClientsStatements(db: Db, instanceId: string, now:
  * gateways close the open agent sessions at once.
  */
 export async function revokeUserClients(db: Db, env: Pick<Env, 'GATEWAY'>, userId: string, now = new Date(), reason: 'sign_out_everywhere' | 'disconnect_all' = 'sign_out_everywhere'): Promise<number> {
+  // Codes first: an approval not yet exchanged must not become a sign-in after this.
+  await db.update(oauthAuthorizationCodes).set({ usedAt: now })
+    .where(and(eq(oauthAuthorizationCodes.userId, userId), isNull(oauthAuthorizationCodes.usedAt)));
   const revoked = await db.update(automationClients).set(revokedFields(now))
     .where(and(eq(automationClients.userId, userId), isNull(automationClients.revokedAt)))
     .returning({ id: automationClients.id, instanceId: automationClients.instanceId });

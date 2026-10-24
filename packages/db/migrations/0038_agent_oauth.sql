@@ -36,19 +36,23 @@ CREATE TABLE `oauth_authorization_codes` (
 --> statement-breakpoint
 CREATE INDEX `oauth_authorization_codes_expires_idx` ON `oauth_authorization_codes` (`expires_at`);
 --> statement-breakpoint
--- A sign-in's app, its rotating refresh token (and the one it replaced, for reuse detection) and
--- the end of its current access token. `credential_hash` holds the access token's hash and
--- `expires_at` the end the owner chose.
+-- A sign-in's app, its rotating refresh token and the end of its current access token.
+-- `credential_hash` holds the access token's hash and `expires_at` the end the owner chose.
 ALTER TABLE `automation_clients` ADD `oauth_client_id` text REFERENCES oauth_clients(id);
 --> statement-breakpoint
 ALTER TABLE `automation_clients` ADD `refresh_hash` text;
---> statement-breakpoint
-ALTER TABLE `automation_clients` ADD `prev_refresh_hash` text;
---> statement-breakpoint
-ALTER TABLE `automation_clients` ADD `refresh_rotated_at` integer;
 --> statement-breakpoint
 ALTER TABLE `automation_clients` ADD `access_expires_at` integer;
 --> statement-breakpoint
 CREATE UNIQUE INDEX `automation_clients_refresh_idx` ON `automation_clients` (`refresh_hash`);
 --> statement-breakpoint
-CREATE INDEX `automation_clients_prev_refresh_idx` ON `automation_clients` (`prev_refresh_hash`);
+-- Every refresh token a sign-in replaced, until it ends: one presented again later than a retry
+-- would be is a stolen copy and revokes the sign-in.
+CREATE TABLE `oauth_spent_refresh_tokens` (
+	`token_hash` text PRIMARY KEY NOT NULL,
+	`grant_id` text NOT NULL,
+	`spent_at` integer NOT NULL,
+	FOREIGN KEY (`grant_id`) REFERENCES `automation_clients`(`id`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE INDEX `oauth_spent_refresh_tokens_grant_idx` ON `oauth_spent_refresh_tokens` (`grant_id`);
