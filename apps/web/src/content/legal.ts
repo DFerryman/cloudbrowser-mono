@@ -14,7 +14,7 @@ const en: Record<PolicySlug, Article> = {
     title: 'Terms of Service',
     summary: 'The agreement between you and Nevazu when you use the service.',
     blocks: [
-      { p: 'These terms apply when you use Nevazu (“the service”, “we”, “us”) at nevazu.com. You accept them when you sign in. Before your first payment, and again whenever these terms change, you also accept them by ticking the box at checkout. If you use the service for an organisation, you accept them on its behalf.' },
+      { p: 'These terms apply when you use Nevazu (“the service”, “we”, “us”) at nevazu.com. Signing in does not mean you accept them. You accept them by ticking the box at checkout before your first payment, and again before your next payment whenever they change. If you use the service for an organisation, you accept them on its behalf.' },
       { h: '1. The service' },
       { p: 'Nevazu provides cloud-hosted Chrome browsers, each on its own virtual machine with a dedicated IP address and persistent encrypted storage, which you view and control over the internet. During the pilot the service is available by invitation only and features may change.' },
       { h: '2. Your account' },
@@ -119,6 +119,7 @@ const en: Record<PolicySlug, Article> = {
         'A duplicate or mistaken charge, or a payment that was not credited to your balance.',
         'Where the law gives you a right to one. For example, consumers in the EU and the UK may withdraw from a purchase within 14 days; if you do, we refund the credit you have not used yet, and usage already metered is not refunded.',
         'If we stop providing the service to you for a reason other than a breach of the Terms of Service, we refund your unused credit.',
+        `If you close your account, you can request a refund of your unused paid credit (Terms of Service sections 8 and 9) by contacting ${SUPPORT_EMAIL}.`,
       ] },
       { p: `To ask, write to ${SUPPORT_EMAIL} from your sign-in email with the date of the top-up. We answer within three business days. Refunds go back to the original payment method.` },
       { h: 'Service problems', id: 'service-problems' },
@@ -137,7 +138,7 @@ const zh: Record<PolicySlug, Article> = {
     title: '服务条款',
     summary: '你使用 Nevazu 服务时与我们之间的协议。',
     blocks: [
-      { p: '本条款适用于你在 nevazu.com 使用 Nevazu（“本服务”“我们”）。你在登录时接受本条款。首次付款前，以及本条款每次变更后，你还需在结账时勾选复选框以接受本条款。如果你代表某个组织使用本服务，即代表该组织接受本条款。' },
+      { p: '本条款适用于你在 nevazu.com 使用 Nevazu（“本服务”“我们”）。登录并不表示你接受本条款。你在首次付款前于结账时勾选确认框即接受本条款；本条款变更后，你需在下次付款前再次勾选接受。如果你代表某个组织使用本服务，即代表该组织接受本条款。' },
       { h: '1. 服务内容' },
       { p: 'Nevazu 提供托管在云端的 Chrome 浏览器，每个浏览器运行在独立的虚拟机上，配有独享 IP 和持久化加密存储，你可以通过互联网查看和控制。试用期间本服务仅限受邀使用，功能可能会调整。' },
       { h: '2. 你的账户' },
@@ -242,6 +243,7 @@ const zh: Record<PolicySlug, Article> = {
         '重复扣款、错误扣款，或已付款但未计入余额。',
         '法律赋予你退款权利的情况。例如，欧盟和英国的消费者可在购买后 14 天内撤回购买；撤回时我们退还尚未使用的余额，已计量的用量不予退还。',
         '若我们因你违反服务条款以外的原因停止为你提供服务，我们会退还未使用的余额。',
+        `如果你关闭账户，可发邮件至 ${SUPPORT_EMAIL} 申请退还未使用的已付费余额（见服务条款第 8 条和第 9 条）。`,
       ] },
       { p: `如需申请，请用登录邮箱发邮件至 ${SUPPORT_EMAIL}，并注明充值日期。我们会在三个工作日内答复。退款将退回原支付方式。` },
       { h: '服务问题', id: 'service-problems' },

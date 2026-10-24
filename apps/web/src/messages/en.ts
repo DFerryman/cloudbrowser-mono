@@ -41,7 +41,7 @@ export const en = {
   'signup.sent': 'We sent a link to {email}. Open it within 30 minutes to finish creating your account.',
   'signup.existingCodeSent': '{email} already has an account. We sent you a sign-in code; enter it below.',
   'signup.haveAccount': 'Already have an account?',
-  'signup.agree': 'By creating an account you agree to the {terms} and the {privacy}.',
+  'signup.agree': 'You accept the {terms} and the {privacy} at checkout, before your first payment.',
   'signup.complete.title': 'Finish creating your account',
   'signup.complete.body': 'Create your Nevazu account and sign in on this device.',
   'signup.complete.button': 'Create my account',
@@ -761,7 +761,7 @@ export const en = {
   'app.error.home': 'Go to browsers',
 
   'auth.signedOut': 'You have signed out.',
-  'auth.agree': 'By signing in you agree to the {terms} and the {privacy}.',
+  'auth.agree': 'You accept the {terms} and the {privacy} at checkout, before your first payment.',
   'auth.backHome': 'Home',
   'nav.collapse': 'Collapse sidebar',
   'nav.expand': 'Expand sidebar',
