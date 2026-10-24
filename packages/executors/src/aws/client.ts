@@ -105,6 +105,36 @@ export interface PriceListProduct {
   effectiveDate: string | null;
 }
 
+/**
+ * How many AWS requests one invocation has in flight at most. A Worker keeps six connections open
+ * per invocation and queues the rest inside the runtime, where a request's timeout already runs:
+ * a provider sync reading six regions at once, six listings each, timed requests out before they
+ * were sent (Service Quotas reads came back empty as "Required AWS quota is unavailable", Describe
+ * calls as "aborted due to timeout"). Requests wait here instead, and their timeouts start when
+ * they are sent. Two connections are left for everything else (queues, other subrequests).
+ */
+export const MAX_AWS_REQUESTS = 4;
+
+/** Admits a bounded number of requests at a time, in arrival order. */
+export class RequestLimiter {
+  private active = 0;
+  private readonly waiting: (() => void)[] = [];
+  constructor(readonly max = MAX_AWS_REQUESTS) {}
+
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    if (this.active < this.max) this.active++;
+    // A finished request hands its slot straight to the next one, so the count stays as it is.
+    else await new Promise<void>((resolve) => this.waiting.push(resolve));
+    try {
+      return await task();
+    } finally {
+      const next = this.waiting.shift();
+      if (next) next();
+      else this.active--;
+    }
+  }
+}
+
 export interface ClientOptions {
   accessKeyId: string;
   secretAccessKey: string;
@@ -113,11 +143,16 @@ export interface ClientOptions {
   /** Tests point this at a fake EC2. */
   endpoint?: (service: Service, region: string) => string;
   fetch?: typeof fetch;
+  /** Shared by every client of one invocation (MAX_AWS_REQUESTS); each client has its own otherwise. */
+  limiter?: RequestLimiter;
 }
 
 export class Ec2Client {
   private readonly signers = new Map<string, AwsClient>();
-  constructor(private readonly opts: ClientOptions) {}
+  private readonly limiter: RequestLimiter;
+  constructor(private readonly opts: ClientOptions) {
+    this.limiter = opts.limiter ?? new RequestLimiter();
+  }
 
   private async signer(service: string, region: string) {
     let credentials: Pick<ClientOptions, 'accessKeyId' | 'secretAccessKey' | 'sessionToken'>;
@@ -192,19 +227,27 @@ export class Ec2Client {
     } catch (e) {
       throw new ExecutorError(mutating ? 'unknown_outcome' : 'retryable', `${action}: ${(e as Error).message}`);
     }
-    // Signing can yield to a newer stop/delete intent. Keep this callback outside the provider
-    // error wrapper: an operation cancellation is neither an outage nor an unknown AWS outcome.
-    await assertActive?.();
-    const requestRemaining = deadline - Date.now();
-    if (requestRemaining <= 0) throw new ExecutorError(mutating ? 'unknown_outcome' : 'retryable', `${action}: deadline passed`);
-    let res: Response;
-    try {
-      // A read that hangs gives up sooner, leaving time to retry it within the same deadline.
-      res = await (this.opts.fetch ?? fetch)(req, { signal: AbortSignal.timeout(Math.min(requestRemaining, mutating ? 30_000 : READ_TIMEOUT_MS)) });
-    } catch (e) {
-      throw new ExecutorError(mutating ? 'unknown_outcome' : 'retryable', `${action}: ${(e as Error).message}`);
-    }
-    const xml = await res.text();
+    // The connection stays in use until the response body has been read.
+    const { res, xml } = await this.limiter.run(async () => {
+      // Signing, and waiting for a connection, can yield to a newer stop/delete intent. Keep this
+      // callback outside the provider error wrapper: an operation cancellation is neither an
+      // outage nor an unknown AWS outcome.
+      await assertActive?.();
+      const requestRemaining = deadline - Date.now();
+      if (requestRemaining <= 0) throw new ExecutorError(mutating ? 'unknown_outcome' : 'retryable', `${action}: deadline passed`);
+      let res: Response;
+      try {
+        // A read that hangs gives up sooner, leaving time to retry it within the same deadline.
+        res = await (this.opts.fetch ?? fetch)(req, { signal: AbortSignal.timeout(Math.min(requestRemaining, mutating ? 30_000 : READ_TIMEOUT_MS)) });
+      } catch (e) {
+        throw new ExecutorError(mutating ? 'unknown_outcome' : 'retryable', `${action}: ${(e as Error).message}`);
+      }
+      try {
+        return { res, xml: await res.text() };
+      } catch (e) {
+        throw new ExecutorError(mutating ? 'unknown_outcome' : 'retryable', `${action}: ${(e as Error).message}`);
+      }
+    });
     const doc = parseXml(xml);
     if (!res.ok) {
       const err = doc.children[0];
@@ -217,21 +260,50 @@ export class Ec2Client {
     return doc.children[0] ?? doc;
   }
 
-  /** Service Quotas (JSON 1.1). Returns null when the quota cannot be read. */
-  async serviceQuota(region: string, serviceCode: string, quotaCode: string, deadline: number): Promise<number | null> {
-    try {
-      const signer = await this.signer('servicequotas', region);
-      const req = await signer.sign(this.url('servicequotas', region), {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-amz-json-1.1', 'x-amz-target': 'ServiceQuotasV20190624.GetServiceQuota' },
-        body: JSON.stringify({ ServiceCode: serviceCode, QuotaCode: quotaCode }),
-      });
-      const res = await (this.opts.fetch ?? fetch)(req, { signal: AbortSignal.timeout(Math.max(1, Math.min(deadline - Date.now(), 15_000))) });
-      if (!res.ok) return null;
-      const out = (await res.json()) as { Quota?: { Value?: number } };
-      return typeof out.Quota?.Value === 'number' ? out.Quota.Value : null;
-    } catch {
-      return null;
+  /**
+   * Service Quotas (JSON 1.1). Returns null when the quota cannot be read, after retrying a
+   * timeout, throttling or a 5xx while the deadline allows; `failed` hears why, e.g.
+   * "ebs/L-7A658B76: ThrottlingException".
+   */
+  async serviceQuota(region: string, serviceCode: string, quotaCode: string, deadline: number, failed?: (reason: string) => void): Promise<number | null> {
+    let reason = 'deadline passed';
+    for (let attempt = 0; ; attempt++) {
+      let retryable = false;
+      try {
+        const signer = await this.signer('servicequotas', region);
+        const req = await signer.sign(this.url('servicequotas', region), {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-amz-json-1.1', 'x-amz-target': 'ServiceQuotasV20190624.GetServiceQuota' },
+          body: JSON.stringify({ ServiceCode: serviceCode, QuotaCode: quotaCode }),
+        });
+        const read = await this.limiter.run(async () => {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) return { value: null, retryable: false, reason: 'deadline passed' };
+          const res = await (this.opts.fetch ?? fetch)(req, { signal: AbortSignal.timeout(Math.min(remaining, 15_000)) });
+          const text = await res.text();
+          if (!res.ok) {
+            let code = '';
+            try { code = String((JSON.parse(text) as { __type?: string }).__type ?? '').split('#').pop() ?? ''; } catch { /* Not JSON. */ }
+            return { value: null, retryable: classify(code, res.status) === 'retryable', reason: code || `HTTP ${res.status}` };
+          }
+          const out = JSON.parse(text) as { Quota?: { Value?: number } };
+          return typeof out.Quota?.Value === 'number'
+            ? { value: out.Quota.Value, retryable: false, reason: '' }
+            : { value: null, retryable: false, reason: 'no value' };
+        });
+        if (read.value !== null) return read.value;
+        ({ retryable, reason } = read);
+      } catch (e) {
+        // A timeout or a lost connection: nothing changed at AWS.
+        retryable = !(e instanceof ExecutorError) || e.errorClass === 'retryable';
+        reason = (e as Error).message;
+      }
+      const wait = READ_RETRY_MS[attempt];
+      if (!retryable || wait === undefined || deadline - Date.now() < wait + 2_000) {
+        failed?.(`${serviceCode}/${quotaCode}: ${reason}`);
+        return null;
+      }
+      await new Promise((resolve) => setTimeout(resolve, wait));
     }
   }
 
@@ -255,17 +327,22 @@ export class Ec2Client {
         ...(next ? { NextToken: next } : {}),
       };
       let res: Response;
+      let text: string;
       try {
         const req = await signer.sign(this.url('pricing', 'us-east-1'), {
           method: 'POST',
           headers: { 'content-type': 'application/x-amz-json-1.1', 'x-amz-target': 'AWSPriceListService.GetProducts' },
           body: JSON.stringify(body),
         });
-        res = await (this.opts.fetch ?? fetch)(req, { signal: AbortSignal.timeout(Math.min(remaining, 20_000)) });
+        ({ res, text } = await this.limiter.run(async () => {
+          const left = deadline - Date.now();
+          if (left <= 0) throw new Error('deadline passed');
+          const res = await (this.opts.fetch ?? fetch)(req, { signal: AbortSignal.timeout(Math.min(left, 20_000)) });
+          return { res, text: await res.text() };
+        }));
       } catch (e) {
         throw new ExecutorError('retryable', `GetProducts ${serviceCode}: ${(e as Error).message}`);
       }
-      const text = await res.text();
       if (!res.ok) {
         const code = (() => {
           try {

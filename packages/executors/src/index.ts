@@ -6,5 +6,5 @@ export { AwsExecutor, DEFAULT_INSTANCE_TYPES, DEFAULT_TIER_INSTANCE_TYPES, DEFAU
 export { bootstrapScript, type BootstrapInput } from './aws/user-data.js';
 export { parseXml } from './aws/xml.js';
 export { AwsApi, assumeRoleCredentials, type AwsCredentials, type AwsCredentialProvider } from './aws/authorization.js';
-export { Ec2Client, isRegionDenial } from './aws/client.js';
+export { Ec2Client, isRegionDenial, MAX_AWS_REQUESTS, RequestLimiter } from './aws/client.js';
 export { items as xmlItems, text as xmlText, type XmlNode } from './aws/xml.js';

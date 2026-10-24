@@ -260,7 +260,8 @@ export interface Executor {
   ensureDeleted(ctx: OpContext, region: string, kind: ResourceKind, providerId: string): Promise<void>;
 
   // Used by the reconciler and the checks before create/start.
-  listManaged(ctx: OpContext, region: string): Promise<ObservedResource[]>;
+  /** Every managed resource in the region, or only those of `kinds` (fewer provider reads). */
+  listManaged(ctx: OpContext, region: string, kinds?: readonly ResourceKind[]): Promise<ObservedResource[]>;
   quotas(ctx: OpContext, region: string): Promise<QuotaSnapshot[]>;
   /** Stable identity for settings that affect the default machine and its provider price sheet. */
   pricingConfigKey(region: string): string;

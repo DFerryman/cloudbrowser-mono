@@ -230,6 +230,37 @@ describe('operation preemption fences in-flight workers', () => {
     await w.settle(stop!.id); expect(w.store.records.get(vm.id)?.state).toBe('stopped');
   });
 
+  it('checks every region on its own: one AWS answered too slowly is skipped, the others still stop their VMs', async () => {
+    const w = new World(); await w.settle(await w.seed()); await w.settle(await w.enqueue('stop'));
+    // The browser's region now names another provider region than its placement's: two regions to read.
+    await w.db.update(browserInstances).set({ desiredState: 'stopped' });
+    await w.db.update(schema.regions).set({ providerRegion: 'xx-slow-1' }).where(eq(schema.regions.id, 'tyo1'));
+    const vm = [...w.store.records.values()].find((r) => r.kind === 'vm')!; await w.store.update(vm.id, { state: 'running' });
+    const deps = w.deps();
+    const real = deps.executor('fake');
+    const listed: { region: string; kinds: unknown }[] = [];
+    const slow = (region: string) => new Proxy(real, { get: (target, key) => key === 'listManaged'
+      ? async (ctx: Parameters<Executor['listManaged']>[0], r: string, kinds?: Parameters<Executor['listManaged']>[2]) => {
+        listed.push({ region: r, kinds });
+        if (r === region) throw new ExecutorError('retryable', 'DescribeInstances: The operation was aborted due to timeout');
+        return target.listManaged(ctx, r, kinds);
+      }
+      : Reflect.get(target, key) });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await enforceStoppedIntent({ ...deps, executor: () => slow('xx-slow-1') })).toBe(1);
+    expect(listed.map((l) => l.region).sort()).toEqual(['ap-northeast-1', 'xx-slow-1']);
+    expect(listed.every((l) => JSON.stringify(l.kinds) === '["vm"]')).toBe(true);
+    expect(warn).toHaveBeenCalledWith('stopped intent: region skipped until the next round', expect.stringContaining('xx-slow-1'));
+    // No region could be read at all: that is the round's failure.
+    await w.settle((await w.db.select().from(operations).where(eq(operations.status, 'queued')))[0]!.id);
+    await w.store.update(vm.id, { state: 'running' });
+    await expect(enforceStoppedIntent({ ...deps, executor: () => slow('ap-northeast-1') })).resolves.toBe(0);
+    const down = new Proxy(real, { get: (target, key) => key === 'listManaged'
+      ? async () => { throw new ExecutorError('retryable', 'DescribeInstances: deadline passed'); }
+      : Reflect.get(target, key) });
+    await expect(enforceStoppedIntent({ ...deps, executor: () => down })).rejects.toThrow(/ap-northeast-1: DescribeInstances: deadline passed; xx-slow-1: DescribeInstances: deadline passed|xx-slow-1: DescribeInstances: deadline passed; ap-northeast-1: DescribeInstances: deadline passed/);
+  });
+
   it('does not stop a new wake that wins after a stopped-inventory snapshot was read', async () => {
     const w = new World(); await w.settle(await w.seed()); await w.settle(await w.enqueue('stop'));
     await w.db.update(browserInstances).set({ desiredState: 'stopped' });

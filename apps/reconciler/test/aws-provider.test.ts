@@ -2,7 +2,7 @@ import { createDb, schema } from '@cloudbrowser/db';
 import { createTestD1 } from '@cloudbrowser/db/testing';
 import { eq, sql } from 'drizzle-orm';
 import { expect, it } from 'vitest';
-import { REGION_REFRESH_MS, RegionUnusable, refreshRegions } from '../src/aws-provider.js';
+import { QUOTA_LIMIT_MAX_AGE_MS, REGION_REFRESH_MS, RegionUnusable, quotaLimit, refreshRegions } from '../src/aws-provider.js';
 
 const MIN = 60_000;
 
@@ -103,4 +103,15 @@ it('keeps the last snapshot through a failed read, and withdraws it only when AW
   expect((await row(a!.id)).syncFailures).toBe(2);
   const [{ n }] = await db.all<{ n: number }>(sql`SELECT count(*) AS n FROM aws_provider_regions WHERE sync_lease_until IS NOT NULL`);
   expect(n).toBe(0);
+});
+
+it('keeps a quota limit Service Quotas could not return from the last snapshot, for up to a week', () => {
+  const now = Date.now();
+  expect(quotaLimit(25, { limit: 20, limitAt: now - MIN }, now - MIN, now)).toEqual({ limit: 25, limitAt: now });
+  // A throttled or slow read no longer withdraws the region ("Required AWS quota is unavailable").
+  expect(quotaLimit(null, { limit: 20, limitAt: now - 3 * 86_400_000 }, now - MIN, now)).toEqual({ limit: 20, limitAt: now - 3 * 86_400_000 });
+  // Snapshots written before limitAt existed are as old as their own observation.
+  expect(quotaLimit(null, { limit: 20 }, now - 5 * MIN, now)).toEqual({ limit: 20, limitAt: now - 5 * MIN });
+  expect(quotaLimit(null, { limit: 20, limitAt: now - QUOTA_LIMIT_MAX_AGE_MS }, now - MIN, now)).toBeNull();
+  expect(quotaLimit(null, undefined, now - MIN, now)).toBeNull();
 });

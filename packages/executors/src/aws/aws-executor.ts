@@ -862,7 +862,7 @@ export class AwsExecutor implements Executor {
     }
   }
 
-  async listManaged(ctx: OpContext, region: string): Promise<ObservedResource[]> {
+  async listManaged(ctx: OpContext, region: string, kinds?: readonly ResourceKind[]): Promise<ObservedResource[]> {
     this.authorize('listManaged');
     const f = filters({ 'tag:cb:managed': 'true', 'tag:cb:env': ctx.tags['cb:env'] });
     const out: ObservedResource[] = [];
@@ -872,13 +872,16 @@ export class AwsExecutor implements Executor {
         out.push({ providerId: id, kind, region, zone, state, tags: tagsOf(node), ...(Number.isInteger(sizeGb) && sizeGb > 0 ? { sizeGb } : {}) });
       }
     };
+    const wanted = (kind: ResourceKind) => !kinds || kinds.includes(kind);
+    const list = (kind: ResourceKind, action: string, set: string, params: Params) =>
+      wanted(kind) ? this.readAll(ctx, region, action, set, params) : Promise.resolve([]);
     // The five listings are independent: read them together rather than one after another.
     const [reservations, volumes, interfaces, addresses, snapshots] = await Promise.all([
-      this.readAll(ctx, region, 'DescribeInstances', 'reservationSet', f),
-      this.readAll(ctx, region, 'DescribeVolumes', 'volumeSet', f),
-      this.readAll(ctx, region, 'DescribeNetworkInterfaces', 'networkInterfaceSet', f),
-      this.readAll(ctx, region, 'DescribeAddresses', 'addressesSet', f),
-      this.readAll(ctx, region, 'DescribeSnapshots', 'snapshotSet', { 'Owner.1': 'self', ...f }),
+      list('vm', 'DescribeInstances', 'reservationSet', f),
+      list('volume', 'DescribeVolumes', 'volumeSet', f),
+      list('network_interface', 'DescribeNetworkInterfaces', 'networkInterfaceSet', f),
+      list('ip', 'DescribeAddresses', 'addressesSet', f),
+      list('snapshot', 'DescribeSnapshots', 'snapshotSet', { 'Owner.1': 'self', ...f }),
     ]);
     for (const r of reservations) {
       for (const i of items(r, 'instancesSet')) {

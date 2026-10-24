@@ -14,7 +14,7 @@ import { meterUsage } from './metering.js';
 import { refreshPrices } from './prices.js';
 import { enforceStoppedIntent } from './enforce-stopped.js';
 import { checkInstanceIp, idleStops, periodicIpChecks, runPending } from './scheduler.js';
-import { errorMessages } from './errors.js';
+import { errorMessages, transientD1 } from './errors.js';
 
 export type { Env } from './deps.js';
 export { EventHub } from './event-hub.js';
@@ -74,13 +74,17 @@ export default {
         return;
       }
       // Each step runs even if an earlier one failed: an idle-stop error must not skip metering,
-      // and a provider error must not skip the IP checks. Failures are reported together.
+      // and a provider error must not skip the IP checks. Failures are reported together. A step
+      // that met one of D1's own transient failures (Cloudflare resetting the database) is
+      // reported as a warning: every step runs again next minute from what is stored (metering
+      // from its watermarks), so nothing is lost and nothing needs doing.
       const failures: unknown[] = [];
       const step = async (name: string, run: () => Promise<unknown>) => {
         try {
           await run();
         } catch (e) {
-          failures.push(new Error(`${name}: ${errorMessages(e).join(' <- ')}`, { cause: e }));
+          if (transientD1(e)) console.warn('engine scheduled step deferred to the next run', JSON.stringify({ step: name, errors: errorMessages(e) }));
+          else failures.push(new Error(`${name}: ${errorMessages(e).join(' <- ')}`, { cause: e }));
         }
       };
       await step('idle stops', () => idleStops(deps));

@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { AwsExecutor, bootstrapScript, createExecutor, ExecutorError, FakeExecutor, LaunchFailed, isRegionDenial, launchFailureClass, MemoryFakeStore, ProviderFailed, type CredentialMode, type Executor, type OpContext, type Placement, type ResourceKind } from '../src/index.js';
+import { AwsExecutor, bootstrapScript, createExecutor, Ec2Client, ExecutorError, FakeExecutor, LaunchFailed, isRegionDenial, launchFailureClass, MAX_AWS_REQUESTS, MemoryFakeStore, ProviderFailed, RequestLimiter, type CredentialMode, type Executor, type OpContext, type Placement, type ResourceKind } from '../src/index.js';
 import { FakeEc2 } from './fake-ec2.js';
 
 const REGION = 'ap-northeast-1';
@@ -330,6 +330,68 @@ describe('aws-ec2 executor', () => {
       { metric: 'static_ips', limit: 5, used: 1 },
       { metric: 'vcpus', limit: 16, used: 2 },
     ]);
+  });
+
+  it('lists only the kinds asked for, with one provider listing per kind', async () => {
+    const { ex, ec2 } = setup();
+    await create(ex);
+    ec2.calls.length = 0;
+    expect((await ex.listManaged(ctx('l'), REGION, ['vm'])).map((r) => r.kind)).toEqual(['vm']);
+    expect(ec2.calls.map((c) => c.action)).toEqual(['DescribeInstances']);
+    expect(new Set((await ex.listManaged(ctx('l'), REGION)).map((r) => r.kind))).toEqual(new Set(['vm', 'volume', 'network_interface', 'ip']));
+  });
+});
+
+describe('AWS requests within a Worker invocation', () => {
+  const quotaClient = (respond: (attempt: number) => Response) => {
+    let attempt = 0;
+    const fetch = vi.fn(async () => respond(attempt++));
+    return { fetch, client: new Ec2Client({ accessKeyId: 'AKIDTEST', secretAccessKey: 'secret', endpoint: () => 'https://quotas.test/', fetch: fetch as unknown as typeof globalThis.fetch }) };
+  };
+
+  it('admits a bounded number of requests at a time, in order, and frees a slot when one fails', async () => {
+    const limiter = new RequestLimiter(2);
+    let active = 0;
+    let most = 0;
+    const started: number[] = [];
+    const releases: (() => void)[] = [];
+    const run = (n: number) => limiter.run(async () => {
+      started.push(n);
+      most = Math.max(most, ++active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active--;
+      if (n === 1) throw new Error('lost connection');
+      return n;
+    });
+    const all = [1, 2, 3, 4, 5].map((n) => run(n).catch((e: Error) => e.message));
+    for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+    expect(started).toEqual([1, 2]);
+    while (releases.length) {
+      releases.shift()!();
+      for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+    }
+    expect(await Promise.all(all)).toEqual(['lost connection', 2, 3, 4, 5]);
+    expect(started).toEqual([1, 2, 3, 4, 5]);
+    expect(most).toBe(2);
+    expect(MAX_AWS_REQUESTS).toBeLessThan(6); // a Worker invocation's open connections
+  });
+
+  it('retries a throttled Service Quotas read instead of reporting the quota missing', async () => {
+    const { client, fetch } = quotaClient((attempt) => attempt === 0
+      ? Response.json({ __type: 'com.amazonaws.servicequotas#TooManyRequestsException' }, { status: 400 })
+      : Response.json({ Quota: { Value: 32 } }));
+    const failed = vi.fn();
+    expect(await client.serviceQuota(REGION, 'ec2', 'L-1216C47A', Date.now() + 30_000, failed)).toBe(32);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(failed).not.toHaveBeenCalled();
+  });
+
+  it('says which quota could not be read and why, without retrying a refusal', async () => {
+    const { client, fetch } = quotaClient(() => Response.json({ __type: 'AccessDeniedException' }, { status: 400 }));
+    const failed = vi.fn();
+    expect(await client.serviceQuota(REGION, 'vpc', 'L-DF5E4CA3', Date.now() + 30_000, failed)).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(failed).toHaveBeenCalledExactlyOnceWith('vpc/L-DF5E4CA3: AccessDeniedException');
   });
 });
 

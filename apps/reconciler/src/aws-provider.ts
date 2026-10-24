@@ -1,7 +1,7 @@
 /** Live AWS catalog, quota and organization billing synchronization. No infrastructure mutations. */
 import { AWS_REGION_FACTS, TIERS } from '@cloudbrowser/contracts';
 import { createDb, schema, type Db } from '@cloudbrowser/db';
-import { AwsApi, AwsExecutor, DEFAULT_TIER_INSTANCE_TYPES, Ec2Client, assumeRoleCredentials, xmlItems, xmlText, type AwsCredentials, type AwsRegionConfig, type XmlNode } from '@cloudbrowser/executors';
+import { AwsApi, AwsExecutor, DEFAULT_TIER_INSTANCE_TYPES, Ec2Client, RequestLimiter, assumeRoleCredentials, xmlItems, xmlText, type AwsCredentials, type AwsRegionConfig, type XmlNode } from '@cloudbrowser/executors';
 import { and, eq, sql } from 'drizzle-orm';
 import type { Env } from './index.js';
 
@@ -25,6 +25,19 @@ const ACCOUNT_LEASE_MS = 5 * 60_000;
  */
 export const RUN_BUDGET_MS = 3 * 60_000;
 const CONCURRENCY = 6;
+/** A quota limit Service Quotas could not return is taken from the last snapshot for this long. */
+export const QUOTA_LIMIT_MAX_AGE_MS = 7 * 86_400_000;
+
+/**
+ * The limit a snapshot records for a quota: the one just read, else the last one observed while
+ * it is no older than QUOTA_LIMIT_MAX_AGE_MS (snapshots before limitAt existed date it by their
+ * own observation), else none.
+ */
+export function quotaLimit(read: number | null, last: { limit: number; limitAt?: number } | undefined, snapshotAt: number | undefined, now: number) {
+  if (read !== null) return { limit: read, limitAt: now };
+  const limitAt = last?.limitAt ?? snapshotAt;
+  return last && limitAt !== undefined && now - limitAt < QUOTA_LIMIT_MAX_AGE_MS ? { limit: last.limit, limitAt } : null;
+}
 
 /** AWS answered, and the region cannot host browsers: unlike a failed read, the snapshot is withdrawn. */
 export class RegionUnusable extends Error {}
@@ -51,7 +64,9 @@ export async function syncAwsProvider(env: Env, opts: { force?: boolean; trigger
   const memberCredentials = env.AWS_ROLE_ARN ? assumeRoleCredentials(base, { arn: env.AWS_ROLE_ARN, externalId: env.AWS_ROLE_EXTERNAL_ID }) : async () => base;
   const managementCredentials = env.AWS_MANAGEMENT_ROLE_ARN ? assumeRoleCredentials(base, { arn: env.AWS_MANAGEMENT_ROLE_ARN, externalId: env.AWS_MANAGEMENT_EXTERNAL_ID }) : null;
   const api = new AwsApi(memberCredentials);
-  const ec2 = new Ec2Client({ ...base, credentials: memberCredentials });
+  // Every region's reads share one invocation's connections (MAX_AWS_REQUESTS).
+  const limiter = new RequestLimiter();
+  const ec2 = new Ec2Client({ ...base, credentials: memberCredentials, limiter });
   try {
     const [current] = await db.select().from(state).where(eq(state.id,1));
     if (!current) throw new Error('AWS provider state is missing');
@@ -93,7 +108,7 @@ export async function syncAwsProvider(env: Env, opts: { force?: boolean; trigger
         const metadata = await api.call<{Parameters?:{Name:string;Value:string}[]}>('ssm','ap-southeast-2','AmazonSSM.GetParameters',{Names:[`/aws/service/global-infrastructure/regions/${code}/longName`,`/aws/service/global-infrastructure/regions/${code}/geolocationCountry`]});
         return { name: metadata.Parameters?.find((p)=>p.Name.endsWith('/longName'))?.Value, country: metadata.Parameters?.find((p)=>p.Name.endsWith('/geolocationCountry'))?.Value };
       },
-      observe: (code, regionId) => syncRegion(db, env, ec2, memberCredentials, code, regionId, force),
+      observe: (code, regionId) => syncRegion(db, env, ec2, limiter, memberCredentials, code, regionId, force, log),
     });
     // API removals or account opt-out must withdraw old inventory too.
     const known = await db.select().from(catalog);
@@ -206,7 +221,7 @@ export async function refreshRegions(db: Db, discovered: { code: string; optIn: 
   return out;
 }
 
-async function syncRegion(db: Db, env: Env, ec2: Ec2Client, credentials: () => Promise<AwsCredentials>, code: string, regionId: string, force: boolean) {
+async function syncRegion(db: Db, env: Env, ec2: Ec2Client, limiter: RequestLimiter, credentials: () => Promise<AwsCredentials>, code: string, regionId: string, force: boolean, log: Log) {
   const began = Date.now();
   // Capture local intents before provider reads. A later create is then deducted by the SQL view.
   const held=await db.all<{id:string}>(sql`SELECT id FROM aws_browser_commitments WHERE region_id=${regionId}`);
@@ -247,22 +262,41 @@ async function syncRegion(db: Db, env: Env, ec2: Ec2Client, credentials: () => P
   // Per zone, so a launch never asks a zone for a type it does not offer (EC2: Unsupported).
   const byZone=(types:string[])=>Object.fromEntries(Object.keys(config!.subnets).map((zone)=>[zone,types.filter((type)=>offerings.some((o)=>xmlText(o,'instanceType')===type && xmlText(o,'location')===zone))]));
   config={...config,instanceTypes:offered,zoneInstanceTypes:byZone(offered),premium:{instanceTypes:premiumOffered,zoneInstanceTypes:byZone(premiumOffered)}};
-  const executor=new AwsExecutor({accessKeyId:env.AWS_ACCESS_KEY_ID!,secretAccessKey:env.AWS_SECRET_ACCESS_KEY!,credentials,mode:'readonly',regions:{[code]:config},appUrl:'',agentImage:'',browserImage:''});
+  const executor=new AwsExecutor({accessKeyId:env.AWS_ACCESS_KEY_ID!,secretAccessKey:env.AWS_SECRET_ACCESS_KEY!,credentials,limiter,mode:'readonly',regions:{[code]:config},appUrl:'',agentImage:'',browserImage:''});
   const ctx={operationId:'aws-provider-sync',step:'provider-sync',token:'provider-sync',tags:{'cb:managed':'true' as const,'cb:env':env.ENV_NAME ?? 'prod','cb:instance':'provider-sync','cb:op':'provider-sync','cb:gen':'0'},deadline};
   // What the snapshot describes: AWS as of these reads, not the run's start. Taken before the first
   // read so its age is never understated.
   const observedAt=new Date();
-  const quotas:{metric:string;limit:number;used:number}[]=await executor.quotas(ctx,code);
+  const [previous]=await db.select({quotas:catalog.quotas,checkedAt:catalog.checkedAt}).from(catalog).where(eq(catalog.regionId,regionId));
   const [volumes,enis,subnets,machines,addresses,reservations]=await Promise.all([
     all('DescribeVolumes','volumeSet'), all('DescribeNetworkInterfaces','networkInterfaceSet'),
     all('DescribeSubnets','subnetSet',{'Filter.1.Name':'subnet-id',...Object.fromEntries(Object.values(config.subnets).map((v,i)=>[`Filter.1.Value.${i+1}`,v]))}),
     all('DescribeInstanceTypes','instanceTypeSet',Object.fromEntries([...offered,...premiumOffered].map((v,i)=>[`InstanceType.${i+1}`,v]))),
     all('DescribeAddresses','addressesSet'),all('DescribeInstances','reservationSet',{'Filter.1.Name':'instance-state-name','Filter.1.Value.1':'pending','Filter.1.Value.2':'running'}),
   ]);
-  const [storageLimit,eniLimit]=await Promise.all([ec2.serviceQuota(code,'ebs','L-7A658B76',deadline),ec2.serviceQuota(code,'vpc','L-DF5E4CA3',deadline)]);
-  if (storageLimit===null || eniLimit===null || !quotas.some((q)=>q.metric==='static_ips') || !quotas.some((q)=>q.metric==='vcpus')) throw new Error('Required AWS quota is unavailable');
-  quotas.push({metric:'gp3_gib',limit:storageLimit*1024,used:volumes.filter((v)=>xmlText(v,'volumeType')==='gp3').reduce((sum,v)=>sum+Number(xmlText(v,'size')),0)});
-  quotas.push({metric:'network_interfaces',limit:eniLimit,used:enis.length});
+  // Usage is read live every time; a limit changes only when AWS grants a request. One Service
+  // Quotas read that failed (slow or throttled) used to withdraw the whole region, so a limit it
+  // could not return now is the last one observed, for up to a week (limitAt says when).
+  const unread:string[]=[];
+  const limit=async(metric:string,service:string,quotaCode:string,scale=1)=>{
+    const value=await ec2.serviceQuota(code,service,quotaCode,deadline,(reason)=>unread.push(reason));
+    return quotaLimit(value===null ? null : value*scale,previous?.quotas?.find((q)=>q.metric===metric),previous?.checkedAt?.getTime(),observedAt.getTime());
+  };
+  const [ipLimit,cpuLimit,storageLimit,eniLimit]=await Promise.all([
+    limit('static_ips','ec2','L-0263D0A3'), // EC2-VPC Elastic IPs
+    limit('vcpus','ec2','L-1216C47A'), // Running On-Demand Standard vCPUs
+    limit('gp3_gib','ebs','L-7A658B76',1024), // gp3 storage, in TiB
+    limit('network_interfaces','vpc','L-DF5E4CA3'), // network interfaces per Region
+  ]);
+  if (!ipLimit || !cpuLimit || !storageLimit || !eniLimit) throw new Error(`Required AWS quota is unavailable: ${unread.join('; ') || 'no value'}`);
+  if (unread.length) log('quota_fallback',{region:code,unread});
+  const vcpusUsed=reservations.flatMap((r)=>xmlItems(r,'instancesSet')).reduce((n,i)=>n+Number(xmlText(i,'cpuOptions','coreCount') ?? 1)*Number(xmlText(i,'cpuOptions','threadsPerCore') ?? 2),0);
+  const quotas:{metric:string;limit:number;used:number;limitAt?:number}[]=[
+    {metric:'static_ips',...ipLimit,used:addresses.length},
+    {metric:'vcpus',...cpuLimit,used:vcpusUsed},
+    {metric:'gp3_gib',...storageLimit,used:volumes.filter((v)=>xmlText(v,'volumeType')==='gp3').reduce((sum,v)=>sum+Number(xmlText(v,'size')),0)},
+    {metric:'network_interfaces',...eniLimit,used:enis.length},
+  ];
   const [price]=await db.select().from(providerPrices).where(eq(providerPrices.regionId,regionId));
   const configurationKey=executor.pricingConfigKey(code);
   let sheet=price?.sheet as import('@cloudbrowser/contracts').ProviderPriceSheet|null;

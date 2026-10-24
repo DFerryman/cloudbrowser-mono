@@ -417,11 +417,11 @@ export class FakeExecutor implements Executor {
     });
   }
 
-  listManaged(ctx: OpContext, region: string): Promise<ObservedResource[]> {
+  listManaged(ctx: OpContext, region: string, kinds?: readonly ResourceKind[]): Promise<ObservedResource[]> {
     return this.call('listManaged', ctx, async () => {
       const all = await this.store.list(region);
       return all
-        .filter((r) => r.state !== 'deleted' && r.tags['cb:managed'] === 'true')
+        .filter((r) => r.state !== 'deleted' && r.tags['cb:managed'] === 'true' && (!kinds || kinds.includes(r.kind)))
         .map((r) => ({ providerId: r.id, kind: r.kind, region: r.region, zone: r.zone, state: r.state, tags: r.tags,
           ...(r.kind === 'volume' && typeof r.attrs.sizeGb === 'number' ? { sizeGb: r.attrs.sizeGb } : {}),
         }));

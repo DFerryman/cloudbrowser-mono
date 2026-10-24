@@ -701,7 +701,7 @@ export const awsProviderState = sqliteTable('aws_provider_state', {
 export const awsProviderRegions = sqliteTable('aws_provider_regions', {
   regionId: text('region_id').primaryKey().references(() => regions.id), providerRegion: text('provider_region').notNull().unique(),
   optInStatus: text('opt_in_status').notNull(), status: text('status').notNull(),
-  config: json<Record<string, unknown>>('config'), quotas: json<{ metric: string; limit: number; used: number }[]>('quotas'),
+  config: json<Record<string, unknown>>('config'), quotas: json<{ metric: string; limit: number; used: number; limitAt?: number }[]>('quotas'),
   capacity: integer('capacity').notNull(), checkedAt: ts('checked_at'), lastError: text('last_error'),
   /** vCPUs the account can give its browsers; `capacity` then counts every other dimension. */
   vcpuCapacity: integer('vcpu_capacity'),
