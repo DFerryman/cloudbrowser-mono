@@ -282,9 +282,11 @@ async function advanceClosing(env: Env, db: Db, row: typeof accountClosures.$inf
     }
     return { deleted, closed: false };
   }
-  // Every browser is purged: nothing meters any more, so the balance is final.
-  const { balanceMicros, paidMicros, orders } = await unusedPaidCredit(db, row.userId);
-  await db.update(accountClosures).set({ status: 'closed', closedAt: now, balanceMicros, paidMicros, paidOrders: orders })
+  // Every browser is purged: nothing meters any more, so the balance is final. Once erased, the
+  // closure already holds what was left at erasure, before the write-off; that record stays.
+  const final = row.erasedAt ? null : await unusedPaidCredit(db, row.userId);
+  await db.update(accountClosures)
+    .set({ status: 'closed', closedAt: now, ...(final ? { balanceMicros: final.balanceMicros, paidMicros: final.paidMicros, paidOrders: final.orders } : {}) })
     .where(and(eq(accountClosures.userId, row.userId), eq(accountClosures.status, 'closing')));
   return { deleted, closed: true };
 }

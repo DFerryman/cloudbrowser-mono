@@ -310,6 +310,7 @@ describe('closing an account', () => {
   });
 
   it('erases the data after 30 days even while a browser is still not purged, and finishes deleting it after', async () => {
+    await paid('ord_stuck', 1000, 200);
     const id = await createBrowser('Stuck');
     await close(await code());
     await t.settle();
@@ -317,10 +318,16 @@ describe('closing an account', () => {
     await sweep(new Date(requested + 30 * DAY));
     expect(closure()).toMatchObject({ status: 'closing', erased_at: expect.any(Number) });
     expect(rows('SELECT email FROM user WHERE id = ?', userId)).toEqual([{ email: erasedEmail(userId) }]);
+    // What was left at erasure, before the write-off, is on record for support.
+    const atErasure = closure()!;
+    expect(atErasure).toMatchObject({ balance_micros: expect.any(Number), paid_micros: expect.any(Number) });
+    expect(Number(atErasure.paid_micros)).toBeGreaterThan(0);
+    expect(JSON.parse(String(atErasure.paid_orders))).toEqual([expect.objectContaining({ orderId: 'ord_stuck' })]);
     await reaper();
     await sweep(new Date(requested + 31 * DAY));
     expect(rows('SELECT status FROM browser_instances WHERE id = ?', id)).toEqual([{ status: 'purged' }]);
-    expect(closure()).toMatchObject({ status: 'closed' });
+    // Finishing the deletion afterwards keeps that record.
+    expect(closure()).toMatchObject({ status: 'closed', closed_at: expect.any(Number), balance_micros: atErasure.balance_micros, paid_micros: atErasure.paid_micros, paid_orders: atErasure.paid_orders });
     expect(rows(`SELECT action FROM audit_log WHERE action = 'account.erased'`)).toHaveLength(1);
   });
 
