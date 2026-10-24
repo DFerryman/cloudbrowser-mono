@@ -99,7 +99,8 @@ function Approve({ request: r, params, email }: { request: Approval; params: Rec
     mutationFn: (approve: boolean) => api<OAuthDecision>('POST', '/oauth/authorize/decision', {
       body: {
         params, approve, grantDays: days, capability, enableAccess: approve && !!browser && !browser.agentAccess,
-        ...(r.browser ? {} : { instanceId }),
+        // The browser the owner picked, only when allowing a request that named none.
+        ...(approve && !r.browser && instanceId ? { instanceId } : {}),
       } satisfies OAuthDecisionBody,
     }),
     onSuccess: ({ redirect }, approve) => {
