@@ -796,6 +796,8 @@ v1.openapi(
 
 /** Analytics Engine stores numbers only: a reading the browser did not have is -1. */
 const measured = (value: number | null | undefined) => value ?? -1;
+/** A data point holds 20 doubles, all in use, so numbers added since are whole ms in a blob: '' when the browser did not have it. */
+const blobbed = (value: number | null | undefined) => (value == null ? '' : String(Math.round(value)));
 
 /** The web app's commit (apps/web/vite.config.ts), as its requests name it; '' when absent or malformed. */
 function clientBuild(c: { req: { header(name: string): string | undefined } }): string {
@@ -818,12 +820,14 @@ v1.openapi(
     // The visitor's own edge (request.cf describes the visitor, not where this Worker runs): with
     // a proxy or VPN, the proxy's. Its country beside a slow picture is what tells them apart.
     const cf = c.req.raw.cf as { country?: string; colo?: string; asn?: number } | undefined;
-    // Layout: docs/connection-diagnostics.md, "Live quality". Fields are only ever appended.
+    // Layout: docs/connection-diagnostics.md, "Live quality". Fields are only ever appended, and
+    // Analytics Engine takes at most 20 blobs and 20 doubles.
     c.env.LIVE_QUALITY?.writeDataPoint({
       indexes: [s.regionId],
       blobs: [
         s.regionId, cf?.country ?? '', cf?.colo ?? '', cf?.asn ? String(cf.asn) : '', r.quality ?? '',
         r.localCandidateType ?? '', r.relayProtocol ?? '', s.instanceId, s.id, r.attemptId, clientBuild(c),
+        blobbed(r.jitterBufferMinimumMs),
       ],
       doubles: [
         r.durationMs, r.readings, measured(r.rttMs), measured(r.gatewayRttMs), measured(r.fps), measured(r.kbps),

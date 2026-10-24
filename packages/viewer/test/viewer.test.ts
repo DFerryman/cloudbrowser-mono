@@ -476,7 +476,7 @@ describe('RemoteBrowser', () => {
         ['v', {
           id: 'v', type: 'inbound-rtp', kind: 'video', transportId: 't', packetsReceived: received, packetsLost: received / 100,
           bytesReceived: received * 1200, framesDecoded: received / 50, freezeCount: Math.floor(received / 5000), totalFreezesDuration: (freezeSeconds += 0.01),
-          jitterBufferDelay: received / 1000, jitterBufferEmittedCount: received / 50, jitterBufferTargetDelay: received / 2500, totalDecodeTime: received / 10_000, framesDropped: received / 1000,
+          jitterBufferDelay: received / 1000, jitterBufferEmittedCount: received / 50, jitterBufferTargetDelay: received / 2500, jitterBufferMinimumDelay: received / 5000, totalDecodeTime: received / 10_000, framesDropped: received / 1000,
           frameWidth: 1920, frameHeight: 1080,
         }],
         ['t', { id: 't', type: 'transport', selectedCandidatePairId: 'pair' }],
@@ -516,6 +516,7 @@ describe('RemoteBrowser', () => {
       keyframes: null,
       levelChanges: 0,
       jitterBufferTargetMs: 20,
+      jitterBufferMinimumMs: 10,
     });
     // Hidden 20 s into the next minute: those 20 s are reported now, and nothing while hidden.
     await vi.advanceTimersByTimeAsync(20_000);
