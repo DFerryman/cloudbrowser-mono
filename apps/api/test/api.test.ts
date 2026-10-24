@@ -564,6 +564,8 @@ describe('gateway internal API and live view', () => {
     const info = (await t.call('GET', `/api/v1/sessions/${open.body.session.id}/connect`)).body;
     expect(info.iceServers).toEqual([{ urls: ['turn:turn.cloudflare.com:3478?transport=udp'], username: 'u', credential: 'c' }]);
     expect(turn).toHaveBeenCalledTimes(1);
+    // The relay disconnects an allocation once its credentials expire, so they outlast a long view.
+    expect(JSON.parse(turn.mock.calls[0]![1]!.body as string)).toEqual({ ttl: 12 * 3600 });
 
     // A TURN outage is reported, not hidden behind a token without relay servers.
     turn.mockImplementationOnce(async () => new Response('down', { status: 503 }));
