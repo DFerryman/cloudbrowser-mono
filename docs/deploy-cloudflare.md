@@ -447,8 +447,8 @@ pnpm run deploy   # checks, builds everything, then deploys gateway, engine + re
 
 The gateway, engine, reaper and reconciler are deployed only when what Wrangler would upload for
 them changed (`scripts/deploy-workers.mjs`). The script builds each one with
-`wrangler deploy --dry-run` and hashes the bundled modules (not their source maps) together with
-the Worker's `wrangler*.jsonc`. Each deploy records `Deploy origin/main <commit> bundle <hash>` as
+`wrangler deploy --dry-run --minify`, so edited comments don't count, and hashes the bundled
+modules (not their source maps) together with the Worker's `wrangler*.jsonc`. Each deploy records `Deploy origin/main <commit> bundle <hash>` as
 its version message, and the next run compares against it. So an edit to a shared package that a
 Worker doesn't import, like the Terms version in `packages/contracts/src/legal.ts`, leaves that
 Worker alone. A live version without a label (a rollback, a hand `wrangler deploy`) is always
