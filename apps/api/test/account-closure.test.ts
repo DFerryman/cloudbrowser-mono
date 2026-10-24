@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { applyBalance } from '../src/billing/ledger.js';
 import { closureSweep, erasedEmail, unusedPaidCredit } from '../src/closure.js';
+import { promotionSweep } from '../src/promotions.js';
 import { sendToUser } from '../src/notifications/send.js';
 import { accessToken, adminCall, configureAdmin, mockAccessJwks } from './admin-helpers.js';
 import { setup, signIn } from './helpers.js';
@@ -287,6 +288,26 @@ describe('closing an account', () => {
     t.d1.sqlite.prepare('UPDATE alerts SET acknowledged_at = ? WHERE dedupe_key = ?').run(Date.now(), 'closure-late-payment:ord_late');
     await sweep();
     expect(alert()).toHaveLength(1);
+  });
+
+  it('earns no promotion reward once closed, and gives back one not yet credited', async () => {
+    await createBrowser('Work');
+    const now = Date.now();
+    t.d1.sqlite.exec('UPDATE promotion_tasks SET enabled = 0');
+    const task = (id: string, max: number | null) => t.d1.sqlite.prepare(`INSERT INTO promotion_tasks (id, title, description, criterion, target, reward_micros, max_completions, created_at, updated_at)
+      VALUES (?, '{"en":"t","zh-CN":"t"}', '{"en":"d","zh-CN":"d"}', 'browsers_created', 1, 1000000, ?, ?, ?)`).run(id, max, now, now);
+    task('earned', 1);
+    // Completed just before the closure, and not credited yet.
+    t.d1.sqlite.prepare(`INSERT INTO promotion_completions (task_id, user_id, progress, reward_micros, completed_at, credited_at) VALUES ('earned', ?, 1, 1000000, ?, NULL)`).run(userId, now);
+    await close(await code());
+    await t.settle();
+    // Dropped, so its place in the task's budget of one is free again.
+    expect(rows('SELECT task_id FROM promotion_completions WHERE user_id = ?', userId)).toEqual([]);
+    // The deleted browser still counts towards both tasks, but the closed account earns neither.
+    task('later', null);
+    expect(await promotionSweep(t.env as never, db(), new Date())).toEqual({ completed: 0, credited: 0 });
+    expect(rows('SELECT task_id FROM promotion_completions WHERE user_id = ?', userId)).toEqual([]);
+    expect(rows(`SELECT kind FROM balance_transactions WHERE user_id = ? AND kind = 'promotion'`, userId)).toEqual([]);
   });
 
   it('erases the data after 30 days even while a browser is still not purged, and finishes deleting it after', async () => {

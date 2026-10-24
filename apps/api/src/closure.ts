@@ -5,7 +5,8 @@
  *  1. At once: the closure is recorded (`account_closures`, status `closing`); every sign-in
  *     session, passkey, authenticator app and pending sign-in code is deleted, and no new session
  *     can be created (trigger, migration 0040); coding-agent keys and sign-ins are revoked; every
- *     browser is permanently deleted through the same path as Delete browser.
+ *     browser is permanently deleted through the same path as Delete browser. Promotion rewards
+ *     not yet credited are dropped, and the account earns no new ones (promotions.ts).
  *  2. Once every browser is purged, nothing meters any more (`closed`): the final balance is
  *     recorded with the part of it that was paid for, per order, for support.
  *  3. 30 days after the closure, even with a browser not purged yet, the balance left is written
@@ -44,7 +45,7 @@ import { problem } from './problem.js';
 
 const {
   accountClosures, admins, alerts, auditLog, automationClients, automationSessions, balanceTransactions, billingAccounts, browserInstances,
-  events, idempotencyKeys, invites, notificationState, oauthAuthorizationCodes, oauthSpentRefreshTokens, user, userNotices, verification,
+  events, idempotencyKeys, invites, notificationState, oauthAuthorizationCodes, oauthSpentRefreshTokens, promotionCompletions, user, userNotices, verification,
   viewerSessions, session, passkey, twoFactor, account, adminStepUps,
 } = schema;
 
@@ -190,6 +191,8 @@ export async function closeAccount(c: Context<AppEnv>, input: { code: string; re
     db.delete(account).where(eq(account.userId, u.id)),
     db.update(user).set({ twoFactorEnabled: false, updatedAt: now }).where(eq(user.id, u.id)),
     db.delete(userNotices).where(and(eq(userNotices.userId, u.id), isNull(userNotices.sentAt))),
+    // Rewards not yet credited are dropped, which returns their share of a task's budget.
+    db.delete(promotionCompletions).where(and(eq(promotionCompletions.userId, u.id), isNull(promotionCompletions.creditedAt))),
     db.insert(auditLog).values({ actor: `user:${u.id}`, action: 'account.closure_requested', target: `user:${u.id}`,
       detail: { reason: input.reason ?? null, browsers: live.length, balanceMicros: credit.balanceMicros, paidMicros: credit.paidMicros, verifiedBy: 'email_code' }, createdAt: now }),
   ]);
