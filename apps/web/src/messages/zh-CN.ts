@@ -43,7 +43,7 @@ export const zhCN: Messages = {
   'signup.sent': '我们已向 {email} 发送链接，请在 30 分钟内打开以完成注册。',
   'signup.existingCodeSent': '{email} 已注册，我们已发送登录验证码，请在下方输入。',
   'signup.haveAccount': '已有账户？',
-  'signup.agree': '创建账户即表示你同意{terms}和{privacy}。',
+  'signup.agree': '你将在首次付款前于结账时接受{terms}和{privacy}。',
   'signup.complete.title': '完成账户注册',
   'signup.complete.body': '创建 Nevazu 账户，并在此设备上登录。',
   'signup.complete.button': '创建我的账户',
@@ -763,7 +763,7 @@ export const zhCN: Messages = {
   'app.error.home': '前往浏览器列表',
 
   'auth.signedOut': '你已退出登录。',
-  'auth.agree': '登录即表示你同意{terms}和{privacy}。',
+  'auth.agree': '你将在首次付款前于结账时接受{terms}和{privacy}。',
   'auth.backHome': '首页',
   'nav.collapse': '收起侧栏',
   'nav.expand': '展开侧栏',
