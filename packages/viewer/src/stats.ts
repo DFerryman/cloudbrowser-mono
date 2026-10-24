@@ -163,6 +163,7 @@ export async function readStats(pc: RTCPeerConnection, previous: { bytes: number
     freezeSeconds: Number(video?.totalFreezesDuration ?? Number.NaN),
     jitterBufferDelay: Number(video?.jitterBufferDelay ?? Number.NaN),
     jitterBufferEmitted: Number(video?.jitterBufferEmittedCount ?? Number.NaN),
+    jitterBufferTarget: Number(video?.jitterBufferTargetDelay ?? Number.NaN),
     decodeSeconds: Number(video?.totalDecodeTime ?? Number.NaN),
     dropped: Number(video?.framesDropped ?? Number.NaN),
     nacks: Number(video?.nackCount ?? Number.NaN),

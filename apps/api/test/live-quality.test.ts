@@ -54,7 +54,7 @@ describe('live quality reports', () => {
     expect(writeDataPoint).toHaveBeenCalledWith({
       indexes: ['tyo1'],
       blobs: ['tyo1', 'TH', 'BKK', '23969', 'high', 'relay', 'udp', instanceId, sessionId, report.attemptId, ''],
-      doubles: [60_000, 30, 290, 41, 24.5, 2400, 0.0099, 3, 300, 50, 5, 15, 1920, 1080, -1, -1, -1, -1, -1],
+      doubles: [60_000, 30, 290, 41, 24.5, 2400, 0.0099, 3, 300, 50, 5, 15, 1920, 1080, -1, -1, -1, -1, -1, -1],
     });
   });
 
@@ -66,21 +66,21 @@ describe('live quality reports', () => {
     expect(writeDataPoint).toHaveBeenCalledWith({
       indexes: ['tyo1'],
       blobs: ['tyo1', '', '', '', '', '', '', instanceId, sessionId, report.attemptId, ''],
-      doubles: [60_000, 30, -1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+      doubles: [60_000, 30, -1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
     });
   });
 
   it('appends repairs, level changes and the reporting build after the original fields', async () => {
-    const repaired = { ...report, nacks: 600, retransmits: 575, plis: 3, keyframes: 4, levelChanges: 2 };
+    const repaired = { ...report, nacks: 600, retransmits: 575, plis: 3, keyframes: 4, levelChanges: 2, jitterBufferTargetMs: 20 };
     expect((await t.call('POST', endpoint(), repaired, { 'x-client-build': '4070ce5a1b2c' })).status).toBe(204);
     expect(writeDataPoint).toHaveBeenCalledWith({
       indexes: ['tyo1'],
       blobs: ['tyo1', '', '', '', 'high', 'relay', 'udp', instanceId, sessionId, report.attemptId, '4070ce5a1b2c'],
-      doubles: [60_000, 30, 290, 41, 24.5, 2400, 0.0099, 3, 300, 50, 5, 15, 1920, 1080, 600, 575, 3, 4, 2],
+      doubles: [60_000, 30, 290, 41, 24.5, 2400, 0.0099, 3, 300, 50, 5, 15, 1920, 1080, 600, 575, 3, 4, 2, 20],
     });
     // Unknown counts are -1, as for the original fields.
     expect((await t.call('POST', endpoint(), { ...repaired, nacks: null, plis: null })).status).toBe(204);
-    expect(writeDataPoint.mock.calls.at(-1)![0].doubles.slice(14)).toEqual([-1, 575, -1, 4, 2]);
+    expect(writeDataPoint.mock.calls.at(-1)![0].doubles.slice(14)).toEqual([-1, 575, -1, 4, 2, 20]);
   });
 
   it('rejects unknown fields and out-of-range values before writing', async () => {
@@ -97,6 +97,7 @@ describe('live quality reports', () => {
       { ...report, localCandidateType: '203.0.113.7' },
       { ...report, nacks: -1 },
       { ...report, levelChanges: 0.5 },
+      { ...report, jitterBufferTargetMs: -5 },
     ]) expect((await t.call('POST', endpoint(), body)).status).toBe(400);
     expect(writeDataPoint).not.toHaveBeenCalled();
   });

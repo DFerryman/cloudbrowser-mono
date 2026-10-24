@@ -83,7 +83,7 @@ async function quality(column, value, from) {
   const sql = `SELECT timestamp, blob2 AS country, blob3 AS colo, blob5 AS level, blob6 AS candidate, blob7 AS relay, blob10 AS attempt, blob11 AS build,
     double1 AS duration, double3 AS rtt, double4 AS gateway_rtt, double5 AS fps, double6 AS kbps, double7 AS loss, double8 AS freezes,
     double9 AS freeze_ms, double12 AS dropped, double13 AS width, double14 AS height, double15 AS nacks, double16 AS retransmits,
-    double17 AS plis, double18 AS keyframes, double19 AS level_changes
+    double17 AS plis, double18 AS keyframes, double19 AS level_changes, double10 AS held, double20 AS held_target
     FROM cloudbrowser_live_quality WHERE ${column} = '${value}' AND timestamp > toDateTime(${Math.floor(from / 1000)}) ORDER BY timestamp`;
   try {
     return (await cf('/analytics_engine/sql', sql, true)).data ?? [];
@@ -160,6 +160,18 @@ function vmVerdict(reports) {
   } else if (judged) parts.push(`the encoder kept its frame rate (${judged} level-heartbeats)`);
   else parts.push('the encoder\'s frame rate was not measured: no level ran a whole heartbeat, or neko\'s counters were unreadable');
   return parts.join('; ');
+}
+/** How long frames waited in the viewer before decoding, over the session's reports, and why. */
+function waitVerdict(reports) {
+  const timed = reports.filter((r) => !r.error && r.held >= 0 && r.duration > 0);
+  if (!timed.length) return null;
+  const mean = (k, rs) => Math.round(rs.reduce((a, r) => a + r[k] * r.duration, 0) / rs.reduce((a, r) => a + r.duration, 0));
+  const held = mean('held', timed);
+  const aimed = timed.filter((r) => r.held_target > 0);
+  if (!aimed.length) return `frames waited ${held} ms on average before decoding`;
+  const target = mean('held_target', aimed);
+  const why = held - target > 50 ? `the other ${held - target} ms, for lost packets to be resent` : 'little waiting for resends';
+  return `frames waited ${held} ms on average before decoding; the browser aimed for ${target} ms (${why})`;
 }
 function line(e) {
   if (e.message === 'vm stream') return `${time(e.at)}  vm       ${vmBits(e).join(' ')}`;
@@ -254,13 +266,15 @@ for (const { session: s, events, attempts, vm, quality: q } of report.sessions) 
   }
   console.log(`  vm: ${vm ?? 'no stream reports (agent before 0.8.0, or no viewer connected)'}`);
   if (q.length) {
+    const wait = waitVerdict(q);
+    if (wait) console.log(`  delay: ${wait}`);
     console.log('  quality (per report):');
     for (const r of q) {
       if (r.error) { console.log(`    ${r.error}`); continue; }
       const v = (x, unit = '') => (x === undefined || x < 0 ? '?' : `${Math.round(x * 100) / 100}${unit}`);
       // Reports from viewers older than these fields read 0 for them, and carry no build.
       if (!r.build) for (const k of ['nacks', 'retransmits', 'plis', 'keyframes', 'level_changes']) r[k] = -1;
-      console.log(`    ${r.timestamp}  ${r.level || '?'} ${v(r.width)}x${v(r.height)}  rtt ${v(r.rtt, 'ms')} input ${v(r.gateway_rtt, 'ms')}  ${v(r.fps)} fps ${v(r.kbps)} kbps  loss ${v(r.loss * 100, '%')}  freezes ${v(r.freezes)} (${v(r.freeze_ms, 'ms')})  nack ${v(r.nacks)} rtx ${v(r.retransmits)} pli ${v(r.plis)}  level changes ${v(r.level_changes)}  ${r.country}/${r.colo} ${r.candidate}/${r.relay}`);
+      console.log(`    ${r.timestamp}  ${r.level || '?'} ${v(r.width)}x${v(r.height)}  rtt ${v(r.rtt, 'ms')} input ${v(r.gateway_rtt, 'ms')}  ${v(r.fps)} fps ${v(r.kbps)} kbps  loss ${v(r.loss * 100, '%')}  freezes ${v(r.freezes)} (${v(r.freeze_ms, 'ms')})  held ${v(r.held, 'ms')}${r.held_target > 0 ? ` (aimed ${v(r.held_target, 'ms')})` : ''}  nack ${v(r.nacks)} rtx ${v(r.retransmits)} pli ${v(r.plis)}  level changes ${v(r.level_changes)}  ${r.country}/${r.colo} ${r.candidate}/${r.relay}`);
     }
   }
 }
