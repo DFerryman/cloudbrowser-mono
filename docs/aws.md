@@ -78,7 +78,9 @@ lighter 30 fps level; the round trip alone never lowers the frame rate (300 ms w
 30 fps). A congested connection (over 6% lost, or the
 round trip risen 300 ms above the path's best of the last minute) goes straight to the sharpest
 level whose constant bitrate fits 90% of what actually arrived, instead of one level per few
-seconds; dropped frames or freezes alone step down one level. Nothing decoding or a fifth of the
+seconds; dropped frames or freezes alone step down one level. Freezes on a path whose best round
+trip is 150 ms or more, while resends were asked for, do not count: each resend holds a frame for
+a round trip, which no lower level shortens. Nothing decoding or a fifth of the
 packets lost counts after two readings, anything else after three. A step up is tried after a
 quiet spell and undone at its first bad reading; one the path plainly cannot carry (a fifth of
 the packets lost, or a growing queue) is undone at its first reading even while the new level

@@ -283,7 +283,8 @@ Cloudflare deployment.
   change; both can go in a later release. A long round trip caps the level at `high` (the
   median of the last five readings above 180 ms, 30 ms of hysteresis before the cap lifts), still
   30 fps; lower levels come only when frames, loss, freezes or a rise in delay show the
-  connection struggling: three readings (about 6 s), two when nothing decodes or a fifth of the
+  connection struggling (not freezes from resends on a path of 150 ms or more, which a lower
+  level cannot shorten): three readings (about 6 s), two when nothing decodes or a fifth of the
   packets are lost, and then straight to the level whose bitrate fits 90% of what arrived. The viewer also
   measures the decoded picture against the desktop and never adapts below a level whose picture
   is under 90% of the desktop's width (`MIN_LEGIBLE_SCALE`), so browsers still on an older,
