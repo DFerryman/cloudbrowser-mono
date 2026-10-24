@@ -46,6 +46,20 @@ export function toRemotePoint(
   };
 }
 
+/**
+ * Remote pixels per pixel of the painted picture, so a finger's movement can scroll the page by
+ * as much as the finger moved over it (1 when nothing is painted yet).
+ */
+export function remotePerPixel(
+  box: { left: number; top: number; width: number; height: number },
+  video: { width: number; height: number },
+  screen: { width: number; height: number } | null,
+): number {
+  const picture = pictureRect(box, video);
+  const { width } = remoteSpace({ width: video.width || box.width, height: video.height || box.height }, screen);
+  return picture.width > 0 && width > 0 ? width / picture.width : 1;
+}
+
 type Rect = { left: number; top: number; width: number; height: number };
 
 /** The coordinates a pointer, wheel or drag event carries. */
@@ -88,4 +102,11 @@ export function unrotate(clientX: number, clientY: number, box: Rect): { x: numb
     y: cy - (clientX - cx),
     frame: { left: cx - box.height / 2, top: cy - box.width / 2, width: box.height, height: box.width },
   };
+}
+
+/** The reverse of unrotate: a point in the unturned frame, back on the box. */
+export function rotate(x: number, y: number, box: Rect): { x: number; y: number } {
+  const cx = box.left + box.width / 2;
+  const cy = box.top + box.height / 2;
+  return { x: cx - (y - cy), y: cy + (x - cx) };
 }

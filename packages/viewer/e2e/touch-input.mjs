@@ -128,13 +128,102 @@ try {
     assert.equal(inputCalls(await snapshot(page), 'button').length, 0, 'Canceled touch must not leave a remote button pressed');
     check('native touch cancellation: no remote button');
 
+    const buttons = (state) => inputCalls(state, 'button').map((call) => [call.args[0], call.args[1]]);
     await clear(page);
     await sendTouch('touchStart', [[point.x, point.y]]);
     await sendTouch('touchStart', [[point.x, point.y], [point.x + 30, point.y + 30, 2]]);
     await sendTouch('touchEnd');
     await settle(page);
-    assert.equal(inputCalls(await snapshot(page), 'button').length, 0, 'A second finger must cancel a pending remote tap');
-    check('native multiple-finger cancellation: no accidental click');
+    assert.deepEqual(buttons(await snapshot(page)), [[true, 2], [false, 2]], 'Two fingers tapped together must right-click, never left-click');
+    check('native two-finger tap: a right-click, no left click');
+
+    await clear(page);
+    await sendTouch('touchStart', [[point.x, point.y]]);
+    await page.waitForTimeout(650);
+    assert.equal(inputCalls(await snapshot(page), 'button').length, 0, 'A held finger must not press a button before it lifts or moves');
+    await sendTouch('touchEnd');
+    await settle(page);
+    assert.deepEqual(buttons(await snapshot(page)), [[true, 2], [false, 2]], 'A held finger must right-click when it lifts');
+    check('native long press: a right-click on release');
+
+    await clear(page);
+    await sendTouch('touchStart', [[point.x - 60, point.y]]);
+    await page.waitForTimeout(650);
+    for (const dx of [-30, 0, 30]) {
+      await sendTouch('touchMove', [[point.x + dx, point.y]]);
+      await settle(page);
+    }
+    await sendTouch('touchEnd');
+    await settle(page);
+    state = await snapshot(page);
+    assert.deepEqual(buttons(state), [[true, 0], [false, 0]], 'A held finger that moves must drag with the left button');
+    const dragMoves = inputCalls(state, 'move').map((call) => call.args[0]);
+    assert.ok(dragMoves.at(-1) - dragMoves[0] > 80, `The drag must follow the finger: ${dragMoves}`);
+    assert.equal(inputCalls(state, 'scroll').length, 0, 'A drag must not scroll');
+    check('native press and drag: left-button drag from the held point');
+
+    await clear(page);
+    for (const dx of [0, 10]) {
+      await sendTouch('touchStart', [[point.x + dx, point.y + dx / 2]]);
+      await sendTouch('touchEnd');
+      await page.waitForTimeout(80);
+    }
+    await settle(page);
+    const taps = inputCalls(await snapshot(page), 'button').filter((call) => call.args[0]).map((call) => [call.args[2], call.args[3]]);
+    assert.equal(taps.length, 2);
+    assert.deepEqual(taps[1], taps[0], 'A quick second tap close by must click exactly where the first did');
+    check('native double tap: both clicks at the same remote point');
+
+    // Pinch: the picture zooms about the fingers; taps then map through the zoom.
+    await clear(page);
+    const before = await page.locator('video').boundingBox();
+    await sendTouch('touchStart', [[point.x - 50, point.y, 1], [point.x + 50, point.y, 2]]);
+    for (const spread of [70, 90, 100]) {
+      await sendTouch('touchMove', [[point.x - spread, point.y, 1], [point.x + spread, point.y, 2]]);
+      await settle(page);
+    }
+    await sendTouch('touchEnd');
+    await settle(page);
+    const zoomed = await page.locator('video').boundingBox();
+    assert.ok(Math.abs(zoomed.width / before.width - 2) < 0.05, `A pinch to twice the spread must zoom the picture 2×: ${zoomed.width / before.width}`);
+    state = await snapshot(page);
+    assert.equal(inputCalls(state, 'button').length, 0, 'A pinch must not click');
+    assert.equal(inputCalls(state, 'scroll').length, 0, 'A pinch must not scroll the page');
+    const remoteOf = async (x, y) => {
+      await clear(page);
+      await page.waitForTimeout(450);
+      await sendTouch('touchStart', [[x, y]]);
+      await sendTouch('touchEnd');
+      await settle(page);
+      return inputCalls(await snapshot(page), 'button').find((call) => call.args[0]).args.slice(2);
+    };
+    const centre = await remoteOf(point.x, point.y);
+    const right = await remoteOf(point.x + 100, point.y);
+    const space = await page.evaluate(() => window.touchHarness.snapshot().calls.filter((call) => call.method === 'setViewport').length);
+    assert.ok(Math.abs((right[0] - centre[0]) - 50 * (centre[0] / (point.x - before.x))) < 2, `100 px on a 2× picture must cover half as many remote pixels: ${centre} ${right}`);
+    assert.equal(space, 0, 'Zooming the picture must not resize the remote desktop');
+    // Two fingers moving together pan the zoomed picture instead of scrolling the page.
+    await clear(page);
+    await sendTouch('touchStart', [[point.x - 40, point.y, 1], [point.x + 40, point.y, 2]]);
+    for (const dx of [20, 40, 60]) {
+      await sendTouch('touchMove', [[point.x - 40 + dx, point.y, 1], [point.x + 40 + dx, point.y, 2]]);
+      await settle(page);
+    }
+    await sendTouch('touchEnd');
+    await settle(page);
+    const panned = await page.locator('video').boundingBox();
+    assert.ok(Math.abs(panned.x - zoomed.x - 60) < 2, `Two fingers must pan a zoomed picture: ${zoomed.x} → ${panned.x}`);
+    assert.equal(inputCalls(await snapshot(page), 'scroll').length, 0);
+    // Pinching back to full size returns to the whole picture.
+    await sendTouch('touchStart', [[point.x - 100, point.y, 1], [point.x + 100, point.y, 2]]);
+    for (const spread of [80, 60, 40]) {
+      await sendTouch('touchMove', [[point.x - spread, point.y, 1], [point.x + spread, point.y, 2]]);
+      await settle(page);
+    }
+    await sendTouch('touchEnd');
+    await settle(page);
+    assert.deepEqual(await page.locator('video').boundingBox(), before, 'Pinching in must return to the whole picture');
+    check('native pinch: zooms the picture about the fingers, taps map through it, two fingers pan it, pinching in restores it');
     await cdp.detach();
   }
 

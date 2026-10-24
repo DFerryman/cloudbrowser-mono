@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import { TouchGestureController, type TouchGestureOptions } from '../src/touch.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DOUBLE_TAP_MS, HOLD_MS, TouchGestureController, TWO_FINGER_TAP_MS, type TouchGestureOptions } from '../src/touch.js';
 
 const pointer = (pointerId: number, clientX: number, clientY: number) => ({ pointerId, clientX, clientY });
 
@@ -81,18 +81,20 @@ describe('TouchGestureController', () => {
     expect(button).not.toHaveBeenCalled();
   });
 
-  it('never clicks a stationary two-finger gesture, and allows a new single-finger tap afterward', () => {
-    const { gestures, button, scroll } = setup();
+  it('right-clicks between two fingers tapped together, and allows a new single-finger tap afterward', () => {
+    const { gestures, move, button, scroll } = setup();
     gestures.pointerDown(pointer(1, 40, 100));
     gestures.pointerDown(pointer(2, 80, 100));
     gestures.pointerUp(pointer(1, 40, 100));
-    gestures.pointerUp(pointer(2, 80, 100));
     expect(button).not.toHaveBeenCalled();
+    gestures.pointerUp(pointer(2, 80, 100));
+    expect(move).toHaveBeenCalledExactlyOnceWith(120, 200);
+    expect(button.mock.calls).toEqual([[true, 120, 200, 2], [false, 120, 200, 2]]);
     expect(scroll).not.toHaveBeenCalled();
 
     gestures.pointerDown(pointer(3, 30, 20));
     gestures.pointerUp(pointer(3, 30, 20));
-    expect(button.mock.calls).toEqual([[true, 60, 40], [false, 60, 40]]);
+    expect(button.mock.calls.slice(2)).toEqual([[true, 60, 40], [false, 60, 40]]);
   });
 
   it('cancels pointers without clicking and resets the remaining finger\'s scroll origin', () => {
@@ -178,12 +180,230 @@ describe('TouchGestureController', () => {
     gestures.pointerDown({ ...pointer(2, 60, 60), isPrimary: true });
     gestures.pointerUp(pointer(2, 60, 60));
     expect(button.mock.calls).toEqual([[true, 120, 120], [false, 120, 120]]);
-    // A second finger of the same touch still makes it a two-finger gesture, never a tap.
+    // A second finger of the same touch still makes it a two-finger gesture, never a left tap.
     gestures.pointerDown({ ...pointer(3, 20, 20), isPrimary: true });
     gestures.pointerDown({ ...pointer(4, 60, 20), isPrimary: false });
     gestures.pointerUp(pointer(4, 60, 20));
     gestures.pointerUp(pointer(3, 20, 20));
-    expect(button).toHaveBeenCalledTimes(2);
+    expect(button.mock.calls.slice(2)).toEqual([[true, 80, 40, 2], [false, 80, 40, 2]]);
     expect(scroll).not.toHaveBeenCalled();
+  });
+});
+
+describe('TouchGestureController with time', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('right-clicks where a finger was held still, once it lifts', () => {
+    const held = vi.fn();
+    const { gestures, move, button } = setup({ held });
+    gestures.pointerDown(pointer(1, 20, 30));
+    vi.advanceTimersByTime(HOLD_MS - 1);
+    expect(held).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(held).toHaveBeenCalledExactlyOnceWith(20, 30);
+    expect(button).not.toHaveBeenCalled();
+    // The finger shifts as it lifts: still a right-click where it was held.
+    gestures.pointerUp(pointer(1, 31, 30));
+    expect(move).toHaveBeenCalledExactlyOnceWith(40, 60);
+    expect(button.mock.calls).toEqual([[true, 40, 60, 2], [false, 40, 60, 2]]);
+  });
+
+  it('drags with the left button from where a finger was held, once it moves', () => {
+    const { gestures, move, button, scroll } = setup({ held: vi.fn() });
+    gestures.pointerDown(pointer(1, 100, 100));
+    vi.advanceTimersByTime(HOLD_MS);
+    gestures.pointerMove(pointer(1, 100, 104));
+    expect(button).not.toHaveBeenCalled();
+    gestures.pointerMove(pointer(1, 100, 120));
+    expect(button.mock.calls).toEqual([[true, 200, 200]]);
+    gestures.pointerMove(pointer(1, 130, 140));
+    // Off the picture the button stays down where the finger last was on it.
+    gestures.pointerMove(pointer(1, -5, 140));
+    gestures.pointerUp(pointer(1, -5, 140));
+    expect(move.mock.calls).toEqual([[200, 200], [200, 240], [260, 280]]);
+    expect(button.mock.calls).toEqual([[true, 200, 200], [false, 260, 280]]);
+    expect(scroll).not.toHaveBeenCalled();
+  });
+
+  it('holds neither a finger that moved first nor one that lifted, and keeps other fingers out of a hold', () => {
+    const held = vi.fn();
+    const { gestures, button, scroll } = setup({ held });
+    gestures.pointerDown(pointer(1, 100, 100));
+    gestures.pointerMove(pointer(1, 100, 80));
+    vi.advanceTimersByTime(HOLD_MS);
+    gestures.pointerUp(pointer(1, 100, 80));
+    gestures.pointerDown(pointer(2, 100, 100));
+    gestures.pointerUp(pointer(2, 100, 100));
+    vi.advanceTimersByTime(HOLD_MS);
+    expect(held).not.toHaveBeenCalled();
+    expect(scroll.mock.calls).toEqual([[0, 20]]);
+    expect(button.mock.calls).toEqual([[true, 200, 200], [false, 200, 200]]);
+
+    gestures.pointerDown(pointer(3, 10, 10));
+    vi.advanceTimersByTime(HOLD_MS);
+    expect(gestures.pointerDown(pointer(4, 50, 50))).toBe(false);
+  });
+
+  it('lets go of a drag that is canceled or reset', () => {
+    const { gestures, button } = setup();
+    gestures.pointerDown(pointer(1, 100, 100));
+    vi.advanceTimersByTime(HOLD_MS);
+    gestures.pointerMove(pointer(1, 100, 120));
+    gestures.pointerCancel(pointer(1, 100, 120));
+    expect(button.mock.calls).toEqual([[true, 200, 200], [false, 200, 240]]);
+
+    gestures.pointerDown(pointer(2, 100, 100));
+    vi.advanceTimersByTime(HOLD_MS);
+    gestures.pointerMove(pointer(2, 120, 100));
+    gestures.reset();
+    expect(button.mock.calls.slice(2)).toEqual([[true, 200, 200], [false, 240, 200]]);
+    gestures.pointerUp(pointer(2, 120, 100));
+    expect(button).toHaveBeenCalledTimes(4);
+  });
+
+  it('double-clicks where the first tap landed when a second one follows close by', () => {
+    const { gestures, button } = setup();
+    const tap = (id: number, x: number, y: number) => {
+      gestures.pointerDown(pointer(id, x, y));
+      gestures.pointerUp(pointer(id, x, y));
+    };
+    tap(1, 100, 100);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS - 100);
+    tap(2, 110, 104);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS - 100);
+    // A third tap continues the run: a triple-click selects the paragraph.
+    tap(3, 96, 108);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS + 1);
+    tap(4, 110, 104);
+    tap(5, 300, 100);
+    const downs = button.mock.calls.filter(([down]) => down).map(([, x, y]) => [x, y]);
+    expect(downs).toEqual([[200, 200], [200, 200], [200, 200], [220, 208], [600, 200]]);
+  });
+
+  it('clicks where a tap lands when a scroll or a hold came between it and the last one', () => {
+    const { gestures, button } = setup();
+    const tap = (id: number, x: number, y: number) => {
+      gestures.pointerDown(pointer(id, x, y));
+      gestures.pointerUp(pointer(id, x, y));
+    };
+    tap(1, 100, 100);
+    gestures.pointerDown(pointer(2, 110, 100));
+    gestures.pointerMove(pointer(2, 110, 80));
+    gestures.pointerUp(pointer(2, 110, 80));
+    tap(3, 110, 100);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS + 1);
+    tap(4, 100, 100);
+    gestures.pointerDown(pointer(5, 100, 100));
+    gestures.pointerDown(pointer(6, 140, 100));
+    gestures.pointerUp(pointer(6, 140, 100));
+    gestures.pointerUp(pointer(5, 100, 100));
+    tap(7, 104, 100);
+    const downs = button.mock.calls.filter(([down]) => down).map(([, x, y]) => [x, y]);
+    expect(downs).toEqual([[200, 200], [220, 200], [200, 200], [240, 200], [208, 200]]);
+  });
+
+  it('does not right-click two fingers that stayed down long or moved', () => {
+    const { gestures, button } = setup();
+    gestures.pointerDown(pointer(1, 40, 100));
+    gestures.pointerDown(pointer(2, 80, 100));
+    vi.advanceTimersByTime(TWO_FINGER_TAP_MS + 1);
+    gestures.pointerUp(pointer(1, 40, 100));
+    gestures.pointerUp(pointer(2, 80, 100));
+
+    gestures.pointerDown(pointer(3, 40, 100));
+    gestures.pointerDown(pointer(4, 80, 100));
+    gestures.pointerMove(pointer(3, 40, 90));
+    gestures.pointerMove(pointer(4, 80, 90));
+    gestures.pointerUp(pointer(3, 40, 90));
+    gestures.pointerUp(pointer(4, 80, 90));
+    expect(button).not.toHaveBeenCalled();
+  });
+});
+
+describe('TouchGestureController with pinch zoom', () => {
+  function zoomable(zoomedIn = false) {
+    const zoom = vi.fn();
+    const zoomEnd = vi.fn();
+    const result = setup({ zoom, zoomEnd, zoomed: () => zoomedIn });
+    return { ...result, zoom, zoomEnd };
+  }
+
+  it('zooms about the fingers\' centre when they move apart, without scrolling or clicking', () => {
+    const { gestures, zoom, zoomEnd, scroll, button } = zoomable();
+    gestures.pointerDown(pointer(1, 100, 100));
+    gestures.pointerDown(pointer(2, 200, 100));
+    gestures.pointerMove(pointer(2, 220, 100));
+    expect(zoom).not.toHaveBeenCalled();
+    gestures.pointerMove(pointer(2, 260, 100));
+    expect(zoom).toHaveBeenCalledExactlyOnceWith(1.6, 180, 100, 30, 0);
+    gestures.pointerMove(pointer(1, 20, 100));
+    expect(zoom.mock.calls[1]).toEqual([1.5, 140, 100, -40, 0]);
+    gestures.pointerUp(pointer(1, 20, 100));
+    expect(zoomEnd).not.toHaveBeenCalled();
+    // The finger left pans without scaling.
+    gestures.pointerMove(pointer(2, 260, 80));
+    expect(zoom.mock.calls[2]).toEqual([1, 260, 80, 0, -20]);
+    gestures.pointerUp(pointer(2, 260, 80));
+    expect(zoomEnd).toHaveBeenCalledOnce();
+    expect(scroll).not.toHaveBeenCalled();
+    expect(button).not.toHaveBeenCalled();
+  });
+
+  it('scrolls two fingers moving together at full size, and pans the picture with them once zoomed in', () => {
+    const plain = zoomable(false);
+    plain.gestures.pointerDown(pointer(1, 100, 100));
+    plain.gestures.pointerDown(pointer(2, 200, 100));
+    plain.gestures.pointerMove(pointer(1, 100, 80));
+    plain.gestures.pointerMove(pointer(2, 200, 80));
+    expect(plain.scroll.mock.calls).toEqual([[0, 10], [0, 10]]);
+    expect(plain.zoom).not.toHaveBeenCalled();
+
+    const zoomed = zoomable(true);
+    zoomed.gestures.pointerDown(pointer(1, 100, 100));
+    zoomed.gestures.pointerDown(pointer(2, 200, 100));
+    zoomed.gestures.pointerMove(pointer(1, 100, 80));
+    zoomed.gestures.pointerMove(pointer(2, 200, 80));
+    expect(zoomed.scroll).not.toHaveBeenCalled();
+    expect(zoomed.zoom.mock.calls.map(([factor, x, y, dx, dy]) => [Number(factor.toFixed(3)), x, y, dx, dy])).toEqual([[1.02, 150, 90, 0, -10], [0.981, 150, 80, 0, -10]]);
+  });
+
+  it('pinches, or pans a zoomed picture, with a finger added to a scroll, and never taps after it', () => {
+    const plain = zoomable(false);
+    plain.gestures.pointerDown(pointer(1, 100, 100));
+    plain.gestures.pointerMove(pointer(1, 100, 80));
+    plain.gestures.pointerDown(pointer(2, 200, 80));
+    plain.gestures.pointerMove(pointer(2, 300, 80));
+    expect(plain.scroll.mock.calls).toEqual([[0, 20]]);
+    expect(plain.zoom).toHaveBeenCalledExactlyOnceWith(2, 200, 80, 50, 0);
+    plain.gestures.pointerUp(pointer(2, 300, 80));
+    plain.gestures.pointerUp(pointer(1, 100, 80));
+    expect(plain.button).not.toHaveBeenCalled();
+
+    const zoomed = zoomable(true);
+    zoomed.gestures.pointerDown(pointer(1, 100, 100));
+    zoomed.gestures.pointerMove(pointer(1, 100, 80));
+    zoomed.gestures.pointerDown(pointer(2, 200, 80));
+    zoomed.gestures.pointerUp(pointer(2, 200, 80));
+    zoomed.gestures.pointerUp(pointer(1, 100, 80));
+    expect(zoomed.button).not.toHaveBeenCalled();
+    zoomed.gestures.pointerDown(pointer(3, 100, 100));
+    zoomed.gestures.pointerMove(pointer(3, 100, 80));
+    zoomed.gestures.pointerDown(pointer(4, 200, 80));
+    zoomed.gestures.pointerMove(pointer(3, 100, 60));
+    zoomed.gestures.pointerMove(pointer(4, 200, 60));
+    expect(zoomed.scroll.mock.calls).toEqual([[0, 20], [0, 20]]);
+    expect(zoomed.zoom.mock.calls.map(([, x, y, dx, dy]) => [x, y, dx, dy])).toEqual([[150, 70, 0, -10], [150, 60, 0, -10]]);
+  });
+
+  it('still taps, holds and two-finger taps while zoomed in', () => {
+    const { gestures, button } = zoomable(true);
+    gestures.pointerDown(pointer(1, 20, 30));
+    gestures.pointerUp(pointer(1, 20, 30));
+    gestures.pointerDown(pointer(2, 40, 100));
+    gestures.pointerDown(pointer(3, 80, 100));
+    gestures.pointerUp(pointer(2, 40, 100));
+    gestures.pointerUp(pointer(3, 80, 100));
+    expect(button.mock.calls).toEqual([[true, 40, 60], [false, 40, 60], [true, 120, 200, 2], [false, 120, 200, 2]]);
   });
 });

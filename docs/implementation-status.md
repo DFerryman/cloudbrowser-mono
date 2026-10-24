@@ -329,7 +329,16 @@ Cloudflare deployment.
   with the geometry it hit-tested, instead of client coordinates against `getBoundingClientRect`.
   More → *Input diagnostics* (or `?debug=input`) draws a marker at the registered point of each
   pointer down and up, in the box, with the geometry behind the mapping: it shows beside the
-  finger exactly when painting and hit-testing disagree. *Maximize* on phones and tablets, and wherever element fullscreen is unavailable, is
+  finger exactly when painting and hit-testing disagree.
+- **Touch gestures** (`packages/viewer/src/touch.ts`): a tap clicks, and a second tap within
+  400 ms and 24 px clicks exactly where the first did, so Chrome counts a double-click (it allows
+  4 remote pixels). A finger held still for 0.5 s right-clicks when it lifts, or drags with the left
+  button from where it was held once it moves (text selection, sliders); a larger ring marks the
+  hold. One finger, or two moving together, scroll the page as far as the finger moved over the
+  picture; two fingers tapped together right-click between them. Two fingers pinched zoom the
+  picture itself on the device (up to 4×, `zoom.ts`; the remote screen keeps its size), and while
+  it is zoomed in, two fingers pan it; a pinch that ends below 1.1× returns to the whole picture.
+  Input maps back through the zoom. *Maximize* on phones and tablets, and wherever element fullscreen is unavailable, is
   an in-page mode (toolbar hidden, a floating control with keyboard, rotate and exit) because
   WebKit allows no keyboard input in a fullscreen element on iPhone and iPad; desktops keep the
   Fullscreen API with Keyboard Lock. More → *Reconnect live view* reconnects in place, and a
@@ -418,7 +427,7 @@ Considered and **not** used:
 
 - **Real browsers**: a pre-built golden image and image signing.
 - **Live view extras**: file upload and download channels, quality modes (Auto / Sharp text /
-  Smooth motion), pausing video after 60 s in a hidden tab, touch gestures, sending quality
+  Smooth motion), pausing video after 60 s in a hidden tab, sending quality
   aggregates to `viewer_sessions`. The neko event names and data-channel opcodes follow neko v3 and
   are confirmed against the pinned image when it is built.
 - Agent: browser container supervision through containerd, neko credentials per wake.
