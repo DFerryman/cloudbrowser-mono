@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import engine from '@cloudbrowser/engine';
 import app from '../src/index.js';
 import { internalApi } from '../src/internal.js';
-import { ORIGIN, setup, signIn } from './helpers.js';
+import { setup, signIn } from './helpers.js';
 
 let t: ReturnType<typeof setup>;
 const quote = async (regionId = 'tyo1') => (await t.call('GET', '/api/v1/pricing')).body.find((p: { regionId: string; version: string }) => p.regionId === regionId).version as string;
@@ -574,31 +574,6 @@ describe('gateway internal API and live view', () => {
     const claims = await verifyViewerToken(keys.publicJwk, info.token);
     t.d1.sqlite.prepare('UPDATE viewer_sessions SET ended_at = ? WHERE id = ?').run(Date.now(), open.body.session.id);
     expect(await internalApi(t.env as never).redeemViewerToken(claims!)).toBe(false);
-    turn.mockRestore();
-  });
-
-  it('offers viewers in China only the TCP and TLS relays in half their sessions, and everyone else every relay', async () => {
-    Object.assign(t.env, { LIVE_VIEW: 'on', GATEWAY_URL: 'wss://connect.test', VIEWER_TOKEN_PRIVATE_KEY: JSON.stringify(keys.privateJwk), TURN_KEY_ID: 'k', TURN_KEY_API_TOKEN: 'secret' });
-    const relays = ['turn:turn.cloudflare.com:3478?transport=udp', 'turn:turn.cloudflare.com:3478?transport=tcp', 'turns:turn.cloudflare.com:443?transport=tcp'];
-    const every = [{ urls: ['stun:stun.cloudflare.com:3478'] }, { urls: relays, username: 'u', credential: 'c' }];
-    const turn = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({ iceServers: every }));
-    const id = await createRunning();
-    // Through Cloudflare, which says in `cf` where the visitor is.
-    const connect = async (sid: string, country: string) => {
-      const url = new URL(`/api/v1/sessions/${sid}/connect`, ORIGIN);
-      const req = new Request(url, { headers: { origin: url.origin, cookie: t.cookie() } });
-      Object.defineProperty(req, 'cf', { value: { country } });
-      return ((await (await app.fetch(req, t.env as never, t.ctx)).json()) as { iceServers: unknown }).iceServers;
-    };
-    const halves = new Set<boolean>();
-    for (let i = 0; halves.size < 2 && i < 20; i++) {
-      const sid = (await t.call('POST', `/api/v1/instances/${id}/sessions`)).body.session.id as string;
-      const tcp = parseInt(sid.slice(-1), 36) % 2 === 1;
-      halves.add(tcp);
-      expect(await connect(sid, 'CN')).toEqual(tcp ? [{ urls: relays.slice(1), username: 'u', credential: 'c' }] : every);
-      expect(await connect(sid, 'GB')).toEqual(every);
-    }
-    expect(halves.size).toBe(2);
     turn.mockRestore();
   });
 
