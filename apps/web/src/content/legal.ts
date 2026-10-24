@@ -14,7 +14,7 @@ const en: Record<PolicySlug, Article> = {
     title: 'Terms of Service',
     summary: 'The agreement between you and Nevazu when you use the service.',
     blocks: [
-      { p: 'These terms apply when you use Nevazu (“the service”, “we”, “us”) at nevazu.com. You accept them when you sign in, and again each time you buy credit, when you tick the box confirming you have read them before you pay. If you use the service for an organisation, you accept them on its behalf.' },
+      { p: 'These terms apply when you use Nevazu (“the service”, “we”, “us”) at nevazu.com. You accept them when you sign in. Before your first payment, and again whenever these terms change, you also accept them by ticking the box at checkout. If you use the service for an organisation, you accept them on its behalf.' },
       { h: '1. The service' },
       { p: 'Nevazu provides cloud-hosted Chrome browsers, each on its own virtual machine with a dedicated IP address and persistent encrypted storage, which you view and control over the internet. During the pilot the service is available by invitation only and features may change.' },
       { h: '2. Your account' },
@@ -136,7 +136,7 @@ const zh: Record<PolicySlug, Article> = {
     title: '服务条款',
     summary: '你使用 Nevazu 服务时与我们之间的协议。',
     blocks: [
-      { p: '本条款适用于你在 nevazu.com 使用 Nevazu（“本服务”“我们”）。你在登录时接受本条款，并在每次购买余额、付款前勾选确认已阅读本条款时再次接受。如果你代表某个组织使用本服务，即代表该组织接受本条款。' },
+      { p: '本条款适用于你在 nevazu.com 使用 Nevazu（“本服务”“我们”）。你在登录时接受本条款。首次付款前，以及本条款每次变更后，你还需在结账时勾选复选框以接受本条款。如果你代表某个组织使用本服务，即代表该组织接受本条款。' },
       { h: '1. 服务内容' },
       { p: 'Nevazu 提供托管在云端的 Chrome 浏览器，每个浏览器运行在独立的虚拟机上，配有独享 IP 和持久化加密存储，你可以通过互联网查看和控制。试用期间本服务仅限受邀使用，功能可能会调整。' },
       { h: '2. 你的账户' },
