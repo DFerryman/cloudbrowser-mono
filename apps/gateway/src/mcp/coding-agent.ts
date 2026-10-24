@@ -65,7 +65,7 @@ type LeaseCheck = 'ok' | 'session_ended' | 'billing_denied' | 'unavailable';
 export const VM_TIMEOUT_MS = AUTOMATION_LIMITS.maxActMs + 15_000;
 /** A protocol 1 VM refuses with desktop_unavailable while the session's desktop opens: asked again this often. */
 export const READINESS_RETRY_MS = 1000;
-/** The session, key and credit check is reused for this long, like a viewer's input lease. */
+/** The session, key and credit check is reused for this long (a viewer's input lease is longer). */
 const LEASE_MS = 1000;
 /** get_status asks the VM for the screen and its capabilities, but does not wait long for them. */
 const STATUS_TIMEOUT_MS = 5000;

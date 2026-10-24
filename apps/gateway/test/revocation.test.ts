@@ -2,7 +2,7 @@ import { signViewerToken } from '@cloudbrowser/contracts';
 import { createTestD1 } from '@cloudbrowser/db/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker, { Internal } from '../src/index.js';
-import { InstanceGateway } from '../src/instance-gateway.js';
+import { INPUT_AUTH_LEASE_MS, InstanceGateway, RENEW_BEFORE_MS } from '../src/instance-gateway.js';
 import type { Env } from '../src/env.js';
 import { Socket, UpgradeResponse, state } from './harness.js';
 
@@ -57,17 +57,17 @@ async function open(role: 'agent' | 'viewer', headers: Record<string, string> = 
   return { response, socket: ctx.getWebSockets(role).at(-1)! };
 }
 
-/** Inside the last half of the one-second lease, where a frame triggers a background re-check. */
-const INPUT_RENEW_AT = 600;
+/** Inside the lease's last stretch, where a frame triggers a background re-check. */
+const INPUT_RENEW_AT = INPUT_AUTH_LEASE_MS - RENEW_BEFORE_MS + 100;
 const ATTEMPT_ID = '5eac2d85-529c-4eec-8398-dd2d25bda1f3';
 
 const frame = (socket: Socket, payload: unknown) => gateway.webSocketMessage(socket as unknown as WebSocket, JSON.stringify(payload));
 
 function expireAuthorizationLease() {
-  // A lost RPC is caught at the existing one-second authorization boundary. This applies to
-  // signaling as well as input; explicit stop/delete RPCs above still revoke synchronously.
+  // A lost RPC is caught at the authorization lease's boundary. This applies to signaling as
+  // well as input; explicit stop/delete RPCs above still revoke synchronously.
   vi.useFakeTimers({ toFake: ['Date'] });
-  vi.setSystemTime(Date.now() + 1001);
+  vi.setSystemTime(Date.now() + INPUT_AUTH_LEASE_MS + 1);
 }
 
 describe('gateway revocation', () => {
@@ -293,8 +293,8 @@ describe('gateway revocation', () => {
     release();
     for (let turn = 0; turn < 50; turn++) await Promise.resolve();
     await new Promise(resolve => setTimeout(resolve, 0));
-    // Past the original lease (start + 1000), the renewed one (until start + 1600) still covers the relay with no new read.
-    vi.setSystemTime(start + 1050);
+    // Past the original lease, the renewed one (from start + INPUT_RENEW_AT) still covers the relay with no new read.
+    vi.setSystemTime(start + INPUT_AUTH_LEASE_MS + 50);
     const before = reads.mock.calls.length;
     await frame(viewer.socket, { t: 'neko', data: { event: 'signal/candidate' } });
     expect(agent.socket.sent.at(-1)).toMatchObject({ t: 'viewer', data: { t: 'neko', data: { event: 'signal/candidate' } } });
@@ -753,6 +753,21 @@ describe('gateway revocation', () => {
     await gateway.alarm();
     expect(viewer.socket.closed).toBeNull();
     expect(await ctx.storage.get('alarm')).toBe(Date.now() + 10_000);
+  });
+
+  it('lets an idle viewer\'s tap through on the lease its last re-check granted, with no D1 read', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
+    const agent = await open('agent');
+    const viewer = await open('viewer');
+    vi.setSystemTime(Date.now() + 10_000);
+    await gateway.alarm();
+    // Seconds later, with nothing sent since: a phone's next tap, from a gateway far from D1.
+    vi.setSystemTime(Date.now() + 6_000);
+    const reads = vi.spyOn(d1, 'prepare');
+    await frame(viewer.socket, { t: 'neko', data: { event: 'control/buttondown', payload: { code: 1 } } });
+    expect(reads).not.toHaveBeenCalled();
+    expect(agent.socket.sent.at(-1)).toMatchObject({ t: 'viewer', data: { t: 'neko', data: { event: 'control/buttondown' } } });
   });
 
   it('does not accept an upgrade whose earlier database read completes after a revoke RPC', async () => {

@@ -30,24 +30,31 @@ const MAX_QUEUED_FRAMES = 4096;
 const MAX_QUEUED_FRAME_BYTES = 4 * 1024 * 1024;
 /** A coding agent's actions count as activity for auto-sleep this often, like a viewer's input. */
 const AUTOMATION_ACTIVITY_MS = 30_000;
-/** All relay frames share a short authorization lease; stop/delete RPCs revoke it immediately. */
-const INPUT_AUTH_LEASE_MS = 1000;
+/**
+ * All relay frames share an authorization lease; stop/delete RPCs and a takeover revoke it at
+ * once, and a credit deadline ends it early. Each check reads D1 in eastern North America, about
+ * 330 ms from a gateway object in Asia: a one-second lease put those reads, and the frames held
+ * up when one fell behind, into every second of use. What only a check notices (a session ended
+ * without a takeover, a browser the engine stopped) is noticed within this long.
+ */
+export const INPUT_AUTH_LEASE_MS = 10_000;
 /**
  * A lease in use is re-checked this long before it lapses, in the background, so the ordered
- * relay (the WebRTC handshake, typing) does not stall on D1 every second. The checks and the
- * lease length are unchanged; a frame that finds an expired lease still waits for a fresh check.
+ * relay (the WebRTC handshake, typing) does not stall on D1: long enough for a cross-region read
+ * and a retry. A frame that finds an expired lease still waits for a fresh check.
  */
-const RENEW_BEFORE_MS = 500;
+export const RENEW_BEFORE_MS = 2_000;
 /**
  * With no frames to re-check, the alarm re-checks open viewers this often (or at an earlier
- * credit deadline). Frames still use the one-second lease; stop and delete RPCs still
- * revoke at once. Re-reading D1 every second for an idle viewer only multiplied the chance that a
+ * credit deadline), as their leases lapse: an idle viewer's next tap finds a valid lease. It must
+ * not be shorter than the lease, or the alarm would find every lease still valid and fire again
+ * at once. Re-reading D1 every second for an idle viewer only multiplied the chance that a
  * transient read error closed a healthy connection.
  */
-const IDLE_RECHECK_MS = 10_000;
+const IDLE_RECHECK_MS = INPUT_AUTH_LEASE_MS;
 /**
  * A viewer that sent a frame this recently has its lease renewed ahead of time, as a moving mouse
- * keeps renewing it with frames inside the lease's last half second. A touch screen sends nothing
+ * keeps renewing it with frames inside the lease's last two seconds. A touch screen sends nothing
  * between taps, so each tap after a pause waited for authorization reads from D1, in another
  * region, before it was relayed: half a second or more per tap. Idle viewers are re-checked by the
  * alarm only, so this costs reads only while someone is using the browser.
