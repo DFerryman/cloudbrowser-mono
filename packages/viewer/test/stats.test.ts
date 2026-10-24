@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readStats } from '../src/stats.js';
+import { readHandshake, readStats } from '../src/stats.js';
 
 const read = (values: Record<string, unknown>[]) => readStats({
   getStats: async () => new Map(values.map((value, index) => [String(value.id ?? index), value])),
@@ -86,5 +86,25 @@ describe('safe media stats', () => {
       { id: 'remote', type: 'remote-candidate', candidateType: '10.0.0.1' },
     ]);
     expect(media).toEqual({ inboundVideo: true });
+  });
+
+  it('reads a handshake as counts and states only, from the video transport', async () => {
+    const values: Record<string, unknown>[] = [
+      { id: 'v', type: 'inbound-rtp', kind: 'video', transportId: 't', bytesReceived: 0 },
+      { id: 't', type: 'transport', dtlsState: 'connecting', bytesReceived: 1480, selectedCandidatePairId: 'p', dtlsCipher: 'private-cipher' },
+      { id: 'other', type: 'transport', dtlsState: 'failed', bytesReceived: 9 },
+      { id: 'p', type: 'candidate-pair', state: 'succeeded', requestsSent: 2, responsesReceived: 2, localCandidateId: 'l', currentRoundTripTime: 0.2 },
+      { id: 'q', type: 'candidate-pair', state: 'frozen', requestsSent: 0, responsesReceived: 0 },
+      { id: 'l', type: 'local-candidate', candidateType: 'relay', relayProtocol: 'tcp', address: '203.0.113.4', url: 'turn:private.example?transport=tcp' },
+      { id: 'h', type: 'local-candidate', candidateType: 'host', address: '10.0.0.2' },
+    ];
+    const reading = await readHandshake({ getStats: async () => new Map(values.map((v) => [String(v.id), v])) } as unknown as RTCPeerConnection);
+    expect(reading.handshake).toEqual({
+      candidates: { relayUdp: 0, relayTcp: 1, relayTls: 0, other: 1 },
+      pairs: { succeeded: 1, inProgress: 0, waiting: 1, failed: 0 },
+      checksSent: 2, checksAnswered: 2, dtlsState: 'connecting', transportBytesReceived: 1480,
+    });
+    expect(reading.media).toMatchObject({ inboundVideo: true, rttMs: 200, localCandidateType: 'relay', relayProtocol: 'tcp' });
+    expect(JSON.stringify(reading)).not.toMatch(/203\.0\.113|10\.0\.0|private|turn:/);
   });
 });

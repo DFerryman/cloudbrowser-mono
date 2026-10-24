@@ -11,6 +11,44 @@ export type ViewerSession = z.infer<typeof ViewerSession>;
 const MediaCounter = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const CandidateType = z.enum(['host', 'srflx', 'prflx', 'relay']);
 
+const Milliseconds = z.number().int().min(0).max(600_000);
+
+/**
+ * How far a WebRTC handshake got, from neko's offer on, for a picture that never came (and, at the
+ * first frame, how long each step took). Counts, states and STUN/TURN error codes only: never
+ * candidate addresses, URLs or error texts (docs/connection-diagnostics.md, "Handshake").
+ */
+export const ConnectionHandshake = z.object({
+  /**
+   * At failure, the first step that did not happen: `candidates` no local (relay) candidate, so
+   * the TURN relay was not reached or refused; `ice` no candidate pair worked; `dtls` the pair
+   * worked but the encrypted session never opened; `media` it opened but no video arrived;
+   * `decode` video arrived but no frame decoded; `render` frames decoded but none was shown.
+   */
+  stalledAt: z.enum(['candidates', 'ice', 'dtls', 'media', 'decode', 'render']).optional(),
+  /** From neko's offer: the first local candidate, ICE connected, the peer (DTLS) connected. */
+  candidateMs: Milliseconds.optional(),
+  iceMs: Milliseconds.optional(),
+  dtlsMs: Milliseconds.optional(),
+  /** Distinct icecandidateerror codes, in order (701: a STUN/TURN server did not answer; 4xx/5xx: it refused). */
+  turnErrors: z.array(z.number().int().min(0).max(999)).max(8).optional(),
+  /** Local candidates gathered: relays by the protocol to the TURN server, and any others. */
+  candidates: z.object({
+    relayUdp: MediaCounter, relayTcp: MediaCounter, relayTls: MediaCounter, other: MediaCounter,
+  }).strict().optional(),
+  /** Candidate pairs by state. */
+  pairs: z.object({
+    succeeded: MediaCounter, inProgress: MediaCounter, waiting: MediaCounter, failed: MediaCounter,
+  }).strict().optional(),
+  /** Connectivity checks sent on every pair, and the answers that came back. */
+  checksSent: MediaCounter.optional(),
+  checksAnswered: MediaCounter.optional(),
+  dtlsState: z.enum(['new', 'connecting', 'connected', 'closed', 'failed']).optional(),
+  /** Bytes the transport received (DTLS and media): whether anything came back on the pair at all. */
+  transportBytesReceived: MediaCounter.optional(),
+}).strict();
+export type ConnectionHandshake = z.infer<typeof ConnectionHandshake>;
+
 /** Fixed, bounded media evidence. No candidate addresses, credentials, SDP or error messages. */
 export const ConnectionMediaSnapshot = z.object({
   connectionState: z.enum(['new', 'connecting', 'connected', 'disconnected', 'failed', 'closed']).optional(),
@@ -44,6 +82,7 @@ export const ConnectionMediaSnapshot = z.object({
     playState: z.enum(['unknown', 'resolved', 'not_allowed', 'unsupported', 'aborted', 'failed']),
     frameCallback: z.boolean(),
   }).strict().optional(),
+  handshake: ConnectionHandshake.optional(),
 }).strict();
 export type ConnectionMediaSnapshot = z.infer<typeof ConnectionMediaSnapshot>;
 
@@ -80,8 +119,6 @@ export const ConnectionDiagnostic = z.object({
 });
 export type ConnectionDiagnostic = z.infer<typeof ConnectionDiagnostic>;
 
-const Milliseconds = z.number().int().min(0).max(600_000);
-
 /**
  * About a minute of a live view's quality, for baselines by browser region and viewer country
  * (docs/connection-diagnostics.md, "Live quality"). Medians and totals over the interval, read
@@ -114,6 +151,17 @@ export const LiveQualityReport = z.object({
   height: z.number().int().min(0).max(32_768).nullable(),
   localCandidateType: CandidateType.optional(),
   relayProtocol: z.enum(['udp', 'tcp', 'tls']).optional(),
+  /**
+   * Repairs in the interval: NACKs sent (packets asked for again), retransmissions received, and
+   * picture loss indications (keyframes asked for). Loss that retransmission repaired never shows
+   * in `loss`, yet costs a round trip per repair. Optional: older viewers do not send them.
+   */
+  nacks: z.number().int().min(0).max(1_000_000).nullable().optional(),
+  retransmits: z.number().int().min(0).max(1_000_000).nullable().optional(),
+  plis: z.number().int().min(0).max(100_000).nullable().optional(),
+  keyframes: z.number().int().min(0).max(100_000).nullable().optional(),
+  /** Times the viewer switched picture level in the interval. */
+  levelChanges: z.number().int().min(0).max(10_000).optional(),
 }).strict();
 export type LiveQualityReport = z.infer<typeof LiveQualityReport>;
 

@@ -1,4 +1,4 @@
-import { TIERS } from '@cloudbrowser/contracts';
+import { ConnectionDiagnostic, TIERS } from '@cloudbrowser/contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { keysymFor, keysymForName } from '../src/keyboard.js';
 import { decode, encode, fitScreen, MIN_SCREEN_SIDE, shapedScreen, squarePixels } from '../src/neko.js';
@@ -510,6 +510,11 @@ describe('RemoteBrowser', () => {
       height: 1080,
       localCandidateType: 'relay',
       relayProtocol: 'udp',
+      nacks: null,
+      retransmits: null,
+      plis: null,
+      keyframes: null,
+      levelChanges: 0,
     });
     // Hidden 20 s into the next minute: those 20 s are reported now, and nothing while hidden.
     await vi.advanceTimersByTimeAsync(20_000);
@@ -1603,8 +1608,41 @@ describe('RemoteBrowser', () => {
     pc.connect();
     await vi.advanceTimersByTimeAsync(8_001);
     const failure = onDiagnostic.mock.calls.map(([d]) => d).find((d) => d.code === 'connection_timeout');
-    expect(failure.media).toEqual({ connectionState: 'connected' });
+    // The peer connected; without a recent reading, where the picture stalled is left unknown.
+    expect(failure.media).toEqual({ connectionState: 'connected', handshake: { dtlsMs: 0 } });
     expect(JSON.stringify(onDiagnostic.mock.calls)).not.toContain('private-stats-error');
+    b.disconnect();
+  });
+
+  it('says where a handshake that never produced a picture stopped, with TURN error codes only', async () => {
+    vi.useFakeTimers();
+    /** A peer with listeners and stats, whose TURN relay never answers. */
+    class ProbedPC extends FakePC {
+      readonly events = new EventTarget();
+      iceConnectionState = 'new';
+      iceGatheringState = 'gathering';
+      addEventListener(type: string, listener: EventListener) { this.events.addEventListener(type, listener); }
+      removeEventListener(type: string, listener: EventListener) { this.events.removeEventListener(type, listener); }
+      getStats = vi.fn(async () => new Map([['t', { id: 't', type: 'transport', dtlsState: 'new', bytesReceived: 0 }]]));
+    }
+    const onDiagnostic = vi.fn();
+    const { b } = setup([{ urls: ['turn:turn.example:3478?transport=udp'], username: 'u', credential: 'private-credential' }],
+      { onDiagnostic, connectionTimeoutMs: 5_000, maxConnectionAttempts: 1, RTCPeerConnectionImpl: ProbedPC as never });
+    await b.connect();
+    FakeWS.all[0]!.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    const pc = FakePC.last as ProbedPC;
+    pc.events.dispatchEvent(Object.assign(new Event('icecandidateerror'), { errorCode: 701, url: 'turn:turn.example:3478', errorText: 'private' }));
+    await vi.advanceTimersByTimeAsync(5_000);
+    const failure = onDiagnostic.mock.calls.map(([d]) => d).find((d) => d.code === 'connection_timeout');
+    expect(failure.media.handshake).toEqual({
+      stalledAt: 'candidates', turnErrors: [701],
+      candidates: { relayUdp: 0, relayTcp: 0, relayTls: 0, other: 0 },
+      pairs: { succeeded: 0, inProgress: 0, waiting: 0, failed: 0 },
+      checksSent: 0, checksAnswered: 0, dtlsState: 'new', transportBytesReceived: 0,
+    });
+    expect(ConnectionDiagnostic.safeParse(failure).success).toBe(true);
+    expect(JSON.stringify(onDiagnostic.mock.calls)).not.toMatch(/turn\.example|private/);
     b.disconnect();
   });
 
@@ -1619,7 +1657,8 @@ describe('RemoteBrowser', () => {
     FakePC.last.connect();
     await vi.advanceTimersByTimeAsync(100);
     const failure = onDiagnostic.mock.calls.map(([d]) => d).find((d) => d.code === 'connection_timeout');
-    expect(failure.media).toEqual({ connectionState: 'connected' });
+    // The peer connected; without a recent reading, where the picture stalled is left unknown.
+    expect(failure.media).toEqual({ connectionState: 'connected', handshake: { dtlsMs: 0 } });
     expect(JSON.stringify(onDiagnostic.mock.calls)).not.toContain('private.example');
     b.disconnect();
   });
@@ -2043,7 +2082,7 @@ describe('RemoteBrowser', () => {
     current.ontrack({ streams: [{ getTracks: () => [track] }], track });
     b.reportFirstFrame(new URL(ws.url).searchParams.get('attemptId')!, onStream.mock.calls[0]![2]);
     const frame = onDiagnostic.mock.calls.map(([d]) => d).find((d) => d.stage === 'first_frame');
-    expect(frame.media).toEqual({ connectionState: 'connected' });
+    expect(frame.media).toEqual({ connectionState: 'connected', handshake: { dtlsMs: 0 } });
     await vi.advanceTimersByTimeAsync(2_000);
     expect(current.getStats).toHaveBeenCalledTimes(1);
     expect(onStats).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ width: 1280 }));
@@ -2075,7 +2114,7 @@ describe('RemoteBrowser', () => {
     pc.ontrack({ streams: [{ getTracks: () => [track] }], track });
     b.reportFirstFrame(new URL(ws.url).searchParams.get('attemptId')!, onStream.mock.calls[0]![2]);
     const frame = onDiagnostic.mock.calls.map(([d]) => d).find((d) => d.stage === 'first_frame');
-    expect(frame.media).toEqual({ connectionState: 'connected' });
+    expect(frame.media).toEqual({ connectionState: 'connected', handshake: { dtlsMs: 0 } });
     b.disconnect();
   });
 

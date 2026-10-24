@@ -807,7 +807,7 @@ v1.openapi(
     const s = await ownedSession(c, c.req.valid('param').id);
     const report = c.req.valid('json');
     console.info('viewer connection', {
-      source: 'viewer', instanceId: s.instanceId, sessionId: s.id,
+      source: 'viewer', instanceId: s.instanceId, sessionId: s.id, clientBuild: clientBuild(c),
       ...report, observedAt: new Date().toISOString(),
     });
     return c.body(null, 204);
@@ -815,7 +815,13 @@ v1.openapi(
 );
 
 /** Analytics Engine stores numbers only: a reading the browser did not have is -1. */
-const measured = (value: number | null) => value ?? -1;
+const measured = (value: number | null | undefined) => value ?? -1;
+
+/** The web app's commit (apps/web/vite.config.ts), as its requests name it; '' when absent or malformed. */
+function clientBuild(c: { req: { header(name: string): string | undefined } }): string {
+  const build = c.req.header('x-client-build') ?? '';
+  return /^[0-9a-f]{7,40}\+?$/.test(build) ? build : '';
+}
 
 v1.openapi(
   createRoute({
@@ -837,12 +843,13 @@ v1.openapi(
       indexes: [s.regionId],
       blobs: [
         s.regionId, cf?.country ?? '', cf?.colo ?? '', cf?.asn ? String(cf.asn) : '', r.quality ?? '',
-        r.localCandidateType ?? '', r.relayProtocol ?? '', s.instanceId, s.id, r.attemptId,
+        r.localCandidateType ?? '', r.relayProtocol ?? '', s.instanceId, s.id, r.attemptId, clientBuild(c),
       ],
       doubles: [
         r.durationMs, r.readings, measured(r.rttMs), measured(r.gatewayRttMs), measured(r.fps), measured(r.kbps),
         measured(r.loss), r.freezes, measured(r.freezeMs), measured(r.jitterBufferMs), measured(r.decodeMs),
         measured(r.framesDropped), measured(r.width), measured(r.height),
+        measured(r.nacks), measured(r.retransmits), measured(r.plis), measured(r.keyframes), measured(r.levelChanges),
       ],
     });
     return c.body(null, 204);

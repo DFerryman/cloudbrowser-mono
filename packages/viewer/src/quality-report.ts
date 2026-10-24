@@ -12,6 +12,10 @@ export interface QualityCounters {
   jitterBufferEmitted: number;
   decodeSeconds: number;
   dropped: number;
+  nacks: number;
+  retransmits: number;
+  plis: number;
+  keyframes: number;
 }
 
 type Reading = { at: number; stats: ViewerStats; counters: QualityCounters; media: ConnectionMediaSnapshot };
@@ -44,6 +48,7 @@ export class QualityWindow {
   private fps: number[] = [];
   private kbps: number[] = [];
   private gateway: number[] = [];
+  private levelChanges = 0;
 
   /** When the baseline was read; null while the window has none. */
   get startedAt(): number | null {
@@ -70,6 +75,11 @@ export class QualityWindow {
     if (this.baseline && ms >= 0 && this.gateway.length < MAX_GATEWAY_SAMPLES) this.gateway.push(ms);
   }
 
+  /** The viewer switched picture level, while the window is open. */
+  levelChanged() {
+    if (this.baseline) this.levelChanges++;
+  }
+
   /**
    * The window's report, or null when it covers less than `minMs`. The next window starts from
    * this one's last reading, so no interval is counted twice or left out.
@@ -92,6 +102,7 @@ export class QualityWindow {
     this.fps = [];
     this.kbps = [];
     this.gateway = [];
+    this.levelChanges = 0;
   }
 
   private summarize(first: Reading, last: Reading, attemptId: string, quality: VideoQuality | null): LiveQualityReport | null {
@@ -106,6 +117,7 @@ export class QualityWindow {
     const buffered = growth(b.jitterBufferDelay, a.jitterBufferDelay);
     const decoding = growth(b.decodeSeconds, a.decodeSeconds);
     const dropped = growth(b.dropped, a.dropped);
+    const count = (now: number, before: number) => { const n = growth(now, before); return n === null ? null : Math.round(n); };
     // Some browsers omit framesPerSecond; decoded frames over the interval say the same.
     const fps = median(this.fps) ?? (frames !== null ? frames / (durationMs / 1000) : null);
     const kbps = median(this.kbps);
@@ -130,6 +142,11 @@ export class QualityWindow {
       height: last.stats.height,
       ...(last.media.localCandidateType ? { localCandidateType: last.media.localCandidateType } : {}),
       ...(last.media.relayProtocol ? { relayProtocol: last.media.relayProtocol } : {}),
+      nacks: count(b.nacks, a.nacks),
+      retransmits: count(b.retransmits, a.retransmits),
+      plis: count(b.plis, a.plis),
+      keyframes: count(b.keyframes, a.keyframes),
+      levelChanges: this.levelChanges,
     });
     // Values outside the contract's bounds (a broken counter) drop the report, not the view.
     return parsed.success ? parsed.data : null;

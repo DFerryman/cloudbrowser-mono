@@ -10,6 +10,7 @@ const stats = (over: Partial<ViewerStats> = {}): ViewerStats => ({
 const basic = (received: number, frames = Number.NaN): QualityCounters => ({
   lost: 0, received, freezes: 0, frames,
   freezeSeconds: Number.NaN, jitterBufferDelay: Number.NaN, jitterBufferEmitted: Number.NaN, decodeSeconds: Number.NaN, dropped: Number.NaN,
+  nacks: Number.NaN, retransmits: Number.NaN, plis: Number.NaN, keyframes: Number.NaN,
 });
 
 describe('quality report window', () => {
@@ -20,8 +21,23 @@ describe('quality report window', () => {
     expect(w.take(10_000, null)).toEqual({
       attemptId: ATTEMPT, durationMs: 30_000, readings: 1, rttMs: 100, gatewayRttMs: null, fps: null, kbps: null,
       loss: 0, freezes: 0, freezeMs: null, jitterBufferMs: null, decodeMs: null, framesDropped: null,
-      quality: null, width: null, height: null,
+      quality: null, width: null, height: null, nacks: null, retransmits: null, plis: null, keyframes: null, levelChanges: 0,
     });
+  });
+
+  it('counts repairs and level changes in the interval only', () => {
+    const w = new QualityWindow();
+    const repairs = (received: number, nacks: number, retransmits: number, plis: number, keyframes: number): QualityCounters =>
+      ({ ...basic(received), nacks, retransmits, plis, keyframes });
+    // A change before the window opens belongs to no report.
+    w.levelChanged();
+    w.add(ATTEMPT, 0, stats(), repairs(0, 40, 35, 1, 2), { inboundVideo: true });
+    w.levelChanged();
+    w.add(ATTEMPT, 30_000, stats(), repairs(9000, 640, 610, 4, 5), { inboundVideo: true });
+    w.levelChanged();
+    expect(w.take(10_000, 'medium')).toMatchObject({ nacks: 600, retransmits: 575, plis: 3, keyframes: 3, levelChanges: 2 });
+    w.add(ATTEMPT, 60_000, stats(), repairs(18_000, 640, 610, 4, 5), { inboundVideo: true });
+    expect(w.take(10_000, 'medium')).toMatchObject({ nacks: 0, retransmits: 0, plis: 0, keyframes: 0, levelChanges: 0 });
   });
 
   it('takes medians, continues from the last reading, and starts over for another attempt', () => {

@@ -12,6 +12,10 @@ export class ApiError extends Error {
   }
 }
 
+declare const __CLIENT_BUILD__: string | undefined;
+/** This build's commit (vite.config.ts), so diagnostics and quality reports name the code that sent them. */
+const CLIENT_BUILD = typeof __CLIENT_BUILD__ === 'string' ? __CLIENT_BUILD__ : '';
+
 type Options = { body?: unknown; idempotent?: boolean; idempotencyKey?: string; signal?: AbortSignal; headers?: Record<string, string>; keepalive?: boolean };
 
 /**
@@ -20,6 +24,7 @@ type Options = { body?: unknown; idempotent?: boolean; idempotencyKey?: string; 
  */
 export async function api<T>(method: string, path: string, opts: Options = {}): Promise<T> {
   const headers: Record<string, string> = { accept: 'application/json', ...opts.headers };
+  if (CLIENT_BUILD) headers['x-client-build'] = CLIENT_BUILD;
   if (opts.body !== undefined) headers['content-type'] = 'application/json';
   if (opts.idempotencyKey !== undefined) headers['idempotency-key'] = opts.idempotencyKey;
   else if (opts.idempotent) headers['idempotency-key'] = crypto.randomUUID();
