@@ -17,6 +17,9 @@
 #   (relay) for a better pair than the relay one a viewer offers, which cannot come; DTLS then
 #   spent a round trip on a cookie. Patched, the first pair that works is nominated and the cookie
 #   is skipped: the first picture comes about 1 s sooner (neko/faster-handshake.patch).
+# - Chrome held every frame in a jitter buffer sized for smooth playback, which grew over the first
+#   minutes; patched, video packets carry the playout-delay extension at 0, so a viewer shows each
+#   frame as soon as it is decoded (neko/playout-delay.patch).
 # Built as neko's own server/Dockerfile does (Go 1.25 on Debian trixie, the base image's OS);
 # NEKO_BUILD_IMAGE is an argument only so a local build can add a proxy's CA certificate.
 ARG NEKO_BUILD_IMAGE=golang:1.25-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73
