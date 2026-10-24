@@ -2,7 +2,8 @@ import { z } from 'zod';
 
 /**
  * Backups of a browser's data (page 4): provider snapshots of the volume (daily, kept 7 days) and
- * encrypted archives of the Chrome profile in R2 (on each sleep; last 10 plus one per day for 14 days).
+ * encrypted archives of the Chrome profile in an S3 bucket in the browser's own region (earlier ones in
+ * R2) (on each sleep; last 10 plus one per day for 14 days).
  */
 export const BackupKind = z.enum(['snapshot', 'archive']);
 export type BackupKind = z.infer<typeof BackupKind>;

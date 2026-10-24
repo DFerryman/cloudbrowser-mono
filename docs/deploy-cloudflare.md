@@ -119,8 +119,16 @@ openssl rand -base64 48 | pnpm exec wrangler secret put BOOTSTRAP_SECRET   # der
 - **TURN (live view):** Dashboard → Realtime → TURN → create a key, then on the api Worker set
   `TURN_KEY_ID` (var) and `TURN_KEY_API_TOKEN` (secret). Without them viewers get no relay servers.
 
-**Profile archives (R2).** Each sleep uploads an encrypted archive of the Chrome profile; the VM
-uploads straight to R2 through a 15-minute presigned URL, so the engine needs an R2 S3 API token:
+**Profile archives (S3 in the browser's region).** Each sleep uploads an encrypted archive of the
+Chrome profile straight from the VM through a 15-minute presigned URL. With
+`S3_ARCHIVE_BUCKET_PREFIX` set on the engine and the reaper, new archives go to the S3 bucket
+`<prefix><region>` in the browser's own AWS region, signed with the deployment's AWS role (runtime:
+`s3:PutObject`/`s3:GetObject`; reaper: `s3:DeleteObject`, on `arn:aws:s3:::<prefix>*/archives/*`).
+Create one bucket per offered region with `infra/aws/archive-buckets.sh`. Unset, new archives go to R2
+as before; archives already in R2 stay restorable there, and the reaper deletes them through the
+R2 binding, so keep the R2 settings below until the last R2 archive has expired (14 days).
+
+**Profile archives (R2, before S3).** The engine needs an R2 S3 API token:
 
 1. Dashboard → R2 → **Manage API tokens** → *Create API token*: permission **Object Read & Write**,
    limited to the bucket `cloudbrowser-archives`. Note the Access Key ID and Secret Access Key.

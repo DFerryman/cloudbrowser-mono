@@ -1,8 +1,8 @@
 import { createDb, schema, type AgentCommandsMessage, type OperationMessage } from '@cloudbrowser/db';
 import { and, eq, inArray } from 'drizzle-orm';
-import { createExecutor, refuseLaunches, type Executor, type ExecutorEnv, type ExecutorKind } from '@cloudbrowser/executors';
+import { awsCredentialProvider, createExecutor, refuseLaunches, type Executor, type ExecutorEnv, type ExecutorKind } from '@cloudbrowser/executors';
 import { FakeAgentBridge, GatewayAgentBridge, type AgentBridge } from './agent.js';
-import { r2ArchiveStore } from './archives.js';
+import { archiveStore, deleteS3Archive, s3Location, type S3Config } from './archives.js';
 import { placementRef, readContext, type EngineDeps, type EngineMode } from './context.js';
 
 export interface Env extends Omit<ExecutorEnv, 'FAKE_PROVIDER_DB'> {
@@ -20,6 +20,11 @@ export interface Env extends Omit<ExecutorEnv, 'FAKE_PROVIDER_DB'> {
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
   R2_ARCHIVE_BUCKET?: string;
+  /**
+   * New archives go to an S3 bucket in the browser's own region, named this prefix plus the
+   * region, signed with this deployment's AWS credentials. Unset: new archives go to R2.
+   */
+  S3_ARCHIVE_BUCKET_PREFIX?: string;
   /** 32 random bytes, base64: wraps per-instance archive keys. */
   ARCHIVE_MASTER_KEY?: string;
   /** R2 bucket binding of the archives (reaper deletes expired archives through it). */
@@ -74,6 +79,22 @@ export function makeDeps(env: Env, waitUntil: (p: Promise<unknown>) => void = ()
   };
   const db = createDb(env.DB);
   const now = () => new Date();
+  const awsCredentials = awsCredentialProvider(env);
+  const s3: S3Config | undefined = env.S3_ARCHIVE_BUCKET_PREFIX && awsCredentials ? { credentials: awsCredentials, bucketPrefix: env.S3_ARCHIVE_BUCKET_PREFIX } : undefined;
+  const r2 = env.R2_ACCOUNT_ID && env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY && env.R2_ARCHIVE_BUCKET
+    ? { accountId: env.R2_ACCOUNT_ID, accessKeyId: env.R2_ACCESS_KEY_ID, secretAccessKey: env.R2_SECRET_ACCESS_KEY, bucket: env.R2_ARCHIVE_BUCKET }
+    : undefined;
+  // Archives in S3 are deleted with the AWS credentials, archives in R2 through the R2 binding.
+  const deleteArchive = s3 || env.ARCHIVES
+    ? async (location: string) => {
+        if (s3Location(location)) {
+          if (!s3) throw new Error('S3 archive storage is not configured for this Worker');
+          return deleteS3Archive(s3, location);
+        }
+        if (!env.ARCHIVES) throw new Error('The R2 archive binding is not configured for this Worker');
+        await env.ARCHIVES.delete(location);
+      }
+    : undefined;
   const gateway = new GatewayAgentBridge(
     db,
     async (msg) => {
@@ -108,16 +129,8 @@ export function makeDeps(env: Env, waitUntil: (p: Promise<unknown>) => void = ()
     now,
     bootstrapSecret: env.BOOTSTRAP_SECRET ?? 'dev-only-bootstrap-secret',
     archiveMasterKey: env.ARCHIVE_MASTER_KEY ?? null,
-    archives:
-      env.R2_ACCOUNT_ID && env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY && env.R2_ARCHIVE_BUCKET && env.ARCHIVE_MASTER_KEY
-        ? r2ArchiveStore({
-            accountId: env.R2_ACCOUNT_ID,
-            accessKeyId: env.R2_ACCESS_KEY_ID,
-            secretAccessKey: env.R2_SECRET_ACCESS_KEY,
-            bucket: env.R2_ARCHIVE_BUCKET,
-          })
-        : null,
-    deleteArchive: env.ARCHIVES ? async (key) => void (await env.ARCHIVES!.delete(key)) : undefined,
+    archives: env.ARCHIVE_MASTER_KEY ? archiveStore({ r2, s3 }) : null,
+    deleteArchive,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     notify(userId) {
       const hub = env.EVENT_HUB;
