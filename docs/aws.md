@@ -108,6 +108,20 @@ frame): 17 ms round trip 1517 → 519 ms, 292 ms round trip 3465 → 2975 ms. A 
 offers a direct pair would need a short host or srflx wait back, or neko could settle on the
 relay before the direct pair is checked.
 
+**Chrome's playout delay.** `images/browser/neko/playout-delay.patch` puts the RTP playout-delay
+header extension (minimum and maximum 0) on every video packet, which turns on Chrome's
+low-latency renderer: each frame shows as soon as it is decoded. Without it Chrome holds frames in
+a jitter buffer sized for smooth playback, which on a clean path grew over the first minutes (a
+frame's wait from arrival to display went from 20 to 83 ms). With the real viewer through a TURN
+relay, scrolling a 1080p page, median glass-to-glass delay: clean 60 ms path over 2 minutes
+178 → 123 ms; 2 Mbit/s with a 200 ms queue about 325 → 150–169 ms, frozen time unchanged. On a
+lossy, jittery long path (230 ms round trip, 60 ms jitter, 1% loss) delay drops about 50 ms but
+Chrome counts more time frozen (10.5–10.9 → 12.7–14.7 s a minute): a frame waiting for a resend
+is no longer hidden behind a longer buffer. A lost packet still holds its frame until it is resent.
+A `jitterBufferTarget` set in the viewer does not bring the smoothing back, so it is per image;
+rolling back means a browser image without the patch. A viewer that does not offer the extension
+is unaffected.
+
 **Turning Premium on in an existing deployment.** Premium is off (`premium` cap 0) until all of
 this is done, so nothing below affects Basic browsers:
 

@@ -105,7 +105,9 @@ Cloudflare deployment.
   earlier release streamed Premium in H.264 at up to 60 fps and Basic in VP8; both now share the
   H.264 stream. neko is rebuilt with `images/browser/neko/keyframes-and-resends.patch` (keyframe on
   RTCP PLI, a budget for resends) and `faster-handshake.patch` (the first ICE pair that works is
-  nominated, no DTLS cookie round trip: the first picture about 1 s sooner) for every browser. See `docs/aws.md`.
+  nominated, no DTLS cookie round trip: the first picture about 1 s sooner) and `playout-delay.patch`
+  (Chrome shows each frame as soon as it is decoded: 50–170 ms less delay, a little more stalling on
+  lossy long paths) for every browser. See `docs/aws.md`.
 - **Storage** (page 6): new browsers get a 10 GB data volume (cap `storage_gb`); users can grow it
   up to `storage_max_gb` (100 GB) from the Storage tab, which shows used and total space and the
   monthly cost before confirming. The volume grows online (`ModifyVolume`) and agent 0.2.0 grows
