@@ -177,46 +177,6 @@ billingRoute.openapi(
   async (c) => c.json(await accountUsage(c.get('db'), c.get('user').id, monthOf(c.req.valid('query').month)), 200),
 );
 
-const TermsConsentState = BillingState.pick({ termsVersion: true, termsAccepted: true });
-
-billingRoute.openapi(
-  createRoute({
-    method: 'get',
-    path: '/terms-consent',
-    tags: ['account'],
-    description: 'Whether the signed-in user has explicitly accepted the current Terms and Privacy Policy.',
-    responses: { 200: json(TermsConsentState, 'Current consent') },
-  }),
-  async (c) => c.json({ termsVersion: TERMS_VERSION, termsAccepted: await acceptedCurrentTerms(c.get('db'), c.get('user').id) }, 200),
-);
-
-billingRoute.openapi(
-  createRoute({
-    method: 'post',
-    path: '/terms-consent',
-    tags: ['account'],
-    description: 'Records an explicit checkbox confirmation of the current Terms and Privacy Policy in the sign-in notice. Does not start a payment.',
-    request: { body: { content: { 'application/json': { schema: z.object({ acceptedTermsVersion: z.string().min(1).max(64) }) } }, required: true } },
-    responses: { 200: json(TermsConsentState, 'Consent recorded'), ...problems },
-  }),
-  async (c) => {
-    if (c.req.valid('json').acceptedTermsVersion !== TERMS_VERSION) {
-      throw problem(409, 'terms_required', 'The Terms of Service or Privacy Policy have changed. Reload the page, read them and confirm again.');
-    }
-    const db = c.get('db');
-    const now = new Date();
-    await storeCurrentTerms(c.env, db, c.req.url, now);
-    await db.insert(termsAcceptances).values({
-      id: newId(), userId: c.get('user').id, termsVersion: TERMS_VERSION, context: 'sign-in',
-      ip: c.req.header('cf-connecting-ip') ?? null,
-      country: c.req.header('cf-ipcountry') ?? null,
-      userAgent: c.req.header('user-agent')?.slice(0, 300) ?? null,
-      acceptedAt: now,
-    }).onConflictDoNothing();
-    return c.json({ termsVersion: TERMS_VERSION, termsAccepted: true }, 200);
-  },
-);
-
 billingRoute.openapi(
   createRoute({
     method: 'post',

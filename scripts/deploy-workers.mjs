@@ -65,7 +65,9 @@ export function bundleHash(files, config) {
 export function builtBundle(worker) {
   const out = mkdtempSync(join(tmpdir(), `${worker.name}-`));
   try {
-    const result = wrangler(['deploy', '--dry-run', '--outdir', out, '-c', worker.config], worker.dir);
+    // Minified for the hash only, so that an edited comment (the bundle keeps some, such as those
+    // in the db schema's column definitions) doesn't count as a change; the deploy is unchanged.
+    const result = wrangler(['deploy', '--dry-run', '--minify', '--outdir', out, '-c', worker.config], worker.dir);
     if (result.status !== 0) throw new Error(`${worker.name}: building the bundle failed:\n${result.stdout}${result.stderr}`);
     const files = readdirSync(out, { recursive: true, withFileTypes: true }).filter((f) => f.isFile())
       .map((f) => {
