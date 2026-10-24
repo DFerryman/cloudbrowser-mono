@@ -1,23 +1,32 @@
 import { agentServer, agentSetups, mcpConfig, signInConfig, signInSetups, type AgentClient, type SignInClient } from '../features/instances/agent-setup.js';
 import type { Locale } from '../lib/i18n.js';
+import { zhCN } from '../messages/zh-CN.js';
 import type { Article, Block } from './types.js';
 
 /** The example in "Coding agent setup": a browser named Work. The app fills in a browser's own values. */
 const EXAMPLE_SERVER = agentServer({ url: 'https://connect.nevazu.com/mcp/BROWSER_ID', browserName: 'Work' });
 
+/** The setup labels the Chinese app translates, so the Chinese guide names them the same way. */
+const ZH_SETUP_NAMES: Record<string, string> = {
+  Terminal: zhCN['agents.setup.terminal'],
+  'Any MCP client (Streamable HTTP)': zhCN['agents.setup.otherWhere'],
+  'Claude app': zhCN['agents.signin.claudeApp'],
+  'Settings → Connectors → Add custom connector': zhCN['agents.signin.claudeAppWhere'],
+};
+
 /** "Coding agent setup", one folded section per client, from the same snippets the app shows. */
-function clientSetupBlocks(text: Record<AgentClient, string>, otherTitle: string): Block[] {
+function clientSetupBlocks(text: Record<AgentClient, string>, otherTitle: string, names: Record<string, string> = {}): Block[] {
   return agentSetups(EXAMPLE_SERVER).map((setup) => ({
-    details: setup.client === 'other' ? otherTitle : setup.label,
-    blocks: [{ p: text[setup.client] }, { code: setup.code, label: setup.where }],
+    details: setup.client === 'other' ? otherTitle : names[setup.label] ?? setup.label,
+    blocks: [{ p: text[setup.client] }, { code: setup.code, label: names[setup.where] ?? setup.where }],
   }));
 }
 
 /** "Signing in instead of a key", one folded section per client, from the same steps the app shows. */
-function signInBlocks(text: Record<SignInClient, string>, otherTitle: string): Block[] {
+function signInBlocks(text: Record<SignInClient, string>, otherTitle: string, names: Record<string, string> = {}): Block[] {
   return signInSetups(EXAMPLE_SERVER).map((setup) => ({
-    details: setup.client === 'other' ? otherTitle : setup.label,
-    blocks: [{ p: text[setup.client] }, { code: setup.code, label: setup.where }],
+    details: setup.client === 'other' ? otherTitle : names[setup.label] ?? setup.label,
+    blocks: [{ p: text[setup.client] }, { code: setup.code, label: names[setup.where] ?? setup.where }],
   }));
 }
 
@@ -33,7 +42,7 @@ const en: Article[] = [
     blocks: [
       { p: 'Nevazu gives you a real Chrome running on its own computer in the cloud. Each browser has a dedicated IP address that no one else uses, and encrypted storage that keeps your profile, cookies and sign-ins between sessions.' },
       { h: 'Sign in' },
-      { p: 'Enter your email on the sign-in page and we send you a 6-digit code, valid for 5 minutes. A new email creates your account. If you turned on two-step verification, you then enter a code from your authenticator app.' },
+      { p: 'Enter your email on the sign-in page and we send you a 6-digit code, valid for 5 minutes. A new email has no account yet: choose Create account instead (see Account security). If you turned on two-step verification, you then enter a code from your authenticator app.' },
       { h: 'Create a browser' },
       { ul: [
         'Open Browsers and choose New browser.',
@@ -351,7 +360,7 @@ const zh: Article[] = [
     blocks: [
       { p: 'Nevazu 为你提供运行在云端独立计算机上的真实 Chrome。每个浏览器都有一个不与他人共享的独享 IP，以及在会话之间保存个人资料、Cookie 和登录状态的加密存储。' },
       { h: '登录', id: 'sign-in' },
-      { p: '在登录页输入邮箱，我们会发送 6 位验证码，5 分钟内有效。新邮箱会自动创建账户。如果你开启了两步验证，接着还需输入身份验证器应用中的验证码。' },
+      { p: '在登录页输入邮箱，我们会发送 6 位验证码，5 分钟内有效。未注册的邮箱需先点击“创建账户”（见“账户安全”）。如果你开启了两步验证，接着还需输入身份验证器应用中的验证码。' },
       { h: '创建浏览器', id: 'create' },
       { ul: [
         '打开“浏览器”，选择“新建浏览器”。',
@@ -369,7 +378,7 @@ const zh: Article[] = [
     summary: '地区、IP 检查、休眠与删除。',
     blocks: [
       { h: '地区', id: 'regions' },
-      { p: '浏览器位于一个地区并永久保持，专属 IP 也随之固定：网站看到的是该地区所在国家/地区的地址，浏览器的时钟使用该地区的时区。如需其他地区，请再创建一个浏览器。' },
+      { p: '浏览器位于一个地区并永久保持，独享 IP 也随之固定：网站看到的是该地区所在国家/地区的地址，浏览器的时钟使用该地区的时区。如需其他地区，请再创建一个浏览器。' },
       { p: '先确定 IP 需要位于哪个国家/地区，再在其中选择离你最近的地区，操作会最流畅。地区列表会显示：' },
       { ul: [
         '延迟：从你的网络到该地区的往返时间，在打开列表时由你的浏览器实测。带 ≈ 的数值是实测完成前根据你的大致位置得到的估算。约 80 毫秒以内几乎无感；超过约 160 毫秒，输入和滚动会明显卡顿。',
@@ -383,7 +392,7 @@ const zh: Article[] = [
       { h: '基础版与高级版', id: 'premium' },
       { p: '在提供高级版的地区，创建浏览器时可以选择机器。基础版使用 2 vCPU、4 GB 内存；高级版使用 4 vCPU、8 GB 内存，复杂页面和多标签页更从容。这是两者唯一的区别：实时画面、IP、存储和流量完全相同。高级版的运行费率更高；IP、存储和流量的费率相同。浏览器创建后机器不可更改；如需另一种，请新建浏览器。' },
       { h: '独享 IP', id: 'ip' },
-      { p: '每个浏览器都有一个专属的公网 IPv4 地址。它会一直归该浏览器所有，直到你删除浏览器；即使删除后也不会分配给其他客户。' },
+      { p: '每个浏览器都有一个独享的公网 IPv4 地址。它会一直归该浏览器所有，直到你删除浏览器；即使删除后也不会分配给其他客户。' },
       { p: '浏览器每隔几分钟会在 Chrome 内检查网站看到的地址。一旦地址不一致，我们会立即暂停其网络，确保不会使用其他 IP，浏览器会显示正在检查。浏览器运行时，你也可以在“设置 → 验证 IP”中手动检查。' },
       { h: '休眠与自动休眠', id: 'sleep' },
       { p: '空闲浏览器会在“设置 → 自动休眠”设定的时间后休眠（默认 10 分钟，时间越短越省钱）。修改设置后从保存时开始重新计时。休眠前，实时画面会显示倒计时和“保持唤醒”按钮。休眠时计算机停止运行，IP 和存储仍保留并继续计费。' },
@@ -393,7 +402,7 @@ const zh: Article[] = [
       { h: '状态说明', id: 'statuses' },
       { ul: [
         '等待资源：云服务商在该地区暂无可用的同类机器。我们会持续重试，你的数据和 IP 是安全的。',
-        '服务商故障：云服务商在该地区出现问题。',
+        '云服务商故障：云服务商在该地区出现问题。',
         '需要处理：出现了需要操作的问题，例如重启浏览器。提示中会说明原因。',
         '失败：浏览器创建失败。选择“重试”会创建一个替代浏览器。',
       ] },
@@ -419,12 +428,12 @@ const zh: Article[] = [
       { p: '支持中文、日文等输入法：组合好的文字会直接插入页面。工具栏中的“发送按键”可发送 Ctrl+Alt+Del 等会被本机拦截的组合键。' },
       { p: '远程浏览器中的 Chrome 默认使用英文。若希望网站显示其他语言，请在 Chrome 自身的设置中添加（chrome://settings/languages），该设置会随浏览器保存。' },
       { h: '剪贴板', id: 'clipboard' },
-      { p: '在远程浏览器中复制，会在你的浏览器允许时写入本机剪贴板。使用“从剪贴板粘贴”可把文字发送到远程浏览器。' },
+      { p: '在远程浏览器中复制，会在你的浏览器允许时写入本机剪贴板。使用“粘贴本地剪贴板内容”可把文字发送到远程浏览器。' },
       { h: '重新连接', id: 'reconnect' },
       { p: '连接中断时画面最多自动尝试三次，并显示尝试次数。仍无法连接时，会显示连接参考编号和重试按钮。“运行中”表示机器正在运行，远程桌面连接仍可能失败。如果输入传输被中断，输入会暂停直到重新连接；之前的点击和按键不会重放，因此不会重复输入。' },
       { h: '画质', id: 'picture' },
       { p: '实时画面会根据网络自动调整，但不会让页面变模糊：每一档都以完整分辨率显示浏览器。它每两秒测量一次网络：往返延迟、丢包、到达的帧数以及实际传输的数据量。网络良好时为每秒 30 帧。往返延迟超过约 180 毫秒时改发较轻的画面，仍为每秒 30 帧；往返延迟较高本身不会降低帧率。网络跟不上时（丢包、帧未到达或延迟明显高于平时），直接降到数据速率与实际传输量相符的一档：先是数据更少的每秒 30 帧，然后是每秒 15 帧和 10 帧，分辨率始终完整，文字保持清晰。网络稳定后再回升；若升档后网络承载不了，几秒内即退回。' },
-      { p: '任何一档下，页面在你窗口中的大小和排版都不变；较低的一档只是更模糊、流量更少。远程页面的尺寸始终跟随你的窗口，工具栏中的连接详情会显示往返延迟和当前发送的画面。' },
+      { p: '任何一档下，页面在你窗口中的大小和排版都不变；较低的一档只是画面略柔和、流量更少。远程页面的尺寸始终跟随你的窗口，工具栏中的连接详情会显示往返延迟和当前发送的画面。' },
       { h: '流量', id: 'data' },
       { p: '画面为 H.264 视频。Chrome、Edge 和 Safari 均可播放；Firefox 需要其 OpenH264 插件（通常会自动安装）。流量取决于屏幕内容的变化：画面只传输变化的部分，完整档在视频或动画铺满屏幕时每小时最多约 1.35 GB，我们测试中阅读和滚动文字约每小时 0.45 GB，静止页面很少。较低的几档每小时最多约 0.8、0.55 和 0.35 GB。浏览器发送的数据按 GB 计费。' },
     ],
@@ -451,7 +460,7 @@ const zh: Article[] = [
       { h: '使用访问密钥', id: 'keys' },
       { ul: [
         '在同一个面板中选择“访问密钥”，然后创建密钥：填写名称、有效期，以及智能体是可以操作还是只能查看。密钥只显示一次，Nevazu 只保存它的指纹。',
-        '用对话框为 macOS、Linux 或 Windows 给出的命令，把密钥保存到它指定的环境变量中，例如 NEVAZU_WORK_KEY。智能体只引用这个变量，密钥不会出现在它的对话或配置中。',
+        '用面板中为 macOS、Linux 或 Windows 给出的命令，把密钥保存到它指定的环境变量中，例如 NEVAZU_WORK_KEY。智能体只引用这个变量，密钥不会出现在它的对话或配置中。',
         '复制给智能体的配置，粘贴到 Claude Code、Codex、Cursor、OpenCode 或任何编程智能体中。其中以标准 mcpServers 格式写明服务器名称和地址，并让智能体查看“编程智能体配置”，在那里找到它所属客户端的步骤并自行加入服务器。',
         '如果智能体要求，重启它，然后让它给浏览器截个图。它会获得 screenshot、act、upload_file、attach_files、get_status 和 end_session 这些工具。',
       ] },
@@ -497,7 +506,7 @@ const zh: Article[] = [
         gemini: '合并到 ~/.gemini/settings.json，保留已有的设置。Gemini CLI 加载设置时从环境中展开 ${NEVAZU_WORK_KEY}。用 /mcp 检查。',
         opencode: '合并到 ~/.config/opencode/opencode.json（或项目中的 opencode.json），保留已有的配置。OpenCode 加载配置时替换 {env:NEVAZU_WORK_KEY}；oauth: false 让它不尝试用 OAuth 登录。',
         other: '任何通过 Streamable HTTP 使用 MCP 的客户端，都用这个地址和携带密钥的 Authorization 请求头连接。请用客户端自己读取环境变量的方式；如果没有，告诉用户自己把密钥填在哪里。curl 命令通过列出工具来检查密钥。',
-      }, '其他客户端'),
+      }, '其他客户端', ZH_SETUP_NAMES),
       { h: '用登录代替密钥', id: 'sign-in' },
       { p: '用于登录的配置只写明服务器名称和地址，没有密钥变量：' },
       { code: signInConfig(EXAMPLE_SERVER), label: 'mcpServers' },
@@ -510,7 +519,7 @@ const zh: Article[] = [
       ] },
       ...signInBlocks({
         'claude-code': '在终端中运行，然后重启 Claude Code。在 Claude Code 中，/mcp 会显示该服务器需要认证：选择它，再选 Authenticate，登录页会在用户的网页浏览器中打开。Claude Code 保存令牌并自动续期。',
-        'claude-app': '适用于网页版、桌面版和移动版 Claude：在 Settings → Connectors 中选择 Add custom connector，填写名称并粘贴这个地址，然后连接。会打开 Nevazu 页面进行批准。在 Team 或 Enterprise 方案中，可能需要所有者先添加该连接器。',
+        'claude-app': '适用于网页版、桌面版和移动版 Claude：在“设置 → 连接器”中选择“添加自定义连接器”，填写名称并粘贴这个地址，然后选择“连接”。会打开 Nevazu 页面进行批准。在 Team 或 Enterprise 方案中，可能需要所有者先添加该连接器。',
         codex: '加入 ~/.codex/config.toml（文件不存在就创建），然后在终端中运行 codex mcp login nevazu-work：Codex 会在用户的网页浏览器中打开登录页并保存令牌。也可以用一条命令加入同一个服务器：codex mcp add nevazu-work --url https://connect.nevazu.com/mcp/BROWSER_ID。如果 Codex 提示不支持登录，请更新它。',
         cursor: '合并到 ~/.cursor/mcp.json，保留已有的服务器。Cursor 的 MCP 设置会显示该服务器需要登录；点击它的按钮（Connect 或 Login），登录页会在用户的网页浏览器中打开，完成后返回 Cursor。',
         vscode: '合并到用户 MCP 配置（命令 MCP: Open User Configuration），保留已有的条目。服务器启动时，VS Code 会询问是否允许它登录，然后打开 Nevazu 页面，并把登录保存在“账户”中。',
@@ -518,7 +527,7 @@ const zh: Article[] = [
         gemini: '合并到 ~/.gemini/settings.json，保留已有的设置。Gemini CLI 连接时会发现需要登录；如果没有自动开始，运行 /mcp auth nevazu-work。',
         opencode: '合并到 ~/.config/opencode/opencode.json（或项目中的 opencode.json），保留已有的配置。OpenCode 连接时会开始登录；也可以用 opencode mcp auth nevazu-work 手动开始。',
         other: '任何实现了 MCP 授权（OAuth 2.1 与 PKCE）的客户端都会自行登录：它从 401 响应中找到 Nevazu，通过动态客户端注册（Dynamic Client Registration）或客户端 ID 元数据文档（Client ID Metadata Document）注册，并返回到本地回调地址（http://127.0.0.1 或 localhost，任意端口）、它自己的应用协议，或 claude.ai、chatgpt.com、vscode.dev。不能登录的客户端请改用访问密钥。',
-      }, '其他客户端'),
+      }, '其他客户端', ZH_SETUP_NAMES),
       { h: '连接不上时', id: 'troubleshooting' },
       { ul: [
         '401 Unauthorized：密钥没有送达或无效。可能是客户端启动时的环境中变量为空（此时发送的是字面的 ${…}），也可能密钥已被撤销或已过期。用户可以在浏览器的“设置 → 编程智能体访问”中创建新密钥。',
@@ -562,7 +571,7 @@ const zh: Article[] = [
         '存储：数据盘和系统盘按 GB·月计费，按时间折算。',
         '发送的数据：浏览器发送到互联网的流量按 GB 计费，主要是实时画面，以及休眠时上传的配置档案备份；已包含把实时画面传给你的中继费用。',
       ] },
-      { p: '价格为该地区 AWS 公开价目乘以每类成本各自公开的倍数；价格页列出每一项的公开价、倍数和你的价格。每次操作前显示的价格都带有版本号；如果在你确认前价格发生变化，我们会请你重新确认。' },
+      { p: '价格为该地区 AWS 公开价目乘以每类成本各自公开的倍率；价格页列出每一项的公开价、倍率和你的价格。每次操作前显示的价格都带有版本号；如果在你确认前价格发生变化，我们会请你重新确认。' },
       { p: '固定资源的每小时费用按每月 730 小时预估。每日合计按 UTC 日期统计。' },
       { h: '总余额、可用余额与冻结金额', id: 'held' },
       { p: '总余额是你全部未花费的余额，其中一部分被冻结：每个付费浏览器七天的 IP 和存储费用。冻结金额不是扣费，它确保可用余额用完时你的数据仍被安全保留，删除浏览器后会释放。' },
@@ -572,7 +581,7 @@ const zh: Article[] = [
         '付费浏览器立即停止，实时画面关闭。没有欠费宽限期。',
         '浏览器及其数据保留七天。冻结金额只支付这段时间实际产生的 IP 和存储费用。',
         '我们会通过邮件告诉你哪些浏览器已停止以及各自的删除时间，三天后再次提醒，删除前一天发送最后提醒。账单页和每个浏览器上也会显示相同的时间。',
-        '如需保留，请至少充值账单页显示的金额：余额需覆盖每个保留浏览器七天的预留以及最低余额。金额不足时会计入余额，但不会停止删除。',
+        '如需保留，请至少充值账单页显示的金额：余额需覆盖每个保留浏览器七天的冻结金额以及最低余额。金额不足时会计入余额，但不会停止删除。',
         '充值后浏览器（包括永不休眠的浏览器）仍保持休眠，请逐个打开，即可用相同的数据和 IP 恢复；不会自动重新启动。',
         '否则它们将被永久删除，未花费的冻结金额重新变为可用。',
       ] },
@@ -617,7 +626,7 @@ const zh: Article[] = [
       { h: '浏览器打不开', id: 'no-open' },
       { ul: [
         '如果可用余额已用完，请充值；付费浏览器需要可用余额才能唤醒。',
-        '等待资源或服务商故障：我们会持续重试，可查看服务状态页面。',
+        '等待资源或云服务商故障：我们会持续重试，可查看服务状态页面。',
         '已在其他标签页打开：选择“在此使用”。',
       ] },
       { h: '网络已暂停', id: 'paused' },
@@ -634,11 +643,11 @@ const zh: Article[] = [
       { h: 'Nevazu 是什么？', id: 'what' },
       { p: 'Nevazu 是一项持久化云浏览器服务。每个浏览器都是在云端独立计算机上运行的真实 Chrome，拥有不与任何人共享的独享 IPv4 地址，以及加密存储：配置文件、Cookie、扩展和登录状态在每次使用之间都会保留。你可以在电脑、平板或手机的网页浏览器中通过实时画面打开它。' },
       { h: '适合谁使用？', id: 'who' },
-      { p: '适合需要浏览器保持登录、并且每次都以同一地址访问网站的工作，无论你用哪台设备：例如登录一次后长期使用的账号，或需要看到你位于某个国家的网站（IP 位于浏览器所在地区的国家）。它也适合交给 Claude Code、Cursor 或 Codex 等编程智能体的任务：智能体在同一个已登录的 Chrome 中工作，你在旁观看。' },
+      { p: '适合需要浏览器保持登录、并且每次都以同一地址访问网站的工作，无论你用哪台设备：例如登录一次后长期使用的账户，或需要看到你位于某个国家的网站（IP 位于浏览器所在地区的国家）。它也适合交给 Claude Code、Cursor 或 Codex 等编程智能体的任务：智能体在同一个已登录的 Chrome 中工作，你在旁观看。' },
       { h: '浏览器运行在哪里？', id: 'regions' },
       { p: '运行在 Amazon Web Services 上，位于你创建浏览器时选择的地区。浏览器永久保留该地区及其 IP：网站看到的是该地区所在国家的地址，浏览器时钟使用该地区的时区。价格页列出了可创建新浏览器的地区及各地区的价格。' },
-      { h: 'Basic 和 Premium 有什么区别？', id: 'tiers' },
-      { p: '只有机器不同。Basic 使用 2 个 vCPU 和 4 GB 内存，Premium 使用 4 个 vCPU 和 8 GB，繁重的页面和大量标签页有更多余量。实时画面、IP、存储和流量完全相同。Premium 的运行费率更高，在价格页显示的地区提供；浏览器的机器终身不变。' },
+      { h: '基础版和高级版有什么区别？', id: 'tiers' },
+      { p: '只有机器不同。基础版使用 2 个 vCPU 和 4 GB 内存，高级版使用 4 个 vCPU 和 8 GB，繁重的页面和大量标签页有更多余量。实时画面、IP、存储和流量完全相同。高级版的运行费率更高，在价格页显示的地区提供；浏览器的机器终身不变。' },
       { h: 'Nevazu 与 VPN 或代理有什么不同？', id: 'vpn' },
       { p: 'VPN 或代理改变的是你自己的浏览器连接网站时使用的地址，而浏览器本身、配置文件和数据仍在你的设备上。使用 Nevazu 时，整个浏览器都在云端运行：网站看到的是浏览器自己的独享 IP，配置文件随浏览器加密保存，因此无论从哪台设备打开，都是同一个浏览器、同一个地址。' },
       { h: '与我电脑上的浏览器配置文件有什么不同？', id: 'local-profile' },
@@ -650,13 +659,13 @@ const zh: Article[] = [
       { h: '编程智能体可以使用我的浏览器吗？', id: 'agents' },
       { p: '可以，而且无需安装任何东西。每个浏览器都有自己的 Model Context Protocol（MCP）服务器地址。在浏览器的“设置 → 编程智能体访问”中复制 Claude Code、Cursor、Codex、VS Code、Windsurf、Gemini CLI 或任何 MCP 客户端的配置；智能体通过 HTTPS 连接，用你的 Nevazu 账户登录（有效期由你选择），或使用访问密钥。它可以截图、点击、输入、滚动和上传文件。每个浏览器都可以关闭访问，断开智能体会立即生效。' },
       { h: '如何计费？', id: 'pricing' },
-      { p: 'Nevazu 采用预付费，没有订阅。你充值后，用量从余额中扣除：浏览器唤醒期间按分钟计运行时间，浏览器存在期间独享 IP 按小时、存储按 GB·月计费，发送的数据按 GB 计费。价格为该地区 AWS 公开标价乘以公布的倍率，价格页逐项列出。每个付费浏览器 7 天的 IP 和存储费用会从余额中预留（不是扣费），以便余额用完时数据仍会保留。' },
+      { p: 'Nevazu 采用预付费，没有订阅。你充值后，用量从余额中扣除：浏览器唤醒期间按分钟计运行时间，浏览器存在期间独享 IP 按小时、存储按 GB·月计费，发送的数据按 GB 计费。价格为该地区 AWS 公开标价乘以公布的倍率，价格页逐项列出。每个付费浏览器 7 天的 IP 和存储费用会从余额中冻结（不是扣费），以便余额用完时数据仍会保留。' },
       { h: '休眠的浏览器怎么收费？', id: 'sleep' },
       { p: '只收取 IP 和存储费用。空闲的浏览器会在设置的时间后休眠（默认 10 分钟）：其计算机停止运行，数据和 IP 保留。删除浏览器即停止所有收费。' },
-      { h: '我的账号和数据如何受到保护？', id: 'security' },
+      { h: '我的账户和数据如何受到保护？', id: 'security' },
       { p: '你通过发送到邮箱的一次性验证码登录，没有可泄露的密码；通行密钥和使用身份验证器应用的两步验证可选。每个浏览器在独立的机器上运行并使用加密存储，每隔几分钟从 Chrome 内部检查网站看到的 IP，一旦地址不同就立即暂停网络。付款由 Stripe 或我们的记录商户 Creem 处理，我们不会接触你的卡信息。' },
       { h: '如何开始？', id: 'start' },
-      { p: '只需邮箱即可创建账号，并确保有可用余额（“账单与用量”），然后创建浏览器：命名、选择地区并查看预估费用。配置通常需要 3–8 分钟，IP 检查通过后浏览器会自动打开。' },
+      { p: '只需邮箱即可创建账户，并确保有可用余额（“账单与用量”），然后创建浏览器：命名、选择地区并查看预估费用。配置通常需要 3–8 分钟，IP 检查通过后浏览器会自动打开。' },
     ],
   },
 ];
