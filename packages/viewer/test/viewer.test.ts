@@ -530,6 +530,32 @@ describe('RemoteBrowser', () => {
     expect(onQualityReport).toHaveBeenCalledTimes(2);
   });
 
+  it('times the input route for a viewer who only watches, while the page is shown', async () => {
+    vi.useFakeTimers();
+    const onQualityReport = vi.fn();
+    const { b } = setup([], { onQualityReport });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp', video: { id: 'high' } } } });
+    await vi.advanceTimersByTimeAsync(0);
+    flowingVideo(FakePC.last);
+    FakePC.last.connect();
+    // neko's heartbeat keeps the socket from ever going quiet, and nobody types.
+    for (let s = 0; s < 62; s += 2) {
+      if (s % 10 === 0) ws.push({ t: 'neko', data: { event: 'system/heartbeat' } });
+      await vi.advanceTimersByTimeAsync(2_000);
+    }
+    expect(ws.pings).toBeGreaterThanOrEqual(3);
+    expect(ws.pings).toBeLessThanOrEqual(4);
+    expect(onQualityReport.mock.calls[0]![0]).toMatchObject({ gatewayRttMs: 0 });
+    // A hidden page sends none.
+    b.setVisible(false);
+    const pings = ws.pings;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(ws.pings).toBe(pings);
+    b.disconnect();
+  });
+
   it('types an address using ordered Neko keys with explicit Shift for capitals and US punctuation', async () => {
     const { b } = setup();
     await b.connect();
