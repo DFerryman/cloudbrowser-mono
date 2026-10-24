@@ -40,6 +40,37 @@ beforeEach(async () => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Terms of Service consent before payment', () => {
+  it('checks sign-in consent without recording it, and requires a signed-in user', async () => {
+    expect(await t.call('GET', '/api/v1/terms-consent')).toMatchObject({ status: 200, body: { termsVersion: TERMS_VERSION, termsAccepted: false } });
+    expect(rows('terms_acceptances')).toHaveLength(0);
+    t.setCookie('');
+    expect((await t.call('GET', '/api/v1/terms-consent')).status).toBe(401);
+    expect((await t.call('POST', '/api/v1/terms-consent', { acceptedTermsVersion: TERMS_VERSION })).status).toBe(401);
+  });
+
+  it('records explicit sign-in consent once with its evidence, without starting a payment', async () => {
+    const confirm = () => t.call('POST', '/api/v1/terms-consent', { acceptedTermsVersion: TERMS_VERSION }, { 'cf-connecting-ip': '203.0.113.8', 'cf-ipcountry': 'GB', 'user-agent': 'Sign-in test' });
+    expect(await confirm()).toMatchObject({ status: 200, body: { termsVersion: TERMS_VERSION, termsAccepted: true } });
+    expect((await confirm()).status).toBe(200);
+    expect(rows('terms_acceptances')).toEqual([expect.objectContaining({ user_id: userId, terms_version: TERMS_VERSION, context: 'sign-in', topup_checkout_id: null, ip: '203.0.113.8', country: 'GB', user_agent: 'Sign-in test' })]);
+    expect(rows('terms_versions')).toEqual([expect.objectContaining({ sha256: TERMS_SHA256, document: termsDocument() })]);
+    expect(rows('topup_checkouts')).toHaveLength(0);
+    expect(creemCheckouts).toHaveLength(0);
+    expect(await billing()).toMatchObject({ termsAccepted: true });
+    // The same confirmation is valid at payment; a second checkbox is unnecessary.
+    expect((await checkout({})).status).toBe(200);
+    expect(rows('terms_acceptances')).toHaveLength(1);
+  });
+
+  it('refuses missing or stale sign-in confirmations, and fails closed without the exact published document', async () => {
+    expect((await t.call('POST', '/api/v1/terms-consent', {})).status).toBe(400);
+    expect(await t.call('POST', '/api/v1/terms-consent', { acceptedTermsVersion: '2020-01-01' })).toMatchObject({ status: 409, body: { type: 'terms_required' } });
+    (t.env as { ASSETS: unknown }).ASSETS = { fetch: async () => new Response('<html>app</html>') };
+    expect((await t.call('POST', '/api/v1/terms-consent', { acceptedTermsVersion: TERMS_VERSION })).status).toBe(503);
+    expect(rows('terms_acceptances')).toHaveLength(0);
+    expect(rows('topup_checkouts')).toHaveLength(0);
+  });
+
   it('refuses a top-up until the user has accepted the current Terms, without asking the provider', async () => {
     expect(await billing()).toMatchObject({ termsVersion: TERMS_VERSION, termsAccepted: false });
     expect(await checkout({})).toMatchObject({ status: 409, body: { type: 'terms_required' } });

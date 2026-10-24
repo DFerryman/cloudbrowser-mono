@@ -6,10 +6,10 @@ import { rich } from '../../lib/rich.js';
 import { isTermsRequired } from './hooks.js';
 
 /**
- * Asked before a top-up until the user has accepted the current version (TERMS_VERSION) of the
+ * Asked at sign-in or before a top-up until the user has accepted the current version (TERMS_VERSION) of the
  * Terms of Service and Privacy Policy: Confirm stays disabled until they tick the box agreeing to
- * both and confirming they are not subject to sanctions, and only then is the checkout created,
- * with the version they accepted; the api records it and asks again only for a new version. Both
+ * both and confirming they are not subject to sanctions. The version is recorded at sign-in or
+ * with checkout, and the api asks again only for a new version. Both
  * documents open in a new tab, so the box stays as the user left it.
  */
 export function TermsConsentDialog({
@@ -18,13 +18,15 @@ export function TermsConsentDialog({
   error,
   onConfirm,
   onCancel,
+  context = 'checkout',
 }: {
   open: boolean;
-  /** The checkout is being created, or the browser is on its way to it. */
+  /** The confirmation is being saved, or checkout is being created. */
   busy: boolean;
   error: unknown;
   onConfirm: () => void;
   onCancel: () => void;
+  context?: 'checkout' | 'sign-in';
 }) {
   const { t, errorMessage } = useI18n();
   const [read, setRead] = useState(false);
@@ -34,21 +36,23 @@ export function TermsConsentDialog({
     if (open) setRead(false);
   }, [open]);
   const changed = isTermsRequired(error);
+  const signingIn = context === 'sign-in';
+  const pendingLabel = t(signingIn ? 'consent.saving' : 'consent.opening');
   return (
     <Dialog
       open={open}
       onOpenChange={(o) => !o && onCancel()}
-      title={t('consent.title')}
+      title={t(signingIn ? 'consent.signInTitle' : 'consent.title')}
       description={t('consent.description')}
-      closeLabel={t('common.cancel')}
+      closeLabel={t(signingIn ? 'nav.signOut' : 'common.cancel')}
       footer={
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <Button className="justify-center" onClick={onCancel}>
-            {t('common.cancel')}
+            {t(signingIn ? 'nav.signOut' : 'common.cancel')}
           </Button>
           <Button variant="primary" className="justify-center" disabled={!read || busy || changed} onClick={onConfirm} data-testid="consent-confirm">
             {busy ? <Loader2 className="animate-spin" aria-hidden /> : null}
-            {busy ? t('consent.opening') : t('consent.confirm')}
+            {busy ? pendingLabel : t(signingIn ? 'consent.continue' : 'consent.confirm')}
           </Button>
         </div>
       }
@@ -87,7 +91,7 @@ export function TermsConsentDialog({
           </div>
         ) : null}
         <p role="status" className="sr-only">
-          {busy ? t('consent.opening') : ''}
+          {busy ? pendingLabel : ''}
         </p>
       </div>
     </Dialog>

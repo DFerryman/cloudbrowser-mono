@@ -6,6 +6,7 @@ import { AccountPage } from './features/account/AccountPage.js';
 import { BillingPage } from './features/billing/BillingPage.js';
 import { BillingSuccessPage } from './features/billing/BillingSuccessPage.js';
 import { SignInPage } from './features/auth/SignInPage.js';
+import { TermsAcceptanceGate } from './features/auth/TermsAcceptanceGate.js';
 import { SignUpCompletePage, SignUpPage } from './features/auth/SignUpPage.js';
 import { BrowsersPage } from './features/instances/BrowsersPage.js';
 import { useMe } from './features/instances/hooks.js';
@@ -40,6 +41,7 @@ export const router = createBrowserRouter([{ errorElement: <RouteError />, child
       { path: '/terms', lazy: async () => { const { LegalPage } = await import('./site/LegalPage.js'); return { Component: () => <LegalPage policy="terms" /> }; } },
       { path: '/privacy', lazy: async () => { const { LegalPage } = await import('./site/LegalPage.js'); return { Component: () => <LegalPage policy="privacy" /> }; } },
       { path: '/refunds', lazy: async () => { const { LegalPage } = await import('./site/LegalPage.js'); return { Component: () => <LegalPage policy="refunds" /> }; } },
+      { path: '/dpa', lazy: async () => { const { LegalPage } = await import('./site/LegalPage.js'); return { Component: () => <LegalPage policy="dpa" /> }; } },
       { path: '/contact', element: <ContactPage /> },
       // Where closing the account lands, signed out (features/account/CloseAccount.tsx).
       { path: '/account-closed', lazy: async () => ({ Component: (await import('./features/account/AccountClosedPage.js')).AccountClosedPage }) },
@@ -50,38 +52,43 @@ export const router = createBrowserRouter([{ errorElement: <RouteError />, child
   { path: '/sign-up', element: <SignUpPage /> },
   { path: '/sign-up/complete', element: <SignUpCompletePage /> },
   { path: '/register', element: <Navigate to="/sign-up" replace /> },
-  // A coding agent's OAuth sign-in (docs/agent-access.md): its own page, signing in first when needed.
-  { path: '/oauth/authorize', lazy: async () => ({ Component: (await import('./features/oauth/AuthorizePage.js')).AuthorizePage }) },
   { path: '/admin/*', element: <AdminRedirect /> },
-  // The session view has its own dark full-screen layout, still behind the auth check.
-  // The viewer is loaded on demand (page 1, "Performance and quality").
   {
-    element: <AppShellGate />,
+    element: <TermsAcceptanceGate />,
     children: [
-      { path: '/b/:id', lazy: async () => ({ Component: (await import('./features/session/SessionPage.js')).SessionPage }) },
-    ],
-  },
-  {
-    element: <AppShell />,
-    children: [
-      { path: '/browsers', element: <BrowsersPage /> },
-      { path: '/browsers/new', element: <BrowsersPage /> },
-      // The browser management area: one header, three tabs (page 1).
+      // A coding agent's OAuth sign-in also confirms changed Terms before authorizing access.
+      { path: '/oauth/authorize', lazy: async () => ({ Component: (await import('./features/oauth/AuthorizePage.js')).AuthorizePage }) },
+      // The session view has its own dark full-screen layout, still behind the auth check.
+      // The viewer is loaded on demand (page 1, "Performance and quality").
       {
-        path: '/browsers/:id',
-        lazy: async () => ({ Component: (await import('./features/instances/BrowserLayout.js')).BrowserLayout }),
+        element: <AppShellGate />,
         children: [
-          { index: true, element: <Navigate to="settings" replace /> },
-          { path: 'settings', lazy: async () => ({ Component: (await import('./features/instances/SettingsPage.js')).SettingsPage }) },
-          { path: 'storage', lazy: async () => ({ Component: (await import('./features/instances/StoragePage.js')).StoragePage }) },
-          { path: 'usage', lazy: async () => ({ Component: (await import('./features/instances/UsagePage.js')).UsagePage }) },
+          { path: '/b/:id', lazy: async () => ({ Component: (await import('./features/session/SessionPage.js')).SessionPage }) },
         ],
       },
-      { path: '/account', element: <AccountPage /> },
-      { path: '/settings', element: <Navigate to="/account" replace /> },
-      { path: '/billing', element: <BillingPage /> },
-      { path: '/billing/success', element: <BillingSuccessPage /> },
-      { path: '/promotions', lazy: async () => ({ Component: (await import('./features/promotions/PromotionsPage.js')).PromotionsPage }) },
+      {
+        element: <AppShell />,
+        children: [
+          { path: '/browsers', element: <BrowsersPage /> },
+          { path: '/browsers/new', element: <BrowsersPage /> },
+          // The browser management area: one header, three tabs (page 1).
+          {
+            path: '/browsers/:id',
+            lazy: async () => ({ Component: (await import('./features/instances/BrowserLayout.js')).BrowserLayout }),
+            children: [
+              { index: true, element: <Navigate to="settings" replace /> },
+              { path: 'settings', lazy: async () => ({ Component: (await import('./features/instances/SettingsPage.js')).SettingsPage }) },
+              { path: 'storage', lazy: async () => ({ Component: (await import('./features/instances/StoragePage.js')).StoragePage }) },
+              { path: 'usage', lazy: async () => ({ Component: (await import('./features/instances/UsagePage.js')).UsagePage }) },
+            ],
+          },
+          { path: '/account', element: <AccountPage /> },
+          { path: '/settings', element: <Navigate to="/account" replace /> },
+          { path: '/billing', element: <BillingPage /> },
+          { path: '/billing/success', element: <BillingSuccessPage /> },
+          { path: '/promotions', lazy: async () => ({ Component: (await import('./features/promotions/PromotionsPage.js')).PromotionsPage }) },
+        ],
+      },
     ],
   },
 ] }]);

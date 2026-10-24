@@ -23,3 +23,28 @@ export async function turnIceServers(env: Env, ttlSeconds: number): Promise<IceS
     .map((s) => ({ ...s, urls: (Array.isArray(s.urls) ? s.urls : [s.urls]).filter((u) => !/:53(\?|$)/.test(u)) }))
     .filter((s) => s.urls.length > 0);
 }
+
+/**
+ * Viewers in China reach Cloudflare's relay in London or Seattle over a lossy UDP path: their
+ * picture is frozen 7-9% of the time while frames wait for resends, against under 1% elsewhere.
+ * Half of their view sessions are offered only the TCP and TLS relay addresses, so the two halves'
+ * live-quality reports can be compared (docs/connection-diagnostics.md, "Relay transport test").
+ */
+const TCP_RELAY_TEST_COUNTRIES = new Set(['CN']);
+
+/**
+ * Whether a viewer session is in the TCP half of the relay transport test: the viewer is in a
+ * test country and the session id's last character, read as a base-36 digit, is odd (for the hex
+ * ids the web app uses, 1 3 5 7 9 b d f). The same session stays in the same half when it reconnects.
+ */
+export function inTcpRelayTest(sessionId: string, country: string | undefined): boolean {
+  return !!country && TCP_RELAY_TEST_COUNTRIES.has(country) && parseInt(sessionId.slice(-1), 36) % 2 === 1;
+}
+
+/** Only the relay addresses reached over TCP or TLS; all of them when Cloudflare offered none. */
+export function tcpRelayServers(servers: IceServer[]): IceServer[] {
+  const tcp = servers
+    .map((s) => ({ ...s, urls: s.urls.filter((u) => u.startsWith('turns:') || (u.startsWith('turn:') && /[?&]transport=tcp(&|$)/.test(u))) }))
+    .filter((s) => s.urls.length > 0);
+  return tcp.length ? tcp : servers;
+}

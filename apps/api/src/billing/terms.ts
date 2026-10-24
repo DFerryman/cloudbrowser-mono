@@ -1,7 +1,7 @@
 /**
- * Consent to the Terms of Service and Privacy Policy before payment (page 6). A user accepts each
+ * Consent to the Terms of Service and Privacy Policy at sign-in or before payment. A user accepts each
  * version once, by ticking the box agreeing to both (and confirming they are not subject to
- * sanctions) in the dialog the Billing page shows before checkout;
+ * sanctions) in the sign-in notice or the dialog the Billing page shows before checkout;
  * top-ups are refused until they have accepted the current version (`TERMS_VERSION`). Acceptances
  * and the text of each version are append-only (migration 0039).
  */
@@ -44,7 +44,7 @@ export async function storeCurrentTerms(env: Env, db: Db, requestUrl: string, no
       detail: { status: res.status },
       dedupeKey: `terms-document:${TERMS_VERSION}`,
     });
-    throw problem(503, 'billing_unavailable', 'Payments are briefly unavailable. Try again in a few minutes.');
+    throw problem(503, 'billing_unavailable', 'The terms cannot be confirmed right now. Try again in a few minutes.');
   }
   await db.insert(termsVersions).values({ version: TERMS_VERSION, sha256: TERMS_SHA256, document, recordedAt: now }).onConflictDoNothing();
 }
