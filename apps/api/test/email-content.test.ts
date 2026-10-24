@@ -2,7 +2,10 @@ import { createDb } from '@cloudbrowser/db';
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../src/notifications/send.js';
 import { renderEmail } from '../src/notifications/template.js';
-import { lowBalanceMessage, noticeMessage, retentionMessage, rewardMessage, runwayMessage, sendAlreadyRegistered, sendRegistrationLink, sendSignInCode } from '../src/notifications/user.js';
+import {
+  closureCodeMessage, closureErasedMessage, closureStartedMessage, lowBalanceMessage, noticeMessage, retentionMessage, rewardMessage, runwayMessage,
+  sendAlreadyRegistered, sendRegistrationLink, sendSignInCode,
+} from '../src/notifications/user.js';
 import { setup } from './helpers.js';
 
 const url = 'https://nevazu.com';
@@ -90,6 +93,29 @@ describe('English transactional emails', () => {
     expect(messages[2]!.text).not.toContain('open it to resume');
     expect(messages[4]!.text).toContain('balance is now $7.00');
     expect(messages[5]!.text).not.toContain('balance is now');
+  });
+
+  it('states the closure code, what closing deleted, the refund and the erasure', () => {
+    const code = closureCodeMessage(url, '042917');
+    assertEmail(code);
+    expect(code.subject).toBe('Your Nevazu account closure code: 042917');
+    expect(code.text).toContain('Your account closure code is 042917');
+    expect(code.text).toContain('Expires in 5 minutes');
+    expect(code.text).toContain('Nothing has changed yet');
+    const started = closureStartedMessage(url, { browsers: 2, refundMicros: 25_000_000, refundDays: 14, eraseDays: 30, supportEmail: 'support@nevazu.com' });
+    assertEmail(started);
+    for (const fact of ['signed out everywhere', 'your 2 browsers and their data are being permanently deleted', 'about $25.00', 'within 14 days', 'within 30 days at the latest', 'support@nevazu.com']) {
+      expect(started.text).toContain(fact);
+    }
+    const none = closureStartedMessage(url, { browsers: 0, refundMicros: 0, refundDays: 14, eraseDays: 30, supportEmail: 'support@nevazu.com' });
+    assertEmail(none);
+    expect(none.text).toContain('you had no browsers to delete');
+    expect(none.text).toContain('no unused paid credit to refund');
+    const erased = [true, false].map((refunded) => closureErasedMessage(url, { refundMicros: 25_000_000, refunded, supportEmail: 'support@nevazu.com' }));
+    erased.forEach(assertEmail);
+    expect(erased[0]!.text).toContain('Your refund of $25.00 has been made');
+    expect(erased[1]!.text).toContain('Your refund of $25.00 is still being processed');
+    expect(erased[0]!.text).toContain('last email we send to this address');
   });
 
   it('rejects executable action URLs and safely escapes every display field', () => {

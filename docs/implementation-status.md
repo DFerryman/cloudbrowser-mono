@@ -224,6 +224,18 @@ Cloudflare deployment.
   The second step stays at sign-in, before any session exists, rather than when opening the
   dashboard or a browser: a session created after the email code alone could already read billing
   and change settings, and checking once at the entrance keeps opening a browser fast.
+- **Account closure** (Terms sections 8 and 9; `apps/api/src/closure.ts`): Account → Close account
+  shows the browsers to delete, the balance and the refund, then confirms with a 6-digit email code
+  and a ticked box. At once every session, passkey and authenticator app is deleted, a trigger
+  refuses new sessions (migration `0040`), coding agents are revoked and every browser is
+  permanently deleted. Once they are purged, the unused paid credit (never signup or promotional
+  credit) is fixed and split over the paid orders, newest first; an operator refunds each order in
+  Creem from the console's Closures page, and the refund webhooks record it (or Refund recorded).
+  Then leftover credit is written off and the personal data erased: email and name replaced,
+  browser names, session logs and agent records deleted, at the latest 30 days after the closure.
+  Billing records, Terms acceptances, the audit log and the browser ledger stay under the anonymous
+  user id, and the address can sign up again. Refused here during a dispute hold, while a browser
+  is suspended, and for operator accounts.
 - **Launch failures and zones**: a VM that EC2 terminates during launch is reported with EC2's
   state reason and relaunched under a new token (the old ClientToken only ever returned the same
   dead VM, so retries could never succeed and every such failure looked like "waiting for

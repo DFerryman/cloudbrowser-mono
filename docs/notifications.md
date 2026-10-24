@@ -29,6 +29,9 @@ deleted, a browser stopped by someone else) is never held back; it is already ra
 | Credit ran out / deletion reminders | Usable credit is gone; never during a payment-dispute hold, which stops browsers but pauses deletion | Exactly three: at the time, after 3 days, 1 day before deletion |
 | Browser stopped / network paused | Engine stopped a browser (admin, suspension, frozen) or paused its network | Once per event; a failed send is retried for up to a day (`NOTICE_RETRY_MS`) |
 | **Reward credited** (new) | A promotion reward reached the balance | Rewards are collected for 10 minutes and confirmed in **one** email; **at most one per 24 h** (`REWARD_COOLDOWN_MS`) — later rewards wait and join the next email, none is lost |
+| **Account closure code** (new) | User asks to close their account (Account → Close account) | At most one a minute; expires in 5 minutes, 5 tries |
+| **Account closed** (new) | The closure is accepted: browsers deleted, refund due | Once |
+| **Account data erased** (new) | The refund is made (or 30 days passed) and the personal data is erased | Once; the last email to the address. Nothing else is sent to a closed account (`sendToUser`) |
 
 Funded-time warnings, credit-ran-out and deletion reminders (the final one too), browser notices
 and reward emails count as sent only once the email went out; a failed one is sent again by the
