@@ -299,13 +299,19 @@ export async function eraseAccount(env: Env, db: Db, row: typeof accountClosures
   const [u] = await db.select({ email: user.email }).from(user).where(eq(user.id, row.userId));
   if (!u) return;
   const email = u.email.toLowerCase();
-  // What was left, after any refund support made, is what the closure keeps on record.
-  const left = await unusedPaidCredit(db, row.userId);
-  await db.update(accountClosures).set({ balanceMicros: left.balanceMicros, paidMicros: left.paidMicros, paidOrders: left.orders }).where(eq(accountClosures.userId, row.userId));
-  const [acct] = await db.select({ balance: billingAccounts.balanceMicros }).from(billingAccounts).where(eq(billingAccounts.userId, row.userId));
-  if (acct && acct.balance > 0) {
-    await applyBalance(db, { userId: row.userId, kind: 'adjustment', amountMicros: -acct.balance, reference: `closure:${row.userId}`, description: 'Account closed: credit not refunded', actor: 'closure' }, now);
+  const reference = `closure:${row.userId}`;
+  const writeOff = async () => (await db.select({ amount: balanceTransactions.amountMicros }).from(balanceTransactions).where(eq(balanceTransactions.reference, reference)))[0];
+  // What was left, after any refund support made, is what the closure keeps on record. A retry
+  // after the write-off (the batch below failed) keeps the record taken before it.
+  if (!(await writeOff())) {
+    const left = await unusedPaidCredit(db, row.userId);
+    await db.update(accountClosures).set({ balanceMicros: left.balanceMicros, paidMicros: left.paidMicros, paidOrders: left.orders }).where(eq(accountClosures.userId, row.userId));
+    const [acct] = await db.select({ balance: billingAccounts.balanceMicros }).from(billingAccounts).where(eq(billingAccounts.userId, row.userId));
+    if (acct && acct.balance > 0) {
+      await applyBalance(db, { userId: row.userId, kind: 'adjustment', amountMicros: -acct.balance, reference, description: 'Account closed: credit not refunded', actor: 'closure' }, now);
+    }
   }
+  const writtenOffMicros = -((await writeOff())?.amount ?? 0);
   if (u.email !== erasedEmail(row.userId) && env.EMAIL) {
     await sendTo(env, u.email, closureErasedMessage(env.APP_URL, { supportEmail: SUPPORT_EMAIL }))
       .catch((e) => console.error('closure: final email failed', row.userId, e));
@@ -331,7 +337,7 @@ export async function eraseAccount(env: Env, db: Db, row: typeof accountClosures
     db.delete(account).where(eq(account.userId, row.userId)),
     db.delete(adminStepUps).where(eq(adminStepUps.userId, row.userId)),
     db.update(accountClosures).set({ erasedAt: now }).where(eq(accountClosures.userId, row.userId)),
-    db.insert(auditLog).values({ actor: 'closure', action: 'account.erased', target: `user:${row.userId}`, detail: { writtenOffMicros: Math.max(0, acct?.balance ?? 0) }, createdAt: now }),
+    db.insert(auditLog).values({ actor: 'closure', action: 'account.erased', target: `user:${row.userId}`, detail: { writtenOffMicros }, createdAt: now }),
   ]);
   await notifyHub(env, row.userId);
 }

@@ -204,7 +204,7 @@ describe('closing an account', () => {
     expect(rows(`SELECT kind FROM balance_transactions WHERE user_id = ? AND kind = 'refund'`, userId)).toHaveLength(0);
     expect(rows(`SELECT title FROM alerts WHERE title LIKE '%efund due%'`)).toHaveLength(0);
 
-    // The user wrote to support, who agreed to refund October's order; Creem reports it.
+    // In a special case agreed by email, support refunds October's order; Creem reports it.
     await refundWebhook('ref_oct', 'ord_oct', 2400);
     expect(rows('SELECT balance_micros FROM billing_accounts WHERE user_id = ?', userId)).toEqual([{ balance_micros: 5_000_000 }]);
     await sweep(new Date(requested + 29 * DAY));
@@ -212,10 +212,18 @@ describe('closing an account', () => {
     expect(rows('SELECT email FROM user WHERE id = ?', userId)).toEqual([{ email: EMAIL }]);
 
     // Day 30: the rest is written off, the address gets one last email, and the data is erased.
+    // The first try stops after the write-off (its erasure batch fails); the next sweep finishes.
     pendingCodes();
+    t.d1.sqlite.exec(`CREATE TEMP TRIGGER erase_fails BEFORE UPDATE OF email ON "user" BEGIN SELECT RAISE(ABORT, 'erase failed'); END`);
+    await sweep(new Date(requested + 30 * DAY));
+    expect(closure()!.erased_at).toBeNull();
+    t.d1.sqlite.exec('DROP TRIGGER erase_fails');
     await sweep(new Date(requested + 30 * DAY));
     expect(codesLeft()).toEqual(['v-other']);
-    expect(closure()).toMatchObject({ status: 'closed', erased_at: expect.any(Number) });
+    // On record: what was left before the write-off, for support.
+    expect(closure()).toMatchObject({ status: 'closed', erased_at: expect.any(Number), balance_micros: 5_000_000, paid_micros: 5_000_000 });
+    expect(JSON.parse(String(closure()!.paid_orders))).toEqual([expect.objectContaining({ orderId: 'ord_sep', creditMicros: 5_000_000 })]);
+    expect(rows(`SELECT detail FROM audit_log WHERE action = 'account.erased'`).map((r) => JSON.parse(String(r.detail)))).toEqual([{ writtenOffMicros: 5_000_000 }]);
     expect(t.emails.at(-1)).toMatchObject({ to: EMAIL, subject: 'Your Nevazu account data has been erased' });
     expect(t.emails.at(-1)!.text).not.toMatch(/refund/i);
     expect(rows(`SELECT amount_micros, description FROM balance_transactions WHERE reference = ?`, `closure:${userId}`)).toEqual([{ amount_micros: -5_000_000, description: 'Account closed: credit not refunded' }]);
