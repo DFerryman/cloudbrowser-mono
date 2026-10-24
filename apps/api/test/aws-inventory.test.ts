@@ -125,6 +125,14 @@ it('ends with a clean schema: the view has only the current columns and users ha
   expect(d1.sqlite.prepare("SELECT COUNT(*) n FROM caps WHERE metric='running' AND scope LIKE 'user:%'").get()).toEqual({n:0});
 });
 
+it('counts commitments once for all regions, not once per region',()=>{
+  const {d1}=setup();
+  // A correlated subquery rescans browser_instances for every region on every read.
+  const plan=(d1.sqlite.prepare('EXPLAIN QUERY PLAN SELECT * FROM aws_region_inventory').all() as {detail:string}[]).map((r)=>r.detail);
+  expect(plan.filter((d)=>/CORRELATED/.test(d))).toEqual([]);
+  expect(plan.filter((d)=>/SCAN b\b/.test(d))).toHaveLength(1);
+});
+
 it('says why a region is unavailable: an expired snapshot or a failing refresh is not an empty quota',async()=>{
   const {d1,db,add,now}=setup();
   d1.sqlite.exec("UPDATE aws_provider_regions SET capacity=5 WHERE region_id='syd1'");
