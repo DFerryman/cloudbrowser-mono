@@ -49,7 +49,7 @@ async function d1(sql, params = []) {
 // --- Workers logs: only fields the code logs on purpose ------------------------------------
 const FIELDS = ['stage', 'code', 'issue', 'source', 'role', 'event', 'instanceId', 'generation', 'sessionId', 'attemptId', 'relayId',
   'peerSequence', 'elapsedMs', 'closeCode', 'wasClean', 'status', 'ignored', 'upMs', 'attempts', 'discardReason', 'clientBuild', 'media',
-  // 'vm stream' (agent 0.7.0 heartbeats)
+  // 'vm stream' (agent 0.8.0 heartbeats)
   'viewers', 'seconds', 'levels', 'nacks', 'lost', 'nekoCpuPct', 'cpuPct', 'stealPct'];
 
 async function logs(key, value, from, to) {
@@ -130,7 +130,7 @@ function verdict(attempt) {
 const time = (ms) => new Date(ms).toISOString().replace('T', ' ').replace('Z', '');
 // Each level's own frame rate (STREAM.fps in packages/contracts/src/tiers.ts; square is full's shape-free twin).
 const LEVEL_FPS = { full: 30, high: 30, medium: 15, low: 10, square: 30 };
-// What the VM saw of the live view over one heartbeat (agent 0.7.0, docs/connection-diagnostics.md).
+// What the VM saw of the live view over one heartbeat (agent 0.8.0, docs/connection-diagnostics.md).
 function vmBits(e) {
   const levels = Object.entries(e.levels ?? {}).map(([id, l]) => `${id} ${l.fps}fps/${l.kbps}kbps${l.starts ? ` started ${l.starts}` : ''}${l.whole ? '' : ' (part)'}`);
   return [`[encoder ${e.levels === undefined ? 'not read' : levels.join(', ') || 'idle'}]`, `[viewers' rtcp nack=${e.nacks ?? '?'} lost=${e.lost ?? '?'}]`,
@@ -248,7 +248,7 @@ for (const { session: s, events, attempts, vm, quality: q } of report.sessions) 
     const steps = a.handshake ? ` (candidate ${a.handshake.candidateMs ?? '?'} ms, ICE ${a.handshake.iceMs ?? '?'} ms, DTLS ${a.handshake.dtlsMs ?? '?'} ms after the offer)` : '';
     console.log(`  attempt ${a.attemptId}${a.clientBuild ? ` build ${a.clientBuild}` : ''}: ${a.firstFrameMs !== undefined ? `first frame at ${a.firstFrameMs} ms${steps}; ` : ''}${a.verdict}`);
   }
-  console.log(`  vm: ${vm ?? 'no stream reports (agent before 0.7.0, or no viewer connected)'}`);
+  console.log(`  vm: ${vm ?? 'no stream reports (agent before 0.8.0, or no viewer connected)'}`);
   if (q.length) {
     console.log('  quality (per report):');
     for (const r of q) {

@@ -71,7 +71,7 @@ export const AgentHello = z.object({
 });
 const streamCount = z.number().nonnegative().max(Number.MAX_SAFE_INTEGER);
 /**
- * heartbeat.stream (agent 0.7.0), while a viewer is connected: what the VM itself saw of the live
+ * heartbeat.stream (agent 0.8.0), while a viewer is connected: what the VM itself saw of the live
  * view since its previous heartbeat, from neko's /metrics and /proc/stat. Per video level the
  * frames per second and kbit/s its encoder produced, the pipelines started (a viewer joining the
  * level or switching to it) and whether it ran the whole interval (only then is `fps` the

@@ -232,7 +232,7 @@ own network, a VPN, or a detour such as mainland China's.
 ### What the VM saw
 
 A viewer's report says what arrived; the VM's side says whether the picture was made and sent at
-its rate in the first place. From agent 0.7.0, each heartbeat (every 15 s) while a viewer is
+its rate in the first place. From agent 0.8.0, each heartbeat (every 15 s) while a viewer is
 connected carries `stream`: the change in neko's own counters (`/metrics` on the VM's loopback)
 and in the VM's CPU times (`/proc/stat`) since the previous heartbeat. The api logs it as
 `vm stream`, with `instanceId`, `generation` and `viewers`. The first heartbeat of a run of
@@ -260,7 +260,7 @@ compare it with the viewer's `double6` for what got through. `nacks` rising with
 loss that resends repaired; `lost` rising with it is loss they did not.
 
 `scripts/session-trace.mjs` shows each report as a `vm` line in the session's timeline and sums
-them up as `vm:` under its attempts. Agents before 0.7.0 send no `stream`, and the trace says so.
+them up as `vm:` under its attempts. Agents before 0.8.0 send no `stream`, and the trace says so.
 A new agent reaches a VM at its first boot: the images workflow publishes the agent image from
 `main` when `services/agent` changes, and VMs already running keep theirs.
 
