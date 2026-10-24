@@ -8,7 +8,7 @@ and `168789041921` (Identity Delegated Admin). SCPs never apply to the managemen
 |---|---|---|---|
 | `NevazuRegionalAPIs-RegionFloor` | `p-e0g0f8sh` | every region except ap-southeast-2, us-east-1, us-west-2 | denies all but an enumerated list of Nevazu APIs |
 | `NevazuRegionalAPIs-UsWest2Partitional` | `p-zxswrdjc` | us-west-2 | denies all but an enumerated list |
-| `AdvancedModeRegionRestrictionSecurityControlPolicy` | `p-vse3360r` | us-east-1 | denies all but listed services (includes `kms:*`); unchanged |
+| `AdvancedModeRegionRestrictionSecurityControlPolicy` | `p-vse3360r` | us-east-1 | denies all but listed services (includes `kms:*`); S3 object actions added 2026-10-24 |
 | `ManagedAccountSecurityControlPolicy` | `p-oqj3bf21` | everywhere | blocks leaving the organization and editing managed roles; unchanged |
 
 ## The problem (found 2026-10-19)
@@ -128,3 +128,37 @@ console, or disable the region).
   directory in sync when either policy changes, and update `before/` with the live content first.
 - A CLI sign-in to the Nevazu account must refresh through us-east-1 (`signin:*` is denied in
   the other restricted regions): run any command with `--region us-east-1` once after 15 minutes.
+
+## Profile archives in S3 (2026-10-24)
+
+Profile archives moved from one R2 bucket in Eastern North America to an S3 bucket in each
+browser's own region (`nevazu-archives-346565070970-<region>`, created by
+`infra/aws/archive-buckets.sh`). Both Nevazu policies denied every S3 action, so:
+
+1. The eleven S3 actions the archives and the bucket setup need are added to the floor
+   statement's `NotAction` list.
+2. Two new Deny statements re-deny exactly those actions in the same regions unless the caller is
+   the Nevazu account (`ArchiveS3OnlyForNevazu`) and the resource is a `nevazu-archives-346565070970-*`
+   bucket or an object in one (`ArchiveS3OnlyOnArchiveBuckets`).
+
+No other S3 action opens (no DeleteBucket, ACLs or bucket listing across the account), and the
+other member account sees no change. `before-s3/` holds the policies as they were before this
+change; `check-s3.py` compares the two with the IAM simulator, like `check.py`.
+
+Rollback: `aws organizations update-policy` with the `before-s3/` files (same commands as above).
+New archives then fail in the restricted regions, so unset `S3_ARCHIVE_BUCKET_PREFIX` on the engine
+first (archives go back to R2).
+
+### us-east-1
+
+`AdvancedModeRegionRestrictionSecurityControlPolicy` (`p-vse3360r`, attached to the root) also
+denied S3 in us-east-1 and is close to the 5,120-character limit, so only `s3:PutObject`,
+`s3:GetObject` and `s3:DeleteObject` were added to its `NotAction` list. There is no room for the
+Nevazu-only statements, so these three actions are open in us-east-1 for every member account
+(the other one, Identity Delegated Admin, does not use S3). The bucket in us-east-1 was created
+while `s3:*` was allowed there for about 11 minutes (2026-10-24 14:10 to 14:21 UTC);
+`before-s3/AdvancedModeRegionRestrictionSecurityControlPolicy.json` is the policy before.
+
+me-south-1 (Bahrain) was unreachable on 2026-10-24 (connections reset; the region is disabled in
+Nevazu and has no browsers), so it has no bucket yet. Run `infra/aws/archive-buckets.sh
+nevazu-archives-346565070970- me-south-1` before enabling that region again.

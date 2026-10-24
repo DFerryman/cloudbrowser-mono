@@ -708,8 +708,9 @@ export const fakeProviderResources = sqliteTable(
 );
 
 /**
- * Provider snapshots and R2 archives (page 4). Owner: engine; the reaper marks expired ones deleted.
- * `location` is the snapshot id for snapshots and the R2 object key for archives.
+ * Provider snapshots and profile archives (page 4). Owner: engine; the reaper marks expired ones deleted.
+ * `location` is the snapshot id for snapshots; for archives, `s3:<region>/<key>` in that region's S3
+ * bucket, or a bare object key in R2 (archives made before S3).
  */
 export const backups = sqliteTable(
   'backups',

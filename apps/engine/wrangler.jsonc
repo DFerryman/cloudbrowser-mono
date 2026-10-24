@@ -33,7 +33,10 @@
     // these are set together with the secrets R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY and
     // ARCHIVE_MASTER_KEY (see docs/deploy-cloudflare.md).
     "R2_ACCOUNT_ID": "84e421f26c708c0cf437e287eed11fa1",
-    "R2_ARCHIVE_BUCKET": "cloudbrowser-archives"
+    "R2_ARCHIVE_BUCKET": "cloudbrowser-archives",
+    // New archives go to the S3 bucket <prefix><region> in the browser's own region (signed with
+    // the AWS role); the R2 settings above keep older archives restorable until they expire.
+    "S3_ARCHIVE_BUCKET_PREFIX": "nevazu-archives-346565070970-"
   },
   "d1_databases": [
     {

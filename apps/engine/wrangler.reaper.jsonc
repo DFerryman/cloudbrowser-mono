@@ -14,7 +14,9 @@
   "durable_objects": { "bindings": [{ "name": "EVENT_HUB", "class_name": "EventHub", "script_name": "cloudbrowser-engine" }] },
   "vars": {
     "ENGINE_MODE": "reaper",
-    "ENV_NAME": "prod"
+    "ENV_NAME": "prod",
+    // Archives in S3 are deleted in their region's bucket <prefix><region>.
+    "S3_ARCHIVE_BUCKET_PREFIX": "nevazu-archives-346565070970-"
   },
   // Deletes expired and purged archives (page 4). Only the reaper deletes.
   "r2_buckets": [{ "binding": "ARCHIVES", "bucket_name": "cloudbrowser-archives" }],

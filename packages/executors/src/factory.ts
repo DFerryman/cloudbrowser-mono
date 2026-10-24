@@ -89,6 +89,16 @@ function roleSession(accessKeyId: string, secretAccessKey: string, arn: string, 
   return provider;
 }
 
+/**
+ * This deployment's AWS credentials for calls outside EC2 (archive storage in S3): the role
+ * session when AWS_ROLE_ARN is set, else the keys themselves; null without keys.
+ */
+export function awsCredentialProvider(env: Pick<ExecutorEnv, 'AWS_ACCESS_KEY_ID' | 'AWS_SECRET_ACCESS_KEY' | 'AWS_ROLE_ARN' | 'AWS_ROLE_EXTERNAL_ID'>): AwsCredentialProvider | null {
+  const { AWS_ACCESS_KEY_ID: accessKeyId, AWS_SECRET_ACCESS_KEY: secretAccessKey } = env;
+  if (!accessKeyId || !secretAccessKey) return null;
+  return env.AWS_ROLE_ARN ? roleSession(accessKeyId, secretAccessKey, env.AWS_ROLE_ARN, env.AWS_ROLE_EXTERNAL_ID) : async () => ({ accessKeyId, secretAccessKey });
+}
+
 /** Each process builds its executors with its own credential mode. */
 export function createExecutor(kind: ExecutorKind, mode: CredentialMode, env: ExecutorEnv): Executor {
   switch (kind) {

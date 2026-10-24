@@ -884,6 +884,7 @@ async function prepareArchive(env: StepEnv, p: PlacementRow, reason: 'sleep' | '
   if (!store || !(await ensureArchiveKey(env, env.instance.id))) return null;
   const backupId = `${env.op.id}-archive`;
   const objectKey = archiveObjectKey(env.instance.id, backupId);
+  const location = store.locate?.(p.providerRegion, objectKey) ?? objectKey;
   await env.deps.db
     .insert(backups)
     .values({
@@ -892,12 +893,12 @@ async function prepareArchive(env: StepEnv, p: PlacementRow, reason: 'sleep' | '
       kind: 'archive',
       reason,
       status: 'pending',
-      location: objectKey,
+      location,
       generation: p.generation,
       createdAt: env.deps.now(),
     })
     .onConflictDoNothing();
-  return { backupId, objectKey, putUrl: await store.presignPut(objectKey) };
+  return { backupId, objectKey, putUrl: await store.presignPut(location) };
 }
 
 async function settleArchive(env: StepEnv, backupId: string, reply: CommandReply) {

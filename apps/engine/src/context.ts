@@ -29,12 +29,12 @@ export interface EngineDeps {
   bootstrapSecret: string;
   /** Waits between polls in synchronous calls such as an on-demand IP check. */
   sleep(ms: number): Promise<void>;
-  /** Archive backups in R2; null when R2 credentials are not configured (archives are skipped). */
+  /** Archive backups in S3 (the browser's region) or R2; null when neither is configured (archives are skipped). */
   archives: ArchiveStore | null;
   /** Wraps per-instance archive keys (Worker secret ARCHIVE_MASTER_KEY); null disables archives. */
   archiveMasterKey: string | null;
-  /** Deletes an archive object (reaper only, through the R2 binding). */
-  deleteArchive?: (objectKey: string) => Promise<void>;
+  /** Deletes an archive object by its location: in S3 with the AWS credentials, in R2 through the binding (reaper). */
+  deleteArchive?: (location: string) => Promise<void>;
 }
 
 /** The step asks to be called again later without counting as a failure (e.g. waiting for the agent). */
