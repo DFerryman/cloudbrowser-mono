@@ -142,18 +142,22 @@ function vmVerdict(reports) {
   const behind = [];
   let judged = 0;
   for (const r of reports) {
+    // CPU is judged in the same heartbeat as the slow encoder, not anywhere in the session.
+    const starved = r.cpuPct > 85 || r.stealPct > 5;
     for (const [id, l] of Object.entries(r.levels ?? {})) {
       // Only a level that ran the whole heartbeat shows its encoder's rate; 0 is a stall.
       if (!l.whole || !LEVEL_FPS[id]) continue;
       judged++;
-      if (l.fps < 0.8 * LEVEL_FPS[id]) behind.push(`${id} ${l.fps}/${LEVEL_FPS[id]} fps`);
+      if (l.fps < 0.8 * LEVEL_FPS[id]) behind.push({ what: `${id} ${l.fps}/${LEVEL_FPS[id]} fps`, starved, cpuKnown: typeof r.cpuPct === 'number' });
     }
   }
   const max = (k) => { const v = reports.map((r) => r[k]).filter((x) => typeof x === 'number'); return v.length ? Math.max(...v) : '?'; };
   const parts = [`${reports.length} heartbeats, CPU up to ${max('cpuPct')}% (neko up to ${max('nekoCpuPct')}% of a core), steal up to ${max('stealPct')}%`];
-  const starved = max('cpuPct') > 85 || max('stealPct') > 5;
-  if (behind.length) parts.push(`the encoder fell behind ${behind.length} time(s): ${[...new Set(behind)].slice(0, 4).join(', ')}${starved ? ' (the VM ran out of CPU)' : ''}`);
-  else if (judged) parts.push(`the encoder kept its frame rate (${judged} level-heartbeats)`);
+  if (behind.length) {
+    const starved = behind.filter((b) => b.starved).length, ample = behind.filter((b) => !b.starved && b.cpuKnown).length;
+    const why = [starved && `the VM was out of CPU in ${starved}`, ample && `CPU was not short in ${ample}: look at capture`].filter(Boolean).join(', ');
+    parts.push(`the encoder fell behind ${behind.length} time(s): ${[...new Set(behind.map((b) => b.what))].slice(0, 4).join(', ')}${why ? ` (${why})` : ''}`);
+  } else if (judged) parts.push(`the encoder kept its frame rate (${judged} level-heartbeats)`);
   else parts.push('the encoder\'s frame rate was not measured: no level ran a whole heartbeat, or neko\'s counters were unreadable');
   return parts.join('; ');
 }
