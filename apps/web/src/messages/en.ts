@@ -582,6 +582,7 @@ export const en = {
   'footer.terms': 'Terms of Service',
   'footer.privacy': 'Privacy Policy',
   'footer.refunds': 'Refund Policy',
+  'footer.dpa': 'Data Processing Addendum',
   'footer.contact': 'Contact',
   'footer.tagline': 'Persistent cloud browsers, each on its own static IP.',
   'footer.rights': '© {year} Nevazu. All rights reserved.',

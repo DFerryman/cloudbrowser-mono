@@ -31,7 +31,7 @@ const text = (html) => html.replace(/<script[\s\S]*?<\/script>/g, ' ').replace(/
 const attr = (html, re) => re.exec(html)?.[1];
 
 const docs = readdirSync(join(dist, 'docs')).filter((f) => f.endsWith('.html')).map((f) => `/docs/${f.slice(0, -5)}`);
-const routes = ['/', '/pricing', '/docs', ...docs, '/terms', '/privacy', '/refunds', '/contact', '/status'];
+const routes = ['/', '/pricing', '/docs', ...docs, '/terms', '/privacy', '/refunds', '/dpa', '/contact', '/status'];
 
 /** Text each page must carry for a reader that runs no JavaScript. */
 const KEY_TEXT = {
@@ -44,6 +44,7 @@ const KEY_TEXT = {
   '/terms': ['Terms of Service'],
   '/privacy': ['Privacy Policy', 'What we collect'],
   '/refunds': ['Refund Policy'],
+  '/dpa': ['Data Processing Addendum', 'What is not in place yet'],
   '/contact': ['Contact', 'support@nevazu.com', 'security@nevazu.com'],
   '/status': ['System status', 'refreshed every minute'],
 };

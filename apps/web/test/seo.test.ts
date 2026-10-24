@@ -14,7 +14,7 @@ const ofType = (nodes: Node[], type: string) => nodes.filter((n) => n['@type'] =
 describe('public pages', () => {
   it('lists every public page once, with its own title, description and file', () => {
     const paths = pages.map((p) => p.path);
-    expect(paths).toEqual(expect.arrayContaining(['/', '/pricing', '/docs', '/terms', '/privacy', '/refunds', '/contact', '/status', ...DOCS.en.map((a) => `/docs/${a.slug}`)]));
+    expect(paths).toEqual(expect.arrayContaining(['/', '/pricing', '/docs', '/terms', '/privacy', '/refunds', '/dpa', '/contact', '/status', ...DOCS.en.map((a) => `/docs/${a.slug}`)]));
     for (const key of ['path', 'title', 'description', 'file'] as const) expect(new Set(pages.map((p) => p[key])).size).toBe(pages.length);
     // No trailing slashes: Workers static assets serve x.html at /x and redirect /x/ there.
     for (const p of pages) expect(p.path === '/' || !p.path.endsWith('/')).toBe(true);

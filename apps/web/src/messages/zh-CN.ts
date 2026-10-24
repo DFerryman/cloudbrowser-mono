@@ -584,6 +584,7 @@ export const zhCN: Messages = {
   'footer.terms': '服务条款',
   'footer.privacy': '隐私政策',
   'footer.refunds': '退款政策',
+  'footer.dpa': '数据处理附录',
   'footer.contact': '联系我们',
   'footer.tagline': '持久在线的云浏览器，每个都有独享静态 IP。',
   'footer.rights': '© {year} Nevazu。保留所有权利。',

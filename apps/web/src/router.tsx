@@ -41,6 +41,7 @@ export const router = createBrowserRouter([{ errorElement: <RouteError />, child
       { path: '/terms', lazy: async () => { const { LegalPage } = await import('./site/LegalPage.js'); return { Component: () => <LegalPage policy="terms" /> }; } },
       { path: '/privacy', lazy: async () => { const { LegalPage } = await import('./site/LegalPage.js'); return { Component: () => <LegalPage policy="privacy" /> }; } },
       { path: '/refunds', lazy: async () => { const { LegalPage } = await import('./site/LegalPage.js'); return { Component: () => <LegalPage policy="refunds" /> }; } },
+      { path: '/dpa', lazy: async () => { const { LegalPage } = await import('./site/LegalPage.js'); return { Component: () => <LegalPage policy="dpa" /> }; } },
       { path: '/contact', element: <ContactPage /> },
       { path: '*', element: <NotFoundPage /> },
     ],
