@@ -13,7 +13,7 @@ export type AwsInventory = {
  * is refreshed within minutes. A failing refresh or missing prices need an operator.
  */
 export const awaitingRefresh = (reason: InventoryUnavailableReason) => reason === 'stale' || reason === 'pending';
-/** A snapshot older than this is not used (aws_region_inventory, migration 0031). */
+/** A snapshot older than this is not used (aws_region_inventory, migrations 0031 and 0037). */
 export const INVENTORY_MAX_AGE_MS = 20 * 60_000;
 /**
  * Browsers AWS can still allocate per region and tier: quota room minus browsers holding a slot.
