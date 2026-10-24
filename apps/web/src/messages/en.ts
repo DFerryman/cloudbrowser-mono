@@ -467,7 +467,6 @@ export const en = {
   'billing.receiptsFrom': '{provider} receipts',
   'consent.title': 'Before you pay',
   'consent.description': 'We ask once for each version of our Terms of Service. If they change, we ask again before your next payment.',
-  'consent.summary': 'You are adding {amount} of credit. Next, you pay on {provider}’s secure checkout page.',
   'consent.checkbox': 'I have read the {terms}',
   'consent.newTab': 'The Terms open in a new tab, so this window stays as it is.',
   'consent.confirm': 'Confirm and pay',

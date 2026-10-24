@@ -192,8 +192,6 @@ function BalanceCard({ state }: { state: BillingState }) {
         {state.enabled && state.topUps.length ? <Hint className="mt-2">{t(state.provider === 'stripe' ? 'billing.topUpHintStripe' : 'billing.topUpHint')}</Hint> : null}
         <TermsConsentDialog
           open={consentFor !== null}
-          amount={consentFor ? money(cents(consentFor.amountCents), locale) : ''}
-          provider={state.provider}
           busy={busy}
           error={consentFor ? checkout.error : null}
           onConfirm={() => consentFor && pay(consentFor, TERMS_VERSION)}

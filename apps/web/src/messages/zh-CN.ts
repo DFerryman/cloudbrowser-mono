@@ -469,7 +469,6 @@ export const zhCN: Messages = {
   'billing.receiptsFrom': '{provider} 收据',
   'consent.title': '付款前请确认',
   'consent.description': '每个版本的服务条款只需确认一次。条款更新后，下次付款前会再次请你确认。',
-  'consent.summary': '你将充值 {amount}。接下来将在 {provider} 的安全付款页面完成支付。',
   'consent.checkbox': '我已阅读{terms}',
   'consent.newTab': '服务条款将在新标签页中打开，当前窗口保持不变。',
   'consent.confirm': '确认并付款',
