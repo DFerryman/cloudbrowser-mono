@@ -8,7 +8,15 @@ export interface TouchPointerEvent {
   pointerId: number;
   clientX: number;
   clientY: number;
+  /** The first finger of a new touch: no other finger is down. */
+  isPrimary?: boolean;
 }
+
+/**
+ * A finger shifts as it lifts. Within this many times the threshold, a tap's last position does
+ * not turn it into a scroll: the lift alone used to cancel taps that never moved before it.
+ */
+const LIFT_SLACK = 2;
 
 export interface TouchGestureOptions {
   /** Maps a client position to the remote desktop; null excludes letterboxing. */
@@ -44,6 +52,10 @@ export class TouchGestureController {
   /** Returns whether this pointer began on the remote desktop and can be captured. */
   pointerDown(event: TouchPointerEvent): boolean {
     if (this.pointers.has(event.pointerId)) return false;
+    // A primary touch means no other finger is down: any still tracked lost its pointerup or
+    // pointercancel (a system gesture took over), and would turn every later tap into a
+    // two-finger scroll until the page lost focus.
+    if (event.isPrimary && this.pointers.size > 0) this.reset();
     const remote = this.options.mapPoint(event.clientX, event.clientY);
     if (!remote) return false;
     this.pointers.set(event.pointerId, this.position(event));
@@ -83,12 +95,17 @@ export class TouchGestureController {
   }
 
   pointerUp(event: TouchPointerEvent): void {
-    if (!this.pointers.has(event.pointerId)) return;
-    // Include the final coordinates even if the platform coalesced the last pointermove.
-    this.pointerMove(event);
-    const tap = this.mode === 'tap' && this.pointers.size === 1
-      ? this.options.mapPoint(event.clientX, event.clientY)
-      : null;
+    const last = this.pointers.get(event.pointerId);
+    if (!last) return;
+    // Include the final coordinates even if the platform coalesced the last pointermove, unless
+    // a tap only shifted as the finger lifted: it clicks where the finger rested.
+    const anchor = this.anchor;
+    const lifted = this.mode === 'tap' && this.pointers.size === 1 && !!anchor
+      && Math.hypot(anchor.x - event.clientX, anchor.y - event.clientY) <= this.threshold * LIFT_SLACK;
+    if (!lifted) this.pointerMove(event);
+    // A tap released outside the desktop clicks nothing.
+    const released = this.mode === 'tap' && this.pointers.size === 1 ? this.options.mapPoint(event.clientX, event.clientY) : null;
+    const tap = released && lifted ? this.options.mapPoint(last.x, last.y) : released;
     this.remove(event.pointerId);
     if (tap) {
       this.options.move(tap.x, tap.y);

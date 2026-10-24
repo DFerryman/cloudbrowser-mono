@@ -16,6 +16,8 @@ type CommandRow = { id: string; kind: string; payload: string };
 type Role = Attachment['role'];
 const ROLES: readonly Role[] = ['agent', 'viewer'];
 
+const PING = '{"t":"ping"}';
+const PONG = '{"t":"pong"}';
 /** Frames bigger than this are refused (page 2: message size limits). */
 const MAX_FRAME_BYTES = 256 * 1024;
 /**
@@ -103,8 +105,9 @@ export class InstanceGateway extends DurableObject<Env> {
   private readonly mcp: CodingAgentSession;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    // Keepalives are answered without waking the object.
-    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"t":"ping"}', '{"t":"pong"}'));
+    // Keepalives are answered without waking the object. The viewer's pong also confirms, in
+    // order, every frame the gateway received before its ping (packages/viewer InputQueue).
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
     this.mcp = new CodingAgentSession({
       ctx, env,
       agent: () => this.sockets('agent')[0],
@@ -503,6 +506,12 @@ export class InstanceGateway extends DurableObject<Env> {
   }
 
   override webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    // The runtime answers keepalives (setWebSocketAutoResponse); one that reaches the object
+    // anyway is answered too, never taken for a viewer frame and refused as invalid input.
+    if (message === PING) {
+      try { ws.send(PONG); } catch { /* A closing socket reports itself. */ }
+      return Promise.resolve();
+    }
     const bytes = typeof message === 'string' ? new TextEncoder().encode(message).byteLength : message.byteLength;
     const role = (ws.deserializeAttachment() as Attachment | null)?.role;
     if (typeof message !== 'string' || bytes > MAX_FRAME_BYTES) {

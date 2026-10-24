@@ -325,6 +325,15 @@ describe('gateway revocation', () => {
     expect(viewer.socket.closed).toBeNull();
   });
 
+  it('answers a keepalive that reaches the object instead of refusing it as input', async () => {
+    const agent = await open('agent');
+    const viewer = await open('viewer');
+    await gateway.webSocketMessage(viewer.socket as unknown as WebSocket, '{"t":"ping"}');
+    expect(viewer.socket.sent.at(-1)).toEqual({ t: 'pong' });
+    expect(viewer.socket.closed).toBeNull();
+    expect(agent.socket.sent.some((f: any) => f.t === 'viewer')).toBe(false);
+  });
+
   it('closes the viewer when a background renewal finds the session ended', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const start = Date.now();

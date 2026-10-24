@@ -10,6 +10,15 @@ import { FileTransfers, type TransferAction, type TransferFile, type TransferUpd
 
 export type ViewerState = 'connecting' | 'live' | 'reconnecting' | 'agent-offline' | 'failed' | 'taken-over' | 'closed';
 
+/**
+ * Why the live view lost its connection, or could not make one, for the page to tell the user:
+ * `offline` the device reported no network; `background` the page was hidden (the system
+ * suspends it); `network` the connection dropped or stopped answering on the way, most often the
+ * user's own network; `service` Nevazu's gateway closed it; `desktop` the cloud browser's own
+ * connection dropped.
+ */
+export type ConnectionIssue = 'offline' | 'background' | 'network' | 'service' | 'desktop';
+
 /** A coding agent's bridge is connected (or not) and who may drive the browser (docs/agent-access.md). */
 export type AutomationStatus = { connected: boolean; control: ControlState };
 
@@ -22,7 +31,8 @@ export interface ConnectInfo {
 export interface RemoteBrowserOptions {
   /** Fetches fresh connect info; each viewer token works once, so every (re)connect calls it. */
   getConnectInfo: () => Promise<ConnectInfo>;
-  onState?: (state: ViewerState, attempt: number) => void;
+  /** `issue`: why the connection is being made again or failed; null while live or for a first connection. */
+  onState?: (state: ViewerState, attempt: number, issue: ConnectionIssue | null) => void;
   onStream?: (stream: MediaStream, attemptId: string, frameSequence: number) => void;
   /** Safe connection milestones only; never contains tokens, SDP or user input. */
   onDiagnostic?: (diagnostic: ConnectionDiagnostic) => void;
@@ -35,8 +45,8 @@ export interface RemoteBrowserOptions {
   onClipboard?: (text: string) => void;
   /** A pasted or dropped file transfer started, progressed or ended; also a text paste refused as too large (`files` 0). */
   onTransfer?: (update: TransferUpdate) => void;
-  /** Delivery was interrupted; discard old input and require an explicit reconnect. */
-  onInputError?: (reason: InputFailure) => void;
+  /** Delivery was interrupted; discard old input and require an explicit reconnect. `issue`: why the connection dropped, when known. */
+  onInputError?: (reason: InputFailure, issue: ConnectionIssue | null) => void;
   /** A coding agent connected, left, took or lost control; the gateway sends it on connect and on every change. */
   onAutomation?: (status: AutomationStatus) => void;
   /** Map Cmd → Ctrl and Option → Alt (macOS default, page 5). */
@@ -66,6 +76,28 @@ const CONNECTION_TIMEOUT_MS = 20_000;
 const MAX_CONNECTION_ATTEMPTS = 3;
 const MAX_PENDING_ICE_CANDIDATES = 256;
 const MAX_MEDIA_SAMPLE_AGE_MS = 5000;
+/**
+ * The gateway answers this frame itself, without waking its object (setWebSocketAutoResponse),
+ * and in order: its pong proves the socket works now and that the gateway received every frame
+ * sent before the ping.
+ */
+const PING = '{"t":"ping"}';
+/** With nothing from the gateway this long, the viewer pings it (neko's own heartbeat arrives every 10 s while its relay is up). */
+const KEEPALIVE_MS = 12_000;
+/** A socket that answers nothing this long after a ping is dead: mobile networks drop connections without closing them. */
+const PONG_TIMEOUT_MS = 8_000;
+/** How often the socket is checked; a much longer gap between checks means the page was frozen. */
+const LIVENESS_TICK_MS = 2_000;
+/** After this long hidden or frozen, the page checks its socket before it sends input on it. */
+const RESUME_CHECK_AFTER_MS = 3_000;
+/** How long that check waits for the gateway's pong before it reconnects. */
+const RESUME_PROBE_MS = 4_000;
+/** Sent input is confirmed by the pong to a ping sent this soon after it. */
+const ACK_PING_DELAY_MS = 250;
+/** A media path that drops while live (a mobile network's blip) gets this long to come back by itself. */
+const ICE_GRACE_MS = 4_000;
+/** How long an ICE restart (neko's signal/restart) may take before the connection starts over. */
+const ICE_RESTART_MS = 12_000;
 /** Characters that require Shift on the remote US X11 keyboard. */
 const SOFTWARE_SHIFTED = new Set([...`~!@#$%^&*()_+{}|:"<>?`]);
 const SHIFTED_KEYSYMS = new Map([...'`1234567890-=[]\\;\',./'].map((character, index) =>
@@ -110,6 +142,8 @@ export class RemoteBrowser {
   private iceServers: IceServer[] = [];
   private statsTimer: ReturnType<typeof setInterval> | null = null;
   private mediaSample: { pc: RTCPeerConnection; ws: WebSocket; frameSequence: number; at: number; media: ConnectionMediaSnapshot } | null = null;
+  /** When a stats reading last saw video bytes arrive: the picture's path worked then. */
+  private mediaProgressAt = -Infinity;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private connectionTimer: ReturnType<typeof setTimeout> | null = null;
   private pressed = new Set<number>();
@@ -148,6 +182,32 @@ export class RemoteBrowser {
   private remoteClipboardNewer = false;
   /** Text recently typed through the remote clipboard, whose clipboard/updated is only an echo. */
   private typedPastes: { text: string; at: number }[] = [];
+  /** The page is shown (setVisible) and the device has a network (setOnline). */
+  private visible = true;
+  private online = true;
+  private hiddenAt: number | null = null;
+  /** A reconnect waits for the page to be shown again or the network to come back, spending no attempts. */
+  private deferred = false;
+  /** Input kept for the next connection: it was held while this one was checked, never sent on it. */
+  private carryInput = false;
+  /** Why the connection is being made again (onState), until it is live. */
+  private issue: ConnectionIssue | null = null;
+  private reportedIssue: ConnectionIssue | null = null;
+  /** How far this attempt got, for what a connection deadline means. */
+  private reached: 'start' | 'transport' | 'desktop' | 'signal' | 'peer' = 'start';
+  // Liveness (PING): when the gateway was last heard from, the ping waiting for its pong and the
+  // frames it confirms, input held while the socket is checked, and their timers.
+  private lastHeardAt = 0;
+  /** Pings waiting for their pongs, oldest first: the socket answers them in order. */
+  private pings: { at: number; frames: number; probe: boolean }[] = [];
+  private lastTickAt = 0;
+  private livenessTimer: ReturnType<typeof setInterval> | null = null;
+  private ackTimer: ReturnType<typeof setTimeout> | null = null;
+  private probeTimer: ReturnType<typeof setTimeout> | null = null;
+  private holdInput = false;
+  /** A media path that dropped while live: its grace or restart deadline, and whether neko restarts ICE. */
+  private iceTimer: ReturnType<typeof setTimeout> | null = null;
+  private iceRestarting = false;
 
   constructor(private readonly opts: RemoteBrowserOptions) {
     this.files = new FileTransfers({
@@ -163,7 +223,8 @@ export class RemoteBrowser {
     this.video = opts.video ?? { quality: 'full', auto: true };
     this.inputQueue = new InputQueue({
       transport: () => this.ws,
-      ready: () => this.inputReady && !this.stopped,
+      // While the socket is checked (holdInput) input waits, unsent, for the gateway's answer.
+      ready: () => this.inputReady && !this.stopped && !this.holdInput,
       held: () => this.transportKeys.size > 0 || this.transportButtons.size > 0,
       failed: (reason) => this.inputFailed(reason),
       sent: (data) => {
@@ -173,6 +234,7 @@ export class RemoteBrowser {
         if (event === EV.CONTROL_KEYUP && payload?.keysym !== undefined) this.transportKeys.delete(payload.keysym);
         if (event === EV.CONTROL_BUTTONDOWN && payload?.code !== undefined) this.transportButtons.add(payload.code);
         if (event === EV.CONTROL_BUTTONUP && payload?.code !== undefined) this.transportButtons.delete(payload.code);
+        this.confirmSoon();
       },
     });
   }
@@ -203,17 +265,57 @@ export class RemoteBrowser {
   async connect(): Promise<void> {
     this.attempt = 0;
     this.connectionAttempts = 0;
+    this.deferred = false;
+    this.carryInput = false;
+    this.issue = null;
     return this.connectAttempt();
   }
 
-  private async connectAttempt(): Promise<void> {
+  /**
+   * The page was shown or hidden (document visibility). A hidden page makes no connection
+   * attempts: its first frame cannot be drawn, so each one ran into the deadline, three in a row
+   * spent the budget, and a page brought back found the view failed. Shown again after a while,
+   * it checks its socket before it sends input on it.
+   */
+  setVisible(visible: boolean) {
+    if (visible === this.visible) return;
+    this.visible = visible;
+    const now = Date.now();
+    if (!visible) {
+      this.hiddenAt = now;
+      if (this.deferred) this.resumeDeferred();
+      return;
+    }
+    const hiddenFor = this.hiddenAt === null ? 0 : now - this.hiddenAt;
+    this.hiddenAt = null;
+    this.lastTickAt = now;
+    if (this.deferred) this.resumeDeferred();
+    else if (hiddenFor >= RESUME_CHECK_AFTER_MS) this.checkConnection();
+  }
+
+  /** The device's network went away or came back (online/offline). Reconnects wait for it, spending no attempts. */
+  setOnline(online: boolean) {
+    if (online === this.online) return;
+    this.online = online;
+    if (this.deferred) this.resumeDeferred();
+    else if (online) this.checkConnection();
+  }
+
+  /** The device changed networks (Wi-Fi to mobile data): the old connection may be gone without a word. */
+  networkChanged() {
+    if (!this.deferred) this.checkConnection();
+  }
+
+  private async connectAttempt(keepQueued = false): Promise<void> {
     const sequence = ++this.connectSequence;
     this.cancelConnectInfo?.();
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     this.clearConnectionTimer();
+    this.stopLiveness();
     this.releaseTransportKeys();
-    this.inputQueue.clear();
+    // Input held while the last connection was checked was never sent on it: it waits for this one.
+    if (!keepQueued) this.inputQueue.clear();
     const old = this.ws;
     this.ws = null;
     old?.close();
@@ -223,6 +325,9 @@ export class RemoteBrowser {
     this.remoteScreen = null;
     this.appliedScreen = '';
     this.stopped = false;
+    this.deferred = false;
+    this.carryInput = false;
+    this.reached = 'start';
     this.connectionAttempts++;
     this.diagnosticAttempt = { id: crypto.randomUUID(), startedAt: Date.now(), stages: new Set() };
     this.firstFrame = false;
@@ -243,8 +348,12 @@ export class RemoteBrowser {
         this.cancelConnectInfo = cancelInfo;
       });
       info = await Promise.race([pendingInfo, deadline]);
-    } catch {
+    } catch (error) {
       if (sequence === this.connectSequence && !this.stopped) {
+        // The request never reached the api (a fetch TypeError, a timeout): the way there. Refused by it: the service.
+        const status = (error as { status?: unknown } | null)?.status;
+        const unreached = tokenTimedOut || error instanceof TypeError || status === 408;
+        this.issue = this.classify(unreached ? 'network' : typeof status === 'number' && status >= 500 ? 'service' : null);
         this.diagnostic('failed', tokenTimedOut ? 'token_timeout' : 'token_failed');
         this.scheduleReconnect();
       }
@@ -266,6 +375,7 @@ export class RemoteBrowser {
     try {
       ws = new WS(`${info.gatewayUrl}${sep}token=${encodeURIComponent(info.token)}&attemptId=${this.diagnosticAttempt!.id}`);
     } catch {
+      this.issue = this.classify(null);
       this.diagnostic('failed', 'transport_error');
       this.scheduleReconnect();
       return;
@@ -274,23 +384,33 @@ export class RemoteBrowser {
     // A blocked WebSocket upgrade may never deliver agent_online or even an error event.
     // Bound the whole transport handshake rather than waiting for the first server frame.
     this.startConnectionTimer(ws);
+    this.startLiveness(ws);
     ws.onopen = () => {
-      if (this.ws === ws && !this.stopped) this.diagnostic('transport_open');
+      if (this.ws !== ws || this.stopped) return;
+      this.reached = 'transport';
+      this.lastHeardAt = Date.now();
+      this.diagnostic('transport_open');
     };
     ws.onerror = () => {
-      if (this.ws === ws && !this.stopped) this.reconnect(ws, 'transport_error');
+      if (this.ws === ws && !this.stopped) {
+        this.issue = this.classify(this.droppedBy(undefined));
+        this.reconnect(ws, 'transport_error');
+      }
     };
     ws.onmessage = (e) => {
       if (this.ws === ws && !this.stopped) this.onGatewayFrame(e.data, ws);
     };
-    ws.onclose = () => {
+    ws.onclose = (event?: { code?: number }) => {
       if (this.ws !== ws) return;
       this.inputReady = false;
+      const closeCode = typeof event?.code === 'number' && event.code >= 1000 && event.code <= 4999 ? event.code : undefined;
+      this.issue = this.classify(this.droppedBy(closeCode));
       // Capture the peer and its last bounded sample before teardown advances its sequence.
-      if (!this.stopped && this.state !== 'taken-over') this.diagnostic('failed', 'transport_closed');
+      if (!this.stopped && this.state !== 'taken-over') this.diagnostic('failed', 'transport_closed', { closeCode });
       this.inputQueue.interrupt('disconnected');
       if (this.ws !== ws) return; // The interruption lost input and ended the connection.
       this.ws = null;
+      this.stopLiveness();
       this.clearConnectionTimer();
       this.teardownPeer();
       if (!this.stopped && this.state !== 'taken-over') {
@@ -299,9 +419,44 @@ export class RemoteBrowser {
     };
   }
 
+  /** A reconnect that waited for the page or the network starts now, with a whole budget; or says what it still waits for. */
+  private resumeDeferred() {
+    if (!this.deferred || this.stopped) return;
+    if (!this.visible || !this.online) {
+      this.issue = this.classify(this.issue);
+      this.setState('reconnecting');
+      return;
+    }
+    const keep = this.carryInput;
+    this.deferred = false;
+    this.attempt = Math.max(1, this.attempt);
+    this.connectionAttempts = 0;
+    void this.connectAttempt(keep);
+  }
+
+  /**
+   * What a lost connection says about where it was lost. A gateway that closed it with a code of
+   * its own: the service. A socket that dropped without one (1006) or stopped answering: the way
+   * to the gateway, unless the picture kept arriving over its own, separate path, in which case
+   * the user's network was fine. Before the picture's path exists, nothing can be told.
+   */
+  private droppedBy(closeCode: number | undefined): ConnectionIssue | null {
+    if (closeCode !== undefined && closeCode !== 1005 && closeCode !== 1006) return 'service';
+    if (!this.pc || this.reached !== 'peer') return null;
+    return this.mediaFlowing() ? 'service' : 'network';
+  }
+
+  /** The device and the page come first: offline, or hidden (suspended by the system). */
+  private classify(issue: ConnectionIssue | null): ConnectionIssue | null {
+    if (!this.online) return 'offline';
+    if (!this.visible) return 'background';
+    return issue;
+  }
+
   disconnect() {
     this.diagnostic('closed', 'canceled');
     this.end();
+    this.issue = null;
     this.setState('closed');
   }
 
@@ -310,9 +465,11 @@ export class RemoteBrowser {
     this.connectSequence++;
     this.cancelConnectInfo?.();
     this.stopped = true;
+    this.deferred = false;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     this.clearConnectionTimer();
+    this.stopLiveness();
     if (this.screenTimer) clearTimeout(this.screenTimer);
     this.releaseTransportKeys();
     this.inputQueue.clear();
@@ -336,7 +493,7 @@ export class RemoteBrowser {
   private inputFailed(reason: InputFailure) {
     this.end();
     this.setState('closed');
-    this.opts.onInputError?.(reason);
+    this.opts.onInputError?.(reason, this.issue);
   }
 
   /** A renderer calls this only after observing a frame from this attempt's video stream. */
@@ -549,16 +706,19 @@ export class RemoteBrowser {
   // --- internals -----------------------------------------------------------------------------
 
   private setState(s: ViewerState) {
-    if (s === this.state && this.attempt === this.reportedAttempt) return;
+    // A live connection has nothing to explain; any other state says why it is not live, when known.
+    const issue = s === 'live' ? null : this.issue;
+    if (s === this.state && this.attempt === this.reportedAttempt && issue === this.reportedIssue) return;
     this.state = s;
     this.reportedAttempt = this.attempt;
-    this.opts.onState?.(s, this.attempt);
+    this.reportedIssue = issue;
+    this.opts.onState?.(s, this.attempt, issue);
   }
 
-  private diagnostic(stage: ConnectionDiagnostic['stage'], code?: ConnectionDiagnostic['code']) {
+  private diagnostic(stage: ConnectionDiagnostic['stage'], code?: ConnectionDiagnostic['code'], extra: { closeCode?: number } = {}) {
     const attempt = this.diagnosticAttempt;
     const frameSequence = this.frameSequence;
-    const mediaStage = ['signal_received', 'peer_connected', 'first_frame', 'failed', 'closed'].includes(stage);
+    const mediaStage = ['signal_received', 'peer_connected', 'first_frame', 'failed', 'closed', 'media_restart', 'media_recovered'].includes(stage);
     const key = mediaStage ? `${frameSequence}:${stage}:${code ?? ''}` : stage;
     if (!attempt || attempt.stages.has(key)) return;
     const media = stage === 'failed' || stage === 'first_frame' ? this.captureMediaSnapshot() : undefined;
@@ -570,6 +730,8 @@ export class RemoteBrowser {
       peerSequence: frameSequence,
       elapsedMs: Math.max(0, Math.min(600_000, Math.round(Date.now() - attempt.startedAt))),
       ...(code ? { code } : {}),
+      ...(extra.closeCode !== undefined ? { closeCode: extra.closeCode } : {}),
+      ...(stage === 'failed' && this.issue ? { issue: this.issue } : {}),
       ...(media ? { media } : {}),
     });
     if (!report.success) return;
@@ -611,6 +773,7 @@ export class RemoteBrowser {
     this.clearConnectionTimer();
     this.attempt = 0;
     this.connectionAttempts = 0;
+    this.issue = null;
     this.inputReady = true;
     this.inputQueue.flush();
     if (this.stopped) return; // Queued input could not be delivered (inputFailed).
@@ -621,8 +784,17 @@ export class RemoteBrowser {
 
   private scheduleReconnect() {
     this.clearConnectionTimer();
+    this.stopLiveness();
     if (this.stopped) return;
     if (this.retryTimer) return;
+    if (!this.visible || !this.online) {
+      // Nothing can connect, or be seen, now: wait for the page or the network without spending
+      // the budget (setVisible, setOnline). Input kept for the next connection keeps waiting too.
+      this.deferred = true;
+      this.issue = this.classify(this.issue);
+      this.setState('reconnecting');
+      return;
+    }
     const configuredMax = this.opts.maxConnectionAttempts ?? MAX_CONNECTION_ATTEMPTS;
     const maxAttempts = Number.isFinite(configuredMax) ? Math.max(1, Math.floor(configuredMax)) : MAX_CONNECTION_ATTEMPTS;
     if (this.connectionAttempts >= maxAttempts) {
@@ -645,7 +817,7 @@ export class RemoteBrowser {
     this.setState('reconnecting');
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
-      void this.connectAttempt();
+      void this.connectAttempt(this.carryInput);
     }, delay);
   }
 
@@ -658,19 +830,30 @@ export class RemoteBrowser {
     if (this.connectionTimer) return;
     this.connectionTimer = setTimeout(() => {
       this.connectionTimer = null;
-      if (this.state !== 'live') this.reconnect(ws, 'connection_timeout');
+      if (this.state === 'live') return;
+      // A picture path that never connected after neko offered one points at the network between
+      // the two (UDP and the relay's ports); a desktop that never answered, at the cloud browser.
+      this.issue = this.classify(this.state === 'agent-offline' || this.reached === 'transport' || this.reached === 'desktop' ? 'desktop'
+        : this.reached === 'signal' ? 'network' : null);
+      this.reconnect(ws, 'connection_timeout');
     }, this.opts.connectionTimeoutMs ?? CONNECTION_TIMEOUT_MS);
   }
 
-  private reconnect(ws: WebSocket, code: ConnectionDiagnostic['code'] = 'relay_failed') {
+  /**
+   * Replaces the socket. `reason` and `beyondGateway` say how its input failed (InputQueue
+   * interrupt); `keepQueued` keeps input that was held, never sent, for the next connection.
+   */
+  private reconnect(ws: WebSocket, code: ConnectionDiagnostic['code'] = 'relay_failed', options: { reason?: InputFailure; beyondGateway?: boolean; keepQueued?: boolean } = {}) {
     if (this.ws !== ws || this.stopped) return;
     this.diagnostic('failed', code);
     // Negotiation errors and deadlines also replace the socket. Pending preconnect
     // input must pause visibly instead of following the retry into another session.
     this.inputReady = false;
-    this.inputQueue.interrupt('disconnected');
+    const kept = this.inputQueue.interrupt(options.reason ?? 'disconnected', false, { beyondGateway: options.beyondGateway, keepQueued: options.keepQueued });
     if (this.stopped) return; // The interruption lost input and ended the connection.
+    this.carryInput = kept;
     this.ws = null;
+    this.stopLiveness();
     this.clearConnectionTimer();
     this.teardownPeer();
     ws.close();
@@ -808,6 +991,7 @@ export class RemoteBrowser {
 
   private onGatewayFrame(raw: unknown, ws: WebSocket) {
     if (typeof raw !== 'string') return;
+    this.lastHeardAt = Date.now();
     let frame: GatewayToViewer;
     try {
       frame = JSON.parse(raw) as GatewayToViewer;
@@ -815,6 +999,9 @@ export class RemoteBrowser {
       return;
     }
     switch (frame.t) {
+      case 'pong':
+        this.pong(ws);
+        return;
       case 'connection_stage':
         if (typeof frame.relayId === 'string' && /^[0-9a-f-]{36}$/i.test(frame.relayId) && this.diagnosticAttempt) {
           this.diagnosticAttempt.relayId = frame.relayId;
@@ -834,9 +1021,11 @@ export class RemoteBrowser {
         }
         return;
       case 'agent_offline':
+        // The cloud browser's tunnel to the gateway dropped: past the gateway, so time settles input.
+        this.issue = this.classify('desktop');
         this.diagnostic('failed', 'agent_offline');
         this.inputReady = false;
-        this.inputQueue.interrupt('disconnected');
+        this.inputQueue.interrupt('disconnected', false, { beyondGateway: true });
         if (this.stopped) return; // The interruption lost input and ended the connection.
         this.clearConnectionTimer();
         this.teardownPeer();
@@ -845,13 +1034,11 @@ export class RemoteBrowser {
         if (!this.stopped) this.startConnectionTimer(ws);
         return;
       case 'input_error':
-        this.inputReady = false;
-        this.diagnostic('failed', 'relay_failed');
-        if (this.state !== 'live') {
-          this.reconnect(ws, 'relay_failed');
-          return;
-        }
-        this.inputQueue.interrupt('relay', true);
+        // The gateway could not relay to the cloud browser and closes this socket. Input sent
+        // before that was refused at once, so it is recent: the user is told when there was some,
+        // and a relay that failed with nothing in flight (neko ending its session) reconnects quietly.
+        this.issue = this.classify('desktop');
+        this.reconnect(ws, 'relay_failed', { reason: 'relay', beyondGateway: true });
         return;
       case 'taken_over':
         this.stopped = true;
@@ -864,7 +1051,10 @@ export class RemoteBrowser {
         this.setState('taken-over');
         return;
       case 'neko':
-        void this.onNeko(frame.data as NekoMessage, ws).catch(() => this.reconnect(ws, 'negotiation_failed'));
+        void this.onNeko(frame.data as NekoMessage, ws).catch(() => {
+          this.issue = this.classify('desktop');
+          this.reconnect(ws, 'negotiation_failed');
+        });
         return;
       case 'file':
         this.files.handle(frame);
@@ -879,6 +1069,7 @@ export class RemoteBrowser {
   private async onNeko(msg: NekoMessage, ws: WebSocket) {
     switch (msg.event) {
       case EV.SYSTEM_INIT: {
+        this.reached = 'desktop';
         this.diagnostic('desktop_ready');
         const init = msg.payload as { screen_size?: unknown; webrtc?: { videos?: unknown } } | undefined;
         // Each system/init comes from a fresh neko session: an unknown screen is better than one
@@ -904,9 +1095,16 @@ export class RemoteBrowser {
         return;
       }
       case EV.SIGNAL_PROVIDE:
+        this.reached = 'signal';
         this.videoChanged((msg.payload as unknown as SignalProvide).video?.id);
         await this.answer(msg.payload as unknown as SignalProvide, ws);
         return;
+      case EV.SIGNAL_RESTART: {
+        // neko's new offer for an ICE restart (restartIce): the same peer, a new media path.
+        const sdp = (msg.payload as { sdp?: unknown } | undefined)?.sdp;
+        if (typeof sdp === 'string') await this.answerRestart(sdp, ws);
+        return;
+      }
       case EV.SIGNAL_VIDEO:
         this.videoChanged((msg.payload as { id?: unknown } | undefined)?.id);
         return;
@@ -995,7 +1193,12 @@ export class RemoteBrowser {
     pc.onconnectionstatechange = () => {
       if (this.pc !== pc) return;
       if (pc.connectionState === 'connected') {
+        if (this.peerConnected) {
+          this.mediaRecovered(ws);
+          return;
+        }
         this.peerConnected = true;
+        this.reached = 'peer';
         this.diagnostic('peer_connected');
         this.sendNeko({ event: EV.CONTROL_REQUEST });
         // Waiting for a first frame must not also stop the measurements and quality changes
@@ -1003,9 +1206,15 @@ export class RemoteBrowser {
         this.startStats();
         this.becomeLive();
       } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-        // An ICE failure (e.g. a network change): start over with a fresh token. Pending input
-        // is interrupted there, after the failure is recorded.
-        this.reconnect(ws);
+        // A live picture whose path dropped (a mobile network's blip, a change of network) is
+        // brought back on this socket (mediaInterrupted); input meanwhile keeps its own path.
+        // Before it was ever live, or when that fails, start over with a fresh token. Pending
+        // input is interrupted there, after the failure is recorded.
+        if (this.peerConnected && (this.state === 'live' || this.iceRestarting) && this.ws === ws) this.mediaInterrupted(ws, pc.connectionState === 'failed');
+        else {
+          this.issue = this.classify('network');
+          this.reconnect(ws);
+        }
       }
     };
 
@@ -1084,6 +1293,7 @@ export class RemoteBrowser {
         // Its counters must not change the replacement's quality or be reported as its stats.
         if (!current()) return;
         this.mediaSample = { pc, ws, frameSequence, at: sampledAt, media: reading.media };
+        if (reading.bytes > (previous?.bytes ?? 0)) this.mediaProgressAt = sampledAt;
         previous = { bytes: reading.bytes, at: Date.now() };
         this.adapt(reading.stats, reading.counters);
         this.opts.onStats?.(reading.stats);
@@ -1123,6 +1333,9 @@ export class RemoteBrowser {
     this.inputReady = false;
     this.peerConnected = false;
     this.firstFrame = false;
+    this.clearIceTimer();
+    if (this.iceRestarting) this.holdInput = false;
+    this.iceRestarting = false;
     this.frameSequence++;
     this.mediaSample = null;
     if (this.opts.requireFirstFrame && this.state === 'live') this.setState('connecting');
@@ -1143,5 +1356,204 @@ export class RemoteBrowser {
     pc?.close();
     // A new offer on the same socket keeps the screen applied for it; a new socket starts afresh.
     if (!preserveCandidates) this.appliedScreen = '';
+  }
+
+  // --- liveness (PING) and the media path ---------------------------------------------------
+
+  private startLiveness(ws: WebSocket) {
+    this.stopLiveness();
+    this.lastHeardAt = this.lastTickAt = Date.now();
+    this.livenessTimer = setInterval(() => this.livenessTick(ws), LIVENESS_TICK_MS);
+  }
+
+  private stopLiveness() {
+    if (this.livenessTimer) clearInterval(this.livenessTimer);
+    this.livenessTimer = null;
+    if (this.ackTimer) clearTimeout(this.ackTimer);
+    this.ackTimer = null;
+    if (this.probeTimer) clearTimeout(this.probeTimer);
+    this.probeTimer = null;
+    this.pings = [];
+    this.holdInput = false;
+  }
+
+  /**
+   * Keeps an open socket honest: one the gateway stopped answering (a network that dropped it
+   * without closing it) is replaced before the user's next tap goes into it. A hidden page's
+   * timers are throttled or stopped, so it checks itself when shown (setVisible); a long gap
+   * between ticks says the page was frozen, and it checks before trusting the socket.
+   */
+  private livenessTick(ws: WebSocket) {
+    if (this.ws !== ws || this.stopped) return;
+    const now = Date.now();
+    const gap = now - this.lastTickAt;
+    this.lastTickAt = now;
+    if (!this.visible || ws.readyState !== 1) return;
+    if (gap > 3 * LIVENESS_TICK_MS) {
+      this.checkConnection();
+      return;
+    }
+    const oldest = this.pings[0];
+    if (oldest && now - oldest.at > PONG_TIMEOUT_MS && this.lastHeardAt < oldest.at) {
+      this.issue = this.classify(this.droppedBy(undefined) ?? 'network');
+      this.reconnect(ws, 'transport_stale');
+      return;
+    }
+    if (!oldest && now - this.lastHeardAt > KEEPALIVE_MS) this.sendPing(ws, false);
+  }
+
+  /** `probe`: input waits (holdInput) until this ping's pong proves the socket works. */
+  private sendPing(ws: WebSocket, probe: boolean) {
+    // A socket that answers none of a few is dead (livenessTick); more would only pile up.
+    if (this.ws !== ws || ws.readyState !== 1 || this.pings.length >= 4) return;
+    try {
+      ws.send(PING);
+    } catch {
+      return; // A closing socket reports itself.
+    }
+    this.pings.push({ at: Date.now(), frames: this.inputQueue.sent, probe });
+  }
+
+  private pong(ws: WebSocket) {
+    if (this.ws !== ws) return;
+    const ping = this.pings.shift();
+    if (!ping) return;
+    this.inputQueue.acknowledge(ping.frames);
+    if (ping.probe) this.releaseInput();
+    // Input sent after that ping is confirmed by the next one.
+    if (this.inputQueue.unconfirmed) this.confirmSoon();
+  }
+
+  /** Sent input is confirmed by a ping right after it, one at a time. */
+  private confirmSoon() {
+    if (this.ackTimer || this.pings.length) return;
+    this.ackTimer = setTimeout(() => {
+      this.ackTimer = null;
+      if (this.ws && !this.pings.length && this.inputQueue.unconfirmed) this.sendPing(this.ws, false);
+    }, ACK_PING_DELAY_MS);
+  }
+
+  /**
+   * After the page was hidden or frozen, or the network changed under it, its socket may be
+   * gone without having closed: an iPad left alone came back to a tap that went nowhere and an
+   * "input interrupted" notice. Input now waits while a ping checks the socket; a pong sends it,
+   * and silence replaces the socket with that input carried over, never sent twice.
+   */
+  private checkConnection() {
+    const ws = this.ws;
+    if (!ws || this.stopped || ws.readyState !== 1) return;
+    // A connection still being made has its own deadline; a ping is enough to keep it honest.
+    if (this.state !== 'live') {
+      this.sendPing(ws, false);
+      return;
+    }
+    const sentAt = Date.now();
+    this.holdInput = true;
+    this.sendPing(ws, true);
+    if (this.probeTimer) clearTimeout(this.probeTimer);
+    this.probeTimer = setTimeout(() => {
+      this.probeTimer = null;
+      if (this.ws !== ws || this.stopped || this.lastHeardAt >= sentAt) {
+        this.releaseInput();
+        return;
+      }
+      this.issue = this.classify('background');
+      this.reconnect(ws, 'transport_stale', { keepQueued: true });
+    }, RESUME_PROBE_MS);
+  }
+
+  private releaseInput() {
+    if (this.probeTimer) clearTimeout(this.probeTimer);
+    this.probeTimer = null;
+    if (!this.holdInput || this.iceRestarting) return;
+    this.holdInput = false;
+    this.inputQueue.flush();
+  }
+
+  /** Media bytes arrived over the picture's own path within the last few seconds. */
+  private mediaFlowing(): boolean {
+    const sample = this.mediaSample;
+    return this.pc?.connectionState === 'connected' && !!sample && sample.pc === this.pc && Date.now() - this.mediaProgressAt < 2.5 * (this.opts.statsIntervalMs ?? 2000);
+  }
+
+  private clearIceTimer() {
+    if (this.iceTimer) clearTimeout(this.iceTimer);
+    this.iceTimer = null;
+  }
+
+  /**
+   * The live picture's path dropped. A blip ('disconnected') often recovers by itself: it gets
+   * ICE_GRACE_MS. Then (or at once for 'failed') neko is asked for an ICE restart on this socket,
+   * which keeps the desktop session and the input path; only if that fails too does the viewer
+   * start over. Before, every blip tore the connection down, and a tap in the last ten seconds
+   * turned it into "input interrupted".
+   */
+  private mediaInterrupted(ws: WebSocket, failed: boolean) {
+    if (this.iceRestarting) return;
+    if (!failed) {
+      if (!this.iceTimer) this.iceTimer = setTimeout(() => {
+        this.iceTimer = null;
+        if (this.pc && this.pc.connectionState !== 'connected') this.restartIce(ws);
+      }, ICE_GRACE_MS);
+      return;
+    }
+    this.restartIce(ws);
+  }
+
+  private restartIce(ws: WebSocket) {
+    if (this.ws !== ws || this.stopped || this.iceRestarting) return;
+    this.clearIceTimer();
+    this.issue = this.classify('network');
+    if (ws.readyState !== 1 || !this.pc) {
+      this.reconnect(ws, 'media_failed');
+      return;
+    }
+    this.iceRestarting = true;
+    // Taps on a frozen picture would land on a page the user cannot see: input waits for it.
+    this.holdInput = true;
+    this.diagnostic('media_restart');
+    this.attempt = 1;
+    this.setState('reconnecting');
+    this.sendNeko({ event: EV.SIGNAL_RESTART });
+    this.iceTimer = setTimeout(() => {
+      this.iceTimer = null;
+      if (this.iceRestarting && this.ws === ws) this.reconnect(ws, 'media_failed', { keepQueued: true });
+    }, ICE_RESTART_MS);
+  }
+
+  private mediaRecovered(ws: WebSocket) {
+    this.clearIceTimer();
+    if (!this.iceRestarting || this.ws !== ws) return; // A blip that passed by itself.
+    this.iceRestarting = false;
+    this.holdInput = false;
+    this.diagnostic('media_recovered');
+    this.attempt = 0;
+    this.issue = null;
+    this.setState('live');
+    this.inputQueue.flush();
+  }
+
+  /** neko's ICE restart offer: the same peer and tracks, a new path for them. */
+  private async answerRestart(sdp: string, ws: WebSocket) {
+    const pc = this.pc;
+    if (!pc || this.ws !== ws) return;
+    // The new path's candidates wait until its description is in place, as in answer().
+    this.remoteDescriptionReady = false;
+    try {
+      await pc.setRemoteDescription({ type: 'offer', sdp });
+      if (this.pc !== pc || this.ws !== ws) return;
+      while (this.pendingCandidates.length > 0) {
+        await pc.addIceCandidate(this.pendingCandidates.shift()!);
+        if (this.pc !== pc || this.ws !== ws) return;
+      }
+      this.remoteDescriptionReady = true;
+      const answer = await pc.createAnswer();
+      if (this.pc !== pc || this.ws !== ws) return;
+      await pc.setLocalDescription(answer);
+      if (this.pc !== pc || this.ws !== ws) return;
+      this.sendNeko({ event: EV.SIGNAL_ANSWER, payload: { sdp: answer.sdp } });
+    } catch (error) {
+      if (this.pc === pc && this.ws === ws) throw error;
+    }
   }
 }

@@ -21,6 +21,8 @@ export const EV = {
   SIGNAL_CANDIDATE: 'signal/candidate',
   /** Which video (quality level) neko streams; sent by either side. */
   SIGNAL_VIDEO: 'signal/video',
+  /** Asks neko for an ICE restart, which it answers with a new offer under the same name. */
+  SIGNAL_RESTART: 'signal/restart',
   CONTROL_REQUEST: 'control/request',
   CONTROL_MOVE: 'control/move',
   CONTROL_SCROLL: 'control/scroll',

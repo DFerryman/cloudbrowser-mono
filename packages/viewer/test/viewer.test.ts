@@ -168,19 +168,27 @@ class FakeWS {
   readyState = 1;
   bufferedAmount = 0;
   sent: unknown[] = [];
+  /** Pings the viewer sent; the gateway's runtime answers them (setWebSocketAutoResponse) unless `answers` is off. */
+  pings = 0;
+  answers = true;
   onmessage: ((e: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((e?: { code?: number }) => void) | null = null;
   onopen: (() => void) | null = null;
   onerror: (() => void) | null = null;
   constructor(readonly url: string) {
     FakeWS.all.push(this);
   }
   send(s: string) {
+    if (s === '{"t":"ping"}') {
+      this.pings++;
+      if (this.answers) queueMicrotask(() => this.readyState === 1 && this.onmessage?.({ data: '{"t":"pong"}' }));
+      return;
+    }
     this.sent.push(JSON.parse(s));
   }
-  close() {
+  close(code?: number) {
     this.readyState = 3;
-    this.onclose?.();
+    this.onclose?.(code === undefined ? undefined : { code });
   }
   push(frame: unknown) {
     this.onmessage?.({ data: JSON.stringify(frame) });
@@ -256,14 +264,15 @@ describe('RemoteBrowser', () => {
     FakeWS.all = [];
     const getConnectInfo = vi.fn(async () => ({ gatewayUrl: 'wss://gw/v1/stream/i1', token: `tok${getConnectInfo.mock.calls.length}`, iceServers }));
     const states: string[] = [];
+    const issues: (string | null)[] = [];
     const b = new RemoteBrowser({
       getConnectInfo,
-      onState: (s) => states.push(s),
+      onState: (s, _attempt, issue) => { states.push(s); issues.push(issue); },
       WebSocketImpl: FakeWS as never,
       RTCPeerConnectionImpl: FakePC as never,
       ...options,
     });
-    return { b, getConnectInfo, states };
+    return { b, getConnectInfo, states, issues };
   }
 
   it('requests a stream, answers neko over the gateway, and goes live', async () => {
@@ -560,7 +569,7 @@ describe('RemoteBrowser', () => {
       send(raw);
     });
     b.typeSoftwareText('a');
-    expect(onInputError.mock.calls).toEqual([['transport']]);
+    expect(onInputError.mock.calls).toEqual([['transport', null]]);
     expect(ws.neko('control/keydown')).toEqual([{ keysym: 0x61 }]);
     expect(ws.neko('control/keyup')).toEqual([{ keysym: 0x61 }]);
     const sent = ws.sent.length;
@@ -584,7 +593,7 @@ describe('RemoteBrowser', () => {
     expect(ws.neko('control/keydown')).toEqual([{ keysym: 0x61 }]);
     expect(ws.neko('control/keyup')).toEqual([]);
     ws.push({ t: 'input_error', reason: 'relay unavailable' });
-    expect(onInputError.mock.calls).toEqual([['relay']]);
+    expect(onInputError.mock.calls).toEqual([['relay', 'desktop']]);
     expect(ws.neko('control/keyup')).toEqual([{ keysym: 0x61 }]);
     ws.bufferedAmount = 0;
     await tick();
@@ -604,10 +613,9 @@ describe('RemoteBrowser', () => {
     pc.connect();
     expect(b.currentState).toBe('live');
     b.move(10, 10);
-    // An ICE drop right after input: the click may not have arrived.
-    pc.connectionState = 'failed';
-    pc.onconnectionstatechange();
-    expect(onInputError).toHaveBeenCalledExactlyOnceWith('disconnected');
+    // The socket drops right after input, before the gateway confirmed it: the move may not have arrived.
+    ws.close(1006);
+    expect(onInputError).toHaveBeenCalledExactlyOnceWith('disconnected', 'network');
     expect(states.at(-1)).toBe('closed');
     expect(b.currentState).toBe('closed');
     expect(ws.readyState).toBe(3);
@@ -622,6 +630,185 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
+  it('reconnects without a notice when the gateway had confirmed the input before the socket dropped', async () => {
+    vi.useFakeTimers();
+    const onInputError = vi.fn();
+    const { b, states, issues } = setup([], { onInputError });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    b.button(true, 0, 10, 10);
+    b.button(false, 0, 10, 10);
+    // A ping right after the tap; its pong says the gateway received everything before it.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(ws.pings).toBe(1);
+    ws.close(1006);
+    expect(onInputError).not.toHaveBeenCalled();
+    expect(states.at(-1)).toBe('reconnecting');
+    expect(issues.at(-1)).toBe('network');
+    await vi.advanceTimersByTimeAsync(600);
+    expect(FakeWS.all).toHaveLength(2);
+    b.disconnect();
+  });
+
+  it('brings a live picture back with an ICE restart when its path drops, keeping the socket and its input', async () => {
+    vi.useFakeTimers();
+    const onInputError = vi.fn();
+    const { b, states, issues, getConnectInfo } = setup([], { onInputError });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    const pc = FakePC.last;
+    pc.connect();
+    b.move(10, 10);
+    // A blip that passes within the grace changes nothing.
+    pc.connectionState = 'disconnected';
+    pc.onconnectionstatechange();
+    await vi.advanceTimersByTimeAsync(2_000);
+    pc.connect();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(ws.neko('signal/restart')).toHaveLength(0);
+    expect(states.at(-1)).toBe('live');
+    // A path that stays down: an ICE restart on the same socket. Input waits for the picture.
+    pc.connectionState = 'disconnected';
+    pc.onconnectionstatechange();
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(ws.neko('signal/restart')).toHaveLength(1);
+    expect(states.at(-1)).toBe('reconnecting');
+    expect(issues.at(-1)).toBe('network');
+    b.move(20, 20);
+    expect(ws.neko('control/move')).toEqual([{ x: 10, y: 10 }]);
+    ws.push({ t: 'neko', data: { event: 'signal/restart', payload: { sdp: 'restart-offer' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pc.remote).toEqual({ type: 'offer', sdp: 'restart-offer' });
+    expect(ws.neko('signal/answer')).toHaveLength(2);
+    pc.connect();
+    expect(states.at(-1)).toBe('live');
+    expect(ws.neko('control/move')).toEqual([{ x: 10, y: 10 }, { x: 20, y: 20 }]);
+    expect(FakeWS.all).toHaveLength(1);
+    // A restart that brings nothing back starts over with a fresh connection, quietly when nothing was at risk.
+    pc.connectionState = 'failed';
+    pc.onconnectionstatechange();
+    expect(ws.neko('signal/restart')).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(ws.readyState).toBe(3);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    expect(onInputError).not.toHaveBeenCalled();
+    b.disconnect();
+  });
+
+  it('replaces a socket that stopped answering before input goes into it', async () => {
+    vi.useFakeTimers();
+    const onInputError = vi.fn();
+    const { b, states, issues, getConnectInfo } = setup([], { onInputError });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    // A network that dropped the socket without closing it: nothing arrives, pings go unanswered.
+    ws.answers = false;
+    // Pinged after 12 quiet seconds (on the next 2 s check), declared dead 8 s later without a pong.
+    await vi.advanceTimersByTimeAsync(12_000 + 2_000 + 8_000 + 2_000);
+    expect(ws.pings).toBeGreaterThan(0);
+    expect(ws.readyState).toBe(3);
+    expect(states.at(-1)).toBe('reconnecting');
+    expect(issues.at(-1)).toBe('network');
+    expect(onInputError).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(600);
+    expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    b.disconnect();
+  });
+
+  it('holds a page\'s first input after it was hidden until the gateway answers, and carries it to a new socket if it does not', async () => {
+    vi.useFakeTimers();
+    const onInputError = vi.fn();
+    const { b, states, issues } = setup([], { onInputError });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    // Shown again after a short break, on a socket that still works: the tap waits one round trip.
+    b.setVisible(false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    b.setVisible(true);
+    b.button(true, 0, 10, 10);
+    expect(ws.neko('control/buttondown')).toEqual([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ws.neko('control/buttondown')).toEqual([{ code: 1 }]);
+    b.button(false, 0, 10, 10);
+    await vi.advanceTimersByTimeAsync(1_000);
+    // An iPad left alone for a minute: its socket is gone, though it still looks open.
+    b.setVisible(false);
+    ws.answers = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(ws.readyState).toBe(1);
+    b.setVisible(true);
+    b.button(true, 0, 30, 30);
+    b.button(false, 0, 30, 30);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(ws.readyState).toBe(3);
+    expect(onInputError).not.toHaveBeenCalled();
+    expect(states.at(-1)).toBe('reconnecting');
+    expect(issues.at(-1)).toBe('background');
+    await vi.advanceTimersByTimeAsync(600);
+    const next = FakeWS.all[1]!;
+    next.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    // The tap went nowhere on the old socket; it is sent once, on the new one.
+    expect(ws.neko('control/buttondown')).toEqual([{ code: 1 }]);
+    expect(next.neko('control/buttondown')).toEqual([{ code: 1 }]);
+    expect(next.neko('control/buttonup')).toEqual([{ code: 1 }]);
+    b.disconnect();
+  });
+
+  it('makes no attempts while hidden or offline, and reconnects with a whole budget when it can', async () => {
+    vi.useFakeTimers();
+    const { b, states, issues, getConnectInfo } = setup([], { connectionTimeoutMs: 1_000, maxConnectionAttempts: 1 });
+    await b.connect();
+    FakeWS.all[0]!.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    b.setVisible(false);
+    FakeWS.all[0]!.close(1006);
+    expect(states.at(-1)).toBe('reconnecting');
+    expect(issues.at(-1)).toBe('background');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(getConnectInfo).toHaveBeenCalledTimes(1);
+    b.setOnline(false);
+    b.setVisible(true);
+    expect(issues.at(-1)).toBe('offline');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(getConnectInfo).toHaveBeenCalledTimes(1);
+    b.setOnline(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getConnectInfo).toHaveBeenCalledTimes(2);
+    FakeWS.all[1]!.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    expect(states.at(-1)).toBe('live');
+    expect(issues.at(-1)).toBeNull();
+    b.disconnect();
+  });
+
+  it('tells a gateway that closed the socket itself from the user\'s network, by the picture\'s own path', async () => {
+    vi.useFakeTimers();
+    const { b, issues } = setup();
+    await b.connect();
+    FakeWS.all[0]!.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    FakeWS.all[0]!.close(1012);
+    expect(issues.at(-1)).toBe('service');
+    b.disconnect();
+  });
+
   it('ends the connection when the agent leaves right after input', async () => {
     const onInputError = vi.fn();
     const { b, states } = setup([], { onInputError });
@@ -630,7 +817,7 @@ describe('RemoteBrowser', () => {
     await readyInput(ws);
     b.typeSoftwareText('a');
     ws.push({ t: 'agent_offline' });
-    expect(onInputError).toHaveBeenCalledExactlyOnceWith('disconnected');
+    expect(onInputError).toHaveBeenCalledExactlyOnceWith('disconnected', 'desktop');
     expect(states.at(-1)).toBe('closed');
     expect(ws.readyState).toBe(3);
   });
@@ -913,7 +1100,7 @@ describe('RemoteBrowser', () => {
     ws.push({ t: 'neko', data: { event: 'system/init' } });
     ws.push({ t: 'neko', data: { event: 'signal/candidate', payload: { candidate: 'before-offline' } } });
     ws.push({ t: 'agent_offline' });
-    expect(vi.getTimerCount()).toBe(1); // an offline agent also has a bounded reconnect deadline
+    expect(vi.getTimerCount()).toBe(2); // an offline agent also has a bounded reconnect deadline, beside the socket's liveness check
     ws.push({ t: 'agent_online' });
     expect(ws.neko('signal/request')).toHaveLength(1);
     ws.push({ t: 'neko', data: { event: 'system/init' } });
@@ -1309,7 +1496,7 @@ describe('RemoteBrowser', () => {
     await oldAttempt;
 
     expect(states.at(-1)).toBe('connecting');
-    expect(vi.getTimerCount()).toBe(1); // current socket's deadline, no stale retry
+    expect(vi.getTimerCount()).toBe(2); // current socket's deadline and liveness check, no stale retry
     expect(current.readyState).toBe(1);
     b.disconnect();
   });
@@ -1429,7 +1616,7 @@ describe('RemoteBrowser', () => {
     expect(old.neko('control/buttondown')).toEqual([]);
 
     await vi.advanceTimersByTimeAsync(1000);
-    expect(onInputError).toHaveBeenCalledExactlyOnceWith('disconnected');
+    expect(onInputError).toHaveBeenCalledExactlyOnceWith('disconnected', null);
     expect(old.readyState).toBe(3);
     expect(getConnectInfo).toHaveBeenCalledTimes(1);
 
@@ -1669,8 +1856,10 @@ describe('RemoteBrowser', () => {
     expect(states.at(-1)).toBe('live');
     expect(ws.readyState).toBe(1);
     expect(getConnectInfo).toHaveBeenCalledTimes(1);
-    expect(vi.getTimerCount()).toBe(0);
+    expect(ws.pings).toBeGreaterThan(0); // quiet, so the socket was checked, and answered
+    expect(vi.getTimerCount()).toBe(1); // only the socket's liveness check
     b.disconnect();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('cancels the connection deadline when disconnected', async () => {

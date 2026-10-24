@@ -160,4 +160,30 @@ describe('TouchGestureController', () => {
     gestures.pointerUp(pointer(1, 20, 40));
     expect(button.mock.calls).toEqual([[true, 40, 80], [false, 40, 80]]);
   });
+
+  it('clicks where the finger rested when it only shifted as it lifted', () => {
+    const { gestures, button, scroll } = setup();
+    gestures.pointerDown(pointer(1, 100, 100));
+    gestures.pointerMove(pointer(1, 103, 102));
+    // The contact point jumps 11 px with the lift: beyond the threshold, within the slack.
+    gestures.pointerUp(pointer(1, 111, 100));
+    expect(scroll).not.toHaveBeenCalled();
+    expect(button.mock.calls).toEqual([[true, 206, 204], [false, 206, 204]]);
+  });
+
+  it('forgets a finger whose pointerup never came once a new touch begins', () => {
+    const { gestures, button, scroll } = setup();
+    gestures.pointerDown({ ...pointer(1, 20, 20), isPrimary: true });
+    // A system gesture took the touch over without a pointerup or pointercancel.
+    gestures.pointerDown({ ...pointer(2, 60, 60), isPrimary: true });
+    gestures.pointerUp(pointer(2, 60, 60));
+    expect(button.mock.calls).toEqual([[true, 120, 120], [false, 120, 120]]);
+    // A second finger of the same touch still makes it a two-finger gesture, never a tap.
+    gestures.pointerDown({ ...pointer(3, 20, 20), isPrimary: true });
+    gestures.pointerDown({ ...pointer(4, 60, 20), isPrimary: false });
+    gestures.pointerUp(pointer(4, 60, 20));
+    gestures.pointerUp(pointer(3, 20, 20));
+    expect(button).toHaveBeenCalledTimes(2);
+    expect(scroll).not.toHaveBeenCalled();
+  });
 });

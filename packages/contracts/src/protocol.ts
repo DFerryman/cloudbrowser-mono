@@ -163,6 +163,8 @@ export type ViewerFrame = z.infer<typeof ViewerFrame>;
 
 export type GatewayToViewer =
   | { t: 'neko'; data: unknown }
+  /** The runtime's answer to the viewer's `{"t":"ping"}` (setWebSocketAutoResponse), in order after everything the gateway received before it. */
+  | { t: 'pong' }
   /** Input could not be delivered; stop and require an explicit reconnect, never replay it. */
   | { t: 'input_error'; reason: string }
   | { t: 'agent_online' }

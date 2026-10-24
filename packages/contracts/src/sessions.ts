@@ -56,6 +56,8 @@ export const ConnectionDiagnostic = z.object({
     'token_start', 'token_ok', 'transport_start', 'transport_open', 'gateway_accepted',
     'agent_received', 'login_start', 'login_ok', 'websocket_start', 'websocket_open',
     'desktop_ready', 'signal_received', 'peer_connected', 'first_frame', 'failed', 'closed',
+    // The media path dropped while live: an ICE restart on the same socket, and its recovery.
+    'media_restart', 'media_recovered',
   ]),
   elapsedMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   code: z.enum([
@@ -63,7 +65,14 @@ export const ConnectionDiagnostic = z.object({
     'relay_failed', 'connection_timeout', 'negotiation_failed', 'retry_exhausted', 'canceled',
     'login_timeout', 'login_rejected', 'login_unavailable', 'websocket_timeout',
     'websocket_unavailable', 'desktop_timeout', 'relay_unavailable',
+    // The socket stopped answering pings (a network that dropped it without closing it), and a
+    // media path an ICE restart could not bring back.
+    'transport_stale', 'media_failed',
   ]).optional(),
+  /** The WebSocket close code a closed transport reported (1006: dropped without a close frame). */
+  closeCode: z.number().int().min(1000).max(4999).optional(),
+  /** What the page told the user about this failure. */
+  issue: z.enum(['offline', 'background', 'network', 'service', 'desktop']).optional(),
   media: ConnectionMediaSnapshot.optional(),
 }).strict().refine((value) => value.media === undefined || value.stage === 'failed' || value.stage === 'first_frame', {
   message: 'Media snapshots are only accepted at failure or first frame', path: ['media'],

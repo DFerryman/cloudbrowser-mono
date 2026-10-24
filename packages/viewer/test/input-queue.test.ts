@@ -79,4 +79,49 @@ describe('one ordered input transport', () => {
     queue.interrupt('disconnected');
     expect(failed).toHaveBeenCalledTimes(2);
   });
+
+  it('settles input the gateway confirmed, and keeps unconfirmed input at risk however long the close takes', () => {
+    vi.useFakeTimers();
+    const failed = vi.fn();
+    const queue = new InputQueue({ transport: () => ({ readyState: 1, send: vi.fn() }), ready: () => true, failed });
+    queue.enqueue({ event: 'buttondown' });
+    queue.enqueue({ event: 'buttonup' });
+    queue.acknowledge(queue.sent);
+    // Confirmed a moment ago: a drop now lost nothing.
+    queue.interrupt('disconnected');
+    expect(failed).not.toHaveBeenCalled();
+    queue.resume();
+    queue.acknowledge(0);
+    queue.enqueue({ event: 'keydown' });
+    // Sent into a socket that died without closing: still at risk when its close arrives late.
+    vi.advanceTimersByTime(60_000);
+    expect(queue.unconfirmed).toBe(true);
+    queue.interrupt('disconnected');
+    expect(failed).toHaveBeenCalledExactlyOnceWith('disconnected');
+    // Past the gateway (the VM's relay), only time settles input, whatever the gateway confirmed.
+    queue.resume();
+    queue.enqueue({ event: 'keyup' });
+    queue.acknowledge(queue.sent);
+    queue.interrupt('relay', false, { beyondGateway: true });
+    expect(failed).toHaveBeenLastCalledWith('relay');
+  });
+
+  it('keeps input that was held and never sent for the next connection, unless sent input was at risk', () => {
+    const failed = vi.fn();
+    let ready = false;
+    const send = vi.fn();
+    const queue = new InputQueue({ transport: () => ({ readyState: 1, send }), ready: () => ready, failed });
+    queue.enqueue({ event: 'buttondown' });
+    expect(queue.interrupt('disconnected', false, { keepQueued: true })).toBe(true);
+    expect(failed).not.toHaveBeenCalled();
+    ready = true;
+    queue.flush();
+    expect(send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ event: 'buttondown' }));
+    // Something sent moments ago on the old connection: that loss is reported, and nothing is kept.
+    ready = false;
+    queue.enqueue({ event: 'buttonup' });
+    expect(queue.interrupt('disconnected', false, { keepQueued: true })).toBe(false);
+    expect(failed).toHaveBeenCalledExactlyOnceWith('disconnected');
+    expect(queue.queued).toBe(0);
+  });
 });

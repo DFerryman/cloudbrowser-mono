@@ -4,7 +4,7 @@ import { elementPoint, pictureRect, remoteSpace, toRemotePoint, unrotate, type P
 import { squarePixels } from './neko.js';
 import type { ConnectionDiagnostic, VideoQuality } from '@cloudbrowser/contracts';
 import type { VideoPreference } from './quality.js';
-import { RemoteBrowser, type AutomationStatus, type ConnectInfo, type ViewerState } from './remote-browser.js';
+import { RemoteBrowser, type AutomationStatus, type ConnectInfo, type ConnectionIssue, type ViewerState } from './remote-browser.js';
 import type { ViewerStats } from './stats.js';
 import { TouchGestureController } from './touch.js';
 import { TextInputController } from './text-input.js';
@@ -33,6 +33,22 @@ async function asPng(file: File): Promise<File> {
   }
 }
 
+/**
+ * Marks a tap where the finger lifted, at once: the remote page answers a round trip later, and a
+ * tap with nothing to show for a third of a second looked like one that went nowhere.
+ */
+function showTap(box: HTMLElement, x: number, y: number) {
+  const mark = document.createElement('div');
+  mark.setAttribute('aria-hidden', 'true');
+  Object.assign(mark.style, {
+    position: 'absolute', left: `${x - 16}px`, top: `${y - 16}px`, width: '32px', height: '32px', borderRadius: '50%',
+    border: '2px solid rgba(255, 255, 255, 0.9)', boxShadow: '0 0 0 1px rgba(0, 0, 0, 0.35)', pointerEvents: 'none', opacity: '0',
+  });
+  box.appendChild(mark);
+  mark.animate?.([{ opacity: 0.9, transform: 'scale(0.55)' }, { opacity: 0, transform: 'scale(1.1)' }], { duration: 420, easing: 'ease-out' });
+  setTimeout(() => mark.remove(), 460);
+}
+
 export interface RemoteBrowserHandle {
   /** Whether the current video element is playing a live video track with a usable picture. */
   isDisplaying(): boolean;
@@ -48,13 +64,14 @@ export interface RemoteBrowserHandle {
 
 export interface RemoteBrowserViewProps {
   getConnectInfo: () => Promise<ConnectInfo>;
-  onState?: (state: ViewerState, attempt: number) => void;
+  /** `issue`: why the view is reconnecting or failed, when known (offline, background, network, service, desktop). */
+  onState?: (state: ViewerState, attempt: number, issue: ConnectionIssue | null) => void;
   onDiagnostic?: (diagnostic: ConnectionDiagnostic) => void;
   onStats?: (stats: ViewerStats) => void;
   /** Called on any user input, for the idle timeout. */
   onInput?: () => void;
   onKeyboardChange?: (open: boolean) => void;
-  onInputError?: (reason: InputFailure) => void;
+  onInputError?: (reason: InputFailure, issue: ConnectionIssue | null) => void;
   /**
    * Shows the remote screen a quarter turn clockwise, for a phone held sideways in portrait
    * orientation; the remote screen then takes the turned shape. Input follows the turn.
@@ -151,7 +168,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     let playState: PlaybackState = 'unknown';
     const browser = new RemoteBrowser({
       getConnectInfo: () => callbacks.current.getConnectInfo(),
-      onState: (s, a) => callbacks.current.onState?.(s, a),
+      onState: (s, a, issue) => callbacks.current.onState?.(s, a, issue),
       onDiagnostic: (d) => callbacks.current.onDiagnostic?.(d),
       getPlaybackState: (attemptId, frameSequence) => {
         const element = videoRef.current;
@@ -168,9 +185,9 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         statsRef.current = s;
         callbacks.current.onStats?.(s);
       },
-      onInputError: (reason) => {
+      onInputError: (reason, issue) => {
         textInputRef.current?.reset();
-        callbacks.current.onInputError?.(reason);
+        callbacks.current.onInputError?.(reason, issue);
       },
       onStream: (stream, attemptId, frameSequence) => {
         const element = videoRef.current;
@@ -216,6 +233,19 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       onAutomation: (status) => callbacks.current.onAutomation?.(status),
     });
     browserRef.current = browser;
+    // Hidden pages make no connection attempts and check their socket when shown again; reconnects
+    // wait for the network to come back (RemoteBrowser.setVisible, setOnline).
+    const shown = () => browser.setVisible(document.visibilityState !== 'hidden');
+    const online = () => browser.setOnline(navigator.onLine !== false);
+    const connection = (navigator as Navigator & { connection?: EventTarget }).connection;
+    const changed = () => browser.networkChanged();
+    shown();
+    online();
+    document.addEventListener('visibilitychange', shown);
+    window.addEventListener('pageshow', shown);
+    window.addEventListener('online', online);
+    window.addEventListener('offline', online);
+    connection?.addEventListener?.('change', changed);
     textInputRef.current = new TextInputController({
       mode: () => keyboardRequested.current ? 'software' : 'desktop',
       key: (down, event) => keyboardRequested.current ? browser.softwareKey(down, event) : browser.key(down, event),
@@ -227,6 +257,11 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     });
     void browser.connect();
     return () => {
+      document.removeEventListener('visibilitychange', shown);
+      window.removeEventListener('pageshow', shown);
+      window.removeEventListener('online', online);
+      window.removeEventListener('offline', online);
+      connection?.removeEventListener?.('change', changed);
       active = false;
       playSequence++;
       resumePlayback.current = null;
@@ -324,12 +359,17 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     const touchEvent = (e: PointerEvent) => {
       const point = elementPoint(e, box);
       const local = toLocal(point.x, point.y);
-      return { pointerId: e.pointerId, clientX: local.x, clientY: local.y };
+      return { pointerId: e.pointerId, clientX: local.x, clientY: local.y, isPrimary: e.isPrimary };
     };
+    /** Where the finger lifted, in the box: a tap is marked there at once (showTap). */
+    let lifted: { x: number; y: number } | null = null;
     const touch = new TouchGestureController({
       mapPoint: (x, y) => remoteAt(x, y, toLocal(0, 0).frame),
       move: (x, y) => browserRef.current?.move(x, y),
-      button: (down, x, y) => browserRef.current?.button(down, 0, x, y),
+      button: (down, x, y) => {
+        if (down && lifted) showTap(box, lifted.x, lifted.y);
+        browserRef.current?.button(down, 0, x, y);
+      },
       scroll: (dx, dy) => {
         browserRef.current?.scroll(dx, dy);
       },
@@ -402,7 +442,9 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       if (e.pointerType === 'touch') {
         // A touch becomes a user gesture only when the finger lifts; a mouse press already is one.
         resumePlayback.current?.();
+        lifted = elementPoint(e, box);
         touch.pointerUp(touchEvent(e));
+        lifted = null;
         browserRef.current?.finishScroll();
         e.preventDefault();
         return;
