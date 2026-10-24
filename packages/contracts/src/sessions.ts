@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { VIDEO_QUALITIES } from './instances.js';
 
 export const ViewerSession = z.object({
   id: z.string(),
@@ -78,6 +79,43 @@ export const ConnectionDiagnostic = z.object({
   message: 'Media snapshots are only accepted at failure or first frame', path: ['media'],
 });
 export type ConnectionDiagnostic = z.infer<typeof ConnectionDiagnostic>;
+
+const Milliseconds = z.number().int().min(0).max(600_000);
+
+/**
+ * About a minute of a live view's quality, for baselines by browser region and viewer country
+ * (docs/connection-diagnostics.md, "Live quality"). Medians and totals over the interval, read
+ * from getStats and the gateway's pongs: never addresses, SDP or what is on screen.
+ */
+export const LiveQualityReport = z.object({
+  attemptId: z.string().uuid(),
+  /** The interval covered: a minute, or less when the view ended, was hidden or the page froze sooner. */
+  durationMs: z.number().int().min(1_000).max(600_000),
+  /** Stats readings (one every 2 s) in the interval. */
+  readings: z.number().int().min(1).max(600),
+  /** The picture's round trip on its selected candidate pair, through the TURN relay; median. */
+  rttMs: Milliseconds.nullable(),
+  /** The input socket's round trip to the gateway (ping to pong); median, null without a ping in the interval. */
+  gatewayRttMs: Milliseconds.nullable(),
+  fps: z.number().min(0).max(240).nullable(),
+  kbps: z.number().int().min(0).max(1_000_000).nullable(),
+  /** Share of video packets lost in the interval, 0–1. */
+  loss: z.number().min(0).max(1).nullable(),
+  freezes: z.number().int().min(0).max(100_000),
+  /** Time the picture spent frozen in the interval; null where the browser does not report it. */
+  freezeMs: Milliseconds.nullable(),
+  /** Average time a frame waited in the jitter buffer, and took to decode. */
+  jitterBufferMs: z.number().min(0).max(60_000).nullable(),
+  decodeMs: z.number().min(0).max(60_000).nullable(),
+  framesDropped: z.number().int().min(0).max(1_000_000).nullable(),
+  /** The picture level neko streamed at the end of the interval. */
+  quality: z.enum(VIDEO_QUALITIES).nullable(),
+  width: z.number().int().min(0).max(32_768).nullable(),
+  height: z.number().int().min(0).max(32_768).nullable(),
+  localCandidateType: CandidateType.optional(),
+  relayProtocol: z.enum(['udp', 'tcp', 'tls']).optional(),
+}).strict();
+export type LiveQualityReport = z.infer<typeof LiveQualityReport>;
 
 /**
  * `simulated` is returned while the instance runs on the `fake` executor: there is no gateway or

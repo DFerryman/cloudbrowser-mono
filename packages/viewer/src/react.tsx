@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type CSSP
 import { isMac } from './keyboard.js';
 import { elementPoint, pictureRect, remoteSpace, toRemotePoint, unrotate, type PositionedEvent } from './mapping.js';
 import { squarePixels } from './neko.js';
-import type { ConnectionDiagnostic, VideoQuality } from '@cloudbrowser/contracts';
+import type { ConnectionDiagnostic, LiveQualityReport, VideoQuality } from '@cloudbrowser/contracts';
 import type { VideoPreference } from './quality.js';
 import { RemoteBrowser, type AutomationStatus, type ConnectInfo, type ConnectionIssue, type ViewerState } from './remote-browser.js';
 import type { ViewerStats } from './stats.js';
@@ -68,6 +68,8 @@ export interface RemoteBrowserViewProps {
   onState?: (state: ViewerState, attempt: number, issue: ConnectionIssue | null) => void;
   onDiagnostic?: (diagnostic: ConnectionDiagnostic) => void;
   onStats?: (stats: ViewerStats) => void;
+  /** About a minute of the live picture's quality at a time (RemoteBrowserOptions.onQualityReport). */
+  onQualityReport?: (report: LiveQualityReport) => void;
   /** Called on any user input, for the idle timeout. */
   onInput?: () => void;
   onKeyboardChange?: (open: boolean) => void;
@@ -107,7 +109,7 @@ export interface RemoteBrowserViewProps {
  * textarea that owns the keyboard (so IME composition works), and the remote cursor drawn locally.
  */
 export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserViewProps>(function RemoteBrowserView(
-  { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onTransfer, onAutomation, rotated = false, debug = false, video, onVideo, maxScreenPixels, muted = true, onMutedChange, className, style },
+  { getConnectInfo, onState, onDiagnostic, onStats, onQualityReport, onInput, onKeyboardChange, onInputError, onTransfer, onAutomation, rotated = false, debug = false, video, onVideo, maxScreenPixels, muted = true, onMutedChange, className, style },
   ref,
 ) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -135,8 +137,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   debugRef.current = debug;
   const [debugInfo, setDebugInfo] = useState<{ x: number; y: number; lines: string[] } | null>(null);
   const statsRef = useRef<ViewerStats | null>(null);
-  const callbacks = useRef({ getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation, onMutedChange });
-  callbacks.current = { getConnectInfo, onState, onDiagnostic, onStats, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation, onMutedChange };
+  const callbacks = useRef({ getConnectInfo, onState, onDiagnostic, onStats, onQualityReport, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation, onMutedChange });
+  callbacks.current = { getConnectInfo, onState, onDiagnostic, onStats, onQualityReport, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation, onMutedChange };
   /** Plays the current stream again if it is paused; a pointer press calls it, as a user gesture. */
   const resumePlayback = useRef<(() => void) | null>(null);
   const initialVideo = useRef(video);
@@ -185,6 +187,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         statsRef.current = s;
         callbacks.current.onStats?.(s);
       },
+      onQualityReport: (report) => callbacks.current.onQualityReport?.(report),
       onInputError: (reason, issue) => {
         textInputRef.current?.reset();
         callbacks.current.onInputError?.(reason, issue);

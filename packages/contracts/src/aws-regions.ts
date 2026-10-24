@@ -75,3 +75,41 @@ export function estimateRttMs(from: { lat: number; lon: number }, to: { lat: num
   const km = 2 * 6371 * Math.asin(Math.min(1, Math.sqrt(a)));
   return Math.round(5 + (2 * km * 1.5) / 200);
 }
+
+/** Durable Object location hints (Cloudflare's `locationHint`), the same list as workers-types'. */
+export const OBJECT_LOCATION_HINTS = ['wnam', 'enam', 'sam', 'weur', 'eeur', 'apac', 'apac-ne', 'apac-se', 'oc', 'afr', 'me'] as const;
+export type ObjectLocationHint = (typeof OBJECT_LOCATION_HINTS)[number];
+
+export const isObjectLocationHint = (value: unknown): value is ObjectLocationHint =>
+  typeof value === 'string' && (OBJECT_LOCATION_HINTS as readonly string[]).includes(value);
+
+/**
+ * Where a region's browsers should have their gateway object. Hong Kong and Taipei sit between
+ * Cloudflare's northeast and southeast Asia-Pacific hints, so they get the whole of it; regions
+ * missing here get no hint.
+ */
+const OBJECT_LOCATIONS: Record<string, ObjectLocationHint> = {
+  'us-east-1': 'enam', 'us-east-2': 'enam', 'ca-central-1': 'enam',
+  'us-west-1': 'wnam', 'us-west-2': 'wnam', 'ca-west-1': 'wnam',
+  'sa-east-1': 'sam',
+  'eu-west-1': 'weur', 'eu-west-2': 'weur', 'eu-west-3': 'weur', 'eu-central-1': 'weur', 'eu-central-2': 'weur',
+  'eu-north-1': 'weur', 'eu-south-1': 'weur', 'eu-south-2': 'weur',
+  'il-central-1': 'me', 'me-central-1': 'me', 'me-south-1': 'me',
+  'af-south-1': 'afr',
+  'ap-northeast-1': 'apac-ne', 'ap-northeast-2': 'apac-ne', 'ap-northeast-3': 'apac-ne',
+  'ap-east-1': 'apac', 'ap-east-2': 'apac',
+  'ap-southeast-1': 'apac-se', 'ap-southeast-3': 'apac-se', 'ap-southeast-5': 'apac-se', 'ap-southeast-7': 'apac-se',
+  'ap-south-1': 'apac-se', 'ap-south-2': 'apac-se',
+  'ap-southeast-2': 'oc', 'ap-southeast-4': 'oc', 'ap-southeast-6': 'oc',
+};
+
+/**
+ * The location hint for a browser's gateway object (one per browser, apps/gateway), from its
+ * provider region. An object stays where it was first created, and without a hint that is near
+ * whoever reached it first: usually the VM's agent, but a viewer or a network route can be on
+ * another continent (a Tokyo browser's object ended up in Los Angeles, a Bangkok one's in
+ * Frankfurt), and every input then travels there and back.
+ */
+export function objectLocationHint(providerRegion: string | null | undefined): ObjectLocationHint | undefined {
+  return providerRegion ? OBJECT_LOCATIONS[providerRegion] : undefined;
+}

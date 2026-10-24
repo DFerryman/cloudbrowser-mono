@@ -126,6 +126,67 @@ TURN path's RTT includes both the user's route to Cloudflare and the route onwar
 so it alone cannot attribute failure to the user's local network. Compare failed/successful
 attempts, and use a controlled network comparison where available.
 
+## Live quality
+
+Diagnostics explain views that fail; live-quality reports measure the ones that work, so latency
+and frame rate can be compared by browser region and by where viewers are. While a picture is
+live and visible, the viewer sums up its 2 s stats readings and the input socket's pongs once a
+minute (sooner when the view ends or the tab is hidden, never for under 10 s) and posts the
+summary to `POST /api/v1/sessions/{id}/quality`. The api writes one Workers Analytics Engine
+data point per report to the `cloudbrowser_live_quality` dataset (binding `LIVE_QUALITY`), with
+the visitor's country, Cloudflare colo and ASN from `request.cf`. Nothing is written to D1, and a
+report never renews a session, wakes a VM or changes billing. Reports share the diagnostics
+write budget. The dataset is created by its first write after the api is deployed.
+
+Fields are only ever appended, so existing queries keep working. `-1` in a double means the
+browser did not report it; an empty blob means unknown.
+
+| Column | Value |
+| --- | --- |
+| `index1`, `blob1` | Browser region id (`tyo1`) |
+| `blob2`, `blob3`, `blob4` | Viewer country, Cloudflare colo, ASN (a VPN's or proxy's when one is used) |
+| `blob5` | Picture level neko streamed at the end of the interval |
+| `blob6`, `blob7` | Selected local candidate type, and the protocol to the TURN relay |
+| `blob8`, `blob9`, `blob10` | Instance, viewer session and attempt ids |
+| `double1`, `double2` | Interval in ms, stats readings in it |
+| `double3`, `double4` | Median picture round trip through TURN, median input round trip to the gateway (ms) |
+| `double5`, `double6`, `double7` | Median fps, median kbps, share of video packets lost (0–1) |
+| `double8`, `double9` | Freezes, ms frozen |
+| `double10`, `double11` | Average jitter buffer delay and decode time per frame (ms) |
+| `double12` | Frames dropped |
+| `double13`, `double14` | Width and height at the end of the interval |
+
+Median picture round trip and frame rate by region and country over the last day, with the
+[SQL API](https://developers.cloudflare.com/analytics/analytics-engine/sql-api/):
+
+```sql
+SELECT blob1 AS region, blob2 AS country,
+  SUM(_sample_interval) AS reports,
+  quantileExactWeighted(0.5, double3, _sample_interval) AS rtt_ms,
+  quantileExactWeighted(0.5, double5, _sample_interval) AS fps
+FROM cloudbrowser_live_quality
+WHERE timestamp > NOW() - INTERVAL '1' DAY AND double3 >= 0 AND double5 >= 0
+GROUP BY region, country
+ORDER BY reports DESC
+```
+
+`double3` includes the viewer's route to its nearest Cloudflare PoP and the backbone onward to
+the VM; `double4` is the route to the browser's gateway object. A high `double3` with a normal
+`double4` points at the media path (TURN, the VM's network); both high points at the viewer's
+own network, a VPN, or a detour such as mainland China's.
+
+### Where the gateway object runs
+
+A browser's `InstanceGateway` Durable Object is created near whichever caller reaches it first,
+and stays there. When a viewer in Europe or the agent's first connection through a distant PoP
+got there first, every input event of every later viewer crossed that detour. The api now
+passes a location hint derived from the browser's AWS region: to the agent and MCP paths in the
+authentication result, and to viewers as the `loc` claim of the viewer token. The gateway gives
+the hint to `get()`, which only affects an object that does not exist yet: objects that
+already exist keep their location. A gateway that does not know a hint ignores it. Internal
+calls (revocation, queue delivery) carry no hint, so an object one of them creates first is
+placed near its caller.
+
 ## Readiness and privacy
 
 Agent 0.3.1 probes the real local Neko login, WebSocket and `system/init` before reporting

@@ -4,7 +4,7 @@
  * shown once; only `sha256('bridge:' + key)` is stored, the scheme the retired bridge's credentials
  * used, so those keep working as keys.
  */
-import { AGENT_KEY_EXPIRY_DAYS, AUTOMATION_LIMITS, type AgentControlMode, type AgentControlState, type AgentKey, type AgentKeyCapability, type AutomationStatus, type CreateAgentKeyBody } from '@cloudbrowser/contracts';
+import { AGENT_KEY_EXPIRY_DAYS, AUTOMATION_LIMITS, objectLocationHint, type AgentControlMode, type AgentControlState, type AgentKey, type AgentKeyCapability, type AutomationStatus, type CreateAgentKeyBody, type ObjectLocationHint } from '@cloudbrowser/contracts';
 import { eventRow, newId, schema, sha256Hex, type Db } from '@cloudbrowser/db';
 import { and, desc, eq, gt, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import type { Env } from './env.js';
@@ -12,11 +12,12 @@ import { agentKeyCreatedMessage } from './notifications/user.js';
 import { sendToUser } from './notifications/send.js';
 import { problem } from './problem.js';
 
-const { browserInstances, automationClients, automationSessions, agentCredentials, auditLog, events } = schema;
+const { browserInstances, automationClients, automationSessions, agentCredentials, auditLog, events, regions } = schema;
 
 /** What the gateway learns about a key on an MCP request; no session is opened by it. */
 export type McpAuth =
-  | { ok: true; clientId: string; userId: string; generation: number; capability: AgentKeyCapability; name: string }
+  /** `location`: where the browser's gateway object belongs (objectLocationHint), for a call that reaches it first. */
+  | { ok: true; clientId: string; userId: string; generation: number; capability: AgentKeyCapability; name: string; location?: ObjectLocationHint }
   | { ok: false; reason: 'invalid_token' | 'expired' | 'unknown_instance' };
 
 type InstanceRow = typeof browserInstances.$inferSelect;
@@ -204,8 +205,9 @@ export async function authenticateMcp(db: Db, input: { instanceId: string; key: 
     .where(and(eq(automationClients.credentialHash, await credentialHash(input.key)), isNull(automationClients.revokedAt)));
   if (!client || client.instanceId !== input.instanceId) return { ok: false, reason: 'invalid_token' };
   if (client.expiresAt && client.expiresAt <= now) return { ok: false, reason: 'expired' };
-  const [inst] = await db.select({ status: browserInstances.status, desiredState: browserInstances.desiredState, generation: agentCredentials.generation })
+  const [inst] = await db.select({ status: browserInstances.status, desiredState: browserInstances.desiredState, generation: agentCredentials.generation, providerRegion: regions.providerRegion })
     .from(browserInstances).leftJoin(agentCredentials, eq(agentCredentials.instanceId, browserInstances.id))
+    .leftJoin(regions, eq(regions.id, browserInstances.regionId))
     .where(and(eq(browserInstances.id, client.instanceId), eq(browserInstances.userId, client.userId)));
   if (!inst || unavailable(inst)) return { ok: false, reason: 'unknown_instance' };
   const lastClient = input.client?.trim().slice(0, 120) || null;
@@ -214,9 +216,10 @@ export async function authenticateMcp(db: Db, input: { instanceId: string; key: 
       lastSeenAt: now, lastIp: input.ip?.slice(0, 64) ?? client.lastIp, ...(lastClient ? { lastClient } : {}),
     }).where(eq(automationClients.id, client.id));
   }
+  const location = objectLocationHint(inst.providerRegion);
   return {
     ok: true, clientId: client.id, userId: client.userId, generation: inst.generation ?? 0,
-    capability: client.capability === 'view' ? 'view' : 'control', name: client.name,
+    capability: client.capability === 'view' ? 'view' : 'control', name: client.name, ...(location ? { location } : {}),
   };
 }
 

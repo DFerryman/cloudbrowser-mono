@@ -4,6 +4,7 @@ import {
   ConnectInfo,
   ConnectionDiagnostic,
   CreateInstanceBody,
+  LiveQualityReport,
   DEFAULT_IDLE_TIMEOUT_S,
   IDLE_TIMEOUT_OPTIONS_S,
   NEVER_SLEEP_TIMEOUT_S,
@@ -25,6 +26,7 @@ import {
   AutomationStatus,
   CreateAgentKeyBody,
   SetControlBody,
+  objectLocationHint,
   signViewerToken,
   type RegionId,
 } from '@cloudbrowser/contracts';
@@ -779,7 +781,7 @@ async function ownedSession(c: Vars, id: string) {
   const user = c.get('user');
   // One round trip: the session and its browser are read together (connect and heartbeats are hot paths).
   const [row] = await db
-    .select({ session: viewerSessions, inst: { userId: browserInstances.userId, status: browserInstances.status, desiredState: browserInstances.desiredState } })
+    .select({ session: viewerSessions, inst: { userId: browserInstances.userId, status: browserInstances.status, desiredState: browserInstances.desiredState, regionId: browserInstances.regionId } })
     .from(viewerSessions)
     .leftJoin(browserInstances, eq(browserInstances.id, viewerSessions.instanceId))
     .where(and(eq(viewerSessions.id, id), eq(viewerSessions.userId, user.id)));
@@ -787,7 +789,7 @@ async function ownedSession(c: Vars, id: string) {
   const { session: s, inst } = row;
   if (!inst || inst.userId !== user.id) throw problem(404, 'not_found');
   if (inst.desiredState === 'deleted' || ['deleting', 'purged'].includes(inst.status)) throw problem(409, 'invalid_state', 'This browser has been deleted.');
-  return { ...s, browserStatus: inst.status };
+  return { ...s, browserStatus: inst.status, regionId: inst.regionId };
 }
 
 v1.openapi(
@@ -807,6 +809,41 @@ v1.openapi(
     console.info('viewer connection', {
       source: 'viewer', instanceId: s.instanceId, sessionId: s.id,
       ...report, observedAt: new Date().toISOString(),
+    });
+    return c.body(null, 204);
+  },
+);
+
+/** Analytics Engine stores numbers only: a reading the browser did not have is -1. */
+const measured = (value: number | null) => value ?? -1;
+
+v1.openapi(
+  createRoute({
+    method: 'post',
+    path: '/sessions/{id}/quality',
+    tags: ['sessions'],
+    description: 'About a minute of live-view quality, for baselines by region and country. These reports do not renew a session, keep the VM awake or change billing.',
+    request: { params: IdParam, body: { content: { 'application/json': { schema: LiveQualityReport } }, required: true } },
+    responses: { 204: { description: 'Report recorded' }, ...errors },
+  }),
+  async (c) => {
+    const s = await ownedSession(c, c.req.valid('param').id);
+    const r = c.req.valid('json');
+    // The visitor's own edge (request.cf describes the visitor, not where this Worker runs): with
+    // a proxy or VPN, the proxy's. Its country beside a slow picture is what tells them apart.
+    const cf = c.req.raw.cf as { country?: string; colo?: string; asn?: number } | undefined;
+    // Layout: docs/connection-diagnostics.md, "Live quality". Fields are only ever appended.
+    c.env.LIVE_QUALITY?.writeDataPoint({
+      indexes: [s.regionId],
+      blobs: [
+        s.regionId, cf?.country ?? '', cf?.colo ?? '', cf?.asn ? String(cf.asn) : '', r.quality ?? '',
+        r.localCandidateType ?? '', r.relayProtocol ?? '', s.instanceId, s.id, r.attemptId,
+      ],
+      doubles: [
+        r.durationMs, r.readings, measured(r.rttMs), measured(r.gatewayRttMs), measured(r.fps), measured(r.kbps),
+        measured(r.loss), r.freezes, measured(r.freezeMs), measured(r.jitterBufferMs), measured(r.decodeMs),
+        measured(r.framesDropped), measured(r.width), measured(r.height),
+      ],
     });
     return c.body(null, 204);
   },
@@ -851,6 +888,8 @@ v1.openapi(
       console.error('TURN credentials failed', ice.error);
       throw problem(503, 'viewer_unavailable', 'The live view relay is unavailable right now. Try again in a moment.');
     }
+    // A viewer can be the first to reach the browser's gateway object, from another continent.
+    const loc = objectLocationHint(p?.providerRegion);
     // A 60 s single-use token for the gateway, and short-lived TURN credentials (pages 2 and 5).
     const token = await signViewerToken(JSON.parse(c.env.VIEWER_TOKEN_PRIVATE_KEY) as JsonWebKey, {
       jti: newId(),
@@ -858,6 +897,7 @@ v1.openapi(
       iid: s.instanceId,
       uid: s.userId,
       exp: Math.floor(Date.now() / 1000) + 60,
+      ...(loc ? { loc } : {}),
     });
     return c.json(
       {

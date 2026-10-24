@@ -6,52 +6,14 @@ import { DocsLink } from '../../app/DocsLink.js';
 import { useI18n } from '../../lib/i18n.js';
 import type { MessageKey } from '../../messages/en.js';
 import { money } from '../../lib/money.js';
+import { measureLatency, readLatencyCache, writeLatencyCache } from './latency.js';
 import { regionPlace, regionSearchText } from './region-names.js';
 
-const CACHE_KEY = 'nevazu.latency.v1';
-const CACHE_MS = 10 * 60_000;
 /** Shown before "show all": the nearest few, plus the selected one. */
 const NEAREST = 5;
 
 /** Creation is open but no browser has run here yet; unknown (older API) is not flagged. */
 const untested = (r: Region) => r.availability !== 'unavailable' && r.launchVerifiedAt === null;
-
-type Cached = Record<string, { ms: number; at: number }>;
-function readCache(): Cached {
-  try {
-    const all = JSON.parse(sessionStorage.getItem(CACHE_KEY) ?? '{}') as Cached;
-    return Object.fromEntries(Object.entries(all).filter(([, v]) => Date.now() - v.at < CACHE_MS));
-  } catch {
-    return {};
-  }
-}
-function writeCache(id: string, ms: number) {
-  try {
-    sessionStorage.setItem(CACHE_KEY, JSON.stringify({ ...readCache(), [id]: { ms, at: Date.now() } }));
-  } catch {
-    // Storage may be unavailable (private mode); the measurement is simply repeated next time.
-  }
-}
-
-/** Round trip to a region's ping endpoint. The first request also opens the connection, so it is not counted. */
-async function measure(url: string): Promise<number | null> {
-  const samples: number[] = [];
-  for (let n = 0; n < 3; n++) {
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 4_000);
-    const start = performance.now();
-    try {
-      await fetch(url, { mode: 'no-cors', cache: 'no-store', credentials: 'omit', signal: ctl.signal });
-      samples.push(performance.now() - start);
-    } catch {
-      break;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  const warm = samples.slice(1);
-  return warm.length ? Math.round(Math.min(...warm)) : null;
-}
 
 /**
  * Latency from the user's own network to each region, measured in their browser while the
@@ -59,19 +21,19 @@ async function measure(url: string): Promise<number | null> {
  * for them.
  */
 function useMeasuredLatency(regions: Region[] | undefined, active: boolean) {
-  const [measured, setMeasured] = useState<Record<string, number>>(() => Object.fromEntries(Object.entries(readCache()).map(([id, v]) => [id, v.ms])));
+  const [measured, setMeasured] = useState<Record<string, number>>(() => Object.fromEntries(Object.entries(readLatencyCache()).map(([id, v]) => [id, v.ms])));
   const probes = regions?.filter((r) => r.probeUrl).map((r) => `${r.id} ${r.probeUrl}`).join('|') ?? '';
   useEffect(() => {
     if (!active || !probes) return;
     let cancelled = false;
-    const cached = readCache();
+    const cached = readLatencyCache();
     const todo = probes.split('|').map((p) => p.split(' ') as [string, string]).filter(([id]) => !cached[id]);
     let next = 0;
     const worker = async () => {
       for (let item = todo[next++]; item && !cancelled; item = todo[next++]) {
-        const ms = await measure(item[1]);
+        const ms = await measureLatency(item[1]);
         if (ms === null || cancelled) continue;
-        writeCache(item[0], ms);
+        writeLatencyCache(item[0], ms);
         setMeasured((m) => ({ ...m, [item[0]]: ms }));
       }
     };

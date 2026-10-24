@@ -1,3 +1,4 @@
+import { isObjectLocationHint } from '@cloudbrowser/contracts';
 import type { Env } from '../env.js';
 import { connectionLog } from '../connection-log.js';
 import { isToolName, SERVER_INSTRUCTIONS, TOOLS } from './tools.js';
@@ -107,8 +108,14 @@ async function readBody(req: Request, limit: number): Promise<string | null> {
 
 const validId = (id: unknown): id is JsonRpcId => typeof id === 'string' || (typeof id === 'number' && Number.isFinite(id));
 
-export function stub(env: Env, instanceId: string) {
-  return env.INSTANCE_GATEWAY.get(env.INSTANCE_GATEWAY.idFromName(instanceId));
+/**
+ * The browser's object. `location` (from the api: objectLocationHint) only counts for the call
+ * that creates it: an object stays where it was created, near its first caller without a hint.
+ * A hint this version does not know is ignored.
+ */
+export function stub(env: Env, instanceId: string, location?: string) {
+  const id = env.INSTANCE_GATEWAY.idFromName(instanceId);
+  return isObjectLocationHint(location) ? env.INSTANCE_GATEWAY.get(id, { locationHint: location }) : env.INSTANCE_GATEWAY.get(id);
 }
 
 export async function handleMcp(req: Request, env: Env, ctx: ExecutionContext, instanceId: string): Promise<Response> {
@@ -214,7 +221,7 @@ export async function handleMcp(req: Request, env: Env, ctx: ExecutionContext, i
 
 /** Hands a call to the browser's Durable Object with the identity checked above. */
 function forward(env: Env, instanceId: string, auth: Extract<Awaited<ReturnType<Env['API']['authenticateMcp']>>, { ok: true }>, path: string, body: unknown, req: Request) {
-  return stub(env, instanceId).fetch(new Request(`https://gateway${path}`, {
+  return stub(env, instanceId, auth.location).fetch(new Request(`https://gateway${path}`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',

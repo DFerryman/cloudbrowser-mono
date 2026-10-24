@@ -28,13 +28,16 @@ const AGENT_SECRET = /^[0-9a-fA-F]{64}$/;
 /** A viewer token: base64url claims, a dot and a base64url Ed25519 signature. */
 const VIEWER_TOKEN = /^[A-Za-z0-9_-]{16,2048}\.[A-Za-z0-9_-]{64,128}$/;
 
-/** Forwards the upgrade to the instance's object with the identity this Worker verified. */
-function forward(env: Env, req: Request, instanceId: string, headers: Record<string, string>) {
+/**
+ * Forwards the upgrade to the instance's object with the identity this Worker verified; `location`
+ * places the object if this is the first request to reach it.
+ */
+function forward(env: Env, req: Request, instanceId: string, headers: Record<string, string>, location?: string) {
   const h = new Headers(req.headers);
   for (const k of [...h.keys()]) if (k.startsWith('x-cb-')) h.delete(k);
   h.set('x-cb-instance', instanceId);
   for (const [k, v] of Object.entries(headers)) h.set(k, v);
-  return stub(env, instanceId).fetch(new Request(req.url, { method: 'GET', headers: h }));
+  return stub(env, instanceId, location).fetch(new Request(req.url, { method: 'GET', headers: h }));
 }
 
 /**
@@ -103,7 +106,7 @@ export default {
           'x-cb-role': 'agent',
           'x-cb-generation': String(auth.generation),
           ...(auth.credential ? { 'x-cb-credential': auth.credential } : {}),
-        });
+        }, auth.location);
       } catch {
         connectionLog('agent_upgrade_failed', { instanceId, role: 'agent', code: 'gateway_unavailable', status: 503 });
         return text('gateway unavailable', 503);
@@ -137,7 +140,7 @@ export default {
         return await forward(env, req, claims.iid, {
           'x-cb-role': 'viewer', 'x-cb-session': claims.sid,
           ...(identity.attemptId ? { 'x-cb-attempt': identity.attemptId } : {}),
-        });
+        }, claims.loc);
       } catch {
         connectionLog('viewer_upgrade_failed', { ...identity, code: 'gateway_unavailable', status: 503 });
         return text('gateway unavailable', 503);

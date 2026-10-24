@@ -239,6 +239,7 @@ export const en = {
   'overlay.issue.desktop': 'The cloud browser’s own connection dropped for a moment. Your network is not the cause.',
   'overlay.issue.unstable': 'The connection dropped {count} times in the last few minutes: your network is unstable. A steadier connection (strong Wi-Fi, no VPN) will help.',
   'session.slowConnection': 'Slow connection: {rtt} ms round trip to your browser, so taps and typing show up later than on a fast network.',
+  'session.slowConnectionDetour': 'Slow connection: {rtt} ms round trip to your browser, though your network reaches its region in about {region} ms. Live video does not go through most VPNs and proxies, and from mainland China it travels through the US, so a browser in another region may respond faster.',
   'session.slowConnectionDismiss': 'Dismiss',
   'overlay.waking': 'Starting your browser…',
   'overlay.wakingHint': 'Usually about a minute.',

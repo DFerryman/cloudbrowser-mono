@@ -1,3 +1,4 @@
+import { signViewerToken } from '@cloudbrowser/contracts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker, { Internal } from '../src/index.js';
 import { resetBlocks } from '../src/mcp/http.js';
@@ -132,6 +133,34 @@ describe('gateway robustness', () => {
     expect((await upgrade('/v1/stream/browser1?token=garbage', {})).status).toBe(401);
     expect((await upgrade(`/v1/stream/${'x'.repeat(65)}?token=${'a'.repeat(20)}.${'b'.repeat(86)}`, {})).status).toBe(401);
     expect(fx.env.API.redeemViewerToken).not.toHaveBeenCalled();
+  });
+
+  it('creates the gateway object where the browser runs, whoever reaches it first', async () => {
+    const get = vi.spyOn(fx.env.INSTANCE_GATEWAY, 'get');
+    const upgrade = (path: string, headers: Record<string, string> = {}) =>
+      worker.fetch!(new Request(`https://connect.test${path}`, { headers: { upgrade: 'websocket', ...headers } }), fx.env, {} as ExecutionContext);
+    vi.mocked(fx.env.API.authenticateAgent).mockResolvedValueOnce({ ok: true, generation: 1, location: 'apac-ne' });
+    expect((await upgrade('/v1/agent', { 'x-instance-id': 'browser1', authorization: `Bearer ${'c'.repeat(64)}` })).status).toBe(101);
+    expect(get).toHaveBeenLastCalledWith('browser1', { locationHint: 'apac-ne' });
+    new FakeVm(fx, fx.ctx.getWebSockets('agent').at(-1)!);
+
+    const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as CryptoKeyPair;
+    const privateKey = await crypto.subtle.exportKey('jwk', pair.privateKey);
+    fx.env.VIEWER_TOKEN_PUBLIC_KEY = JSON.stringify(await crypto.subtle.exportKey('jwk', pair.publicKey));
+    const token = (loc?: string) => signViewerToken(privateKey, {
+      iid: 'browser1', uid: 'owner1', sid: 'viewer1', jti: crypto.randomUUID(), exp: Math.floor(Date.now() / 1000) + 60, ...(loc ? { loc } : {}),
+    });
+    expect((await upgrade(`/v1/stream/browser1?token=${await token('apac-ne')}`)).status).toBe(101);
+    expect(get).toHaveBeenLastCalledWith('browser1', { locationHint: 'apac-ne' });
+    // A hint this gateway does not know (from a newer api) and a token without one: no hint, not a refusal.
+    expect((await upgrade(`/v1/stream/browser1?token=${await token('mars')}`)).status).toBe(101);
+    expect(get).toHaveBeenLastCalledWith('browser1');
+    expect((await upgrade(`/v1/stream/browser1?token=${await token()}`)).status).toBe(101);
+    expect(get).toHaveBeenLastCalledWith('browser1');
+
+    vi.mocked(fx.env.API.authenticateMcp).mockResolvedValueOnce({ ok: true, clientId: 'client1', userId: 'owner1', generation: 1, capability: 'control', name: 'laptop', location: 'apac-ne' });
+    expect((await fx.call('screenshot')).isError).toBe(false);
+    expect(get).toHaveBeenLastCalledWith('browser1', { locationHint: 'apac-ne' });
   });
 
   it('closes a socket of the retired bridge role on its next frame', async () => {

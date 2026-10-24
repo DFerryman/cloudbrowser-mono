@@ -1,12 +1,13 @@
 import type { GatewayToAgent, ViewerTokenClaims } from '@cloudbrowser/contracts';
 
+/** `location` on success: where the browser's object belongs (objectLocationHint); absent from an older api. */
 export type AgentAuth =
-  | { ok: true; generation: number; credential?: string }
+  | { ok: true; generation: number; credential?: string; location?: string }
   | { ok: false; reason: string };
 
 /** A coding agent's access key on an MCP request (docs/agent-access.md); no session is opened by it. */
 export type McpAuth =
-  | { ok: true; clientId: string; userId: string; generation: number; capability: 'control' | 'view'; name: string }
+  | { ok: true; clientId: string; userId: string; generation: number; capability: 'control' | 'view'; name: string; location?: string }
   | { ok: false; reason: 'invalid_token' | 'expired' | 'unknown_instance' };
 
 /** The api Worker's `Internal` RPC entrypoint (page 2: the gateway depends on api internal endpoints). */
