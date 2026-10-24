@@ -445,6 +445,17 @@ pnpm db:migrate:remote
 pnpm run deploy   # checks, builds everything, then deploys gateway, engine + reaper, reconciler and api, in that order
 ```
 
+The gateway, engine, reaper and reconciler are deployed only when something they are built from
+changed since the commit their live version came from (`scripts/deploy-workers.mjs`): their own
+directory, the workspace packages they depend on, the lockfile and the shared build settings. Each
+deploy records `Deploy origin/main <commit>` as its version message for the next comparison; a
+live version without one (a rollback, a hand deploy) is always replaced. A gateway deploy restarts
+every `InstanceGateway` object, and as the update reaches each one over the next few minutes it
+drops that browser's agent tunnel and live views (the picture is back about 7 seconds later), so a
+docs or frontend change no longer does that. The api is always deployed. `DEPLOY_ALL_WORKERS=1
+pnpm run deploy` deploys all of them; `node scripts/deploy-workers.mjs --dry-run` prints what
+would be deployed.
+
 **Apply the migrations before deploying any Worker**, every time. A Worker that reads a table or
 column a pending migration adds fails until it exists, and every Worker shares the one database.
 Write `pnpm run deploy`, not `pnpm deploy`: the latter is pnpm's own command for copying a
