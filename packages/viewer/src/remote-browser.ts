@@ -17,7 +17,7 @@ export type ViewerState = 'connecting' | 'live' | 'reconnecting' | 'agent-offlin
  * user's own network; `service` Nevazu's gateway closed it; `desktop` the cloud browser's own
  * connection dropped.
  */
-export type ConnectionIssue = 'offline' | 'background' | 'network' | 'service' | 'desktop';
+export type ConnectionIssue = 'offline' | 'background' | 'network' | 'gateway' | 'service' | 'desktop';
 
 /** A coding agent's bridge is connected (or not) and who may drive the browser (docs/agent-access.md). */
 export type AutomationStatus = { connected: boolean; control: ControlState };
@@ -92,6 +92,12 @@ const LIVENESS_TICK_MS = 2_000;
 const RESUME_CHECK_AFTER_MS = 3_000;
 /** How long that check waits for the gateway's pong before it reconnects. */
 const RESUME_PROBE_MS = 4_000;
+/**
+ * A connection found dropped or silent this soon after the page came back from the background
+ * (or a freeze) was lost while the system had the page suspended: iPadOS ends a locked page's
+ * connections without a word.
+ */
+const RESUME_SETTLE_MS = 10_000;
 /** Sent input is confirmed by the pong to a ping sent this soon after it. */
 const ACK_PING_DELAY_MS = 250;
 /** A media path that drops while live (a mobile network's blip) gets this long to come back by itself. */
@@ -186,6 +192,8 @@ export class RemoteBrowser {
   private visible = true;
   private online = true;
   private hiddenAt: number | null = null;
+  /** When the page last came back from the background or a freeze (setVisible, livenessTick). */
+  private resumedAt = -Infinity;
   /** A reconnect waits for the page to be shown again or the network to come back, spending no attempts. */
   private deferred = false;
   /** Input kept for the next connection: it was held while this one was checked, never sent on it. */
@@ -289,6 +297,7 @@ export class RemoteBrowser {
     const hiddenFor = this.hiddenAt === null ? 0 : now - this.hiddenAt;
     this.hiddenAt = null;
     this.lastTickAt = now;
+    if (hiddenFor >= RESUME_CHECK_AFTER_MS) this.resumedAt = now;
     if (this.deferred) this.resumeDeferred();
     else if (hiddenFor >= RESUME_CHECK_AFTER_MS) this.checkConnection();
   }
@@ -394,7 +403,8 @@ export class RemoteBrowser {
     ws.onerror = () => {
       if (this.ws === ws && !this.stopped) {
         this.issue = this.classify(this.droppedBy(undefined));
-        this.reconnect(ws, 'transport_error');
+        // Input held back while the socket was checked never went on it: it waits for the next one.
+        this.reconnect(ws, 'transport_error', { keepQueued: this.holdInput });
       }
     };
     ws.onmessage = (e) => {
@@ -407,8 +417,9 @@ export class RemoteBrowser {
       this.issue = this.classify(this.droppedBy(closeCode));
       // Capture the peer and its last bounded sample before teardown advances its sequence.
       if (!this.stopped && this.state !== 'taken-over') this.diagnostic('failed', 'transport_closed', { closeCode });
-      this.inputQueue.interrupt('disconnected');
+      const kept = this.inputQueue.interrupt('disconnected', false, { keepQueued: this.holdInput });
       if (this.ws !== ws) return; // The interruption lost input and ended the connection.
+      this.carryInput = kept;
       this.ws = null;
       this.stopLiveness();
       this.clearConnectionTimer();
@@ -436,21 +447,36 @@ export class RemoteBrowser {
 
   /**
    * What a lost connection says about where it was lost. A gateway that closed it with a code of
-   * its own: the service. A socket that dropped without one (1006) or stopped answering: the way
-   * to the gateway, unless the picture kept arriving over its own, separate path, in which case
-   * the user's network was fine. Before the picture's path exists, nothing can be told.
+   * its own: the service. A socket that dropped without one (1006) or stopped answering while the
+   * picture's own path stopped too: the device's network, most likely. While the picture kept
+   * arriving, the device reaches us, but not where the socket was lost: our side, or a router,
+   * proxy or VPN on the way (`gateway`). Before the picture's path exists, nothing can be told.
    */
   private droppedBy(closeCode: number | undefined): ConnectionIssue | null {
     if (closeCode !== undefined && closeCode !== 1005 && closeCode !== 1006) return 'service';
     if (!this.pc || this.reached !== 'peer') return null;
-    return this.mediaFlowing() ? 'service' : 'network';
+    return this.mediaFlowing() ? 'gateway' : 'network';
   }
 
-  /** The device and the page come first: offline, or hidden (suspended by the system). */
+  /**
+   * The device and the page come first: offline, or hidden or just back from the background
+   * (suspended by the system), unless the gateway itself said why (service, desktop).
+   */
   private classify(issue: ConnectionIssue | null): ConnectionIssue | null {
     if (!this.online) return 'offline';
     if (!this.visible) return 'background';
+    if (issue !== 'service' && issue !== 'desktop' && this.justResumed()) return 'background';
     return issue;
+  }
+
+  /**
+   * The page came back from the background or a freeze within RESUME_SETTLE_MS. A check that ran
+   * far later than due says the page was frozen until now, with or without a visibility event.
+   */
+  private justResumed(): boolean {
+    const now = Date.now();
+    if (this.livenessTimer && now - this.lastTickAt > 3 * LIVENESS_TICK_MS) this.resumedAt = now;
+    return now - this.resumedAt < RESUME_SETTLE_MS;
   }
 
   disconnect() {
@@ -933,6 +959,9 @@ export class RemoteBrowser {
 
   private sendInput(msg: NekoMessage): boolean {
     if (msg.event !== EV.CONTROL_SCROLL && msg.event !== EV.CONTROL_MOVE) this.finishScroll();
+    // Input that finds the socket check overdue comes from a page just thawed (a locked screen),
+    // possibly before its timers ran: the socket is checked before anything goes into it.
+    if (this.livenessTimer && this.ws && Date.now() - this.lastTickAt > 3 * LIVENESS_TICK_MS) this.thawed();
     return this.inputQueue.enqueue({ t: 'neko', data: msg });
   }
 
@@ -1276,6 +1305,7 @@ export class RemoteBrowser {
     if (!pc || !ws || !this.mediaConnected || this.statsTimer || (!this.opts.onStats && !this.opts.onDiagnostic && !this.video.auto)) return;
     let previous: { bytes: number; at: number } | null = null;
     let pending = false;
+    const interval = this.opts.statsIntervalMs ?? 2000;
     const current = () => this.pc === pc && this.ws === ws && this.frameSequence === frameSequence && this.mediaConnected;
     this.counters = null;
     this.statsTimer = setInterval(async () => {
@@ -1293,14 +1323,21 @@ export class RemoteBrowser {
         // Its counters must not change the replacement's quality or be reported as its stats.
         if (!current()) return;
         this.mediaSample = { pc, ws, frameSequence, at: sampledAt, media: reading.media };
-        if (reading.bytes > (previous?.bytes ?? 0)) this.mediaProgressAt = sampledAt;
+        // A reading across a freeze (a locked screen) averages time the page did not run: its
+        // bytes may have arrived before the freeze, and its rates are too low. It starts afresh.
+        const spansFreeze = !!previous && (previous.at < this.resumedAt || sampledAt - previous.at > 2.5 * interval);
+        if (!spansFreeze && reading.bytes > (previous?.bytes ?? 0)) this.mediaProgressAt = sampledAt;
         previous = { bytes: reading.bytes, at: Date.now() };
+        if (spansFreeze) {
+          this.counters = null;
+          return;
+        }
         this.adapt(reading.stats, reading.counters);
         this.opts.onStats?.(reading.stats);
       } finally {
         pending = false;
       }
-    }, this.opts.statsIntervalMs ?? 2000);
+    }, interval);
   }
 
   private adapt(stats: ViewerStats, counters: { lost: number; received: number; freezes: number; frames: number }) {
@@ -1390,16 +1427,25 @@ export class RemoteBrowser {
     this.lastTickAt = now;
     if (!this.visible || ws.readyState !== 1) return;
     if (gap > 3 * LIVENESS_TICK_MS) {
-      this.checkConnection();
+      this.thawed();
       return;
     }
+    // A ping sent before the page was hidden or frozen is timed from its return: neither it nor
+    // its answer could move while the page did not run. Timed by the clock, it condemned the socket
+    // the moment an iPad was unlocked, ahead of the check (checkConnection), which decides then.
     const oldest = this.pings[0];
-    if (oldest && now - oldest.at > PONG_TIMEOUT_MS && this.lastHeardAt < oldest.at) {
+    if (oldest && !this.probeTimer && now - Math.max(oldest.at, this.resumedAt) > PONG_TIMEOUT_MS && this.lastHeardAt < oldest.at) {
       this.issue = this.classify(this.droppedBy(undefined) ?? 'network');
-      this.reconnect(ws, 'transport_stale');
+      this.reconnect(ws, 'transport_stale', { keepQueued: this.holdInput });
       return;
     }
     if (!oldest && now - this.lastHeardAt > KEEPALIVE_MS) this.sendPing(ws, false);
+  }
+
+  /** The page ran again after a freeze: its socket is checked before input goes into it. */
+  private thawed() {
+    this.lastTickAt = this.resumedAt = Date.now();
+    this.checkConnection();
   }
 
   /** `probe`: input waits (holdInput) until this ping's pong proves the socket works. */

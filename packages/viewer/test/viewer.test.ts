@@ -768,6 +768,106 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
+  /** Video that keeps arriving: each stats reading has more bytes than the last. */
+  function flowingVideo(pc: FakePC) {
+    let received = 0;
+    pc.getStats = async () => {
+      received += 500;
+      return new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', packetsReceived: received, packetsLost: 0, bytesReceived: received * 1200, framesDecoded: received / 50 }]]);
+    };
+  }
+
+  it('lets the check after an unlock decide about a ping sent before the lock, and carries taps made meanwhile', async () => {
+    vi.useFakeTimers();
+    const onInputError = vi.fn();
+    const { b, states, issues } = setup([], { onInputError });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    flowingVideo(FakePC.last);
+    FakePC.last.connect();
+    // A quiet spell sends the keepalive ping; the screen is locked before any answer comes.
+    ws.answers = false;
+    await vi.advanceTimersByTimeAsync(14_000);
+    expect(ws.pings).toBe(1);
+    b.setVisible(false);
+    await vi.advanceTimersByTimeAsync(60_000);
+    // Unlocked, and tapped at once: the tap waits for the check.
+    b.setVisible(true);
+    b.button(true, 0, 10, 10);
+    b.button(false, 0, 10, 10);
+    await vi.advanceTimersByTimeAsync(2_000);
+    // Timed by the clock, the ping from before the lock condemned the socket here and lost the tap.
+    expect(ws.readyState).toBe(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(ws.readyState).toBe(3);
+    expect(onInputError).not.toHaveBeenCalled();
+    expect(states.at(-1)).toBe('reconnecting');
+    expect(issues.at(-1)).toBe('background');
+    await vi.advanceTimersByTimeAsync(600);
+    const next = FakeWS.all[1]!;
+    next.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    expect(ws.neko('control/buttondown')).toEqual([]);
+    expect(next.neko('control/buttondown')).toEqual([{ code: 1 }]);
+    b.disconnect();
+  });
+
+  it('puts a socket lost while the page was frozen down to the background, not to us, and keeps the taps made since', async () => {
+    vi.useFakeTimers();
+    const onInputError = vi.fn();
+    const onStats = vi.fn();
+    const { b, issues } = setup([], { onInputError, onStats });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    flowingVideo(FakePC.last);
+    FakePC.last.connect();
+    await vi.advanceTimersByTimeAsync(5_000);
+    const readings = onStats.mock.calls.length;
+    // Frozen for a minute with no visibility event (a locked screen): nothing runs, and the socket
+    // dies meanwhile. A tap made the moment it thaws, before any timer has run, waits for a check.
+    ws.answers = false;
+    vi.setSystemTime(Date.now() + 60_000);
+    b.button(true, 0, 10, 10);
+    b.button(false, 0, 10, 10);
+    expect(ws.neko('control/buttondown')).toEqual([]);
+    // The stats reading across the freeze is a new baseline, not slow video or a picture still arriving.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(onStats.mock.calls.length).toBe(readings);
+    // The socket died while frozen; its close is delivered now.
+    ws.close(1006);
+    expect(onInputError).not.toHaveBeenCalled();
+    expect(issues.at(-1)).toBe('background');
+    await vi.advanceTimersByTimeAsync(600);
+    const next = FakeWS.all[1]!;
+    next.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    expect(next.neko('control/buttondown')).toEqual([{ code: 1 }]);
+    b.disconnect();
+  });
+
+  it('does not blame either side when the socket goes silent while the picture keeps arriving', async () => {
+    vi.useFakeTimers();
+    const { b, issues } = setup([], { onStats: vi.fn() });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    flowingVideo(FakePC.last);
+    FakePC.last.connect();
+    ws.answers = false;
+    await vi.advanceTimersByTimeAsync(12_000 + 2_000 + 8_000 + 2_000);
+    expect(ws.readyState).toBe(3);
+    // The device is online (the video came through), but where the socket was lost cannot be told.
+    expect(issues.at(-1)).toBe('gateway');
+    b.disconnect();
+  });
+
   it('makes no attempts while hidden or offline, and reconnects with a whole budget when it can', async () => {
     vi.useFakeTimers();
     const { b, states, issues, getConnectInfo } = setup([], { connectionTimeoutMs: 1_000, maxConnectionAttempts: 1 });

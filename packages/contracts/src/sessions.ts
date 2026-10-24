@@ -72,7 +72,7 @@ export const ConnectionDiagnostic = z.object({
   /** The WebSocket close code a closed transport reported (1006: dropped without a close frame). */
   closeCode: z.number().int().min(1000).max(4999).optional(),
   /** What the page told the user about this failure. */
-  issue: z.enum(['offline', 'background', 'network', 'service', 'desktop']).optional(),
+  issue: z.enum(['offline', 'background', 'network', 'gateway', 'service', 'desktop']).optional(),
   media: ConnectionMediaSnapshot.optional(),
 }).strict().refine((value) => value.media === undefined || value.stage === 'failed' || value.stage === 'first_frame', {
   message: 'Media snapshots are only accepted at failure or first frame', path: ['media'],

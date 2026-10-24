@@ -26,7 +26,13 @@ What the viewer does about a connection that degrades, and what the user is told
 - **Shown again, or a new network.** A page shown after 3 s hidden, a page whose timers were
   frozen, the `online` event and a network change (`navigator.connection`) hold input while a ping
   checks the socket; the pong sends it. Silence for 4 s replaces the socket, and the held input,
-  never sent on the old one, goes once on the new one.
+  never sent on the old one, goes once on the new one. Held input is carried the same way when the
+  socket errors, closes or is found stale during the check. A ping sent before the page was
+  hidden or frozen is timed from the page's return, and the check decides while it runs: timed by
+  the clock, such a ping condemned the socket the moment an iPad was unlocked, ahead of the check,
+  and the taps it held were reported lost. Input that finds the 2 s check overdue (a page thawed
+  before its timers ran) starts the check itself. A stats reading across a freeze starts a new
+  baseline: it is neither reported (fps, bitrate) nor taken as video still arriving.
 - **Hidden or offline.** A hidden page cannot draw its first frame, so attempts made while hidden
   ran into the 20 s deadline until the budget was spent. Hidden or offline pages make no attempts;
   they reconnect with a whole budget once shown and online.
@@ -42,9 +48,10 @@ WebSocket `closeCode` for a closed transport) and shown in the session overlays:
 | `issue` | Meaning | How it is told |
 | --- | --- | --- |
 | `offline` | The device reported no network (`navigator.onLine`) | Always first |
-| `background` | The page was hidden or frozen when the connection dropped | Before network causes |
-| `network` | The picture's own path failed too (ICE disconnected/failed), the socket dropped without a close frame (1006) while no media arrived, or ICE never connected after neko offered | The user's network; three such drops in five minutes are called unstable |
-| `service` | The gateway closed the socket with a code of its own, or the socket dropped while video bytes kept arriving over TURN | Not the user's network |
+| `background` | The page was hidden or frozen when the connection dropped, or came back from the background or a freeze less than 10 s before the drop was found (iPadOS ends a locked page's connections without a word) | Before inferred causes; `service` and `desktop` still stand |
+| `network` | The picture's own path failed too (ICE disconnected/failed), the socket dropped without a close frame (1006) or went silent while no media arrived, or ICE never connected after neko offered | Most likely the device's network; three such drops in five minutes are called unstable |
+| `gateway` | The socket dropped without a close frame or went silent while video kept arriving over TURN | The device is online, but where the socket was lost cannot be told: our side, or a router, proxy or VPN on the way. Fresh video says only that the device reaches TURN, not that the socket's TCP path is healthy |
+| `service` | The gateway closed the socket with a code of its own, or the token request failed with a 5xx | Our side |
 | `desktop` | The VM's tunnel went offline, the relay to neko failed (`input_error`), or the desktop never answered | The cloud browser's side |
 
 A round trip above 250 ms for three readings in a row (6 s) shows a closable note that taps and
