@@ -128,7 +128,9 @@ export function deployReason({ live, commit, bundle, inputsChanged, force }) {
   if (!live) return 'live version unlabelled';
   if (live.commit === commit) return null;
   if (live.bundle) return live.bundle === bundle() ? null : `bundle changed since ${live.commit.slice(0, 7)}`;
-  return inputsChanged() ? `changed since ${live.commit.slice(0, 7)}` : null;
+  // Without a recorded bundle only the files it is built from can be compared, and a shared-package
+  // edit it doesn't use counts too: say so, so that a held gateway isn't mistaken for pending work.
+  return inputsChanged() ? `files it builds from changed since ${live.commit.slice(0, 7)}; its live version has no bundle hash, so its code may be unchanged` : null;
 }
 
 function wrangler(args, dir) {
@@ -170,7 +172,8 @@ async function main() {
     if (held) {
       const pending = live ? execFileSync('git', ['log', '--format=  %h %s', `${live.commit}..HEAD`, '--', ...inputs], { cwd: root, encoding: 'utf8' }).trimEnd() : '';
       console.log(`${worker.name}: ${reason}; held for the gateway deploy window (DEPLOY_GATEWAY_WINDOW=1, `
-        + `docs/deploy-cloudflare.md). Keep api changes working with the live gateway until then.${pending ? `\n${pending}` : ''}`);
+        + `docs/deploy-cloudflare.md). Keep api changes working with the live gateway until then.`
+        + `${pending ? `\nCommits since its live version that touch what it is built from:\n${pending}` : ''}`);
       continue;
     }
     console.log(`${worker.name}: ${dryRun ? 'would deploy' : 'deploying'} ${commit.slice(0, 7)} (${worker.windowed ? `gateway deploy window, ${reason}` : reason}).`);

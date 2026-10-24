@@ -466,7 +466,9 @@ deploy, and live views drop once.
 
 - Outside the window, `pnpm run deploy` (and `pnpm --filter @cloudbrowser/gateway run deploy`)
   holds a changed gateway. It prints `held for the gateway deploy window` with the commits waiting
-  for it, then deploys everything else.
+  for it, then deploys everything else. While the live gateway has no bundle hash (it was deployed
+  before they were recorded), the script can only compare files, and says its code may be
+  unchanged. Tell the owner anyway; the owner checks whether the built code differs.
 - The window belongs to one owner: the latency thread in the Claude project, or whoever the project
   names. Merge your gateway change, then tell the owner it is waiting. The owner announces the
   window to the other threads, runs `DEPLOY_GATEWAY_WINDOW=1 pnpm run deploy` from `main`, and
