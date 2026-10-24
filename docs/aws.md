@@ -90,10 +90,12 @@ lowest level keeps the full resolution, so text stays readable.
 **neko's resends and keyframes.** The browser image rebuilds neko's server from the pinned
 release with `images/browser/neko/keyframes-and-resends.patch`, for every browser: a viewer's
 keyframe request (RTCP PLI) is answered with a keyframe at once, instead of leaving the picture
-frozen until the next periodic one, and resends of lost packets have a budget (half the stream's
-rate, at least 300 kbit/s). Unpatched, neko resent every packet a viewer reported lost at once;
-on a busy path the resends overflowed it again, and through a 2.5 Mbit/s bottleneck in a test no
-frame decoded for 20 s.
+frozen until the next periodic one, and resends of lost packets have a budget (a quarter of the
+stream's rate, at least 100 kbit/s). Unpatched, neko resent every packet a viewer reported lost at
+once; on a busy path the resends overflowed it again, and through a 2.5 Mbit/s bottleneck in a
+test no frame decoded for 20 s. The budget was half the rate, at least 300 kbit/s, until a
+1 Mbit/s link showed that the lowest level (800 kbit/s) and its resends then reached 1.2 Mbit/s:
+after an overload the picture stayed frozen at that level for 4–16 s.
 
 **neko's handshake.** `images/browser/neko/faster-handshake.patch` brings the first picture
 about a second sooner. neko offers, so its ICE agent nominates the pair to use, and it waited 1 s
