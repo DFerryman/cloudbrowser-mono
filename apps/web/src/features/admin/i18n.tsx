@@ -227,7 +227,7 @@ const M = {
   'limits.premiumOff': ['未提供', 'Not offered'],
   'limits.premiumEnable': ['提供高级版', 'Offer Premium'],
   'limits.premiumDisable': ['停止提供', 'Stop offering'],
-  'limits.premiumHelp': ['开关（user:default / premium，1 或 0）。高级版运行于 4 vCPU / 8 GB 机器（c7i.xlarge，备选 c6i.xlarge、c5.xlarge）。开启前：AWS 栈的 AllowedInstanceTypes 须包含这三种机型（见 docs/aws.md）。可在下表用 user:<id> / premium 为单个用户开启或关闭。停止提供不影响已有的高级版浏览器。', 'A switch (user:default / premium, 1 or 0). Premium runs on 4 vCPU / 8 GB machines (c7i.xlarge, then c6i.xlarge and c5.xlarge) and streams the same live view as Basic. Before turning it on, the AWS stack\'s AllowedInstanceTypes must include those three types (see docs/aws.md). Turn it on or off for one user below with user:<id> / premium. Turning it off does not change existing Premium browsers.'],
+  'limits.premiumHelp': ['开关（user:default / premium，1 或 0）。高级版运行于 4 vCPU / 8 GB 机器（c7i.xlarge，备选 c6i.xlarge、c5.xlarge），实时画面与基础版相同。开启前：AWS 栈的 AllowedInstanceTypes 须包含这三种机型（见 docs/aws.md）。可在下表用 user:<id> / premium 为单个用户开启或关闭。停止提供不影响已有的高级版浏览器。', 'A switch (user:default / premium, 1 or 0). Premium runs on 4 vCPU / 8 GB machines (c7i.xlarge, then c6i.xlarge and c5.xlarge) and streams the same live view as Basic. Before turning it on, the AWS stack\'s AllowedInstanceTypes must include those three types (see docs/aws.md). Turn it on or off for one user below with user:<id> / premium. Turning it off does not change existing Premium browsers.'],
   'limits.neverSleep': ['永不休眠', 'Never sleep'],
   'limits.neverSleepOn': ['已向付费用户提供', 'Offered to paid users'],
   'limits.neverSleepOff': ['未提供', 'Not offered'],
