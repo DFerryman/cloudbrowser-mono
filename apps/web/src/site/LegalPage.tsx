@@ -18,15 +18,18 @@ export function LegalPage({ policy }: { policy: PolicySlug }) {
         </p>
         <p className="mt-6 mb-10 border-b border-border pb-8 text-lg leading-relaxed text-muted">{article.summary}</p>
         <ArticleBody article={article} />
-        <p className="mt-10 border-t border-border pt-6 text-sm text-muted">
-          {rich(t('legal.questions'), {
-            email: (
-              <a href={`mailto:${SUPPORT_EMAIL}`} className="text-accent hover:underline">
-                {SUPPORT_EMAIL}
-              </a>
-            ),
-          })}
-        </p>
+        {/* The Terms end with their own Contact section. */}
+        {policy !== 'terms' && (
+          <p className="mt-10 border-t border-border pt-6 text-sm text-muted">
+            {rich(t('legal.questions'), {
+              email: (
+                <a href={`mailto:${SUPPORT_EMAIL}`} className="text-accent hover:underline">
+                  {SUPPORT_EMAIL}
+                </a>
+              ),
+            })}
+          </p>
+        )}
       </article>
     </div>
   );
