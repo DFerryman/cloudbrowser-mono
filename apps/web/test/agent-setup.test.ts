@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { DOCS } from '../src/content/docs.js';
+import type { Block } from '../src/content/types.js';
 import { agentHandoff, agentServer, agentSetups, keyEnvCommands, keyEnvName, mcpConfig, serverName, SETUP_GUIDE_URL, signInConfig, signInHandoff, signInSetups } from '../src/features/instances/agent-setup.js';
 
 const url = 'https://connect.nevazu.com/mcp/abc123';
@@ -77,5 +79,17 @@ describe('coding-agent setup', () => {
     expect(JSON.parse(code('windsurf'))).toEqual({ mcpServers: { 'nevazu-work': { serverUrl: url } } });
     expect(JSON.parse(code('gemini'))).toEqual({ mcpServers: { 'nevazu-work': { httpUrl: url } } });
     expect(JSON.parse(code('opencode')).mcp['nevazu-work']).toEqual({ type: 'remote', url, enabled: true });
+  });
+
+  it('has the guide section the sign-in handoff names, with every client, in each language', () => {
+    for (const articles of Object.values(DOCS)) {
+      const blocks = articles.find((a) => a.slug === 'agent-setup')!.blocks;
+      const at = blocks.findIndex((b) => 'h' in b && b.id === 'sign-in');
+      expect(at).toBeGreaterThan(0);
+      const section = blocks.slice(at + 1, blocks.findIndex((b, i) => i > at && 'h' in b));
+      const folded = section.filter((b): b is Extract<Block, { details: string }> => 'details' in b);
+      expect(folded).toHaveLength(signInSetups(server).length);
+    }
+    expect(DOCS.en.find((a) => a.slug === 'agent-setup')!.blocks).toContainEqual({ h: 'Signing in instead of a key', id: 'sign-in' });
   });
 });
