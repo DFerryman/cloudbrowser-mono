@@ -12,9 +12,7 @@ export function LegalPage({ policy }: { policy: PolicySlug }) {
   return (
     <div className={`${container} py-14 md:py-20`}>
       <article className="mx-auto max-w-[68ch]">
-        {policy !== 'terms' && (
-          <h1 className="text-3xl font-semibold tracking-tight md:text-[44px] md:leading-[1.08]">{article.title}</h1>
-        )}
+        <h1 className="text-3xl font-semibold tracking-tight md:text-[44px] md:leading-[1.08]">{article.title}</h1>
         <p className="mt-4 font-mono text-xs text-subtle">
           {t('legal.updated', { date: new Date(`${LEGAL_UPDATED}T00:00:00Z`).toLocaleDateString(locale, { dateStyle: 'long', timeZone: 'UTC' }) })}
         </p>
