@@ -169,9 +169,11 @@ function waitVerdict(reports) {
   const held = mean('held', timed);
   const aimed = timed.filter((r) => r.held_target > 0);
   if (!aimed.length) return `frames waited ${held} ms on average before decoding`;
-  const target = mean('held_target', aimed);
-  const why = held - target > 50 ? `the other ${held - target} ms, for lost packets to be resent` : 'little waiting for resends';
-  return `frames waited ${held} ms on average before decoding; the browser aimed for ${target} ms (${why})`;
+  // The excess is taken over the reports that carry a target, never one average against another.
+  const target = mean('held_target', aimed), heldAimed = mean('held', aimed);
+  const why = heldAimed - target > 50 ? `the other ${heldAimed - target} ms, for lost packets to be resent` : 'little waiting for resends';
+  if (aimed.length === timed.length) return `frames waited ${held} ms on average before decoding; the browser aimed for ${target} ms (${why})`;
+  return `frames waited ${held} ms on average before decoding; in the reports that say what the browser aimed for (${aimed.length} of ${timed.length}), ${heldAimed} ms against ${target} ms (${why})`;
 }
 function line(e) {
   if (e.message === 'vm stream') return `${time(e.at)}  vm       ${vmBits(e).join(' ')}`;
