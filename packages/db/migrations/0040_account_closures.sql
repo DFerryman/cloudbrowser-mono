@@ -32,3 +32,11 @@ WHEN EXISTS (SELECT 1 FROM account_closures WHERE user_id = NEW.user_id)
 BEGIN
   SELECT RAISE(ABORT, 'account_closed');
 END;
+--> statement-breakpoint
+-- Nor a new browser: a create request that passed its sign-in check before the closure and commits
+-- after it would otherwise leave a browser the closure never deletes.
+CREATE TRIGGER browser_instances_closed_account BEFORE INSERT ON browser_instances
+WHEN EXISTS (SELECT 1 FROM account_closures WHERE user_id = NEW.user_id)
+BEGIN
+  SELECT RAISE(ABORT, 'account_closed');
+END;

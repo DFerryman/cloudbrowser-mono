@@ -1042,8 +1042,8 @@ export type ClosureOrder = {
 /**
  * A closed account (Terms sections 8 and 9; migration 0040): `closing` while its browsers are
  * deleted, `closed` once all are purged and the balance is final. `erased_at`: the personal data
- * was erased and the balance left written off, 30 days after the closure. Sessions cannot be
- * created for a user with a row here (trigger). Owner: api.
+ * was erased and the balance left written off, 30 days after the closure. Neither sessions nor
+ * browsers can be created for a user with a row here (triggers). Owner: api.
  */
 export const accountClosures = sqliteTable(
   'account_closures',

@@ -159,6 +159,10 @@ describe('closing an account', () => {
     expect(t.emails.length).toBe(sent);
     // Whatever path tries, no session can be created for the account.
     expect(() => t.d1.sqlite.prepare(`INSERT INTO session (id, expires_at, token, created_at, updated_at, user_id) VALUES ('s', 0, 't', 0, 0, ?)`).run(userId)).toThrow(/account_closed/);
+    // Nor a browser, from a create request that raced the closure.
+    t.d1.sqlite.prepare(`CREATE TEMP TABLE late AS SELECT * FROM browser_instances WHERE id = ?`).run(a);
+    t.d1.sqlite.exec(`UPDATE late SET id = 'late', status = 'creating', desired_state = 'running', deleted_at = NULL`);
+    expect(() => t.d1.sqlite.exec(`INSERT INTO browser_instances SELECT * FROM late`)).toThrow(/account_closed/);
     // And it gets no other email.
     expect(await sendToUser(t.env as never, db(), userId, { subject: 'Low balance', text: 'x' })).toBe(false);
   });
