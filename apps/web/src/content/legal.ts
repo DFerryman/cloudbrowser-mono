@@ -71,7 +71,7 @@ const en: Record<PolicySlug, Article> = {
       { h: 'What we collect' },
       { ul: [
         'Account: your email address, sign-in and two-step verification records, passkeys you register (public keys only), and trusted-device markers.',
-        'Usage and billing: browsers you create, their regions and settings, metered usage, balance transactions and payment references. Card details are handled by our payment providers, Stripe and Creem, and never reach us.',
+        'Usage and billing: browsers you create, their regions and settings, metered usage, balance transactions and payment references, and a record of each time you confirm the Terms of Service before paying (the version, the time, your IP address, approximate country and user agent), kept with your billing records. Card details are handled by our payment providers, Stripe and Creem, and never reach us.',
         'Session and security: IP address and approximate country of sign-ins and live-view sessions, user agent, and security events such as failed codes.',
         'Browser data: what you store in your cloud browsers (profile, cookies, downloads). It is encrypted at rest, and we do not inspect it.',
       ] },
@@ -193,7 +193,7 @@ const zh: Record<PolicySlug, Article> = {
       { h: '我们收集的信息' },
       { ul: [
         '账户：你的邮箱地址、登录和两步验证记录、你注册的通行密钥（仅公钥）以及受信任设备标记。',
-        '用量与账单：你创建的浏览器及其地区和设置、计量用量、余额交易和支付参考号。银行卡信息由我们的支付服务商 Stripe 和 Creem 处理，不会传给我们。',
+        '用量与账单：你创建的浏览器及其地区和设置、计量用量、余额交易和支付参考号，以及你每次付款前确认服务条款的记录（条款版本、时间、你的 IP 地址、大致国家和用户代理），与账单记录一并保存。银行卡信息由我们的支付服务商 Stripe 和 Creem 处理，不会传给我们。',
         '会话与安全：登录和实时画面会话的 IP 地址及大致国家、用户代理，以及验证码错误等安全事件。',
         '浏览器数据：你在云浏览器中存储的内容（个人资料、Cookie、下载文件）。这些数据静态加密，我们不会查看。',
       ] },
