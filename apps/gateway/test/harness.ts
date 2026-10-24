@@ -5,6 +5,11 @@ export class Socket {
   static OPEN = 1;
   readyState = 0;
   attachment: unknown = null;
+  /**
+   * When the runtime last answered this socket's keepalive (setWebSocketAutoResponse). A live VM
+   * pings whenever the gateway is quiet, so unless a test sets it, one was answered just now.
+   */
+  autoResponseAt: Date | null | undefined = undefined;
   sent: unknown[] = [];
   closed: { code?: number; reason?: string } | null = null;
   send(frame: string) {
@@ -43,6 +48,7 @@ export function state() {
       getAlarm: async () => (storage.get('alarm') as number | undefined) ?? null,
     },
     setWebSocketAutoResponse() {},
+    getWebSocketAutoResponseTimestamp: (ws: Socket) => ws.autoResponseAt === undefined ? new Date() : ws.autoResponseAt,
     acceptWebSocket(ws: Socket, tags: string[]) { ws.readyState = Socket.OPEN; sockets.push({ ws, tags }); },
     getWebSockets: (tag?: string) => sockets.filter((s) => !tag || s.tags.includes(tag)).map((s) => s.ws),
     waitUntil(p: Promise<unknown>) { pending.push(p); },

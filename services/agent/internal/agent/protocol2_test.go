@@ -99,10 +99,8 @@ func TestALostTunnelSuspendsSessionsForAGrace(t *testing.T) {
 	eventually(t, "Shift held", func() bool { k, _ := s.held(); return k == 1 })
 
 	c.CloseNow()
-	eventually(t, "the suspension", func() bool { return s.isSuspended() })
-	if k, _ := s.held(); k != 0 {
-		t.Fatal("Shift held across the lost tunnel")
-	}
+	// Held input is let go just after the session is marked suspended.
+	eventually(t, "the suspension to let Shift go", func() bool { k, _ := s.held(); return s.isSuspended() && k == 0 })
 	if session("b1") != s {
 		t.Fatal("the session closed with the tunnel")
 	}
@@ -128,9 +126,11 @@ func TestALostTunnelSuspendsSessionsForAGrace(t *testing.T) {
 	eventually(t, "the grace to run out", func() bool { return session("b1") == nil })
 	<-g.auths
 	c = <-g.conns
-	if matches, _ := filepath.Glob(filepath.Join(dir, "*-f1")); len(matches) != 0 {
-		t.Fatalf("files of an expired session: %v", matches)
-	}
+	// The files go just after the session leaves the list.
+	eventually(t, "the expired session's files to go", func() bool {
+		matches, _ := filepath.Glob(filepath.Join(dir, "*-f1"))
+		return len(matches) == 0
+	})
 
 	// Shutting down closes at once.
 	send(t, c, map[string]any{"t": "automation_open", "sessionId": "b2", "clientId": "k1"})
@@ -203,7 +203,7 @@ func TestScreenshotsScaleToFitTheRequestedBox(t *testing.T) {
 	request(a, ctx, "b1", map[string]any{"t": "status", "id": "st"})
 	r, _ := bridgeResult(t, remote, "st")
 	caps := r["capabilities"].(map[string]any)
-	if caps["protocol"].(float64) != 2 || caps["scaledShots"] != true || caps["resume"] != true || caps["agentVersion"] != "0.5.0" {
+	if caps["protocol"].(float64) != 2 || caps["scaledShots"] != true || caps["resume"] != true || caps["agentVersion"] != Version {
 		t.Fatalf("capabilities %v", caps)
 	}
 	for _, tc := range []struct {

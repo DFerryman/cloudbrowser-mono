@@ -58,6 +58,29 @@ A round trip above 250 ms for three readings in a row (6 s) shows a closable not
 typing appear later. Touch taps are marked locally at once, so a tap that is on its way does not
 look like one that went nowhere.
 
+## The VM's tunnel
+
+The agent's WebSocket to the gateway carries every viewer's relay and command. Stages in the
+`cloudbrowser-gateway` logs (`apps/gateway/src/instance-gateway.ts`):
+
+| Stage | Meaning |
+| --- | --- |
+| `agent_tunnel_accepted` / `agent_replaced` | A tunnel opened; an older one of the same VM was closed (4000) |
+| `agent_tunnel_closed` | A live tunnel closed. 1001: the agent stopped (0.6.0 sends a close frame when its VM shuts down; older agents' stops read 1006) |
+| `agent_tunnel_released` | A tunnel the gateway had already closed (replaced, revoked, silent) reported its close. One whose path had died reports it when TCP gives up, often 15 minutes later: no new drop |
+| `agent_tunnel_silent` | Nothing (no frame, no answered keepalive) arrived for 45 s: closed as dead (4008), viewers told `agent_offline` |
+| `agent_reconnected` | The VM's own account of the previous tunnel (agent 0.6.0): `code` silent, closed (with `closeCode`), write_timeout, reset, eof, timeout or error; `upMs`, `elapsedMs` (time without a tunnel), `attempts` (failed dials) and `event` (the last dial's failure: dns, connect, tls, timeout, http_<status>) |
+
+A socket the gateway closed is marked in its attachment and never chosen again: the runtime has
+reported such a socket as open once the object had hibernated, and listed it first, so viewers'
+relays and commands went into a replaced tunnel while the VM waited on its new one. Of the
+newest open tunnels, the most recently accepted is used.
+
+Agents from 0.6.0 ping (`{"t":"ping"}`, answered by the runtime) after 15 s without a frame from
+the gateway and replace a tunnel that brings nothing 10 s later; they do so only when the
+gateway's welcome says `keepalive: true`. Without it, a connection that vanished without a close
+(a route change between AWS and Cloudflare) looked open to the VM until TCP gave up.
+
 ## Correlating one attempt
 
 The failure overlay displays an attempt UUID. Search the `cloudbrowser` API and
@@ -126,8 +149,8 @@ release requires a committed, clean checkout of the latest `origin/main` (see
 `deploy-cloudflare.md`). Do not bypass that release check with a direct API Wrangler deploy.
 
 New agent images are published by the Images workflow after agent changes reach `main`.
-The gateway advertises `viewerStages: true` in its welcome frame; new agents send stage frames
-only when that capability is present. This keeps a new image compatible with an older gateway
+The gateway advertises `viewerStages: true` and `keepalive: true` in its welcome frame; new agents
+send stage frames, and keepalive pings, only when those capabilities are present. This keeps a new image compatible with an older gateway
 during rollout. Older agents continue to work with the new gateway, but cannot report detailed
 local milestones or perform the new desktop readiness probe.
 

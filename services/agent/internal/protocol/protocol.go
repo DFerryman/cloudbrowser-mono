@@ -6,9 +6,26 @@ import "encoding/json"
 
 // Frames the agent sends.
 type Hello struct {
-	T            string `json:"t"` // "hello"
-	AgentVersion string `json:"agentVersion"`
-	Generation   int    `json:"generation"`
+	T            string     `json:"t"` // "hello"
+	AgentVersion string     `json:"agentVersion"`
+	Generation   int        `json:"generation"`
+	Previous     *TunnelEnd `json:"previous,omitempty"`
+}
+
+// TunnelEnd says why the previous tunnel ended (contracts AgentTunnelEnd), so the gateway's logs
+// explain a drop without this VM's journal: fixed codes and durations, never an error's text.
+type TunnelEnd struct {
+	Reason       string `json:"reason"` // silent | closed | write_timeout | reset | eof | timeout | error
+	CloseCode    int    `json:"closeCode,omitempty"`
+	UpMs         int64  `json:"upMs"`
+	DownMs       int64  `json:"downMs"`
+	DialFailures int    `json:"dialFailures"`
+	DialError    string `json:"dialError,omitempty"` // dns | connect | tls | timeout | http_<status> | error
+}
+
+// Ping asks for a pong, which a gateway whose welcome says keepalive answers.
+type Ping struct {
+	T string `json:"t"` // "ping"
 }
 
 type Event struct {
@@ -60,6 +77,7 @@ type Incoming struct {
 	T            string          `json:"t"` // welcome | command | turn | viewer_open | viewer | viewer_close | automation_open | automation | automation_close | automation_control | pong
 	Credential   string          `json:"credential,omitempty"`
 	ViewerStages bool            `json:"viewerStages,omitempty"` // welcome capability; absent on older gateways
+	Keepalive    bool            `json:"keepalive,omitempty"`    // welcome capability: pings are answered
 	ID           string          `json:"id,omitempty"`
 	Kind         string          `json:"kind,omitempty"`
 	Payload      map[string]any  `json:"payload,omitempty"`
@@ -153,7 +171,7 @@ type AutomationWelcome struct {
 //     VM can tell (it asks xdotool), a chooser that is not open is "rejected" with "no_dialog" and
 //     one that stays open is status "error" with reason "dialog_open". neko's own upload dialog
 //     stays disabled.
-//   - Capabilities gain scaledShots: true and resume: true; protocol is 2, agentVersion "0.5.0".
+//   - Capabilities gain scaledShots: true and resume: true; protocol is 2, agentVersion "0.5.0" (from then on, the agent's Version).
 const AutomationProtocol = 2
 
 // ControlState is who may drive the browser (contracts ControlState).

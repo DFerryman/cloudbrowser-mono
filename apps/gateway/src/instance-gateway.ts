@@ -9,9 +9,11 @@ import { CodingAgentSession } from './mcp/coding-agent.js';
 /**
  * Sockets accepted before coding agents moved to the MCP endpoint may still carry the retired
  * `automation` role. It is no role any more, so their next frame closes them.
+ * `closing`: this object closed the socket (shut). `since`/`heardAt`: when the VM's tunnel was
+ * accepted and when a frame last arrived on it (agentSilent).
  */
-type Attachment = ({ instanceId?: string } & { role: 'agent'; generation: number })
-  | ({ instanceId?: string; attemptId?: string; signalsSeen?: string[] } & { role: 'viewer'; sessionId: string; generation: number; relayId?: string });
+type Attachment = ({ instanceId?: string; closing?: true } & { role: 'agent'; generation: number; since?: number; heardAt?: number })
+  | ({ instanceId?: string; attemptId?: string; signalsSeen?: string[]; closing?: true } & { role: 'viewer'; sessionId: string; generation: number; relayId?: string });
 type CommandRow = { id: string; kind: string; payload: string };
 type Role = Attachment['role'];
 const ROLES: readonly Role[] = ['agent', 'viewer'];
@@ -51,6 +53,15 @@ const IDLE_RECHECK_MS = 10_000;
  * alarm only, so this costs reads only while someone is using the browser.
  */
 const ACTIVE_VIEWER_MS = 30_000;
+/**
+ * The VM sends a heartbeat every 15 s, and agents from 0.6.0 a ping when the gateway has been
+ * quiet; a tunnel nothing arrived on for this long is dead, whatever the runtime reports. A VM
+ * whose connection vanished without a close (a route change, a frozen VM) left its tunnel looking
+ * open for up to 15 minutes, until TCP gave up, and viewers were relayed into it meanwhile.
+ */
+const AGENT_SILENT_MS = 45_000;
+/** How often a frame on the VM's tunnel is recorded in its attachment. */
+const AGENT_HEARD_EVERY_MS = 5_000;
 /** Agent frames that belong to one viewer's relay: that viewer's lease authorizes them. */
 const VIEWER_RELAY_FRAMES = ['viewer', 'viewer_error', 'viewer_stage', 'viewer_file'];
 /**
@@ -110,9 +121,9 @@ export class InstanceGateway extends DurableObject<Env> {
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
     this.mcp = new CodingAgentSession({
       ctx, env,
-      agent: () => this.sockets('agent')[0],
+      agent: () => this.agent(),
       sendToAgent: (frame) => {
-        const agent = this.sockets('agent')[0];
+        const agent = this.agent();
         return !!agent && this.send(agent, frame);
       },
       readInstance: (instanceId) => this.readInstance(instanceId),
@@ -145,8 +156,64 @@ export class InstanceGateway extends DurableObject<Env> {
     if (current === null || current <= Date.now() || at < current) await this.ctx.storage.setAlarm(at);
   }
 
+  /** Open, and not closed by this object (shut). */
+  private isOpen(ws: WebSocket) {
+    return ws.readyState === WebSocket.OPEN && !(ws.deserializeAttachment() as Attachment | null)?.closing;
+  }
+
   private sockets(role: Role) {
-    return this.ctx.getWebSockets(role).filter((ws) => ws.readyState === WebSocket.OPEN);
+    return this.ctx.getWebSockets(role).filter((ws) => this.isOpen(ws));
+  }
+
+  /**
+   * Closes a socket for good. The runtime has reported a socket this object closed as open again
+   * once the object had hibernated, and listed it first: a replaced VM tunnel then took the next
+   * viewers' relays and commands, which the VM, connected on its new tunnel, never received. The
+   * attachment remembers the close.
+   */
+  private shut(ws: WebSocket, code: number, reason: string) {
+    const att = ws.deserializeAttachment() as Attachment | null;
+    if (att && !att.closing) ws.serializeAttachment({ ...att, closing: true });
+    ws.close(code, reason);
+  }
+
+  /**
+   * The VM's tunnel: the newest open one. One nothing has arrived on for AGENT_SILENT_MS is closed
+   * as dead, and viewers are told the VM is offline instead of waiting on a relay it never gets.
+   */
+  private agent(): WebSocket | undefined {
+    let newest: WebSocket | undefined;
+    let newestSince = -Infinity;
+    for (const ws of this.sockets('agent')) {
+      const since = (ws.deserializeAttachment() as Extract<Attachment, { role: 'agent' }>).since ?? 0;
+      if (since >= newestSince) [newest, newestSince] = [ws, since];
+    }
+    if (!newest || !this.agentSilent(newest)) return newest;
+    this.closeAgent(newest, 4008, 'tunnel silent', 'agent_tunnel_silent');
+    return undefined;
+  }
+
+  /** Neither a frame (heardAt) nor a keepalive the runtime answered for AGENT_SILENT_MS. */
+  private agentSilent(ws: WebSocket) {
+    const att = ws.deserializeAttachment() as Extract<Attachment, { role: 'agent' }>;
+    const pinged = this.ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0;
+    const heard = att.heardAt ?? att.since;
+    return heard !== undefined && Date.now() - Math.max(heard, pinged) > AGENT_SILENT_MS;
+  }
+
+  /** A frame arrived on the VM's tunnel; recorded at most every AGENT_HEARD_EVERY_MS. */
+  private heard(ws: WebSocket, att: Extract<Attachment, { role: 'agent' }>) {
+    const now = Date.now();
+    if (!att.closing && now - (att.heardAt ?? 0) >= AGENT_HEARD_EVERY_MS) ws.serializeAttachment({ ...att, heardAt: now });
+  }
+
+  /** Closes the VM's tunnel. If it was the last, viewers and the coding agent hear now that the VM is offline. */
+  private closeAgent(ws: WebSocket, code: number, reason: string, stage: string) {
+    connectionLog(stage, { ...this.identity(ws), closeCode: code, code: reason.replaceAll(' ', '_') });
+    this.shut(ws, code, reason);
+    if (this.sockets('agent').length) return;
+    for (const v of this.sockets('viewer')) this.send(v, { t: 'agent_offline' });
+    this.mcp.agentOffline();
   }
 
   private identity(ws: WebSocket, instanceId?: string): ConnectionIdentity & { role?: Role } {
@@ -204,7 +271,7 @@ export class InstanceGateway extends DurableObject<Env> {
   }
 
   private send(ws: WebSocket, frame: GatewayToAgent | GatewayToViewer) {
-    if (ws.readyState !== WebSocket.OPEN) return false;
+    if (!this.isOpen(ws)) return false;
     try {
       ws.send(JSON.stringify(frame));
       return true;
@@ -219,7 +286,7 @@ export class InstanceGateway extends DurableObject<Env> {
     const attachment = ws.deserializeAttachment() as Attachment | null;
     const relayId = attachment?.role === 'viewer' ? attachment.relayId : undefined;
     for (const agent of this.sockets('agent')) this.send(agent, { t: 'viewer_close', sessionId, relayId });
-    ws.close(code, reason);
+    this.shut(ws, code, reason);
   }
 
   private closeAll(reason: string, code = 4003) {
@@ -227,11 +294,11 @@ export class InstanceGateway extends DurableObject<Env> {
     for (const viewer of this.sockets('viewer')) {
       const attachment = viewer.deserializeAttachment() as Attachment | null;
       if (attachment?.role === 'viewer') this.closeViewer(viewer, attachment.sessionId, code, reason);
-      else viewer.close(code, reason);
+      else this.shut(viewer, code, reason);
     }
     for (const agent of this.sockets('agent')) {
       connectionLog('agent_revoked', { ...this.identity(agent), closeCode: code, code: reason.replaceAll(' ', '_') });
-      agent.close(code, reason);
+      this.shut(agent, code, reason);
     }
     // A closed tunnel answers nothing more; the coding agent hears so now, not at its timeout.
     this.mcp.agentOffline();
@@ -266,8 +333,11 @@ export class InstanceGateway extends DurableObject<Env> {
   private async validSocket(ws: WebSocket, row: LiveInstance, instanceId: string, allowCached = false): Promise<boolean> {
     const attachment = ws.deserializeAttachment() as Attachment | null;
     if (!attachment || !ROLES.includes(attachment.role) || !row.generation || attachment.generation !== row.generation) {
-      connectionLog('socket_rejected', { ...this.identity(ws, instanceId), code: 'generation_revoked', closeCode: 4003 });
-      ws.close(4003, 'generation revoked');
+      if (attachment?.role === 'agent') this.closeAgent(ws, 4003, 'generation revoked', 'socket_rejected');
+      else {
+        connectionLog('socket_rejected', { ...this.identity(ws, instanceId), code: 'generation_revoked', closeCode: 4003 });
+        this.shut(ws, 4003, 'generation revoked');
+      }
       return false;
     }
     if (attachment.role === 'viewer') {
@@ -276,7 +346,7 @@ export class InstanceGateway extends DurableObject<Env> {
         return false;
       }
     }
-    return ws.readyState === WebSocket.OPEN;
+    return this.isOpen(ws);
   }
 
   private async validSession(sessionId: string, row: LiveInstance, instanceId: string, allowCached = false): Promise<boolean> {
@@ -360,7 +430,7 @@ export class InstanceGateway extends DurableObject<Env> {
       if (this.warmLease?.timer !== timer) return;
       this.warmLease = null;
       const active = Date.now() - (this.viewerActiveAt.get(sessionId) ?? -Infinity) < ACTIVE_VIEWER_MS;
-      const open = this.ctx.getWebSockets(`session:${sessionId}`).some((ws) => ws.readyState === WebSocket.OPEN);
+      const open = this.ctx.getWebSockets(`session:${sessionId}`).some((ws) => this.isOpen(ws));
       if (!active || !open) {
         this.viewerActiveAt.delete(sessionId);
         return;
@@ -405,7 +475,7 @@ export class InstanceGateway extends DurableObject<Env> {
       for (const viewer of this.sockets('viewer')) {
         const attachment = viewer.deserializeAttachment() as Attachment | null;
         if (attachment?.role === 'viewer') this.closeViewer(viewer, attachment.sessionId);
-        else viewer.close(4003, 'session revoked');
+        else this.shut(viewer, 4003, 'session revoked');
       }
       // The browser is going to sleep: its VM keeps no coding-agent session either.
       await this.mcp.close('browser_stopped');
@@ -458,16 +528,19 @@ export class InstanceGateway extends DurableObject<Env> {
       const replaced = this.sockets('agent');
       for (const old of replaced) {
         connectionLog('agent_replaced', { ...this.identity(old, instanceId), closeCode: 4000 });
-        old.close(4000, 'replaced');
+        this.shut(old, 4000, 'replaced');
       }
       if (replaced.length) this.mcp.agentOffline();
-      const att: Attachment = { role: 'agent', generation, instanceId };
+      const att: Attachment = { role: 'agent', generation, instanceId, since: Date.now() };
       this.ctx.acceptWebSocket(server, ['agent']);
       server.serializeAttachment(att);
       connectionLog('agent_tunnel_accepted', this.identity(server));
       const credential = req.headers.get('x-cb-credential');
       const automation = { mode: controlMode(row), access: !!row.agent_access };
-      this.send(server, credential ? { t: 'welcome', credential, viewerStages: true, automation } : { t: 'welcome', viewerStages: true, automation });
+      // keepalive: the runtime answers the VM's {"t":"ping"} (setWebSocketAutoResponse), so agents
+      // from 0.6.0 ping a quiet tunnel and replace one that answers nothing.
+      const welcome = { t: 'welcome', viewerStages: true, keepalive: true, automation } as const;
+      this.send(server, credential ? { ...welcome, credential } : welcome);
       for (const v of this.sockets('viewer')) {
         this.send(v, { t: 'agent_online' });
         this.openViewerRelay(server, v);
@@ -487,14 +560,14 @@ export class InstanceGateway extends DurableObject<Env> {
       // One controller at a time: the newest viewer takes over (page 5).
       for (const old of this.sockets('viewer')) {
         const prior = old.deserializeAttachment() as Attachment | null;
-        if (prior?.role === 'viewer' && prior.sessionId === sessionId) old.close(4000, 'reconnected');
-        else { this.send(old, { t: 'taken_over' }); old.close(4001, 'taken over'); }
+        if (prior?.role === 'viewer' && prior.sessionId === sessionId) this.shut(old, 4000, 'reconnected');
+        else { this.send(old, { t: 'taken_over' }); this.shut(old, 4001, 'taken over'); }
       }
       this.ctx.acceptWebSocket(server, ['viewer', `session:${sessionId}`]);
       server.serializeAttachment(attachment);
       connectionLog('viewer_gateway_accepted', this.identity(server));
       this.send(server, { t: 'connection_stage', stage: 'gateway_accepted', relayId: attachment.relayId });
-      const agent = this.sockets('agent')[0];
+      const agent = this.agent();
       this.send(server, agent ? { t: 'agent_online' } : { t: 'agent_offline' });
       if (agent) this.openViewerRelay(agent, server);
       else connectionLog('viewer_agent_offline', { ...this.identity(server), code: 'relay_unavailable' });
@@ -513,10 +586,12 @@ export class InstanceGateway extends DurableObject<Env> {
       return Promise.resolve();
     }
     const bytes = typeof message === 'string' ? new TextEncoder().encode(message).byteLength : message.byteLength;
-    const role = (ws.deserializeAttachment() as Attachment | null)?.role;
+    const attachment = ws.deserializeAttachment() as Attachment | null;
+    const role = attachment?.role;
+    if (attachment?.role === 'agent') this.heard(ws, attachment);
     if (typeof message !== 'string' || bytes > MAX_FRAME_BYTES) {
       if (role === 'agent') this.dropAgentFrame(ws, message);
-      else ws.close(1009, 'frame too large or not text');
+      else this.shut(ws, 1009, 'frame too large or not text');
       return Promise.resolve();
     }
     let queue = this.queues.get(ws);
@@ -545,9 +620,12 @@ export class InstanceGateway extends DurableObject<Env> {
       this.closeViewer(ws, att.sessionId, code, reason);
       return;
     }
-    connectionLog(att?.role === 'agent' ? 'agent_tunnel_failed' : 'socket_failed', { ...this.identity(ws), closeCode: code, code: reason.replaceAll(' ', '_') });
-    ws.close(code, reason);
-    if (att?.role === 'agent' && this.sockets('agent').length === 0) this.mcp.agentOffline();
+    if (att?.role === 'agent') {
+      this.closeAgent(ws, code, reason, 'agent_tunnel_failed');
+      return;
+    }
+    connectionLog('socket_failed', { ...this.identity(ws), closeCode: code, code: reason.replaceAll(' ', '_') });
+    this.shut(ws, code, reason);
   }
 
   /**
@@ -565,7 +643,7 @@ export class InstanceGateway extends DurableObject<Env> {
   }
 
   private async processWebSocketMessage(ws: WebSocket, message: string) {
-    if (ws.readyState !== WebSocket.OPEN) return;
+    if (!this.isOpen(ws)) return;
     const epoch = this.revocationEpoch;
     const viewerEpoch = this.viewerEpoch;
     const attachment = ws.deserializeAttachment() as Attachment | null;
@@ -575,7 +653,8 @@ export class InstanceGateway extends DurableObject<Env> {
     try {
       raw = JSON.parse(message);
     } catch {
-      ws.close(1007, 'invalid json');
+      if (attachment?.role === 'agent') this.closeAgent(ws, 1007, 'invalid json', 'agent_frame_rejected');
+      else this.shut(ws, 1007, 'invalid json');
       return;
     }
     const frameType = raw && typeof raw === 'object' && 't' in raw ? String(raw.t) : '';
@@ -643,8 +722,7 @@ export class InstanceGateway extends DurableObject<Env> {
   private async fromAgent(ws: WebSocket, att: Extract<Attachment, { role: 'agent' }>, raw: unknown) {
     const parsed = AgentFrame.safeParse(raw);
     if (!parsed.success) {
-      connectionLog('agent_frame_rejected', { ...this.identity(ws), code: 'invalid_frame', closeCode: 1007 });
-      ws.close(1007, 'invalid frame');
+      this.closeAgent(ws, 1007, 'invalid frame', 'agent_frame_rejected');
       return;
     }
     const frame = parsed.data;
@@ -671,7 +749,7 @@ export class InstanceGateway extends DurableObject<Env> {
     }
     if (frame.t === 'viewer') {
       for (const v of this.ctx.getWebSockets(`session:${frame.sessionId}`)) {
-        if (v.readyState !== WebSocket.OPEN) continue;
+        if (!this.isOpen(v)) continue;
         const attachment = v.deserializeAttachment() as Attachment | null;
         if (frame.relayId && (attachment?.role !== 'viewer' || attachment.relayId !== frame.relayId)) continue;
         this.traceSignal(v, 'agent', frame.data);
@@ -701,7 +779,15 @@ export class InstanceGateway extends DurableObject<Env> {
       await this.agentRpc(ws, att, frame);
       return;
     }
-    if (frame.t === 'hello') return;
+    if (frame.t === 'hello') {
+      // Why the VM's previous tunnel ended, as the VM saw it (agent 0.6.0).
+      const previous = frame.previous;
+      if (previous) connectionLog('agent_reconnected', {
+        ...this.identity(ws), code: previous.reason, closeCode: previous.closeCode, event: previous.dialError,
+        elapsedMs: previous.downMs, upMs: previous.upMs, attempts: previous.dialFailures,
+      });
+      return;
+    }
     // Events, replies and TURN requests go to the api, which owns those records.
     const answer = await this.agentRpc(ws, att, frame);
     if (answer) this.send(ws, answer);
@@ -713,7 +799,7 @@ export class InstanceGateway extends DurableObject<Env> {
 
   private fromViewer(ws: WebSocket, att: Extract<Attachment, { role: 'viewer' }>, raw: unknown) {
     const parsed = ViewerFrame.safeParse(raw);
-    const agent = this.sockets('agent')[0];
+    const agent = this.agent();
     if (!parsed.success) { this.inputFailure(att.sessionId, 'invalid_input'); return; }
     if (!agent) { this.inputFailure(att.sessionId, 'relay_unavailable'); return; }
     if (parsed.data.t === 'neko') this.traceSignal(ws, 'viewer', parsed.data.data);
@@ -724,7 +810,7 @@ export class InstanceGateway extends DurableObject<Env> {
 
   private inputFailure(sessionId: string, reason: string, relayId?: string) {
     for (const viewer of this.ctx.getWebSockets(`session:${sessionId}`)) {
-      if (viewer.readyState !== WebSocket.OPEN) continue;
+      if (!this.isOpen(viewer)) continue;
       const attachment = viewer.deserializeAttachment() as Attachment | null;
       if (relayId && (attachment?.role !== 'viewer' || attachment.relayId !== relayId)) continue;
       connectionLog('viewer_error', { ...this.identity(viewer), code: reason });
@@ -751,8 +837,12 @@ export class InstanceGateway extends DurableObject<Env> {
     const att = ws.deserializeAttachment() as Attachment | null;
     // Logging must never require storage availability before relay cleanup can run. New
     // attachments retain their instance ID across hibernation; legacy IDs may be absent.
-    connectionLog(att?.role === 'agent' ? 'agent_tunnel_closed' : 'viewer_socket_closed', { ...this.identity(ws), closeCode: code, wasClean });
+    // A tunnel this object closed (shut) was dealt with then. A replaced one whose path had died
+    // reports its close only when TCP gives up, often 15 minutes later: no new drop.
+    const stage = att?.role === 'agent' ? (att.closing ? 'agent_tunnel_released' : 'agent_tunnel_closed') : 'viewer_socket_closed';
+    connectionLog(stage, { ...this.identity(ws), closeCode: code, wasClean });
     if (att?.role === 'agent') {
+      if (att.closing) return;
       if (this.sockets('agent').every((s) => s === ws)) {
         for (const v of this.sockets('viewer')) this.send(v, { t: 'agent_offline' });
         // The coding agent's calls in flight fail now with relay_unavailable, not at their timeout.
@@ -762,9 +852,9 @@ export class InstanceGateway extends DurableObject<Env> {
       // A reconnect can accept/open the same session before the replaced socket's close callback.
       // Its relay now belongs to the replacement; the old close must not tear that relay down.
       const replacement = this.ctx.getWebSockets(`session:${att.sessionId}`)
-        .some((s) => s !== ws && s.readyState === WebSocket.OPEN);
+        .some((s) => s !== ws && this.isOpen(s));
       if (replacement) return;
-      const agent = this.sockets('agent')[0];
+      const agent = this.agent();
       if (agent) this.send(agent, { t: 'viewer_close', sessionId: att.sessionId, relayId: att.relayId });
     }
   }
@@ -782,7 +872,7 @@ export class InstanceGateway extends DurableObject<Env> {
     const row = await this.liveInstance(instanceId);
     if (!row) return;
     await this.pruneSockets(row, instanceId, true);
-    const agent = this.sockets('agent')[0];
+    const agent = this.agent();
     if (!agent || epoch !== this.revocationEpoch) return;
     const { results } = await this.env.DB.prepare(
       `SELECT c.id, c.kind, c.payload FROM agent_commands c
@@ -791,7 +881,7 @@ export class InstanceGateway extends DurableObject<Env> {
       .bind(instanceId)
       .all<CommandRow>();
     for (const c of results) {
-      if (epoch !== this.revocationEpoch || agent.readyState !== WebSocket.OPEN) return;
+      if (epoch !== this.revocationEpoch || !this.isOpen(agent)) return;
       const payload = JSON.parse(c.payload) as Record<string, unknown>;
       // The archive key is added on delivery and lives only in this frame, never in D1 (page 4).
       const archive = payload.archive as Record<string, unknown> | undefined;
@@ -799,7 +889,7 @@ export class InstanceGateway extends DurableObject<Env> {
         const key = await this.env.API.archiveKey(instanceId);
         payload.archive = key ? { ...archive, key } : null;
       }
-      if (epoch !== this.revocationEpoch || agent.readyState !== WebSocket.OPEN) return;
+      if (epoch !== this.revocationEpoch || !this.isOpen(agent)) return;
       // Claim immediately before send, after any awaited key lookup. Cancellation and this
       // transition are serialized by D1, so a stale pending row cannot resurrect old work.
       const claimed = await this.env.DB.prepare(`UPDATE agent_commands AS c

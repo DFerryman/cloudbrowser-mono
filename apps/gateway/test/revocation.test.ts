@@ -71,12 +71,12 @@ function expireAuthorizationLease() {
 }
 
 describe('gateway revocation', () => {
-  it('advertises viewer-stage capability in both credential and reconnect welcomes', async () => {
+  it('advertises viewer-stage and keepalive capabilities in both credential and reconnect welcomes', async () => {
     const log = vi.spyOn(console, 'info').mockImplementation(() => {});
     const reconnect = await open('agent');
-    expect(reconnect.socket.sent[0]).toEqual({ t: 'welcome', viewerStages: true, automation: { mode: 'agent', access: true } });
+    expect(reconnect.socket.sent[0]).toEqual({ t: 'welcome', viewerStages: true, keepalive: true, automation: { mode: 'agent', access: true } });
     const bootstrap = await open('agent', { 'x-cb-credential': 'PRIVATE-ISSUED-CREDENTIAL' });
-    expect(bootstrap.socket.sent[0]).toEqual({ t: 'welcome', credential: 'PRIVATE-ISSUED-CREDENTIAL', viewerStages: true, automation: { mode: 'agent', access: true } });
+    expect(bootstrap.socket.sent[0]).toEqual({ t: 'welcome', credential: 'PRIVATE-ISSUED-CREDENTIAL', viewerStages: true, keepalive: true, automation: { mode: 'agent', access: true } });
     expect(JSON.stringify(log.mock.calls)).not.toContain('PRIVATE-ISSUED-CREDENTIAL');
   });
 
@@ -138,7 +138,8 @@ describe('gateway revocation', () => {
     expireAuthorizationLease();
     const before = viewer.socket.sent.length;
     await frame(agent.socket, { t: 'viewer_stage', sessionId: 'viewer1', relayId, stage: 'desktop_ready' });
-    expect(viewer.socket.sent).toHaveLength(before);
+    // Nothing from the revoked tunnel reaches the viewer; it hears only that the VM went offline.
+    expect(viewer.socket.sent.slice(before)).toEqual([{ t: 'agent_offline' }]);
     expect(agent.socket.closed?.code).toBe(4003);
     expect(log).not.toHaveBeenCalledWith('connection stage', expect.objectContaining({ stage: 'agent_desktop_ready' }));
   });
@@ -493,6 +494,77 @@ describe('gateway revocation', () => {
     expect(replacement.socket.sent).toContainEqual({t:'viewer_open',sessionId:'viewer1',relayId});
   });
 
+  it('never relays to a replaced tunnel that the runtime reports open again after hibernating', async () => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const old = await open('agent');
+    const current = await open('agent');
+    expect(old.socket.closed).toEqual({ code: 4000, reason: 'replaced' });
+    // As seen in production: once the object had hibernated, the closed tunnel read as open again, listed first.
+    old.socket.readyState = Socket.OPEN;
+    gateway = new InstanceGateway(ctx as unknown as DurableObjectState, env);
+    const viewer = await open('viewer');
+    const relayId = (viewer.socket.attachment as { relayId: string }).relayId;
+    expect(viewer.socket.sent).toContainEqual({ t: 'agent_online' });
+    expect(current.socket.sent).toContainEqual({ t: 'viewer_open', sessionId: 'viewer1', relayId });
+    expect(old.socket.sent).not.toContainEqual(expect.objectContaining({ t: 'viewer_open' }));
+    // Commands go to the current tunnel too.
+    d1.sqlite.exec(`INSERT INTO agent_commands (id, instance_id, kind, payload, status, created_at)
+      VALUES ('cmd1', 'browser1', 'ip_check', '{}', 'pending', 0)`);
+    await gateway.fetch(new Request('https://gateway/deliver', { method: 'POST' }));
+    expect(current.socket.sent.at(-1)).toMatchObject({ t: 'command', id: 'cmd1' });
+    expect(old.socket.sent).not.toContainEqual(expect.objectContaining({ t: 'command' }));
+    // The next reconnect replaces only the current tunnel. The old one's close, reported when TCP
+    // gives up on its path, is no new drop and tells the viewers nothing.
+    await open('agent');
+    expect(log.mock.calls.filter(([, fields]) => (fields as { stage?: string }).stage === 'agent_replaced')).toHaveLength(2);
+    const before = viewer.socket.sent.length;
+    await gateway.webSocketClose(old.socket as unknown as WebSocket, 1006, '', false);
+    expect(viewer.socket.sent).toHaveLength(before);
+    expect(log).toHaveBeenCalledWith('connection stage', expect.objectContaining({ stage: 'agent_tunnel_released', closeCode: 1006 }));
+    expect(log).not.toHaveBeenCalledWith('connection stage', expect.objectContaining({ stage: 'agent_tunnel_closed' }));
+  });
+
+  it('treats a tunnel nothing has arrived on for 45 s as dead, and tells viewers at once', async () => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const agent = await open('agent');
+    agent.socket.autoResponseAt = null;
+    // Heartbeats keep it well past 45 s from its start.
+    for (let i = 0; i < 4; i++) {
+      vi.setSystemTime(Date.now() + 15_000);
+      await frame(agent.socket, { t: 'event', kind: 'heartbeat', data: {} });
+    }
+    const viewer = await open('viewer');
+    expect(viewer.socket.sent).toContainEqual({ t: 'agent_online' });
+    // A keepalive the runtime answered counts as much as a frame.
+    vi.setSystemTime(Date.now() + 40_000);
+    agent.socket.autoResponseAt = new Date();
+    vi.setSystemTime(Date.now() + 40_000);
+    await frame(viewer.socket, { t: 'ime', text: 'hi' });
+    expect(agent.socket.sent.at(-1)).toMatchObject({ t: 'viewer', data: { t: 'ime', text: 'hi' } });
+    expect(agent.socket.closed).toBeNull();
+    // Then nothing at all for longer: closed, and the viewer is told instead of relayed into it.
+    vi.setSystemTime(Date.now() + 6_000);
+    const sent = agent.socket.sent.length;
+    await frame(viewer.socket, { t: 'ime', text: 'lost' });
+    expect(agent.socket.closed).toEqual({ code: 4008, reason: 'tunnel silent' });
+    expect(agent.socket.sent).toHaveLength(sent);
+    expect(viewer.socket.sent).toContainEqual({ t: 'agent_offline' });
+    expect(log).toHaveBeenCalledWith('connection stage', expect.objectContaining({ stage: 'agent_tunnel_silent', closeCode: 4008 }));
+  });
+
+  it("logs why the VM's previous tunnel ended, and never refuses a tunnel over that report", async () => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const agent = await open('agent');
+    await frame(agent.socket, { t: 'hello', agentVersion: '0.6.0', generation: 1,
+      previous: { reason: 'silent', upMs: 600_000, downMs: 27_000, dialFailures: 2, dialError: 'connect' } });
+    expect(log).toHaveBeenCalledWith('connection stage', expect.objectContaining({
+      stage: 'agent_reconnected', code: 'silent', elapsedMs: 27_000, upMs: 600_000, attempts: 2, event: 'connect',
+    }));
+    await frame(agent.socket, { t: 'hello', agentVersion: '0.9.0', generation: 1, previous: { reason: 'not known yet', upMs: -1 } });
+    expect(agent.socket.closed).toBeNull();
+  });
+
   it('replaces the same session without a false takeover or closing the new relay', async () => {
     const agent = await open('agent');
     const previous = await open('viewer');
@@ -631,7 +703,7 @@ describe('gateway revocation', () => {
     await frame(agent.socket, { t: 'viewer', sessionId: 'viewer1', data: 'secret' });
     expect(agent.socket.closed?.code).toBe(4003);
     expect(viewer.socket.closed?.code).toBe(4003);
-    expect(viewer.socket.sent).toHaveLength(before);
+    expect(viewer.socket.sent.slice(before)).toEqual([{ t: 'agent_offline' }]);
     expect((await open('agent')).response.status).toBe(403);
     expect((await open('agent', { 'x-cb-generation': '2' })).response.status).toBe(101);
   });

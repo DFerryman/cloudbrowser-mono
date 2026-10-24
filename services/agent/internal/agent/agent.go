@@ -6,16 +6,20 @@ package agent
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -37,8 +41,25 @@ import (
 // scaled screenshots, and refusals that name the step. It keeps the bridge's desktop session open
 // (it was closed right after opening), logs neko sessions out, drops neko messages too large for
 // the gateway, refuses a symlinked upload directory, and closes the firewall only on a real IP
-// mismatch or repeated failed checks, opening it again after a check passes.
-const Version = "0.5.0"
+// mismatch or repeated failed checks, opening it again after a check passes. 0.6.0 replaces a
+// tunnel that answers nothing (keepalive), closes it with a close frame when stopping, and tells
+// the gateway in the next hello why the previous tunnel ended.
+const Version = "0.6.0"
+
+// Tunnel keepalive, with a gateway whose welcome says keepalive (it answers {"t":"ping"} with
+// {"t":"pong"} without waking its object): a tunnel the gateway has sent nothing on for
+// tunnelKeepaliveIdle gets a ping, and one that brings nothing tunnelKeepaliveWait later is given
+// up for a new one. A connection that vanished without a close (a route change, a dead path)
+// otherwise looked open until TCP gave up, up to 15 minutes, and the browser was unreachable.
+const (
+	tunnelKeepaliveIdle = 15 * time.Second
+	tunnelKeepaliveWait = 10 * time.Second
+)
+
+var errTunnelSilent = errors.New("gateway sent nothing within the keepalive window")
+
+// stopCloseWait bounds how long stopping waits for the gateway to answer the tunnel's close frame.
+const stopCloseWait = 500 * time.Millisecond
 
 // Browser is Chrome as the agent controls it through CDP.
 type Browser interface {
@@ -121,17 +142,26 @@ type Agent struct {
 	desktopFailure       string
 	desktopProbeRequests chan struct{}
 	viewerStages         bool // negotiated by the current gateway's welcome
-	lastInputAt          time.Time
-	transfers            map[string]*transfer
+	keepaliveOn          bool // negotiated by the current gateway's welcome
+	// stalled is the tunnel a write timed out on: the library closed it, and its read loop says why.
+	stalled     *websocket.Conn
+	lastInputAt time.Time
+	transfers   map[string]*transfer
 	// clipboardQuietUntil: neko's clipboard reports are not relayed until then (files.go).
 	clipboardQuietUntil time.Time
 	// Coding-agent bridges (automation.go) and who may drive the browser (control.go).
 	automations map[string]*automation
 	control     controlState
 	screen      screenState
-	// Bridge timings: constants in production, shorter in tests.
+	// Bridge and keepalive timings: constants in production, shorter in tests.
 	readyWait, suspendGrace, openLimit time.Duration
 	reopenDelays                       []time.Duration
+	keepaliveIdle, keepaliveWait       time.Duration
+	// Why the last tunnel ended and the dials that failed since, for the next hello. Only Run's
+	// goroutine uses them.
+	lastEnd      *tunnelEnd
+	dialFailures int
+	dialError    string
 	// uploadsRefused: UploadDir turned out not to be the agent's own directory (checkUploadDir).
 	uploadsRefused bool
 	// IP checks (selfCheck): one periodic check at a time, the address the engine last named, how
@@ -159,7 +189,8 @@ func New(cfg Config, b Browser, n Neko, f Firewall, log *slog.Logger) *Agent {
 	}
 	return &Agent{cfg: cfg, browser: b, neko: n, firewall: f, log: log, sessions: map[string]NekoSession{}, relayIDs: map[string]string{}, viewerOpens: map[string]*viewerOpen{}, desktopProbeRequests: make(chan struct{}, 1), transfers: map[string]*transfer{},
 		automations: map[string]*automation{}, control: controlState{controller: ctlNone, mode: modeAgent, access: true},
-		readyWait: automationReadyWait, suspendGrace: automationSuspendGrace, openLimit: automationOpenLimit, reopenDelays: automationReopen}
+		readyWait: automationReadyWait, suspendGrace: automationSuspendGrace, openLimit: automationOpenLimit, reopenDelays: automationReopen,
+		keepaliveIdle: tunnelKeepaliveIdle, keepaliveWait: tunnelKeepaliveWait}
 }
 
 func (a *Agent) credentialPath() string { return filepath.Join(a.cfg.StateDir, "credential") }
@@ -212,7 +243,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	return nil
 }
 
-func (a *Agent) session(ctx context.Context, chromeMajor int) error {
+func (a *Agent) session(ctx context.Context, chromeMajor int) (err error) {
 	auth, err := a.authHeader()
 	if err != nil {
 		return err
@@ -223,6 +254,8 @@ func (a *Agent) session(ctx context.Context, chromeMajor int) error {
 		"X-Instance-Id": {a.cfg.InstanceID},
 	}})
 	if err != nil {
+		a.dialFailures++
+		a.dialError = dialFailure(err, resp)
 		if resp != nil && resp.StatusCode == http.StatusUnauthorized && strings.HasPrefix(auth, "Bootstrap") {
 			return fmt.Errorf("bootstrap token rejected: %w", err)
 		}
@@ -230,11 +263,46 @@ func (a *Agent) session(ctx context.Context, chromeMajor int) error {
 	}
 	conn.SetReadLimit(1 << 20)
 	defer conn.CloseNow()
+	connected := time.Now()
+	previous := a.takeTunnelEnd(connected)
+	// Stopping closes the tunnel with a close frame (going away), so the gateway can tell a VM
+	// going to sleep from a lost connection; a read ended by ctx closed it without one. The read
+	// ends at the gateway's answer, or stopCloseWait later anyway. The keepalive gives up a tunnel
+	// that answers nothing.
+	readCtx, giveUp := context.WithCancelCause(context.WithoutCancel(ctx))
+	closing := make(chan struct{})
+	go func() {
+		defer close(closing)
+		select {
+		case <-ctx.Done():
+			closed := make(chan struct{})
+			go func() {
+				defer close(closed)
+				_ = conn.Close(websocket.StatusGoingAway, "agent stopping")
+			}()
+			select {
+			case <-closed:
+			case <-time.After(stopCloseWait):
+			}
+			giveUp(nil)
+		case <-readCtx.Done():
+		}
+	}()
+	defer func() {
+		silent := errors.Is(context.Cause(readCtx), errTunnelSilent)
+		giveUp(nil)
+		<-closing
+		a.mu.Lock()
+		stalled := a.stalled == conn
+		a.mu.Unlock()
+		a.tunnelEnded(connected, err, silent, stalled)
+	}()
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	a.mu.Lock()
 	a.conn = conn
 	a.viewerStages = false
+	a.keepaliveOn = false
 	a.mu.Unlock()
 	defer a.closeSessions()
 	// A coding agent's sessions outlive a lost tunnel for a short grace (protocol 2), so the
@@ -248,7 +316,7 @@ func (a *Agent) session(ctx context.Context, chromeMajor int) error {
 		}
 	}()
 
-	if err := a.write(sctx, protocol.Hello{T: "hello", AgentVersion: Version, Generation: a.cfg.Generation}); err != nil {
+	if err := a.write(sctx, protocol.Hello{T: "hello", AgentVersion: Version, Generation: a.cfg.Generation, Previous: previous}); err != nil {
 		return err
 	}
 	if err := a.write(sctx, protocol.TurnRequest{T: "turn_request"}); err != nil {
@@ -260,11 +328,21 @@ func (a *Agent) session(ctx context.Context, chromeMajor int) error {
 		a.reportReadiness(sctx, chromeMajor)
 	}
 	go a.loops(sctx)
+	var heard atomic.Int64
+	heard.Store(connected.UnixNano())
+	go a.keepalive(sctx, &heard, giveUp)
 
 	for {
-		_, data, err := conn.Read(sctx)
+		_, data, err := conn.Read(readCtx)
 		if err != nil {
+			if cause := context.Cause(readCtx); errors.Is(cause, errTunnelSilent) {
+				return cause
+			}
 			return err
+		}
+		heard.Store(time.Now().UnixNano())
+		if ctx.Err() != nil {
+			continue // stopping: nothing that arrives while the close goes out is acted on
 		}
 		var in protocol.Incoming
 		if err := json.Unmarshal(data, &in); err != nil {
@@ -445,6 +523,7 @@ func (a *Agent) handle(ctx context.Context, in protocol.Incoming) {
 	case "welcome":
 		a.mu.Lock()
 		a.viewerStages = in.ViewerStages
+		a.keepaliveOn = in.Keepalive
 		a.mu.Unlock()
 		if in.Credential != "" {
 			if err := a.saveCredential(in.Credential); err != nil {
@@ -761,5 +840,111 @@ func (a *Agent) write(ctx context.Context, v any) error {
 	}
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	return conn.Write(wctx, websocket.MessageText, b)
+	err = conn.Write(wctx, websocket.MessageText, b)
+	if err != nil && errors.Is(wctx.Err(), context.DeadlineExceeded) {
+		a.mu.Lock()
+		a.stalled = conn
+		a.mu.Unlock()
+	}
+	return err
+}
+
+// keepalive pings a tunnel the gateway has sent nothing on for keepaliveIdle, and gives it up
+// when keepaliveWait more brings nothing either. It does nothing unless the welcome said keepalive.
+func (a *Agent) keepalive(ctx context.Context, heard *atomic.Int64, giveUp context.CancelCauseFunc) {
+	tick := time.NewTicker(a.keepaliveIdle / 3)
+	defer tick.Stop()
+	var pinged int64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		a.mu.Lock()
+		on := a.keepaliveOn
+		a.mu.Unlock()
+		last := heard.Load()
+		quiet := time.Since(time.Unix(0, last))
+		switch {
+		case !on || quiet < a.keepaliveIdle:
+		case quiet >= a.keepaliveIdle+a.keepaliveWait:
+			giveUp(errTunnelSilent)
+			return
+		case pinged != last:
+			pinged = last
+			_ = a.write(ctx, protocol.Ping{T: "ping"})
+		}
+	}
+}
+
+// tunnelEnd is why a tunnel ended, reported in the next tunnel's hello.
+type tunnelEnd struct {
+	reason    string
+	closeCode int
+	at        time.Time
+	up        time.Duration
+}
+
+func (a *Agent) tunnelEnded(connected time.Time, err error, silent, stalled bool) {
+	reason, code := tunnelEndReason(err, silent, stalled)
+	a.lastEnd = &tunnelEnd{reason: reason, closeCode: code, at: time.Now(), up: time.Since(connected)}
+	a.dialFailures, a.dialError = 0, ""
+}
+
+// takeTunnelEnd is the previous tunnel's end and the dials that failed since, once.
+func (a *Agent) takeTunnelEnd(now time.Time) *protocol.TunnelEnd {
+	end, failures, dialErr := a.lastEnd, a.dialFailures, a.dialError
+	a.lastEnd, a.dialFailures, a.dialError = nil, 0, ""
+	if end == nil {
+		return nil
+	}
+	return &protocol.TunnelEnd{Reason: end.reason, CloseCode: end.closeCode, UpMs: end.up.Milliseconds(),
+		DownMs: now.Sub(end.at).Milliseconds(), DialFailures: failures, DialError: dialErr}
+}
+
+// tunnelEndReason names why a tunnel's reads ended: a fixed code, never the error's text.
+func tunnelEndReason(err error, silent, stalled bool) (string, int) {
+	if silent {
+		return "silent", 0
+	}
+	if code := int(websocket.CloseStatus(err)); code >= 1000 && code <= 4999 {
+		return "closed", code
+	}
+	var ne net.Error
+	switch {
+	case stalled:
+		return "write_timeout", 0
+	case errors.Is(err, syscall.ECONNRESET):
+		return "reset", 0
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "eof", 0
+	case errors.As(err, &ne) && ne.Timeout():
+		return "timeout", 0
+	}
+	return "error", 0
+}
+
+// dialFailure names how a dial failed: dns, connect, tls, timeout, http_<status> or error.
+func dialFailure(err error, resp *http.Response) string {
+	if resp != nil {
+		return fmt.Sprintf("http_%d", resp.StatusCode)
+	}
+	var dnsErr *net.DNSError
+	var certErr *tls.CertificateVerificationError
+	var recordErr tls.RecordHeaderError
+	var alert tls.AlertError
+	var opErr *net.OpError
+	var ne net.Error
+	switch {
+	case errors.As(err, &dnsErr):
+		return "dns"
+	case errors.As(err, &certErr), errors.As(err, &recordErr), errors.As(err, &alert):
+		return "tls"
+	case errors.As(err, &ne) && ne.Timeout():
+		return "timeout"
+	case errors.As(err, &opErr) && opErr.Op == "dial":
+		return "connect"
+	}
+	return "error"
 }

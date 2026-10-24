@@ -41,10 +41,33 @@ export type IceServer = z.infer<typeof IceServer>;
 
 // --- agent -> gateway -----------------------------------------------------------------------
 
+/**
+ * Why the VM's previous tunnel ended, as the VM saw it (agent 0.6.0), sent in the next hello so
+ * the gateway's logs explain a drop without the VM's journal. Fixed codes only, never error text.
+ */
+export const AgentTunnelEnd = z.object({
+  /**
+   * silent: nothing arrived within the keepalive window; closed: a close frame (`closeCode`);
+   * write_timeout: a frame could not be sent within 10 s; reset, eof, timeout, error: the
+   * connection failed under it.
+   */
+  reason: z.enum(['silent', 'closed', 'write_timeout', 'reset', 'eof', 'timeout', 'error']),
+  closeCode: z.number().int().min(1000).max(4999).optional(),
+  /** How long that tunnel was up, and how long the VM was without one. */
+  upMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  downMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  /** Dials that failed in between, and how the last one failed: dns, connect, tls, timeout, http_<status> or error. */
+  dialFailures: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  dialError: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/).optional(),
+});
+export type AgentTunnelEnd = z.infer<typeof AgentTunnelEnd>;
+
 export const AgentHello = z.object({
   t: z.literal('hello'),
   agentVersion: z.string(),
   generation: z.number().int(),
+  /** A report the gateway cannot read is dropped: it must never refuse the tunnel. */
+  previous: AgentTunnelEnd.optional().catch(undefined),
 });
 export const AgentEvent = z.object({
   t: z.literal('event'),
@@ -112,8 +135,9 @@ export type GatewayToAgent =
   /**
    * Sent once after a bootstrap exchange: the long-lived credential to store (mode 0600).
    * `automation` carries the persisted control mode, so a takeover survives agent restarts.
+   * `keepalive`: the gateway answers `{"t":"ping"}` with `{"t":"pong"}` on this tunnel.
    */
-  | { t: 'welcome'; credential?: string; viewerStages?: boolean; automation?: { mode: AgentControlMode; access: boolean } }
+  | { t: 'welcome'; credential?: string; viewerStages?: boolean; keepalive?: boolean; automation?: { mode: AgentControlMode; access: boolean } }
   | { t: 'command'; id: string; kind: AgentCommandKind; payload: Record<string, unknown> }
   | { t: 'turn'; iceServers: IceServer[] }
   | { t: 'viewer_open'; sessionId: string; relayId?: string }

@@ -15,6 +15,9 @@ type ConnectionEvidence = ConnectionIdentity & {
   code?: string;
   event?: string;
   elapsedMs?: number;
+  /** agent_reconnected: how long the VM's previous tunnel was up, and the dials that failed after it. */
+  upMs?: number;
+  attempts?: number;
   closeCode?: number;
   wasClean?: boolean;
   status?: number;
@@ -22,6 +25,7 @@ type ConnectionEvidence = ConnectionIdentity & {
   discardReason?: 'stale_relay';
 };
 
+const count = (value: number | undefined) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 const identifier = (value: string | undefined) => value && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : undefined;
 const label = (value: string | undefined) => value && /^[a-z][a-z0-9_/]{0,63}$/.test(value) ? value : undefined;
 
@@ -40,7 +44,9 @@ export function connectionLog(stage: string, fields: ConnectionEvidence): void {
     role: fields.role,
     code: label(fields.code),
     event: label(fields.event),
-    elapsedMs: typeof fields.elapsedMs === 'number' && Number.isSafeInteger(fields.elapsedMs) && fields.elapsedMs >= 0 ? fields.elapsedMs : undefined,
+    elapsedMs: count(fields.elapsedMs),
+    upMs: count(fields.upMs),
+    attempts: count(fields.attempts),
     closeCode: typeof fields.closeCode === 'number' && Number.isSafeInteger(fields.closeCode) ? fields.closeCode : undefined,
     wasClean: fields.wasClean,
     status: fields.status,
