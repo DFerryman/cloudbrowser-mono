@@ -998,7 +998,7 @@ export const termsVersions = sqliteTable('terms_versions', {
 
 /**
  * Who accepted which version of the Terms of Service and Privacy Policy, and when: one row per
- * user and version, written when they tick the box agreeing to both before paying. A top-up checkout is
+ * user and version, written when they tick the box at sign-in or before paying. A top-up checkout is
  * only started for a user with a row for the current version, so a new version asks again.
  * Append-only (triggers): kept as evidence of the agreement, with where the request came from.
  */
@@ -1012,7 +1012,7 @@ export const termsAcceptances = sqliteTable(
     termsVersion: text('terms_version')
       .notNull()
       .references(() => termsVersions.version),
-    /** `checkout`: ticked in the dialog before a top-up. */
+    /** `sign-in`: ticked in the in-app notice; `checkout`: ticked before a top-up. */
     context: text('context').notNull(),
     /** The checkout the user went on to start. */
     topupCheckoutId: text('topup_checkout_id').references(() => topupCheckouts.id),
