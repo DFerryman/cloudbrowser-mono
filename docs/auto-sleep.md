@@ -25,6 +25,8 @@ Never sleep setting. An open socket or healthy VM alone does not keep a browser 
 | First accepted visible-to-hidden/disconnected transition | Records a final activity anchor and starts a full idle window |
 | Repeated hidden/disconnected heartbeats | Keep session authorization current; do not restart the idle window |
 | Visibility unavailable (`viewing: null`) | Only actual input renews activity |
+| A coding agent's tool call (`screenshot`, `act`, `upload_file` or its upload URL, `attach_files`, `get_status`) | Records activity at most every 30 s, whether or not a viewer is open (docs/agent-access.md) |
+| A coding agent's handshake, `ping`, `tools/list`, or an open session without calls | Never renews activity |
 | The idle-timeout setting changes | Starts a fresh window at the new duration |
 | A visible viewer closes | The end-session transaction records the final activity anchor once |
 | Automatic reconnect or signaling | Does not renew activity for a presence-aware client; a successful visible picture does |

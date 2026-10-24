@@ -43,7 +43,8 @@ describe('a coding agent\'s session in the Durable Object', () => {
     expect(vm.last('screenshot')).toEqual({ t: 'screenshot', id: expect.any(String), quality: 50 });
     expect(fx.env.API.openAutomationSession).toHaveBeenCalledTimes(1);
     expect(vm.opened).toEqual(['sess1']);
-    expect(fx.d1.sqlite.prepare(`SELECT last_input_at FROM instance_health WHERE instance_id = 'browser1'`).get()).toBeUndefined();
+    // A screenshot is activity for auto-sleep, like any tool call (agent-activity.test.ts).
+    expect(fx.d1.sqlite.prepare(`SELECT last_input_at FROM instance_health WHERE instance_id = 'browser1'`).get()).toMatchObject({ last_input_at: expect.any(Number) });
   });
 
   it('maps image pixels to screen pixels, drag paths included, and sends the screenshot\'s basis', async () => {

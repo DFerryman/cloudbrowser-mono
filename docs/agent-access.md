@@ -138,8 +138,13 @@ never instructions.
 - **Readiness**: a protocol 2 VM waits up to 15 s for its desktop session itself. A protocol 1 VM
   answers `desktop_unavailable` until it is ready; the gateway asks again every second for the
   session's first 15 s.
-- **Activity**: an act or attach counts as activity for auto-sleep, like the Viewer's input; an
-  idle session does not keep the browser awake.
+- **Activity**: every tool call the browser takes counts as activity for auto-sleep, like the
+  Viewer's input, whether or not anyone is watching: `screenshot`, `act`, `upload_file` (and a
+  file sent to its upload URL), `attach_files` once admitted, and `get_status` on a running
+  browser with access on. It is recorded at most every 30 s. The handshake, `ping`, `tools/list`
+  and notifications never reach the browser's object and do not count, and neither does an open
+  session without calls: once the agent stops calling, the browser sleeps on its usual timeout
+  from the last call (`apps/gateway/test/agent-activity.test.ts`).
 
 ## Screenshots and coordinates
 
@@ -394,6 +399,9 @@ Security Level, for `GET`, `HEAD` and `OPTIONS`; `/api/oauth/` is already covere
   "Not now", lapse, a phone and the maximized view).
 - `apps/gateway/test/mcp-upload.test.ts`: inline content and its limit, upload URLs (`409`, `410`,
   `411`, length mismatch, the acknowledgement window, SHA-256), VM failures, attaching.
+- `apps/gateway/test/agent-activity.test.ts`: auto-sleep with nobody watching, through the Worker,
+  the object and the engine's idle check: each kind of call keeps resetting the countdown, and an
+  open session with only keepalives sleeps on time.
 - `apps/gateway/test/robustness.test.ts`: the gateway's per-socket budgets and failure isolation.
 - `apps/api/test/automation.test.ts`: keys shown once and stored hashed, the MCP check, limits,
   revocation (owner, deletion, sign-out-everywhere), legacy credentials, migration 0035.

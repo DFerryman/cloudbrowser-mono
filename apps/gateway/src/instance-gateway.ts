@@ -28,7 +28,7 @@ const MAX_FRAME_BYTES = 256 * 1024;
  */
 const MAX_QUEUED_FRAMES = 4096;
 const MAX_QUEUED_FRAME_BYTES = 4 * 1024 * 1024;
-/** A coding agent's actions count as activity for auto-sleep this often, like a viewer's input. */
+/** A coding agent's tool calls count as activity for auto-sleep this often, like a viewer's input. */
 const AUTOMATION_ACTIVITY_MS = 30_000;
 /**
  * All relay frames share an authorization lease; stop/delete RPCs and a takeover revoke it at
@@ -259,8 +259,11 @@ export class InstanceGateway extends DurableObject<Env> {
     return { t: 'automation_status', connected: this.mcp.open, control, request: this.mcp.controlRequest(control.mode) };
   }
 
-  /** A coding agent's action is activity for auto-sleep and the Settings page, recorded at most every 30 s. */
-  private async touchAutomationActivity(instanceId: string, sessionId: string) {
+  /**
+   * A coding agent's tool call is activity for auto-sleep and, within its session, for the
+   * Settings page; recorded at most every 30 s. MCP keepalives never get here.
+   */
+  private async touchAutomationActivity(instanceId: string, sessionId?: string) {
     const now = Date.now();
     if (now - this.automationActivityAt < AUTOMATION_ACTIVITY_MS) return;
     this.automationActivityAt = now;
@@ -268,7 +271,7 @@ export class InstanceGateway extends DurableObject<Env> {
       await this.env.DB.batch([
         this.env.DB.prepare(`INSERT INTO instance_health (instance_id, last_input_at) VALUES (?, ?)
           ON CONFLICT (instance_id) DO UPDATE SET last_input_at = max(coalesce(instance_health.last_input_at, 0), excluded.last_input_at)`).bind(instanceId, now),
-        this.env.DB.prepare(`UPDATE automation_sessions SET last_seen_at = ? WHERE id = ? AND instance_id = ? AND ended_at IS NULL`).bind(now, sessionId, instanceId),
+        ...(sessionId ? [this.env.DB.prepare(`UPDATE automation_sessions SET last_seen_at = ? WHERE id = ? AND instance_id = ? AND ended_at IS NULL`).bind(now, sessionId, instanceId)] : []),
       ]);
     } catch {
       this.automationActivityAt = 0; // next action tries again; activity is best effort

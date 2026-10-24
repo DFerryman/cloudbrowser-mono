@@ -53,8 +53,8 @@ export interface SessionHost {
   scheduleAlarm(at: number): Promise<void>;
   /** Bumped by every revocation: work begun before one must not finish after it. */
   epoch(): number;
-  /** An action counts as activity for auto-sleep, like a viewer's input. */
-  touchActivity(instanceId: string, sessionId: string): Promise<void>;
+  /** A tool call counts as activity for auto-sleep, like a viewer's input; `sessionId` is the caller's open session. */
+  touchActivity(instanceId: string, sessionId?: string): Promise<void>;
 }
 
 type AutomationResult = Extract<AgentFrame, { t: 'automation_result' }>;
@@ -279,6 +279,8 @@ export class CodingAgentSession {
     }
     rec.lastUsedAt = Date.now();
     await this.save(rec);
+    // Whatever the call does with the browser (a screenshot, an act, a file), the agent is at work in it.
+    this.host.ctx.waitUntil(this.host.touchActivity(instanceId, rec.sessionId));
     return { rec, notices };
   }
 
@@ -555,7 +557,6 @@ export class CodingAgentSession {
       ...(args.quality ? { quality: args.quality } : {}),
       ...shotBounds(args.size),
     };
-    this.host.ctx.waitUntil(this.host.touchActivity(instanceId, rec.sessionId));
     try {
       const out = await this.vm(rec, request, (vmId) => { this.running = { call, clientId: caller.clientId, vmId }; });
       return 'content' in out ? out : await this.finish(rec, out, notices);
@@ -586,7 +587,6 @@ export class CodingAgentSession {
       ...(args.quality ? { quality: args.quality } : {}),
       ...shotBounds(args.size),
     };
-    this.host.ctx.waitUntil(this.host.touchActivity(instanceId, rec.sessionId));
     const out = await this.vm(rec, request);
     return 'content' in out ? out : this.finish(rec, out, notices);
   }
@@ -657,13 +657,15 @@ export class CodingAgentSession {
     if (!row || row.user_id !== caller.userId) return refusal('browser_unavailable', 'This browser no longer exists.');
     const online = !!this.host.agent();
     const running = row.status === 'running' && row.desired_state === 'running';
+    const rec = await this.load();
+    // A status check is a request like any other: an agent waiting on the browser is still at work.
+    if (running && row.agent_access) this.host.ctx.waitUntil(this.host.touchActivity(instanceId, rec?.clientId === caller.clientId ? rec.sessionId : undefined));
     const lines = [
       `browser: ${row.status}${row.desired_state !== 'running' && row.status === 'running' ? ` (going to ${row.desired_state})` : ''}${running ? '' : ' — ask the user to open it in Nevazu; a coding agent cannot wake it'}`,
       `coding agent access: ${row.agent_access ? 'on' : 'off'}; this key: "${caller.keyName}" (${caller.capability === 'view' ? 'view only' : 'control'})`,
       `browser agent: ${online ? 'online' : 'offline'}`,
       describeControl(this.host.controlState(row)),
     ];
-    const rec = await this.load();
     if (rec && rec.clientId === caller.clientId) {
       const now = Date.now();
       rec.lastUsedAt = now;
@@ -747,6 +749,7 @@ export class CodingAgentSession {
       const reason = refused ?? (lease === 'billing_denied' ? 'browser_unavailable' : 'relay_unavailable');
       return uploadError(reason === 'relay_unavailable' ? 503 : 403, reason, 'The browser cannot take the file now; see get_status. The URL stays valid until it expires.');
     }
+    this.host.ctx.waitUntil(this.host.touchActivity(instanceId, rec.sessionId));
     try {
       const stored = await this.store(rec, { name: slot.name, type: slot.mime, size: slot.size }, streamBytes(req.body ?? new ReadableStream()));
       slot.state = 'done';

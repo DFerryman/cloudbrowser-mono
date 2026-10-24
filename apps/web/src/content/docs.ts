@@ -150,7 +150,7 @@ const en: Article[] = [
       { h: 'Files', id: 'files' },
       { p: 'To give the browser a file from your computer, the agent asks for a one-time upload address and sends the file with curl, which comes with macOS, Linux and Windows; small files can also be sent directly. Uploading only copies a file to the browser’s temporary storage; attaching it to a page (into Chrome’s file dialog, by paste or by drop) needs the agent to have control at that moment. Temporary files are removed when the agent’s session ends.' },
       { h: 'What the agent can do', id: 'scope' },
-      { p: 'The agent has the same reach as you at the keyboard and mouse: every website you are signed in to, including anything those accounts allow (reading, sending, buying, deleting). Give an agent only tasks you would do yourself, watch it in the live view, and prefer a separate browser with its own sign-ins for agent work. Agent actions count as activity, so a browser an agent is working in does not go to sleep; an idle connection does not keep it awake.' },
+      { p: 'The agent has the same reach as you at the keyboard and mouse: every website you are signed in to, including anything those accounts allow (reading, sending, buying, deleting). Give an agent only tasks you would do yourself, watch it in the live view, and prefer a separate browser with its own sign-ins for agent work. Every request the agent makes (a screenshot, an action, a file, a status check) counts as activity, so a browser an agent is working in does not go to sleep, even when nobody is watching. An idle connection does not keep it awake: once the agent stops making requests, the browser sleeps on its usual timer.' },
     ],
   },
   {
@@ -468,7 +468,7 @@ const zh: Article[] = [
       { h: '文件', id: 'files' },
       { p: '要把你电脑上的文件交给浏览器，智能体会申请一个一次性上传地址，并用 curl（macOS、Linux 和 Windows 都自带）发送文件；小文件也可以直接发送。上传只是把文件复制到浏览器的临时存储；把文件附加到页面（放进 Chrome 的文件对话框、粘贴或拖放）要求智能体在那一刻拥有控制权。智能体的会话结束时临时文件会被删除。' },
       { h: '智能体能做什么', id: 'scope' },
-      { p: '智能体拥有和你用键盘鼠标一样的能力：你登录过的每个网站，以及这些账户允许的一切（读取、发送、购买、删除）。只把你自己会做的任务交给它，在实时画面中看着它工作，并尽量为智能体工作单独准备一个有独立登录状态的浏览器。智能体的操作算作活动，因此它正在工作的浏览器不会休眠；仅保持连接不会让浏览器保持唤醒。' },
+      { p: '智能体拥有和你用键盘鼠标一样的能力：你登录过的每个网站，以及这些账户允许的一切（读取、发送、购买、删除）。只把你自己会做的任务交给它，在实时画面中看着它工作，并尽量为智能体工作单独准备一个有独立登录状态的浏览器。智能体的每个请求（截图、操作、文件、状态查询）都算作活动，因此它正在工作的浏览器即使无人观看也不会休眠。仅保持连接不会让浏览器保持唤醒：智能体停止发出请求后，浏览器按平常的时间休眠。' },
     ],
   },
   {
