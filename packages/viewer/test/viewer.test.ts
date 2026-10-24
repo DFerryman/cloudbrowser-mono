@@ -147,6 +147,13 @@ describe('neko data channel encoding', () => {
     // Over the tier's pixel budget, a smaller desktop of the same shape, shown enlarged.
     expect(shapedScreen(2560, 1311, 30, basic)).toEqual({ width: 2008, height: 1024, rate: 30 });
     expect(shapedScreen(2560, 1311, 30, TIERS.premium.maxScreenPixels)).toEqual({ width: 2560, height: 1304, rate: 30 });
+    // A short strip of a window: the minimum side would take the area over the budget, so the long side gives way.
+    expect(shapedScreen(3440, 300, 30, basic)).toEqual({ width: 4112, height: MIN_SCREEN_SIDE, rate: 30 });
+    expect(shapedScreen(300, 3440, 30, basic)).toEqual({ width: MIN_SCREEN_SIDE, height: 4112, rate: 30 });
+    for (const [w, h] of [[3440, 300], [5120, 400], [300, 3440], [2560, 1311], [393, 660]] as const) {
+      const s = shapedScreen(w, h, 30, basic)!;
+      expect(s.width * s.height).toBeLessThanOrEqual(basic);
+    }
     // Without a budget, at most Premium's pixels.
     expect(shapedScreen(4000, 2500)).toEqual({ width: 2424, height: 1512, rate: 30 });
     expect(shapedScreen(0, 600)).toBeNull();

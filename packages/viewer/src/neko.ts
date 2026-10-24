@@ -250,5 +250,13 @@ export function shapedScreen(width: number, height: number, rate = 30, maxPixels
   const budget = Math.min(maxPixels, MAX_SCREEN_PIXELS);
   const scale = Math.min(Math.max(1, MIN_SCREEN_SIDE / width, MIN_SCREEN_SIDE / height), Math.sqrt(budget / (width * height)));
   const side = (length: number) => Math.max(MIN_SCREEN_SIDE, Math.floor((length * scale) / 8) * 8);
-  return { width: side(width), height: side(height), rate };
+  let w = side(width);
+  let h = side(height);
+  // A side held at MIN_SCREEN_SIDE can still take the area over the budget (a window that is a
+  // short strip): the other side gives way, and the picture is letterboxed.
+  if (w * h > budget) {
+    if (w > h) w = Math.max(MIN_SCREEN_SIDE, Math.floor(budget / h / 8) * 8);
+    else h = Math.max(MIN_SCREEN_SIDE, Math.floor(budget / w / 8) * 8);
+  }
+  return { width: w, height: h, rate };
 }
