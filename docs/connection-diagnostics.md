@@ -126,6 +126,52 @@ TURN path's RTT includes both the user's route to Cloudflare and the route onwar
 so it alone cannot attribute failure to the user's local network. Compare failed/successful
 attempts, and use a controlled network comparison where available.
 
+### Handshake
+
+From neko's offer until the peer connects, the viewer reads `getStats` every second and listens
+for `icecandidate`, `icecandidateerror` and ICE state changes (`packages/viewer/src/handshake.ts`);
+`startStats` takes over once the peer connects. Before, a handshake that never connected left no
+counters at all, so every one of them read as `network`. The snapshot's `media.handshake` says how
+far it got, at a `failed` milestone before any picture and, for the timings, at `first_frame`:
+
+| Field | Meaning |
+| --- | --- |
+| `stalledAt` | The first step that did not happen (failure only); absent when it cannot be told |
+| `candidateMs`, `iceMs`, `dtlsMs` | From the offer: the first local candidate (the TURN allocation), ICE connected, the peer (DTLS) connected |
+| `turnErrors` | Distinct `icecandidateerror` codes, at most 8: `701` a STUN/TURN server did not answer, `401`/`403` refused, `437`, `486`, `508` allocation problems. Never the URL or text |
+| `candidates` | Local candidates gathered: relays by their protocol to the TURN server (`relayUdp`, `relayTcp`, `relayTls`), and any others |
+| `pairs`, `checksSent`, `checksAnswered` | Candidate pairs by state, and connectivity checks sent on all of them with the answers that came back |
+| `dtlsState`, `transportBytesReceived` | The transport's DTLS state, and whether anything came back on it at all |
+
+| `stalledAt` | What it points at |
+| --- | --- |
+| `candidates` | No relay candidate: the viewer's network did not reach the TURN relay (UDP and TCP/TLS blocked, a captive portal), or the relay refused it. `turnErrors` says which |
+| `ice` | The relay was reached, but no pair worked: the VM did not answer checks through it (`checksAnswered` 0) |
+| `dtls` | A pair worked but the encrypted session never opened: large packets lost on the path (a VPN's or tunnel's MTU), or the VM stopped answering |
+| `media` | Connected, but no video arrived: capture or the encoder on the VM |
+| `decode` | Video arrived but no frame decoded: no keyframe got through, or the device could not decode |
+| `render` | Frames decoded, none shown: a hidden page, refused or paused playback (see `playback`) |
+
+Every api request from the web app carries `x-client-build`, the commit it was built from (a
+trailing `+` for a tree with changes, `apps/web/vite.config.ts`); `viewer connection` logs it as
+`clientBuild`, so a report can be matched to the code that produced it.
+
+### Tracing a session
+
+`scripts/session-trace.mjs` puts one live view on a single timeline: the viewer's milestones, the
+gateway's stages for each of its attempts, the VM tunnel's events, its quality reports and the
+browser's D1 rows (region, machine, agent and Chrome version), and ends with what stopped each
+attempt. It reads only the fields these logs are written with, never request headers.
+
+```sh
+CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… node scripts/session-trace.mjs <id> [--hours 24] [--json]
+```
+
+`<id>` is a viewer session id, the attempt id the failure overlay shows, or a browser id (its
+sessions in the last `--hours`). The token needs Workers Observability read, Account Analytics
+read and D1 read. A viewer's milestones arrive at the api in batches, so the tool places each at
+its attempt's start plus `elapsedMs`; gateway lines keep the gateway's own time.
+
 ## Live quality
 
 Diagnostics explain views that fail; live-quality reports measure the ones that work, so latency
@@ -148,6 +194,7 @@ browser did not report it; an empty blob means unknown.
 | `blob5` | Picture level neko streamed at the end of the interval |
 | `blob6`, `blob7` | Selected local candidate type, and the protocol to the TURN relay |
 | `blob8`, `blob9`, `blob10` | Instance, viewer session and attempt ids |
+| `blob11` | The web app build that sent the report (`x-client-build`); empty from older viewers |
 | `double1`, `double2` | Interval in ms, stats readings in it |
 | `double3`, `double4` | Median picture round trip through TURN, median input round trip to the gateway (ms) |
 | `double5`, `double6`, `double7` | Median fps, median kbps, share of video packets lost (0–1) |
@@ -155,6 +202,11 @@ browser did not report it; an empty blob means unknown.
 | `double10`, `double11` | Average jitter buffer delay and decode time per frame (ms) |
 | `double12` | Frames dropped |
 | `double13`, `double14` | Width and height at the end of the interval |
+| `double15`, `double16`, `double17` | NACKs sent, retransmitted packets received, picture loss indications sent (repairs that `double7` does not show) |
+| `double18`, `double19` | Keyframes decoded, picture level changes |
+
+`double15` to `double19` read 0 in reports from viewers older than them; `blob11` is empty in
+those, so tell them apart by it (`blob11 != ''`).
 
 Median picture round trip and frame rate by region and country over the last day, with the
 [SQL API](https://developers.cloudflare.com/analytics/analytics-engine/sql-api/):

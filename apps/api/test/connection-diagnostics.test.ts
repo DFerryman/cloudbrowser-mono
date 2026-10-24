@@ -70,6 +70,31 @@ describe('connection evidence', () => {
     expect(t.d1.sqlite.prepare('SELECT total_changes() AS n').get()).toEqual(before);
   });
 
+  it('logs where a handshake stopped and the build that reported it', async () => {
+    const log = logs();
+    const handshake = {
+      stalledAt: 'dtls', candidateMs: 240, iceMs: 910, turnErrors: [701, 401],
+      candidates: { relayUdp: 1, relayTcp: 1, relayTls: 1, other: 0 },
+      pairs: { succeeded: 1, inProgress: 0, waiting: 2, failed: 0 },
+      checksSent: 6, checksAnswered: 2, dtlsState: 'connecting', transportBytesReceived: 0,
+    } as const;
+    const evidence = { ...report, media: { connectionState: 'connecting', iceConnectionState: 'connected', handshake } };
+    expect((await t.call('POST', endpoint(), evidence, { 'x-client-build': '4070ce5a1b2c+' })).status).toBe(204);
+    expect(log).toHaveBeenLastCalledWith('viewer connection', expect.objectContaining({ clientBuild: '4070ce5a1b2c+', media: evidence.media }));
+    // A malformed build is dropped, never logged as sent.
+    expect((await t.call('POST', endpoint(), evidence, { 'x-client-build': 'https://private.example' })).status).toBe(204);
+    expect(log).toHaveBeenLastCalledWith('viewer connection', expect.objectContaining({ clientBuild: '' }));
+    for (const bad of [
+      { ...handshake, stalledAt: 'somewhere' },
+      { ...handshake, turnErrors: ['turn:relay.example:3478'] },
+      { ...handshake, turnErrors: [701, 701, 701, 701, 701, 701, 701, 701, 701] },
+      { ...handshake, turnErrors: [1000] },
+      { ...handshake, candidates: { ...handshake.candidates, address: '203.0.113.7' } },
+      { ...handshake, errorText: 'private timeout' },
+      { ...handshake, iceMs: 600_001 },
+    ]) expect((await t.call('POST', endpoint(), { ...report, media: { handshake: bad } })).status).toBe(400);
+  });
+
   it('rejects nested addresses, URLs, SDP and raw playback errors before logging', async () => {
     const log = logs();
     const forbidden = [

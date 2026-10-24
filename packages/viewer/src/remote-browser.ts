@@ -5,6 +5,7 @@ import { QualityController, type VideoPreference } from './quality.js';
 import { KEYSYM, keyIdentity, keysymFor, keysymForName, matchingKeyIdentity, unidentifiedKey, type KeyIdentityEvent } from './keyboard.js';
 import { readStats, type ViewerStats } from './stats.js';
 import { QualityWindow } from './quality-report.js';
+import { HandshakeProbe } from './handshake.js';
 import { ScrollAccumulator } from './scroll.js';
 import { InputQueue, type InputFailure } from './input-queue.js';
 import { FileTransfers, type TransferAction, type TransferFile, type TransferUpdate } from './file-transfer.js';
@@ -160,6 +161,8 @@ export class RemoteBrowser {
   private iceServers: IceServer[] = [];
   private statsTimer: ReturnType<typeof setInterval> | null = null;
   private mediaSample: { pc: RTCPeerConnection; ws: WebSocket; frameSequence: number; at: number; media: ConnectionMediaSnapshot } | null = null;
+  /** The current peer's handshake, from neko's offer on (failure and first-frame snapshots). */
+  private handshake: HandshakeProbe | null = null;
   /** When a stats reading last saw video bytes arrive: the picture's path worked then. */
   private mediaProgressAt = -Infinity;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -772,7 +775,7 @@ export class RemoteBrowser {
     const mediaStage = ['signal_received', 'peer_connected', 'first_frame', 'failed', 'closed', 'media_restart', 'media_recovered'].includes(stage);
     const key = mediaStage ? `${frameSequence}:${stage}:${code ?? ''}` : stage;
     if (!attempt || attempt.stages.has(key)) return;
-    const media = stage === 'failed' || stage === 'first_frame' ? this.captureMediaSnapshot() : undefined;
+    const media = stage === 'failed' || stage === 'first_frame' ? this.captureMediaSnapshot(stage) : undefined;
     if (attempt !== this.diagnosticAttempt || frameSequence !== this.frameSequence) return;
     const report = ConnectionDiagnostic.safeParse({
       attemptId: attempt.id,
@@ -794,7 +797,7 @@ export class RemoteBrowser {
     } catch { /* Diagnostics must not affect the viewer. */ }
   }
 
-  private captureMediaSnapshot(): ConnectionMediaSnapshot | undefined {
+  private captureMediaSnapshot(stage: 'failed' | 'first_frame'): ConnectionMediaSnapshot | undefined {
     const pc = this.pc;
     const ws = this.ws;
     const frameSequence = this.frameSequence;
@@ -815,6 +818,10 @@ export class RemoteBrowser {
       const parsed = ConnectionMediaSnapshot.safeParse({ playback });
       if (parsed.success && parsed.data.playback) media.playback = parsed.data.playback;
     } catch { /* A renderer cannot break connection handling or add unvalidated fields. */ }
+    // How far this peer's handshake got: at the first frame, how long each step took; at a failure
+    // before any picture, also where it stopped. A peer that was live failed for another reason.
+    const handshake = this.handshake?.pc === pc ? this.handshake : null;
+    if (handshake && (stage === 'first_frame' || !this.firstFrame)) media.handshake = handshake.snapshot(stage === 'failed' ? { media } : undefined);
     if (this.pc !== pc || this.ws !== ws || this.frameSequence !== frameSequence || this.diagnosticAttempt?.id !== attemptId) return undefined;
     return Object.keys(media).length ? media : undefined;
   }
@@ -1039,6 +1046,7 @@ export class RemoteBrowser {
 
   private videoChanged(id: unknown) {
     if (typeof id !== 'string' || !(VIDEO_QUALITIES as readonly string[]).includes(id) || id === this.videoId) return;
+    if (this.videoId !== null) this.qualityWindow.levelChanged();
     this.videoId = id as VideoQuality;
     this.opts.onVideo?.(this.videoId);
   }
@@ -1216,6 +1224,10 @@ export class RemoteBrowser {
     const pc = new PC({ iceServers: servers, iceTransportPolicy: relayOnly ? 'relay' : 'all' });
     this.pc = pc;
     const frameSequence = this.frameSequence;
+    // Until the peer connects, the probe's readings are the failure snapshot's media evidence.
+    this.handshake = new HandshakeProbe(pc, (media, at) => {
+      if (this.pc === pc && this.ws === ws && this.frameSequence === frameSequence && !this.statsTimer) this.mediaSample = { pc, ws, frameSequence, at, media };
+    });
     let mediaStream: MediaStream | null = null;
 
     pc.ontrack = (e) => {
@@ -1253,6 +1265,7 @@ export class RemoteBrowser {
         }
         this.peerConnected = true;
         this.reached = 'peer';
+        this.handshake?.connected();
         this.diagnostic('peer_connected');
         this.sendNeko({ event: EV.CONTROL_REQUEST });
         // Waiting for a first frame must not also stop the measurements and quality changes
@@ -1435,6 +1448,8 @@ export class RemoteBrowser {
     this.iceRestarting = false;
     this.frameSequence++;
     this.mediaSample = null;
+    this.handshake?.stop();
+    this.handshake = null;
     if (this.opts.requireFirstFrame && this.state === 'live') this.setState('connecting');
     // Every path that loses the agent ends here (a new offer keeps it); the agent discards the
     // part of a transfer it received.

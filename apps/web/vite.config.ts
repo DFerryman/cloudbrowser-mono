@@ -6,10 +6,20 @@ import { defineConfig } from 'vite';
 
 const repository = fileURLToPath(new URL('../..', import.meta.url));
 const git = (...args: string[]) => execFileSync('git', args, { cwd: repository, encoding: 'utf8' }).trim();
+/** The commit a build was made from (a trailing + when the tree had changes); '' outside a checkout. */
+function commit() {
+  try {
+    return git('rev-parse', '--short=12', 'HEAD') + (git('status', '--porcelain') !== '' ? '+' : '');
+  } catch {
+    return '';
+  }
+}
 
 // In development the api Worker (wrangler dev, port 8787) serves /api; Vite proxies to it so the
 // app and the API share an origin, as they do in production.
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  // Sent with every api request (src/lib/api.ts) so a report names the code that sent it.
+  define: { __CLIENT_BUILD__: JSON.stringify(command === 'build' ? commit() : '') },
   plugins: [
     react(),
     tailwindcss(),
@@ -38,4 +48,4 @@ export default defineConfig({
   // No public source maps: everything in dist/ is served as a static asset.
   // Never inline assets as data: URIs, so the CSP can stay at font-src 'self'.
   build: { sourcemap: false, assetsInlineLimit: 0 },
-});
+}));

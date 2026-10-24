@@ -1,4 +1,4 @@
-import type { ConnectionMediaSnapshot } from '@cloudbrowser/contracts';
+import type { ConnectionHandshake, ConnectionMediaSnapshot } from '@cloudbrowser/contracts';
 
 /** Connection quality read from RTCPeerConnection.getStats() every 2 s (page 5, "Quality telemetry"). */
 export interface ViewerStats {
@@ -89,7 +89,7 @@ function mediaSnapshot(pair: AnyStat | undefined, video: AnyStat | undefined, al
   return media;
 }
 
-export async function readStats(pc: RTCPeerConnection, previous: { bytes: number; at: number } | null) {
+async function statsOf(pc: RTCPeerConnection) {
   const report = await pc.getStats();
   const all = new Map<string, AnyStat>();
   report.forEach((s: AnyStat) => all.set(s.id, s));
@@ -97,6 +97,54 @@ export async function readStats(pc: RTCPeerConnection, previous: { bytes: number
   for (const s of all.values()) {
     if (s.type === 'inbound-rtp' && s.isRemote !== true && (s.kind === 'video' || s.mediaType === 'video')) video = s;
   }
+  return { all, video };
+}
+
+/** The handshake's counts and states in an RTCStatsReport (ConnectionHandshake): never addresses or URLs. */
+function handshakeCounts(all: Map<string, AnyStat>, video: AnyStat | undefined): ConnectionHandshake {
+  const candidates = { relayUdp: 0, relayTcp: 0, relayTls: 0, other: 0 };
+  const pairs = { succeeded: 0, inProgress: 0, waiting: 0, failed: 0 };
+  let checksSent = 0;
+  let checksAnswered = 0;
+  for (const s of all.values()) {
+    if (s.type === 'local-candidate') {
+      const relay = s.candidateType === 'relay' ? allowed(s.relayProtocol, ['udp', 'tcp', 'tls'] as const) : undefined;
+      if (relay === 'udp') candidates.relayUdp++;
+      else if (relay === 'tcp') candidates.relayTcp++;
+      else if (relay === 'tls') candidates.relayTls++;
+      else candidates.other++;
+    } else if (s.type === 'candidate-pair') {
+      if (s.state === 'succeeded') pairs.succeeded++;
+      else if (s.state === 'in-progress') pairs.inProgress++;
+      else if (s.state === 'failed') pairs.failed++;
+      else pairs.waiting++;
+      checksSent += counter(s.requestsSent) ?? 0;
+      checksAnswered += counter(s.responsesReceived) ?? 0;
+    }
+  }
+  const transports = [...all.values()].filter((s) => s.type === 'transport');
+  const transport = (typeof video?.transportId === 'string' ? all.get(video.transportId) : undefined) ?? (transports.length === 1 ? transports[0] : undefined);
+  const handshake: ConnectionHandshake = { candidates, pairs };
+  if (Number.isSafeInteger(checksSent)) handshake.checksSent = checksSent;
+  if (Number.isSafeInteger(checksAnswered)) handshake.checksAnswered = checksAnswered;
+  const dtlsState = allowed(transport?.dtlsState, ['new', 'connecting', 'connected', 'closed', 'failed'] as const);
+  if (dtlsState) handshake.dtlsState = dtlsState;
+  const bytes = counter(transport?.bytesReceived);
+  if (bytes !== undefined) handshake.transportBytesReceived = bytes;
+  return handshake;
+}
+
+/**
+ * A reading for a handshake that has no picture yet (HandshakeProbe): the media evidence a failure
+ * snapshot carries, and the handshake's own counts.
+ */
+export async function readHandshake(pc: RTCPeerConnection) {
+  const { all, video } = await statsOf(pc);
+  return { media: mediaSnapshot(selectedPair(all, video), video, all), handshake: handshakeCounts(all, video) };
+}
+
+export async function readStats(pc: RTCPeerConnection, previous: { bytes: number; at: number } | null) {
+  const { all, video } = await statsOf(pc);
   const pair = selectedPair(all, video);
   const bytes = Number(video?.bytesReceived ?? 0);
   const lost = Number(video?.packetsLost ?? 0);
@@ -117,6 +165,10 @@ export async function readStats(pc: RTCPeerConnection, previous: { bytes: number
     jitterBufferEmitted: Number(video?.jitterBufferEmittedCount ?? Number.NaN),
     decodeSeconds: Number(video?.totalDecodeTime ?? Number.NaN),
     dropped: Number(video?.framesDropped ?? Number.NaN),
+    nacks: Number(video?.nackCount ?? Number.NaN),
+    retransmits: Number(video?.retransmittedPacketsReceived ?? Number.NaN),
+    plis: Number(video?.pliCount ?? Number.NaN),
+    keyframes: Number(video?.keyFramesDecoded ?? Number.NaN),
   };
   const stats: ViewerStats = {
     rttMs: typeof pair?.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : null,
