@@ -328,6 +328,14 @@ on the app host and `/.well-known/oauth-protected-resource/` on the gateway host
   every key and sign-in of every browser, or all at once), deleting the browser, and "Sign out
   everywhere". Disconnect all, sign-out-everywhere and deletion also spend approvals whose code
   was not exchanged yet. A sign-in that ended is listed for one more day.
+- **Web** (`apps/web`): while sign-in is on (the api's `MCP_OAUTH`, reported as `signIn` in the
+  browser's automation status), the Coding agent panel opens on **Sign in with browser** beside
+  **Access key** (the last choice is remembered): a setup for the agent with the URL alone
+  (`signInHandoff` in `agent-setup.ts`) and per-client sign-in steps folded under "Set it up by
+  hand". The approval page is `features/oauth/AuthorizePage.tsx`; it signs the visitor in first,
+  keeps the request, and returns to the app with `location.assign`. The panel's list and the
+  account page's **Connected agents** show keys and sign-ins together, with the app's verified
+  host or "name not verified", and Disconnect (one, or all on the account page).
 - **Housekeeping**: nightly, codes expired over a day ago, replaced refresh tokens of sign-ins that
   are over, and apps that never got a sign-in within a week are deleted (some clients register on
   every connect). Rate limits (`OAUTH_LIMITER`): registration per address, refreshes per sign-in,

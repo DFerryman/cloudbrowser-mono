@@ -94,7 +94,7 @@ export function mcpUrl(env: Pick<Env, 'GATEWAY_URL'>, instanceId: string): strin
 /** A browser the owner deleted no longer has coding-agent access of any kind. */
 export const unavailable = (row: Pick<InstanceRow, 'desiredState' | 'status'>) => row.desiredState === 'deleted' || ['deleting', 'purged'].includes(row.status);
 
-export async function automationStatus(db: Db, env: Pick<Env, 'GATEWAY_URL'>, row: InstanceRow): Promise<AutomationStatus> {
+export async function automationStatus(db: Db, env: Pick<Env, 'GATEWAY_URL' | 'MCP_OAUTH'>, row: InstanceRow): Promise<AutomationStatus> {
   const now = Date.now();
   const [clients, [session]] = await Promise.all([
     db.select({ client: automationClients, app: { id: oauthClients.id, kind: oauthClients.kind } }).from(automationClients)
@@ -107,6 +107,7 @@ export async function automationStatus(db: Db, env: Pick<Env, 'GATEWAY_URL'>, ro
     enabled: row.agentAccess,
     mode: controlModeOf(row),
     mcpUrl: mcpUrl(env, row.id),
+    signIn: env.MCP_OAUTH === 'on',
     clients: clients.filter((c) => listed(c.client, now)).map((c) => toAutomationClient(c.client, c.app)),
     // A session the gateway could not end (a lost close) is not shown forever.
     session: session && now - session.lastSeenAt.getTime() < AUTOMATION_LIMITS.maxSessionMs

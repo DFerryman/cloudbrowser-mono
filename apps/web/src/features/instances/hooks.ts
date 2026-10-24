@@ -1,5 +1,5 @@
 import { REGION_INFO } from '@cloudbrowser/contracts';
-import type { Accepted, AgentControlMode, AgentKey, AutomationStatus, CreateAgentKeyBody, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, NeverSleepQuote, Region } from '@cloudbrowser/contracts';
+import type { Accepted, AgentConnection, AgentControlMode, AgentKey, AutomationStatus, CreateAgentKeyBody, CreateInstanceBody, Instance, InstanceStorage, InstanceUsage, IpCheck, Me, NeverSleepQuote, Region } from '@cloudbrowser/contracts';
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { useRef } from 'react';
 import { api, ApiError } from '../../lib/api.js';
@@ -144,7 +144,28 @@ export function useCreateAgentKey() {
 export function useRevokeClient() {
   return useMutation({
     mutationFn: ({ id, clientId }: { id: string; clientId: string }) => api<void>('DELETE', `/instances/${id}/automation/clients/${clientId}`),
-    onSettled: (_d, _e, v) => void queryClient.invalidateQueries({ queryKey: keys.automation(v.id) }),
+    onSettled: (_d, _e, v) => {
+      void queryClient.invalidateQueries({ queryKey: keys.automation(v.id) });
+      void queryClient.invalidateQueries({ queryKey: keys.agentConnections });
+    },
+  });
+}
+
+/** Every key and sign-in of every browser of the account (the account page's Connected agents). */
+export const useAgentConnections = () =>
+  useQuery({ queryKey: keys.agentConnections, queryFn: () => api<AgentConnection[]>('GET', '/agent-connections'), refetchInterval: 30_000 });
+
+/** Disconnects one key or sign-in (`clientId`), or every one of them (no `clientId`). */
+export function useDisconnectAgents() {
+  return useMutation({
+    mutationFn: async ({ clientId }: { clientId?: string }) => {
+      if (clientId) await api<void>('DELETE', `/agent-connections/${clientId}`);
+      else await api<{ revoked: number }>('DELETE', '/agent-connections');
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.agentConnections });
+      void queryClient.invalidateQueries({ predicate: (q) => q.queryKey[0] === 'instance' && q.queryKey[2] === 'automation' });
+    },
   });
 }
 

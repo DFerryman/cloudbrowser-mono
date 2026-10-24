@@ -46,6 +46,8 @@
     "TURNSTILE_SITE_KEY": "0x4AAAAAAFe-qsMj-V1PL5xE",
     // Public URL of the session gateway Worker (apps/gateway), e.g. wss://connect.example.com.
     "GATEWAY_URL": "wss://connect.nevazu.com",
+    // Coding agents' OAuth sign-in in the web app; turned on with the gateway's MCP_OAUTH.
+    "MCP_OAUTH": "off",
     // Prepaid top-ups (page 6). Stripe takes them when its secrets STRIPE_SECRET_KEY,
     // STRIPE_WEBHOOK_SECRET and STRIPE_TOPUP_PRICES are all valid; never declare them here, since
     // vars in this file override what the dashboard keeps (docs/deploy-cloudflare.md, "3b").

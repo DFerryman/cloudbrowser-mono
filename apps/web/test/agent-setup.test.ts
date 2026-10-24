@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { agentHandoff, agentServer, agentSetups, keyEnvCommands, keyEnvName, mcpConfig, serverName, SETUP_GUIDE_URL } from '../src/features/instances/agent-setup.js';
+import { agentHandoff, agentServer, agentSetups, keyEnvCommands, keyEnvName, mcpConfig, serverName, SETUP_GUIDE_URL, signInConfig, signInHandoff, signInSetups } from '../src/features/instances/agent-setup.js';
 
 const url = 'https://connect.nevazu.com/mcp/abc123';
 const server = agentServer({ url, browserName: 'Work' });
@@ -53,5 +53,29 @@ describe('coding-agent setup', () => {
     const { unix, windows } = keyEnvCommands('NEVAZU_WORK_KEY', 'nvzk_abc');
     expect(unix).toContain(`echo 'export NEVAZU_WORK_KEY="nvzk_abc"' >> ~/.zshrc`);
     expect(windows).toContain('setx NEVAZU_WORK_KEY "nvzk_abc"');
+  });
+
+  it('signs an agent in with the URL alone: no key, no header, no variable', () => {
+    expect(JSON.parse(signInConfig(server))).toEqual({ mcpServers: { 'nevazu-work': { type: 'http', url } } });
+    const handoff = signInHandoff(server, 'Work');
+    expect(handoff).toContain(signInConfig(server));
+    expect(handoff).toContain(SETUP_GUIDE_URL);
+    expect(handoff).toContain('Signing in instead of a key');
+    expect(handoff).not.toMatch(/NEVAZU_WORK_KEY|nvzk_|Bearer/);
+    const setups = signInSetups(server);
+    expect(setups.map((s) => s.client)).toEqual(['claude-code', 'claude-app', 'codex', 'cursor', 'vscode', 'windsurf', 'gemini', 'opencode', 'other']);
+    for (const setup of setups) {
+      expect(setup.code).toContain(url);
+      expect(setup.code).not.toMatch(/KEY|Authorization|Bearer|headers/);
+    }
+    const code = (client: string) => setups.find((s) => s.client === client)!.code;
+    expect(code('claude-code')).toBe(`claude mcp add --transport http --scope user nevazu-work ${url}`);
+    expect(code('claude-app')).toBe(url);
+    expect(code('codex')).toContain('codex mcp login nevazu-work');
+    expect(JSON.parse(code('cursor'))).toEqual({ mcpServers: { 'nevazu-work': { url } } });
+    expect(JSON.parse(code('vscode'))).toEqual({ servers: { 'nevazu-work': { type: 'http', url } } });
+    expect(JSON.parse(code('windsurf'))).toEqual({ mcpServers: { 'nevazu-work': { serverUrl: url } } });
+    expect(JSON.parse(code('gemini'))).toEqual({ mcpServers: { 'nevazu-work': { httpUrl: url } } });
+    expect(JSON.parse(code('opencode')).mcp['nevazu-work']).toEqual({ type: 'remote', url, enabled: true });
   });
 });

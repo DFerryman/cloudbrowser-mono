@@ -27,5 +27,6 @@ export const keys = {
   instanceUsage: (id: string, month: string) => ['instance', id, 'usage', month] as const,
   neverSleep: (id: string) => ['instance', id, 'never-sleep'] as const,
   automation: (id: string) => ['instance', id, 'automation'] as const,
+  agentConnections: ['agent-connections'] as const,
   operation: (id: string) => ['operation', id] as const,
 };

@@ -1,12 +1,12 @@
 import type { AgentControlMode, AgentKey, AutomationClient, AutomationStatus, Instance } from '@cloudbrowser/contracts';
 import { Button, cn, Hint, Input, Label, Section, Select, SidePanel, useToast } from '@cloudbrowser/ui';
-import { Bot, Check, ChevronRight, Copy, Eye, EyeOff, Hand, KeyRound, Play, Settings, Trash2 } from 'lucide-react';
+import { Bot, Check, ChevronRight, Copy, Eye, EyeOff, Hand, KeyRound, LogIn, Play, Settings, ShieldAlert, ShieldCheck, Trash2 } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 import { DocsLink } from '../../app/DocsLink.js';
 import { useI18n, useRelativeTime } from '../../lib/i18n.js';
 import type { MessageKey } from '../../messages/en.js';
-import { agentHandoff, agentServer, agentSetups, keyEnvCommands, type AgentClient } from './agent-setup.js';
+import { agentHandoff, agentServer, agentSetups, keyEnvCommands, signInHandoff, signInSetups, type AgentClient, type SignInClient } from './agent-setup.js';
 import { useAutomation, useCreateAgentKey, useRevokeClient, useSetControl, useUpdateInstance } from './hooks.js';
 
 type Expiry = '7' | '30' | '90' | '365' | 'never';
@@ -117,13 +117,111 @@ function Fold({ title, aside, children, testId }: { title: ReactNode; aside?: Re
   );
 }
 
+function UrlBox({ url, copy }: { url: string; copy: ReturnType<typeof useCopy> }) {
+  const { t } = useI18n();
+  return (
+    <div>
+      <p className="text-xs text-muted">{t('agents.connect.url')}</p>
+      <div className="mt-1 flex items-center gap-2 border border-border bg-surface px-3 py-1.5">
+        <code className="min-w-0 flex-1 truncate font-mono text-xs" data-testid="mcp-url">{url}</code>
+        <CopyButton id="url" text={url} copy={copy} />
+      </div>
+    </div>
+  );
+}
+
+type Method = 'signin' | 'key';
+const METHOD_KEY = 'nevazu.agent.method';
+
+/** Sign in or access key: signing in first, and the last choice remembered in this browser. */
+function useMethod(): [Method, (m: Method) => void] {
+  const [method, setMethod] = useState<Method>(() => {
+    try {
+      return localStorage.getItem(METHOD_KEY) === 'key' ? 'key' : 'signin';
+    } catch {
+      return 'signin';
+    }
+  });
+  const choose = (m: Method) => {
+    setMethod(m);
+    try {
+      localStorage.setItem(METHOD_KEY, m);
+    } catch {
+      // Not remembered; the choice still applies here.
+    }
+  };
+  return [method, choose];
+}
+
 /**
- * Connecting an agent (docs/agent-access.md): nothing to install, and the agent sets itself up.
- * The user's part is the secret: create a key (shown once; only its hash is kept) and save it in
- * an environment variable. The agent gets a short setup that refers to the variable and points it
- * to the steps for its own client; the same steps, filled in, are folded away for doing it by hand.
+ * Connecting an agent (docs/agent-access.md): nothing to install, and the agent sets itself up,
+ * either signing in (no secret; the owner approves it on nevazu.com) or with an access key. Both
+ * stay mounted, so a key shown once is not lost by looking at the other tab.
  */
 function AgentConnect({ instance: i, status }: { instance: Instance; status: AutomationStatus | undefined }) {
+  const { t } = useI18n();
+  const [method, setMethod] = useMethod();
+  if (!status?.signIn) return <KeyConnect instance={i} status={status} />;
+  return (
+    <div className="space-y-5">
+      <Choices
+        label={t('agents.method')}
+        options={[{ id: 'signin', label: t('agents.method.signin') }, { id: 'key', label: t('agents.method.key') }]}
+        value={method}
+        onChange={setMethod}
+      />
+      <div hidden={method !== 'signin'}><SignInConnect instance={i} status={status} /></div>
+      <div hidden={method !== 'key'}><KeyConnect instance={i} status={status} /></div>
+    </div>
+  );
+}
+
+/**
+ * Signing an agent in: a setup with the URL alone for the agent, then the owner's approval on
+ * nevazu.com, where the permission and how long it lasts are chosen. The per-client steps are
+ * folded away, as for keys.
+ */
+function SignInConnect({ instance: i, status }: { instance: Instance; status: AutomationStatus }) {
+  const { t } = useI18n();
+  const copy = useCopy();
+  const [client, setClient] = useState<SignInClient>('claude-code');
+  if (!status.mcpUrl) return <p className="text-sm text-muted">{t('common.loading')}</p>;
+  const server = agentServer({ url: status.mcpUrl, browserName: i.name });
+  const setups = signInSetups(server);
+  const setup = setups.find((s) => s.client === client) ?? setups[0]!;
+  const label = (c: SignInClient, fallback: string) => (c === 'other' ? t('agents.setup.other') : c === 'claude-app' ? t('agents.signin.claudeApp') : fallback);
+  const where = setup.client === 'other' ? t('agents.setup.otherWhere') : setup.client === 'claude-app' ? t('agents.signin.claudeAppWhere') : setup.where === 'Terminal' ? t('agents.setup.terminal') : setup.where;
+  return (
+    <div className="space-y-6">
+      <Step n={1} title={t('agents.step.handoff')}>
+        <CodeBox id="signin-handoff" label={t('agents.handoff.label')} code={signInHandoff(server, i.name)} copy={copy} wrap compact testId="agent-signin-handoff" />
+        <Hint>{t('agents.signin.handoffHint')}</Hint>
+      </Step>
+      <Step n={2} title={t('agents.signin.step.approve')}>
+        <p className="text-sm leading-relaxed text-muted">{t('agents.signin.approveBody')}</p>
+      </Step>
+      <Fold title={t('agents.manual.title')} testId="agent-signin-manual">
+        <UrlBox url={server.url} copy={copy} />
+        <Choices
+          label={t('agents.setup.title')}
+          options={setups.map((s) => ({ id: s.client, label: label(s.client, s.label) }))}
+          value={setup.client}
+          onChange={setClient}
+        />
+        <CodeBox id={`signin-${setup.client}`} label={where} code={setup.code} copy={copy} testId="agent-signin-setup" />
+        <Hint>{t(`agents.signin.hint.${setup.client}` as MessageKey, { name: server.name })}</Hint>
+      </Fold>
+    </div>
+  );
+}
+
+/**
+ * Connecting with an access key. The user's part is the secret: create a key (shown once; only
+ * its hash is kept) and save it in an environment variable. The agent gets a short setup that
+ * refers to the variable and points it to the steps for its own client; the same steps, filled
+ * in, are folded away for doing it by hand.
+ */
+function KeyConnect({ instance: i, status }: { instance: Instance; status: AutomationStatus | undefined }) {
   const { t, errorMessage } = useI18n();
   const toast = useToast();
   const create = useCreateAgentKey();
@@ -223,13 +321,7 @@ function AgentConnect({ instance: i, status }: { instance: Instance; status: Aut
 
       {server && setup ? (
         <Fold title={t('agents.manual.title')} testId="agent-manual">
-          <div>
-            <p className="text-xs text-muted">{t('agents.connect.url')}</p>
-            <div className="mt-1 flex items-center gap-2 border border-border bg-surface px-3 py-1.5">
-              <code className="min-w-0 flex-1 truncate font-mono text-xs" data-testid="mcp-url">{server.url}</code>
-              <CopyButton id="url" text={server.url} copy={copy} />
-            </div>
-          </div>
+          <UrlBox url={server.url} copy={copy} />
           <Choices
             label={t('agents.setup.title')}
             options={setups.map((s) => ({ id: s.client, label: s.client === 'other' ? t('agents.setup.other') : s.label }))}
@@ -250,41 +342,73 @@ function AgentConnect({ instance: i, status }: { instance: Instance; status: Aut
   );
 }
 
-/** The browser's keys (and paired bridges from before), with the connected one marked. */
-function AgentKeys({ instance: i, status, heading = true }: { instance: Instance; status: AutomationStatus | undefined; heading?: boolean }) {
-  const { t, errorMessage, locale } = useI18n();
+/**
+ * One key or sign-in: what it is, the app's verified host (or that its name is unverified), last
+ * use and when it ends. Shared by a browser's list and the account's Connected agents.
+ */
+export function AgentClientRow({ client: c, browserName, connected = false, pending, onRemove }: {
+  client: AutomationClient;
+  /** The browser it belongs to, on the account page. */
+  browserName?: string;
+  connected?: boolean;
+  pending: boolean;
+  onRemove: () => void;
+}) {
+  const { t, locale } = useI18n();
   const relative = useRelativeTime();
+  const signIn = c.kind === 'oauth';
+  const ended = !!c.expiresAt && Date.parse(c.expiresAt) <= Date.now();
+  const date = c.expiresAt ? new Date(c.expiresAt).toLocaleDateString(locale) : '';
+  const details = connected ? [t('agents.keys.connected')] : [
+    c.lastSeenAt ? (c.lastClient ? t('agents.keys.lastUsedBy', { when: relative(c.lastSeenAt) ?? '', client: c.lastClient }) : t('agents.keys.lastUsed', { when: relative(c.lastSeenAt) ?? '' })) : t('agents.keys.neverUsed'),
+    c.expiresAt ? (ended ? t(signIn ? 'agents.keys.ended' : 'agents.keys.expired') : t(signIn ? 'agents.keys.endsOn' : 'agents.keys.expiresOn', { date })) : null,
+  ];
+  const tag = signIn ? t('agents.keys.tag.signin') : c.kind === 'bridge' ? t('agents.keys.legacy') : t('agents.keys.tag.key');
+  return (
+    <li className="flex flex-wrap items-center justify-between gap-2 py-2.5">
+      <span className="min-w-0">
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-medium">
+          {signIn ? <LogIn className="size-4 text-muted" aria-hidden /> : <KeyRound className="size-4 text-muted" aria-hidden />} {c.name}
+          {c.keyPrefix ? <code className="font-mono text-xs font-normal text-subtle">{c.keyPrefix}…</code> : null}
+          <span className="border border-border px-1 text-[11px] font-normal text-subtle">{tag}</span>
+          {c.capability === 'view' ? <span className="text-xs font-normal text-subtle">{t('agents.keys.viewOnly')}</span> : null}
+        </span>
+        {signIn ? (
+          <span className="mt-0.5 flex items-center gap-1 text-xs text-subtle">
+            {c.verifiedHost
+              ? <><ShieldCheck className="size-3.5 shrink-0" aria-hidden /> {t('agents.keys.verified', { host: c.verifiedHost })}</>
+              : <><ShieldAlert className="size-3.5 shrink-0" aria-hidden /> {t('agents.keys.unverified')}</>}
+          </span>
+        ) : null}
+        {browserName ? <span className="block text-xs text-muted">{t('agents.keys.browser', { name: browserName })}</span> : null}
+        <span className={cn('block text-xs', connected ? 'text-running' : 'text-subtle')}>{details.filter(Boolean).join(' · ')}</span>
+      </span>
+      <Button size="sm" disabled={pending} onClick={onRemove}>
+        <Trash2 /> {t(signIn ? 'agents.disconnect' : 'agents.revoke')}
+      </Button>
+    </li>
+  );
+}
+
+/** The browser's keys and sign-ins (and paired bridges from before), with the connected one marked. */
+function AgentKeys({ instance: i, status, heading = true }: { instance: Instance; status: AutomationStatus | undefined; heading?: boolean }) {
+  const { t, errorMessage } = useI18n();
   const toast = useToast();
   const revoke = useRevokeClient();
   const connectedId = status?.session?.clientId ?? null;
-  const describe = (c: AutomationClient) => {
-    if (connectedId === c.id) return t('agents.keys.connected');
-    const parts = [
-      c.lastSeenAt ? (c.lastClient ? t('agents.keys.lastUsedBy', { when: relative(c.lastSeenAt) ?? '', client: c.lastClient }) : t('agents.keys.lastUsed', { when: relative(c.lastSeenAt) ?? '' })) : t('agents.keys.neverUsed'),
-      c.expiresAt ? (Date.parse(c.expiresAt) <= Date.now() ? t('agents.keys.expired') : t('agents.keys.expiresOn', { date: new Date(c.expiresAt).toLocaleDateString(locale) })) : null,
-    ];
-    return parts.filter(Boolean).join(' · ');
-  };
   return (
     <div>
       {heading ? <p className="mb-2 text-sm font-medium">{t('agents.keys')}</p> : null}
       {status?.clients.length ? (
         <ul className="divide-y divide-border text-sm" data-testid="agent-keys">
           {status.clients.map((c) => (
-            <li key={c.id} className="flex flex-wrap items-center justify-between gap-2 py-2.5">
-              <span className="min-w-0">
-                <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-medium">
-                  <KeyRound className="size-4 text-muted" aria-hidden /> {c.name}
-                  {c.keyPrefix ? <code className="font-mono text-xs font-normal text-subtle">{c.keyPrefix}…</code> : null}
-                  {c.kind === 'bridge' ? <span className="text-xs font-normal text-subtle">{t('agents.keys.legacy')}</span> : null}
-                  {c.capability === 'view' ? <span className="text-xs font-normal text-subtle">{t('agents.keys.viewOnly')}</span> : null}
-                </span>
-                <span className={cn('block text-xs', connectedId === c.id ? 'text-running' : 'text-subtle')}>{describe(c)}</span>
-              </span>
-              <Button size="sm" disabled={revoke.isPending} onClick={() => revoke.mutate({ id: i.id, clientId: c.id }, { onError: (e) => toast(errorMessage(e), 'error') })}>
-                <Trash2 /> {t('agents.revoke')}
-              </Button>
-            </li>
+            <AgentClientRow
+              key={c.id}
+              client={c}
+              connected={connectedId === c.id}
+              pending={revoke.isPending}
+              onRemove={() => revoke.mutate({ id: i.id, clientId: c.id }, { onError: (e) => toast(errorMessage(e), 'error') })}
+            />
           ))}
         </ul>
       ) : (
