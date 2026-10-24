@@ -355,6 +355,21 @@ describe('an agent asking for control while the user holds it', () => {
     expect(statuses(viewer).at(-1)!.request).toBeUndefined();
   });
 
+  it('ends a key\'s ask when that key is revoked, even without a session', async () => {
+    const viewer = (await fx.open('viewer')).socket;
+    fx.d1.sqlite.exec(`UPDATE browser_instances SET agent_control = 'user' WHERE id = 'browser1'`);
+    await fx.call('act', { steps: [{ type: 'wait', ms: 1 }] }, { key: OTHER_KEY });
+    await fx.ctx.settle();
+    expect(fx.env.API.openAutomationSession).not.toHaveBeenCalled();
+    expect(statuses(viewer).at(-1)!.request).toBeDefined();
+    await internal().revokeAutomation('browser1', 'client1');
+    await fx.ctx.settle();
+    expect(statuses(viewer).at(-1)!.request).toBeDefined();
+    await internal().revokeAutomation('browser1', 'client2');
+    await fx.ctx.settle();
+    expect(statuses(viewer).at(-1)!.request).toBeUndefined();
+  });
+
   it('lets the ask lapse when the agent stops asking', async () => {
     const viewer = (await fx.open('viewer')).socket;
     fx.d1.sqlite.exec(`UPDATE browser_instances SET agent_control = 'user' WHERE id = 'browser1'`);
