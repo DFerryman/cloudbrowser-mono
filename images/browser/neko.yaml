@@ -30,12 +30,17 @@ desktop:
 capture:
   video:
     codec: h264
-    ids: [full, high, medium, low]
+    ids: [full, high, medium, low, square]
     pipelines:
-      full:
+      full: &full
         fps: 30
-        # Constrained baseline: what neko's H.264 SDP offers (profile-level-id 42e01f).
-        gst_prefix: "! video/x-raw,format=I420"
+        # Square pixels for every desktop shape. The X server keeps the physical size of its first,
+        # 16:9 mode through every resize, so ximagesrc tags any other shape with a pixel aspect
+        # ratio (11:10, 16:15, more for a portrait desktop) that x264 writes into the stream;
+        # Chrome ignores it, Safari draws the picture stretched. capssetter sets it to 1:1 (it has
+        # to follow the I420 caps). The viewer asks for a desktop the shape of its view only from
+        # an image that lists the `square` video below (ANY_SHAPE_VIDEO in packages/viewer).
+        gst_prefix: &square-pixels '! video/x-raw,format=I420 ! capssetter caps="video/x-raw,pixel-aspect-ratio=(fraction)1/1"'
         gst_encoder: x264enc
         gst_params: &h264
           pass: qual                 # constant quality (CRF) at `quantizer` ...
@@ -51,10 +56,11 @@ capture:
           byte-stream: "true"
           tune: zerolatency          # no lookahead or B-frames: each frame leaves as it is encoded
           speed-preset: superfast
+        # Constrained baseline: what neko's H.264 SDP offers (profile-level-id 42e01f).
         gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
       high:
         fps: 30
-        gst_prefix: "! video/x-raw,format=I420"
+        gst_prefix: *square-pixels
         gst_encoder: x264enc
         gst_params:
           <<: *h264
@@ -62,7 +68,7 @@ capture:
         gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
       medium:
         fps: 15
-        gst_prefix: "! video/x-raw,format=I420"
+        gst_prefix: *square-pixels
         gst_encoder: x264enc
         gst_params:
           <<: *h264
@@ -71,13 +77,18 @@ capture:
         gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
       low:
         fps: 10
-        gst_prefix: "! video/x-raw,format=I420"
+        gst_prefix: *square-pixels
         gst_encoder: x264enc
         gst_params:
           <<: *h264
           bitrate: "800"
           key-int-max: "3000"
         gst_suffix: "! video/x-h264,stream-format=byte-stream,profile=constrained-baseline"
+      # Not a picture level: its presence tells the viewer that every shape streams with square
+      # pixels (see `full`). A browser keeps the image it was created with, so older images, which
+      # lack it, keep 16:9 desktops. Requested by id only, so it never costs an encoder; if it is,
+      # it streams as `full`.
+      square: *full
 server:
   bind: "127.0.0.1:8080"   # reached only by the agent on the same VM
 webrtc:

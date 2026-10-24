@@ -1,6 +1,6 @@
 import type { ControlState, GatewayToViewer, IceServer, LiveQualityReport } from '@cloudbrowser/contracts';
 import { ConnectionDiagnostic, ConnectionMediaSnapshot, STREAM, VIDEO_QUALITIES, type VideoQuality } from '@cloudbrowser/contracts';
-import { decode, EV, fitScreen, sameScreen, screenOf, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
+import { ANY_SHAPE_VIDEO, decode, EV, fitScreen, sameScreen, screenOf, shapedScreen, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
 import { QualityController, type VideoPreference } from './quality.js';
 import { KEYSYM, keyIdentity, keysymFor, keysymForName, matchingKeyIdentity, unidentifiedKey, type KeyIdentityEvent } from './keyboard.js';
 import { readStats, type ViewerStats } from './stats.js';
@@ -279,6 +279,11 @@ export class RemoteBrowser {
   /** neko's current mode with its refresh rate, for input diagnostics. */
   get screenMode(): ScreenConfiguration | null {
     return this.remoteScreen ? { ...this.remoteScreen } : null;
+  }
+
+  /** Whether the image streams a desktop of any shape with square pixels, so the screen takes the view's shape. */
+  get anyShapeOffered() {
+    return this.offeredVideos.includes(ANY_SHAPE_VIDEO);
   }
 
   /** A changed preference applies at once to a live stream, without reconnecting. */
@@ -1310,9 +1315,11 @@ export class RemoteBrowser {
     // WebRTC handshake, and the first frame already has the right size instead of being followed
     // by an encoder restart.
     if (!viewport || (!live && (!this.screenConfigurations.length || !this.signalRequested || this.ws?.readyState !== 1))) return;
-    // Neko advertises the actual X11 modes, including their refresh rates. A familiar size
-    // such as 1600×900 can support 25 Hz without supporting 30 Hz.
-    const s = fitScreen(viewport.width, viewport.height, this.screenConfigurations, STREAM.maxRefreshRate, this.opts.maxScreenPixels)
+    // An image that streams any shape gets the view's own shape, and neko creates the mode. On an
+    // older one, neko's advertised X11 modes, including their refresh rates: a familiar size such
+    // as 1600×900 can support 25 Hz without supporting 30 Hz.
+    const s = (this.anyShapeOffered ? shapedScreen(viewport.width, viewport.height, STREAM.maxRefreshRate, this.opts.maxScreenPixels) : null)
+      ?? fitScreen(viewport.width, viewport.height, this.screenConfigurations, STREAM.maxRefreshRate, this.opts.maxScreenPixels)
       ?? { ...fitScreen(viewport.width, viewport.height), rate: 60 }; // Neko v3's default for clients without capabilities.
     const key = `${s.width}x${s.height}@${s.rate}`;
     if (key === this.appliedScreen) return;

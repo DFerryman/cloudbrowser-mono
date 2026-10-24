@@ -1,0 +1,17 @@
+diff --git a/server/pkg/xorg/xorg.c b/server/pkg/xorg/xorg.c
+index a796e37..52e22af 100644
+--- a/server/pkg/xorg/xorg.c
++++ b/server/pkg/xorg/xorg.c
+@@ -389,7 +389,11 @@ XRRModeInfo *XCreateScreenModeInfo(int hdisplay, int vdisplay, short vrefresh) {
+ 
+   modeinfo->width      = mode_info->hdisplay;
+   modeinfo->height     = mode_info->vdisplay;
+-  modeinfo->dotClock   = mode_info->dot_clock * 1000;
++  // Not libxcvt's clock: it rounds it down to a 0.25 MHz step, and a short mode gets more blanking
++  // lines than its line period allowed for, so a mode made for 30 Hz could run at 29.4 Hz. XRandR
++  // rounded that to 29 and refused the mode at 30 (BadValue). The dummy screen has no real clock;
++  // the exact one keeps the rate that was asked for.
++  modeinfo->dotClock   = (unsigned long) mode_info->htotal * mode_info->vtotal * vrefresh;
+   modeinfo->hSyncStart = mode_info->hsync_start;
+   modeinfo->hSyncEnd   = mode_info->hsync_end;
+   modeinfo->hTotal     = mode_info->htotal;

@@ -160,7 +160,8 @@ export function screenOf(value: unknown): ScreenConfiguration | null {
  * aspect ratio from that size and x264 writes it into the stream, so a 16:10, 4:3 or 5:4 desktop
  * is tagged 11:10. Chrome ignores the tag. Safari honours it: it painted a 1280×800 desktop as
  * 1408×800 (aspect 1.76) inside the 1280×800 box the viewer laid out and mapped input to, and
- * taps landed up to 36 px off. ximagesrc keeps 1:1 within about 3% of 16:9.
+ * taps landed up to 36 px off. ximagesrc keeps 1:1 within about 3% of 16:9. Images that list
+ * ANY_SHAPE_VIDEO retag every shape 1:1; this is for the older ones.
  */
 export const squarePixels = (s: { width: number; height: number }) =>
   s.width > 0 && s.height > 0 && Math.abs((s.width * 9) / (s.height * 16) - 1) < 0.03;
@@ -217,4 +218,45 @@ export function fitScreen(width: number, height: number, configurations?: readon
   let best: readonly [number, number] = SCREEN_SIZES[0];
   for (const s of SCREEN_SIZES) if (s[0] <= width && s[1] <= height) best = s;
   return { width: best[0], height: best[1] };
+}
+
+/**
+ * The video an image lists in system/init when it streams a desktop of any shape with square
+ * pixels (images/browser/neko.yaml retags every picture 1:1). A browser keeps the image it was
+ * created with, so on an older one the viewer stays on 16:9 desktops (squarePixels, fitScreen).
+ */
+export const ANY_SHAPE_VIDEO = 'square';
+
+/**
+ * Neither side of a desktop shaped like the view is smaller: Chrome's window will not go below
+ * 500 px wide, and its tab strip and toolbar take about 80 px above the page. A multiple of 8.
+ */
+export const MIN_SCREEN_SIDE = 504;
+
+/** Without a tier's budget, a shaped desktop has at most Premium's pixels (2560×1440). */
+const MAX_SCREEN_PIXELS = 2560 * 1440;
+
+/**
+ * A desktop the shape of the viewport, for an image that streams any shape (ANY_SHAPE_VIDEO): the
+ * viewport's own size, so the page shows at 100% and fills the view, on a monitor, an iPad held
+ * either way or a phone. A side under MIN_SCREEN_SIDE (a phone) makes the desktop that much larger,
+ * shown scaled down; more than `maxPixels` (TIERS[tier].maxScreenPixels) makes it smaller, shown
+ * enlarged. Both sides are rounded down to a multiple of 8: Xorg does so for widths (sameScreen),
+ * x264 needs even sizes, and neko keeps every new size as an Xorg mode, so fewer distinct sizes
+ * leave fewer behind. neko creates the mode at `rate` (STREAM.maxRefreshRate).
+ */
+export function shapedScreen(width: number, height: number, rate = 30, maxPixels = Infinity): ScreenConfiguration | null {
+  if (!(width > 0 && height > 0)) return null;
+  const budget = Math.min(maxPixels, MAX_SCREEN_PIXELS);
+  const scale = Math.min(Math.max(1, MIN_SCREEN_SIDE / width, MIN_SCREEN_SIDE / height), Math.sqrt(budget / (width * height)));
+  const side = (length: number) => Math.max(MIN_SCREEN_SIDE, Math.floor((length * scale) / 8) * 8);
+  let w = side(width);
+  let h = side(height);
+  // A side held at MIN_SCREEN_SIDE can still take the area over the budget (a window that is a
+  // short strip): the other side gives way, and the picture is letterboxed.
+  if (w * h > budget) {
+    if (w > h) w = Math.max(MIN_SCREEN_SIDE, Math.floor(budget / h / 8) * 8);
+    else h = Math.max(MIN_SCREEN_SIDE, Math.floor(budget / w / 8) * 8);
+  }
+  return { width: w, height: h, rate };
 }
