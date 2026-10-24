@@ -198,6 +198,25 @@ describe('picture quality controller', () => {
     expect(run(farther, 0, 120, rtt(500))).toEqual([[4, 'high']]);
   });
 
+  it('does not step down for freezes that resends over a long path explain', () => {
+    // A 230 ms path losing 1% of packets: each resend holds a frame about a round trip, a freeze
+    // at 30 fps whatever the level. The view keeps the level the path allows.
+    const resends = (at: number): QualitySample => ({ ...good(at), rttMs: 230, freezes: 2, nacks: 6 });
+    const far = new QualityController('full', 0);
+    expect(run(far, 0, 120, resends)).toEqual([[4, 'high']]);
+    // A view that starts low on such a path steps up after the usual quiet spells.
+    const low = new QualityController('full', 0, 'low');
+    expect(run(low, 0, 40, resends)).toEqual([[16, 'medium'], [32, 'high']]);
+    // Freezes with no resends asked for (a slow decoder) still count, and so does loss on top.
+    const decoder = new QualityController('full', 0);
+    expect(run(decoder, 0, 30, (at) => ({ ...resends(at), nacks: 0 }))).toEqual([[4, 'high'], [12, 'medium'], [20, 'low']]);
+    const congested = new QualityController('full', 0);
+    expect(run(congested, 0, 16, (at) => ({ ...resends(at), lossRate: 0.1 }))).toEqual([[4, 'high'], [12, 'medium']]);
+    // On a short path a resend is no freeze, so a freeze with resends still says something is wrong.
+    const near = new QualityController('full', 0);
+    expect(run(near, 10_000, 6, (at) => ({ ...good(at), freezes: 1, nacks: 6 }))).toEqual([[14, 'high']]);
+  });
+
   it('settles a longer path at the level it allows, and returns to full when the path shortens', () => {
     const c = new QualityController('full', 0);
     run(c, 10_000, 20, good);

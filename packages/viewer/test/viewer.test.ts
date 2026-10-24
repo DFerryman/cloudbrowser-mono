@@ -2096,6 +2096,40 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
+  it('keeps the level through freezes that resends over a long path explain', async () => {
+    vi.useFakeTimers();
+    const switches = async (nacks: boolean) => {
+      const { b } = setup([], { video: { quality: 'full', auto: true } });
+      await b.connect();
+      const ws = FakeWS.all[0]!;
+      ws.push({ t: 'agent_online' });
+      ws.push({ t: 'neko', data: { event: 'system/init', payload: { webrtc: { videos: ['full', 'high', 'medium', 'low'] } } } });
+      ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer', video: { id: 'high' } } } });
+      await vi.advanceTimersByTimeAsync(0);
+      // 230 ms round trips and nothing lost after resends, 30 fps, but a freeze every reading.
+      let n = 0;
+      FakePC.last.getStats = async () => {
+        n++;
+        return new Map<string, unknown>([
+          ['v', {
+            id: 'v', type: 'inbound-rtp', kind: 'video', transportId: 't', packetsReceived: n * 500, packetsLost: 0, bytesReceived: n * 400_000,
+            framesDecoded: n * 60, framesPerSecond: 30, freezeCount: n, ...(nacks ? { nackCount: n * 5 } : {}),
+          }],
+          ['t', { id: 't', type: 'transport', selectedCandidatePairId: 'pair' }],
+          ['pair', { id: 'pair', type: 'candidate-pair', localCandidateId: 'local', currentRoundTripTime: 0.23 }],
+          ['local', { id: 'local', type: 'local-candidate', candidateType: 'relay' }],
+        ]);
+      };
+      FakePC.last.connect();
+      await vi.advanceTimersByTimeAsync(60_000);
+      b.disconnect();
+      return ws.neko('signal/video').map((v) => (v as { selector: { id: string } }).selector.id);
+    };
+    expect(await switches(true)).toEqual([]);
+    // Freezes with no resends asked for have another cause, which a lower level may help.
+    expect(await switches(false)).toEqual(['medium', 'low']);
+  });
+
   it('recovers picture quality before the first frame without enabling input or reporting live early', async () => {
     vi.useFakeTimers();
     const onStream = vi.fn();

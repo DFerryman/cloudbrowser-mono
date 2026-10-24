@@ -17,6 +17,8 @@ export interface QualitySample {
   lossRate: number;
   /** Video freezes since the previous reading. */
   freezes: number;
+  /** NACKs sent (lost packets asked for again) since the previous reading; null when unknown. */
+  nacks?: number | null;
   /** Video received since the previous reading, in kbit/s; null when unknown. */
   kbps?: number | null;
   rttMs: number | null;
@@ -73,6 +75,15 @@ const MEMORY_KEY = 'cloudbrowser.viewer.level';
 const MEMORY_REFRESH_MS = 60_000;
 const LOSS_LIMIT = 0.06;
 const FPS_SHARE = 0.5;
+/**
+ * A frame that waits for a resent packet waits about a round trip. From this round trip on, that
+ * alone is a freeze at 30 fps (Chrome counts a frame more than 150 ms later than usual), and no
+ * lower level shortens it. On a 230 ms path losing 1% of packets, views that stepped down to low
+ * for those freezes showed 10 fps and froze longer than views held at high, which showed 20 fps
+ * (5 s a minute against 2–4 s). So on a path this long, freezes while resends were asked for,
+ * with nothing else wrong, are not trouble with the level.
+ */
+const RESEND_FREEZE_RTT_MS = 150;
 /**
  * The best round trip is taken over the last minute of readings, so a path that simply got
  * longer (another network, another relay) becomes the new normal instead of looking congested.
@@ -238,7 +249,8 @@ export class QualityController {
     }
     const expected = this.profile.fps[this.quality];
     const severe = s.stalled || s.fps === 0 || s.lossRate > SEVERE_LOSS;
-    const struggling = severe || s.lossRate > LOSS_LIMIT || s.freezes > 0 || (s.fps !== null && s.fps < expected * FPS_SHARE)
+    const resent = (s.nacks ?? 0) > 0 && bestRtt !== null && bestRtt >= RESEND_FREEZE_RTT_MS;
+    const struggling = severe || s.lossRate > LOSS_LIMIT || (s.freezes > 0 && !resent) || (s.fps !== null && s.fps < expected * FPS_SHARE)
       || this.queueBuilding(s.rttMs, bestRtt);
     if (struggling) {
       this.goodSince = null;

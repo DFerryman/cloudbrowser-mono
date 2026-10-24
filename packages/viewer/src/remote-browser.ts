@@ -218,7 +218,7 @@ export class RemoteBrowser {
   private focusAnswered = false;
   /** The last focus question's id: only its answers count. */
   private focusQuestion = 0;
-  private counters: { lost: number; received: number; freezes: number; frames: number; at: number } | null = null;
+  private counters: { lost: number; received: number; freezes: number; frames: number; nacks: number; at: number } | null = null;
   /** The live picture's readings and gateway round trips since the last quality report. */
   private readonly qualityWindow = new QualityWindow();
   private readonly files: FileTransfers;
@@ -1413,7 +1413,7 @@ export class RemoteBrowser {
     let pending = false;
     const interval = this.opts.statsIntervalMs ?? 2000;
     const current = () => this.pc === pc && this.ws === ws && this.frameSequence === frameSequence && this.mediaConnected;
-    this.counters = { lost: 0, received: 0, freezes: 0, frames: 0, at: connectedAt };
+    this.counters = { lost: 0, received: 0, freezes: 0, frames: 0, nacks: 0, at: connectedAt };
     this.statsTimer = setInterval(async () => {
       if (pending || !current()) return;
       pending = true;
@@ -1448,7 +1448,7 @@ export class RemoteBrowser {
     }, interval);
   }
 
-  private adapt(stats: ViewerStats, counters: { lost: number; received: number; freezes: number; frames: number }) {
+  private adapt(stats: ViewerStats, counters: { lost: number; received: number; freezes: number; frames: number; nacks: number }) {
     const before = this.counters;
     const at = Date.now();
     this.counters = { ...counters, at };
@@ -1467,6 +1467,7 @@ export class RemoteBrowser {
       fps: stats.fps ?? decodedFps,
       lossRate: lost + received > 0 ? lost / (lost + received) : 0,
       freezes: Math.max(0, counters.freezes - before.freezes),
+      nacks: Number.isFinite(counters.nacks) && Number.isFinite(before.nacks) ? Math.max(0, counters.nacks - before.nacks) : null,
       kbps: stats.bitrateKbps,
       rttMs: stats.rttMs,
       scale: stats.width && this.remoteScreen?.width ? stats.width / this.remoteScreen.width : null,
