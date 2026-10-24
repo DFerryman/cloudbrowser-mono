@@ -5,8 +5,7 @@ import type { Article } from './types.js';
 export type PolicySlug = 'terms' | 'privacy' | 'refunds';
 
 /**
- * The Terms of Service, Privacy Policy and Refund Policy. Written in plain language for the
- * invite-only pilot; review with counsel before opening sign-ups to the public.
+ * The Terms of Service, Privacy Policy and Refund Policy in each supported language.
  */
 const en: Record<PolicySlug, Article> = {
   terms: {
@@ -17,7 +16,7 @@ const en: Record<PolicySlug, Article> = {
       { h: "Preamble" },
       { p: "These terms apply when you use Nevazu (“the service”, “we”, “us”) at nevazu.com. You accept them when you sign in. Before your first payment, and again whenever these terms change, you also accept them by ticking the confirmation box at checkout or in an in-app notice when you sign in. If you use the service for an organisation, you accept them on its behalf." },
       { h: "1. The service" },
-      { p: "Nevazu provides cloud-hosted Chrome browsers, each on its own virtual machine with a dedicated IP address and persistent encrypted storage, which you view and control over the internet. During the pilot the service is available by invitation only and features may change." },
+      { p: "Nevazu provides cloud-hosted Chrome browsers, each on its own virtual machine with a dedicated IP address and persistent encrypted storage, which you view and control over the internet." },
       { h: "2. Your account" },
       { ul: [
         "You sign in with codes sent to your email address. Keep access to that mailbox, and to your authenticator app if you turn on two-step verification, secure.",
@@ -142,9 +141,10 @@ const zh: Record<PolicySlug, Article> = {
     title: '服务条款',
     summary: '你使用 Nevazu 服务时与我们之间的协议。',
     blocks: [
-      { p: '本条款适用于你在 nevazu.com 使用 Nevazu（“本服务”“我们”）。登录并不表示你接受本条款。你在首次付款前于结账时勾选确认框即接受本条款；本条款变更后，你需在下次付款前再次勾选接受。如果你代表某个组织使用本服务，即代表该组织接受本条款。' },
+      { h: '序言' },
+      { p: '本条款适用于你在 nevazu.com 使用 Nevazu（“本服务”“我们”）。你在登录时接受本条款。首次付款前，以及本条款每次变更后，你还需在结账时或登录时的应用内通知中勾选确认框以接受本条款。如果你代表某个组织使用本服务，即代表该组织接受本条款。' },
       { h: '1. 服务内容' },
-      { p: 'Nevazu 提供托管在云端的 Chrome 浏览器，每个浏览器运行在独立的虚拟机上，配有独享 IP 和持久化加密存储，你可以通过互联网查看和控制。试用期间本服务仅限受邀使用，功能可能会调整。' },
+      { p: 'Nevazu 提供托管在云端的 Chrome 浏览器，每个浏览器运行在独立的虚拟机上，配有独享 IP 和持久化加密存储，你可以通过互联网查看和控制。' },
       { h: '2. 你的账户' },
       { ul: [
         '你通过发送到邮箱的验证码登录。请妥善保护该邮箱，以及开启两步验证后的身份验证器应用。',
@@ -168,9 +168,10 @@ const zh: Record<PolicySlug, Article> = {
       { p: 'Nevazu 以技术服务的形式提供浏览器：我们不选择、不指示也不查看其中进行的操作（见第 5 条）。在法律允许的范围内，对于你、你允许使用你账户的任何人或其他用户利用浏览器实施的违法或犯罪行为，我们不承担责任，除非损失是由我们违反本条款或我们的过失造成或促成的。实施该行为的人对其行为及后果负责。' },
       { p: `当我们得知可能存在违法使用（例如通过举报或主管机关告知）时，我们可能在调查期间暂停相关的浏览器和账户，保留相关记录，并在法律要求或允许的情况下向执法机关或其他主管机关提供信息。终止服务按第 8 条执行。举报滥用请发邮件至 ${SUPPORT_EMAIL}。` },
       { p: '你的浏览器、其计算机和存储的数据位于你为每个浏览器选择的云端地区（例如日本、澳大利亚或美国），因此往返它们的流量会跨越国境。你有责任确保你的访问和使用，以及你向浏览器发送或从浏览器传出的任何数据，符合你连接所在地的电信、数据安全和数据出境法律。Nevazu 是运行浏览器的云基础设施，并非作为规避你所在地适用的电信许可或网络限制的手段而提供、宣传或授权。' },
-      { h: '4. 预付余额与费用' },
-      { p: '本服务为预付费。你以美元预先购买余额，通过 Stripe 支付，或通过作为我们记录商户的 Creem 支付（支付页面会显示是哪一家），用量按应用和价格页面显示的价格扣除。适用时，结账时会加收增值税或销售税。付款即表示你要求我们立即为你充值；如果你是英国或欧盟的消费者，你仍享有退款政策所述的撤回权利。价格可能变化；每次会产生费用的操作都会先显示当前价格，价格变化不影响已计量的用量。余额不是存款，不计利息，不可转让，除退款政策所述情况外不予退款。' },
-      { p: '可用余额用完时，浏览器会立即停止并保留七天，若未充值则随后永久删除。' },
+      { h: '4. 预付额度与费用' },
+      { p: '本服务为预付费。你以美元预先购买使用额度，通过 Stripe 支付，或通过作为我们记录商户的 Creem 支付（支付页面会显示是哪一家），每次购买须达到结账时显示的最低金额（目前为 10 美元）。用量按应用和价格页面显示的费率从你的余额中扣除。适用时，结账时会加收增值税或销售税。' },
+      { p: '使用额度不是存款，不计利息，没有现金价值，且不可转让、提取或退款，除非强制性法律另有要求。购买使用额度时，你要求我们立即将额度记入账户，并确认额度到账后你将丧失任何法定冷静期或撤回权利。使用额度自购买之日起 12 个月后到期；12 个月后剩余的任何未使用额度均作废。费率可能变化；每次会产生费用的操作都会先显示当前价格，费率变化不适用于已计量的用量。' },
+      { p: '可用额度降至零时，浏览器会立即停止并保留七天；若你未充值，七天后浏览器及其存储的数据将被永久删除，其 IP 地址也会释放。' },
       { h: '5. 你的内容' },
       { p: '你在浏览器中存储的内容和进行的操作归你所有。你仅授予我们运行本服务所需的权限，例如存储和传输你的浏览器数据。除非你为获得支持而要求，或法律要求，我们不会查看你浏览器中的内容。' },
       { h: '6. 可用性与数据' },
@@ -179,10 +180,12 @@ const zh: Record<PolicySlug, Article> = {
       { p: '在法律允许的范围内，我们不对间接或后果性损失、利润损失或数据丢失承担责任，且我们对任何索赔的总责任以你在索赔前 12 个月内向我们支付的金额为限。本条款不限制法律规定不得限制的责任。' },
       { p: '在法律允许的范围内，对于你违反本条款或法律使用本服务，或其他用户使用本服务所造成的损失或损害，我们不承担责任。如果你为企业使用本服务，对于第三方或主管机关因该使用而向我们提出的索赔、罚款及合理费用（包括律师费），你将予以赔偿。这不影响你作为消费者的法定权利。' },
       { h: '8. 终止服务' },
-      { p: '你可以随时停止使用本服务并删除浏览器。我们可以提前 30 天通知终止为你提供服务，或在你严重违反本条款时立即终止。若终止并非因你违约，我们将退还未使用的余额。' },
+      { p: '你可以随时通过删除浏览器并关闭账户来停止使用本服务。如果你自愿关闭或删除账户，或要求删除账户数据，余额中任何剩余的使用额度将立即作废，且不予退款或转让。若你因不同意更新后的条款而关闭账户，则不适用上述规定；在这种情况下，你可以联系 support@nevazu.com 关闭账户，并按第 9 条获得任何剩余未过期预付使用额度的退款。' },
+      { p: '如果你严重违反本条款，我们可以立即暂停或终止为你提供服务，在这种情况下，任何剩余余额均作废。' },
+      { p: '我们也可能自行决定停止提供本服务或关闭你的账户，但会提前 30 天通知你。如果我们自行决定终止服务，且并非因为你违约，我们将退还你购买的任何剩余未过期预付使用额度。' },
       { h: '9. 条款变更' },
-      { p: '我们可能会不时更新本条款。如有重大变更，我们会在变更生效前至少 14 天通过邮件或应用内通知你。条款更新后，你仅在付款时才会被要求勾选确认框以接受新条款。' },
-      { p: '如果你不同意更新后的条款，请勿勾选该确认框，并须停止使用本服务；你可以删除浏览器并申请关闭账户，我们将按第 8 条退还你剩余的未使用余额。' },
+      { p: '我们可能会不时更新本条款。如有重大变更，我们会在变更生效前至少 14 天通过邮件或应用内通知你。条款更新后，你在登录或付款时会被要求勾选确认框以接受更新后的条款。' },
+      { p: '如果你不同意更新后的条款，请勿勾选该确认框，并须在生效日期前停止使用本服务；你可以删除浏览器，并联系 support@nevazu.com 关闭账户，按第 8 条获得任何剩余未过期预付使用额度的退款。' },
       { h: '10. 适用法律与争议' },
       { p: '本条款以及与本条款或本服务有关的任何争议，均适用英格兰和威尔士法律。如果你为企业使用本服务，英格兰和威尔士法院拥有专属管辖权。如果你是消费者，你仍受你居住国强制性法律的保护，并可在这些法律允许的情况下向当地法院提起诉讼，包括在你居住于苏格兰或北爱尔兰时向当地法院起诉。' },
       { h: '11. 一般条款' },
