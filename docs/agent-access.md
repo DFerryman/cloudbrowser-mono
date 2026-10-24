@@ -221,8 +221,8 @@ so a reconnect or restart never silently returns control to the agent; only an e
 - **Keys at rest on the user's machine.** Most clients keep the header in a configuration file in
   plain text (VS Code keeps it in its secret storage; Codex reads it from an environment variable).
   Anyone with the key can drive the browser until it expires or is revoked. Short expiries,
-  view-only keys where acting is not needed, and the creation email narrow this; OAuth (below)
-  removes long-lived secrets from configuration files.
+  view-only keys where acting is not needed, and the creation email narrow this; an OAuth sign-in
+  (below) keeps no long-lived secret in a configuration file.
 - **Upload URLs are in the model's context.** A prompt injection could make the agent reveal one;
   the URL accepts one file of the declared size within 10 minutes into temporary storage, and only
   the key can attach it.
@@ -275,29 +275,65 @@ folded **Set it up by hand** section, filled in for the browser.
 
 </details>
 
-## Next: OAuth 2.1
+## OAuth sign-in
 
-Header keys work in every coding agent today. claude.ai and Claude Desktop connectors, and clients
-that prefer not to hold a secret, need OAuth 2.1 as the MCP authorization spec describes it:
+The third way in, beside the agent-set-up handoff and setting a key by hand: the agent adds the
+browser's MCP URL with no key, and its MCP client opens nevazu.com, where the owner approves it.
+Nothing secret is written to a configuration file, and claude.ai and Claude Desktop connectors
+work without `mcp-remote`. It follows the MCP authorization spec (OAuth 2.1).
 
-- **Authorization server** on `nevazu.com` (the api), with authorization code + PKCE, short-lived
-  access tokens bound to the resource (`https://connect.<domain>/mcp/<instanceId>`) and rotating
-  refresh tokens.
-- **Protected-resource metadata** (RFC 9728) for `/mcp/:id` on the gateway, named in the 401's
-  `WWW-Authenticate: Bearer resource_metadata="…"`, pointing at the authorization server.
-- **Client registration** through Client ID Metadata Documents, with Dynamic Client Registration
-  for clients that do not support them.
-- **Consent** in the web app: the user signs in, picks the browser (and view-only or control), and
-  sees which client asks.
-- **Storage and revocation**: tokens hashed in D1 on the same `automation_clients` rows (a new
-  `kind`), so the Settings list, last use, revocation, deletion and sign-out-everywhere work as for
-  keys.
+It is behind a switch: the gateway's `MCP_OAUTH` var. While it is `off` (the default), the 401
+challenge stays `Bearer realm="nevazu"` and the gateway serves no metadata, so no client offers a
+sign-in; the api's endpoints answer but nothing points to them. `on` (with `OAUTH_ISSUER`, the
+app's origin) turns discovery on. The Cloudflare WAF must let `/.well-known/oauth-authorization-server`
+on the app host and `/.well-known/oauth-protected-resource/` on the gateway host through unchallenged.
+
+- **Discovery.** A request without a key (or with an expired sign-in token) gets
+  `WWW-Authenticate: Bearer realm="nevazu", resource_metadata="https://connect.<domain>/.well-known/oauth-protected-resource/mcp/<id>", scope="browser:control"`
+  (plus `error="invalid_token"` for a token). A request with an access key always gets the plain
+  challenge, so a key user is never pushed into a sign-in. The metadata (RFC 9728) is the same for
+  every well-formed id and names `https://<app>` as the authorization server, whose RFC 8414
+  metadata is at `https://<app>/.well-known/oauth-authorization-server` (`apps/api/src/oauth.ts`).
+- **Apps** are public clients (PKCE S256, no secret). They are known by their Client ID Metadata
+  Document (Claude Code, VS Code: an https URL as `client_id`, read with no redirects, at most
+  5 KB in 3 s, its `client_id` equal to the URL, cached a day; the approval page shows its host as
+  verified), or register through Dynamic Client Registration (`POST /api/oauth/register`: Cursor,
+  Codex, Gemini CLI and most others). Callbacks are local (`http://127.0.0.1`, `localhost` or
+  `[::1]`, any port, RFC 8252), an installed app's scheme (`cursor://`, `vscode://`), or the
+  hosted clients' sites (claude.ai, claude.com, chatgpt.com, vscode.dev); a metadata document may
+  also name its own host. Any other https callback is refused at registration.
+- **Approval** (`/oauth/authorize` in the web app; `POST /api/v1/oauth/authorize/check` and
+  `/decision`): the signed-in owner sees the app's name, where approving returns to, and the
+  browser the app asked for (its `resource`, RFC 8707) or a choice of browsers, and picks the
+  permission (control or view; an app asking only `browser:view` gets view) and how long the
+  sign-in lasts: 1, 7 (default), 30 or 90 days, never "forever". An unknown app or an unregistered
+  callback is refused on the page and never redirected to; other problems go back to the app's
+  callback as OAuth errors, with `state` and `iss` (RFC 9207). Approving is refused while agent
+  access is off unless the owner turns it on there, and past ten active sign-ins per browser
+  (`409 agent_grant_limit`, apart from the ten keys). It emails the owner, like a new key.
+- **Tokens** (`POST /api/oauth/token`): the code lasts 60 s and is used once; a code presented again
+  revokes the sign-in it made. The sign-in is an `automation_clients` row of kind `oauth` for one
+  browser, with its end (`expires_at`, never moved). Access tokens (`nvza_` + 43 base62) last an
+  hour and never past the end; refresh tokens (`nvzr_` + 43) rotate on every use. The token a
+  refresh replaced is forgiven for 30 s (a retry in flight); later it is a stolen copy and the
+  whole sign-in is revoked. Only hashes are stored, each under its own label
+  (`sha256('oauth-access:' + token)` in `credential_hash`, `oauth-refresh:` in `refresh_hash`,
+  `oauth-code:` for codes), and the gateway checks the access token on every request through
+  `authenticateMcp`, exactly like a key, so a revoke takes effect at once.
+- **Revocation**: the app's own sign-out (`POST /api/oauth/revoke`, RFC 7009), Disconnect in the
+  browser's panel or on the account page (`GET`/`DELETE /api/v1/agent-connections[/{id}]`,
+  every key and sign-in of every browser, or all at once), deleting the browser, and "Sign out
+  everywhere". A sign-in that ended is listed for one more day.
+- **Housekeeping**: nightly, codes expired over a day ago and apps that never got a sign-in within
+  a week are deleted (some clients register on every connect). Token and revocation calls are
+  rate limited per app, registration per address (`OAUTH_LIMITER`).
 
 ## Tests
 
 - `apps/gateway/test/mcp-http.test.ts`: version negotiation, `ping`, `tools/list`, `202`, `405`,
   batches, origins, body size, `401` with its challenge, wrong-browser and expired keys, rate
-  limits, tool errors instead of `401`.
+  limits, tool errors instead of `401`, and with `MCP_OAUTH` off and on, the OAuth challenge,
+  sign-in tokens and the protected-resource metadata.
 - `apps/gateway/test/mcp-session.test.ts`: lazy open, blob reassembly, coordinate mapping
   (1280×720 to 1920×1080, drag paths), `stale_screenshot` without the VM, protocol 1 VMs,
   serialization, mode and view-only refusals, `busy_other_agent` then hand-over, idle and hard
@@ -307,5 +343,8 @@ that prefer not to hold a secret, need OAuth 2.1 as the MCP authorization spec d
 - `apps/gateway/test/robustness.test.ts`: the gateway's per-socket budgets and failure isolation.
 - `apps/api/test/automation.test.ts`: keys shown once and stored hashed, the MCP check, limits,
   revocation (owner, deletion, sign-out-everywhere), legacy credentials, migration 0035.
+- `apps/api/test/oauth.test.ts`: metadata, registration and callback rules, metadata documents,
+  the approval check and decision, PKCE and single-use codes, refresh rotation and reuse, the
+  chosen end, RFC 7009, separate limits, Connected agents, sign-out-everywhere, the nightly sweep.
 - `services/agent`: takeover order, held-key release, screen-change invalidation, privacy pause,
   stored-vs-attach control and a restored takeover.

@@ -128,6 +128,23 @@ export function agentKeyCreatedMessage(keyName: string, browserName: string, url
   });
 }
 
+/** An OAuth sign-in was approved: the same warning as a new key, since a stolen session could approve one. */
+export function agentSignInMessage(appName: string, browserName: string, days: number, viewOnly: boolean, url: string): Message {
+  const until = `${days} ${days === 1 ? 'day' : 'days'}`;
+  return renderEmail(url, {
+    subject: `'${appName}' can now use '${browserName}'`,
+    category: 'Account security',
+    title: 'A coding agent was signed in.',
+    preview: `'${appName}' was approved to use '${browserName}' for ${until}.`,
+    paragraphs: [
+      `'${appName}' was approved to use '${browserName}' for ${until}. It can take screenshots of the browser${viewOnly ? '' : ' and click and type in it as you'}. The name is what the app calls itself.`,
+      'If you did not approve it, disconnect it now in the browser\'s Coding agent panel, then sign out everywhere from your account page.',
+    ],
+    details: [{ label: 'Browser', value: browserName }, { label: 'App', value: appName }, { label: 'Access lasts', value: until }],
+    action: { label: 'Review coding-agent access', url },
+  });
+}
+
 // ---------------------------------------------------------------------------------------------
 // Credit
 

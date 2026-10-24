@@ -483,10 +483,61 @@ export const agentCommands = sqliteTable(
 );
 
 /**
+ * Apps a coding agent signs in with (docs/agent-access.md, "OAuth sign-in"): registered through
+ * Dynamic Client Registration (`kind = 'dcr'`, id `nvzc_…`), or known by their Client ID Metadata
+ * Document (`kind = 'cimd'`, id = the document's URL, cached here for a day). Everything in a row is
+ * what the app said about itself; only a metadata document's host is verified. Owner: api.
+ */
+export const oauthClients = sqliteTable('oauth_clients', {
+  id: text('id').primaryKey(),
+  /** `dcr` | `cimd`. */
+  kind: text('kind').notNull(),
+  name: text('name').notNull(),
+  clientUri: text('client_uri'),
+  redirectUris: json<string[]>('redirect_uris').notNull(),
+  softwareId: text('software_id'),
+  softwareVersion: text('software_version'),
+  createdAt: ts('created_at').notNull(),
+  /** When a metadata document was last read; null for registered apps. */
+  fetchedAt: ts('fetched_at'),
+  lastUsedAt: ts('last_used_at'),
+});
+
+/**
+ * One-time authorization codes of OAuth sign-ins: 60 s, single use, only the hash is kept. A code
+ * presented again revokes the sign-in it was exchanged for. Owner: api; pruned nightly.
+ */
+export const oauthAuthorizationCodes = sqliteTable(
+  'oauth_authorization_codes',
+  {
+    codeHash: text('code_hash').primaryKey(),
+    clientId: text('client_id').notNull(),
+    userId: text('user_id').notNull(),
+    instanceId: text('instance_id')
+      .notNull()
+      .references(() => browserInstances.id),
+    redirectUri: text('redirect_uri').notNull(),
+    /** PKCE S256 challenge. */
+    codeChallenge: text('code_challenge').notNull(),
+    /** The browser's MCP URL when the app named it (RFC 8707). */
+    resource: text('resource'),
+    capability: text('capability').notNull(),
+    grantDays: integer('grant_days').notNull(),
+    createdAt: ts('created_at').notNull(),
+    expiresAt: ts('expires_at').notNull(),
+    usedAt: ts('used_at'),
+    /** The sign-in (`automation_clients.id`) the code was exchanged for. */
+    grantId: text('grant_id'),
+  },
+  (t) => [index('oauth_authorization_codes_expires_idx').on(t.expiresAt)],
+);
+
+/**
  * A coding agent's access to one browser (docs/agent-access.md): an access key the owner created
- * in Settings (`kind = 'key'`), or the credential of a bridge paired before keys existed
- * (`kind = 'bridge'`), which is accepted as a key. Only the hash `sha256('bridge:' + secret)` is
- * stored. The pairing columns are kept for those older rows. Owner: api.
+ * in Settings (`kind = 'key'`), the credential of a bridge paired before keys existed
+ * (`kind = 'bridge'`), which is accepted as a key, or an OAuth sign-in the owner approved
+ * (`kind = 'oauth'`). Keys store only `sha256('bridge:' + secret)`; a sign-in stores the hashes of
+ * its current access and refresh tokens. The pairing columns are kept for the oldest rows. Owner: api.
  */
 export const automationClients = sqliteTable(
   'automation_clients',
@@ -501,12 +552,13 @@ export const automationClients = sqliteTable(
     clientInfo: text('client_info'),
     pairingHash: text('pairing_hash'),
     pairingExpiresAt: ts('pairing_expires_at'),
+    /** A key's hash; for a sign-in, `sha256('oauth-access:' + token)` of its current access token. */
     credentialHash: text('credential_hash'),
-    /** `key` | `bridge`. */
+    /** `key` | `bridge` | `oauth`. */
     kind: text('kind').notNull().default('bridge'),
-    /** `nvzk_` and the key's first six characters; null for bridges. */
+    /** `nvzk_` and the key's first six characters; null for bridges and sign-ins. */
     keyPrefix: text('key_prefix'),
-    /** Null: never expires. */
+    /** Null: never expires. A sign-in's end, chosen on the approval page; it never moves. */
     expiresAt: ts('expires_at'),
     /** `control` | `view` (screenshots and status only). */
     capability: text('capability').notNull().default('control'),
@@ -517,11 +569,22 @@ export const automationClients = sqliteTable(
     activatedAt: ts('activated_at'),
     lastSeenAt: ts('last_seen_at'),
     revokedAt: ts('revoked_at'),
+    /** A sign-in's app. */
+    oauthClientId: text('oauth_client_id').references(() => oauthClients.id),
+    /** `sha256('oauth-refresh:' + token)` of a sign-in's current refresh token; replaced on every refresh. */
+    refreshHash: text('refresh_hash'),
+    /** The refresh token it replaced, to tell a late duplicate from a stolen copy. */
+    prevRefreshHash: text('prev_refresh_hash'),
+    refreshRotatedAt: ts('refresh_rotated_at'),
+    /** When the current access token stops working: an hour after it was issued, never past `expires_at`. */
+    accessExpiresAt: ts('access_expires_at'),
   },
   (t) => [
     index('automation_clients_instance_idx').on(t.instanceId, t.revokedAt),
     uniqueIndex('automation_clients_pairing_idx').on(t.pairingHash),
     index('automation_clients_credential_idx').on(t.credentialHash),
+    uniqueIndex('automation_clients_refresh_idx').on(t.refreshHash),
+    index('automation_clients_prev_refresh_idx').on(t.prevRefreshHash),
   ],
 );
 

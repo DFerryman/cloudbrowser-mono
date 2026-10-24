@@ -28,6 +28,7 @@ const TITLES: Record<ErrorType, string> = {
   account_frozen: 'Account on hold',
   agent_access_off: 'Coding agent access is off',
   agent_key_limit: 'Too many access keys',
+  agent_grant_limit: 'Too many sign-ins',
   internal: 'Something went wrong',
 };
 

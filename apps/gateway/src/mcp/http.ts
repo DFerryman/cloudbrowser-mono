@@ -1,11 +1,12 @@
-import { isObjectLocationHint } from '@cloudbrowser/contracts';
+import { AGENT_OAUTH_SCOPES, isObjectLocationHint } from '@cloudbrowser/contracts';
 import type { Env } from '../env.js';
 import { connectionLog } from '../connection-log.js';
 import { isToolName, SERVER_INSTRUCTIONS, TOOLS } from './tools.js';
 
 /**
  * The remote MCP endpoint, `POST /mcp/:instanceId` (docs/agent-access.md): Streamable HTTP in its
- * stateless form. Every request carries the access key; every answer is a single JSON body (never
+ * stateless form. Every request carries the access key or a sign-in's access token (OAuth, when
+ * MCP_OAUTH is on); every answer is a single JSON body (never
  * an event stream), and no `Mcp-Session-Id` is issued, so any request can arrive on its own, with
  * or without an `initialize` before it. The handshake, `ping` and `tools/list` are answered here;
  * tool calls and cancellations go to the browser's Durable Object, which holds the agent's session.
@@ -14,7 +15,8 @@ import { isToolName, SERVER_INSTRUCTIONS, TOOLS } from './tools.js';
 export const MCP_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'] as const;
 export const SERVER_VERSION = '1.0.0';
 const MAX_BODY_BYTES = 1024 * 1024;
-const KEY_FORMAT = /^(?:nvzk_[A-Za-z0-9]{43}|[0-9a-f]{64})$/;
+/** Access keys, a retired bridge's credentials, and sign-ins' access tokens. */
+const KEY_FORMAT = /^(?:nvz[ka]_[A-Za-z0-9]{43}|[0-9a-f]{64})$/;
 /** An address whose failed authentications hit the limiter is refused here, without an api call, for this long. */
 const BLOCK_MS = 60_000;
 
@@ -47,6 +49,29 @@ export async function failedAttempt(limiter: RateLimit | undefined, key: string,
   const { success } = await limiter.limit({ key }).catch(() => ({ success: true }));
   if (!success) block(ip);
   return !success;
+}
+
+export const oauthOn = (env: Pick<Env, 'MCP_OAUTH' | 'OAUTH_ISSUER'>) => env.MCP_OAUTH === 'on' && !!env.OAUTH_ISSUER;
+
+const METADATA_CORS = { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, OPTIONS', 'access-control-allow-headers': 'mcp-protocol-version' };
+
+/**
+ * RFC 9728 metadata of a browser's MCP server, at /.well-known/oauth-protected-resource/mcp/:id:
+ * the resource (the URL as the agent wrote it, trailing slash and all) and its authorization
+ * server. It is the same for every well-formed id, so it never says whether a browser exists.
+ */
+export function protectedResourceMetadata(req: Request, env: Env, instanceId: string, slash: boolean): Response {
+  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: METADATA_CORS });
+  if (req.method !== 'GET' && req.method !== 'HEAD') return new Response(null, { status: 405, headers: { allow: 'GET', ...METADATA_CORS } });
+  const issuer = env.OAUTH_ISSUER!.replace(/\/$/, '');
+  return new Response(JSON.stringify({
+    resource: `${new URL(req.url).origin}/mcp/${instanceId}${slash ? '/' : ''}`,
+    authorization_servers: [issuer],
+    scopes_supported: [AGENT_OAUTH_SCOPES.control, AGENT_OAUTH_SCOPES.view],
+    bearer_methods_supported: ['header'],
+    resource_name: 'Nevazu cloud browser',
+    resource_documentation: `${issuer}/docs/coding-agents`,
+  }), { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=3600', ...METADATA_CORS } });
 }
 
 export function allowedOrigins(env: Pick<Env, 'MCP_ALLOWED_ORIGINS'>): Set<string> {
@@ -133,15 +158,26 @@ export async function handleMcp(req: Request, env: Env, ctx: ExecutionContext, i
   }
 
   const ip = req.headers.get('cf-connecting-ip') ?? 'unknown';
+  const [scheme, key = ''] = (req.headers.get('authorization') ?? '').split(' ');
+  // What the agent sent decides the challenge. A key that failed keeps the plain one, so a key
+  // user is never pushed into a sign-in; no credential, or a sign-in's token, names the metadata
+  // for OAuth (RFC 9728) when it is on.
+  const sent = scheme?.toLowerCase() !== 'bearer' ? 'none' : key.startsWith('nvza_') ? 'oauth' : /^(?:nvzk_|[0-9a-f]{64}$)/.test(key) ? 'key' : 'none';
+  const oauth = oauthOn(env) && sent !== 'key';
+  const path = new URL(req.url).pathname;
+  const challenge = oauth
+    ? `Bearer realm="nevazu", resource_metadata="${new URL(req.url).origin}/.well-known/oauth-protected-resource/mcp/${instanceId}${path.endsWith('/') ? '/' : ''}", scope="${AGENT_OAUTH_SCOPES.control}"${sent === 'oauth' ? ', error="invalid_token"' : ''}`
+    : 'Bearer realm="nevazu"';
   const unauthorized = async (id: JsonRpcId | null, message: string) => {
     if (await failedAttempt(env.MCP_LIMITER, `mcp-fail:${ip}`, ip)) return json(rpcError(id, -32000, 'Too many failed attempts; try again in a minute.'), 429, { 'retry-after': '60', ...cors });
     connectionLog('mcp_auth_rejected', { instanceId, role: 'mcp', status: 401 });
-    return json(rpcError(id, -32001, message), 401, { 'www-authenticate': 'Bearer realm="nevazu"', ...cors });
+    return json(rpcError(id, -32001, message), 401, { 'www-authenticate': challenge, ...cors });
   };
   if (isBlocked(ip)) return json(rpcError(null, -32000, 'Too many failed attempts; try again in a minute.'), 429, { 'retry-after': '60', ...cors });
-  const [scheme, key = ''] = (req.headers.get('authorization') ?? '').split(' ');
   if (scheme?.toLowerCase() !== 'bearer' || !KEY_FORMAT.test(key)) {
-    return unauthorized(null, 'Unauthorized: send this browser\'s access key as "Authorization: Bearer <key>". Create one in the browser\'s Settings → Coding agent access.');
+    return unauthorized(null, oauth
+      ? 'Unauthorized: sign in to Nevazu (your MCP client offers it for this server), or send this browser\'s access key as "Authorization: Bearer <key>".'
+      : 'Unauthorized: send this browser\'s access key as "Authorization: Bearer <key>". Create one in the browser\'s Settings → Coding agent access.');
   }
 
   if (Number(req.headers.get('content-length') ?? 0) > MAX_BODY_BYTES) return json(rpcError(null, -32600, 'Request too large'), 413, cors);
@@ -174,12 +210,16 @@ export async function handleMcp(req: Request, env: Env, ctx: ExecutionContext, i
     return json(rpcError(id, -32603, 'The service is temporarily unavailable; try again shortly.'), 503, cors);
   }
   if (!auth.ok) {
-    return unauthorized(id, auth.reason === 'expired'
-      ? 'Unauthorized: this access key has expired. Create a new one in the browser\'s Settings → Coding agent access.'
-      : 'Unauthorized: this access key is not valid for this browser (revoked, or made for another browser).');
+    return unauthorized(id, sent === 'oauth'
+      ? auth.reason === 'expired'
+        ? 'Unauthorized: the access token has expired; refresh it, or sign in again if the sign-in has ended.'
+        : 'Unauthorized: this sign-in is not valid for this browser (disconnected, or made for another browser); sign in again.'
+      : auth.reason === 'expired'
+        ? 'Unauthorized: this access key has expired. Create a new one in the browser\'s Settings → Coding agent access.'
+        : 'Unauthorized: this access key is not valid for this browser (revoked, or made for another browser).');
   }
-  // Each key's calls are limited, so one runaway agent cannot monopolize the gateway.
-  if (env.MCP_LIMITER && !(await env.MCP_LIMITER.limit({ key: `mcp:${key.slice(0, 11)}` }).catch(() => ({ success: true }))).success) {
+  // Each key's or sign-in's calls are limited, so one runaway agent cannot monopolize the gateway.
+  if (env.MCP_LIMITER && !(await env.MCP_LIMITER.limit({ key: `mcp:${auth.clientId}` }).catch(() => ({ success: true }))).success) {
     return json(rpcError(id, -32000, 'Rate limited: too many calls with this key; slow down.'), 429, { 'retry-after': '10', ...cors });
   }
 

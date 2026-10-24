@@ -5,7 +5,7 @@ export type AgentAuth =
   | { ok: true; generation: number; credential?: string; location?: string }
   | { ok: false; reason: string };
 
-/** A coding agent's access key on an MCP request (docs/agent-access.md); no session is opened by it. */
+/** A coding agent's access key or sign-in token on an MCP request (docs/agent-access.md); no session is opened by it. */
 export type McpAuth =
   | { ok: true; clientId: string; userId: string; generation: number; capability: 'control' | 'view'; name: string; location?: string }
   | { ok: false; reason: 'invalid_token' | 'expired' | 'unknown_instance' };
@@ -41,4 +41,12 @@ export interface Env {
    * key the browser has no business holding (DNS rebinding, CSRF). Empty by default.
    */
   MCP_ALLOWED_ORIGINS?: string;
+  /**
+   * `on`: coding agents may sign in with OAuth instead of sending a key (docs/agent-access.md,
+   * "OAuth sign-in"). A 401 without a key then names this Worker's protected-resource metadata,
+   * which points to OAUTH_ISSUER. Anything else keeps the plain key challenge and serves no metadata.
+   */
+  MCP_OAUTH?: string;
+  /** The OAuth authorization server: the app's origin, e.g. https://nevazu.com. */
+  OAUTH_ISSUER?: string;
 }

@@ -25,13 +25,15 @@
   // html_handling "auto-trailing-slash"), then index.html for the app's routes. The Worker runs
   // first for the API, for hashed build files (404 rather than the app shell), for the public
   // pages and texts that carry live prices, including / itself (src/site.ts), and for every text
-  // file, which the assets binding sends without a charset (the Worker adds it). Patterns match the
-  // whole path; * matches anything, slashes included.
+  // file, which the assets binding sends without a charset (the Worker adds it), and for
+  // /.well-known/*, so coding agents' OAuth discovery gets JSON or a 404 rather than the app shell
+  // (other well-known files still come from the assets). Patterns match the whole path; * matches
+  // anything, slashes included.
   "assets": {
     "directory": "../web/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/assets/*", "/", "/home", "/pricing", "/index.md", "/pricing.md", "/llms.txt", "/llms-full.txt", "/*.md", "/robots.txt"]
+    "run_worker_first": ["/api/*", "/assets/*", "/", "/home", "/pricing", "/index.md", "/pricing.md", "/llms.txt", "/llms-full.txt", "/*.md", "/robots.txt", "/.well-known/*"]
   },
   "vars": {
     "TURN_KEY_ID": "b465a1e4c38bbb6364fb92145ac9170c",
@@ -89,7 +91,9 @@
   // Workers Rate Limiting (per Cloudflare location; period must be 10 or 60 seconds).
   "ratelimits": [
     { "name": "AUTH_LIMITER", "namespace_id": "1001", "simple": { "limit": 5, "period": 60 } },
-    { "name": "API_LIMITER", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } }
+    { "name": "API_LIMITER", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } },
+    // Coding agents' OAuth (src/oauth.ts): app registrations per address, token calls per app.
+    { "name": "OAUTH_LIMITER", "namespace_id": "1003", "simple": { "limit": 30, "period": 60 } }
   ],
   // A minute of live-view quality per data point, by browser region and viewer country
   // (docs/connection-diagnostics.md, "Live quality"). The dataset is created by its first write.
