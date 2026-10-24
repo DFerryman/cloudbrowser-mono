@@ -31,7 +31,7 @@ import {
   type RegionId,
 } from '@cloudbrowser/contracts';
 import { automationStatus, createAgentKey, revokeClient, setAccess, setControl } from '../automation.js';
-import { inTcpRelayTest, tcpRelayServers, turnIceServers } from '../turn.js';
+import { turnIceServers } from '../turn.js';
 import { callerLocation, regionViews } from '../availability.js';
 import { awsInventory, billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, sha256Hex, settleRunningStatements } from '@cloudbrowser/db';
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
@@ -888,14 +888,12 @@ v1.openapi(
       exp: Math.floor(Date.now() / 1000) + 60,
       ...(loc ? { loc } : {}),
     });
-    // The visitor's country, as in live-quality reports, decides the relay transport test.
-    const country = (c.req.raw.cf as { country?: string } | undefined)?.country;
     return c.json(
       {
         mode: 'webrtc' as const,
         gatewayUrl: `${c.env.GATEWAY_URL.replace(/\/$/, '')}/v1/stream/${s.instanceId}`,
         token,
-        iceServers: inTcpRelayTest(s.id, country) ? tcpRelayServers(ice.servers) : ice.servers,
+        iceServers: ice.servers,
       },
       200,
     );
