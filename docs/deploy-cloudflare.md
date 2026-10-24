@@ -357,11 +357,14 @@ Stop and delete are accepted even while another operation is unfinished. Delete 
 priority; repeated requests merge, and a late stop cannot undo deletion. Canceled work is fenced
 before provider calls and lifecycle writes. AWS calls already in flight still require drain and
 confirmation, so accepting intent does not claim instantaneous physical termination. Stop revokes
-viewers while retaining the agent channel for cleanup. Normal input has at most a one-second
-authorization lease; trusted stop/delete RPCs revoke it immediately, and alarms enforce
-credit expiry even without another input event. A lease in use is re-checked shortly before it
-lapses, off the relay path, so signaling and typing do not wait on D1; the checks and the lease
-length are the same.
+viewers while retaining the agent channel for cleanup. Normal input has at most a ten-second
+authorization lease; trusted stop/delete RPCs and a takeover revoke it immediately, and alarms
+enforce credit expiry even without another input event. What only a lease check notices (a
+session ended without a takeover, a browser the engine stopped) is noticed within those ten
+seconds. A lease in use is re-checked two seconds before it lapses, off the relay path, and the
+alarm renews an idle viewer's as it lapses, so signaling, typing and a tap after a pause do not
+wait on D1, which is about 330 ms away from a gateway object in Asia. Coding agents' calls keep
+a one-second lease (`agent-access.md`).
 
 ### Permanent user deletion and isolation
 
