@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type CSSProperties } from 'react';
 import { isMac } from './keyboard.js';
 import { elementPoint, pictureRect, remotePerPixel, remoteSpace, rotate, toRemotePoint, unrotate, type PositionedEvent } from './mapping.js';
-import { squarePixels } from './neko.js';
+import { squarePixels, type TextKeyboard } from './neko.js';
 import type { ConnectionDiagnostic, LiveQualityReport, VideoQuality } from '@cloudbrowser/contracts';
 import type { VideoPreference } from './quality.js';
 import { RemoteBrowser, type AutomationStatus, type ConnectInfo, type ConnectionIssue, type ViewerState } from './remote-browser.js';
@@ -13,6 +13,12 @@ import type { InputFailure } from './input-queue.js';
 import { pastedFiles, type TransferUpdate } from './file-transfer.js';
 import { observeFirstFrame } from './first-frame.js';
 import { isDisplaying, readPlayback, startPlayback, type PlaybackState } from './playback.js';
+
+/** iPhone and iPad, including an iPad presenting itself as a Mac. */
+const appleTouch = () => /iPad|iPhone|iPod/.test(navigator.platform) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+/** A tap's text field opens the keyboard within this long of the tap, while the view has the focus. */
+const TEXT_FOCUS_MS = 4000;
 
 /** Image types Chrome cannot paste from the X clipboard; one is pasted as a PNG instead. */
 const CONVERTED_IMAGES = ['image/jpeg', 'image/webp', 'image/bmp', 'image/avif'];
@@ -123,6 +129,14 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   const textInputRef = useRef<TextInputController | null>(null);
   const keyboardRequested = useRef(false);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+  /** The keyboard the remote text field wants (its inputmode); the toolbar's is a text keyboard. */
+  const [keyboardKind, setKeyboardKind] = useState<TextKeyboard>('text');
+  /** The keyboard opened for a tapped text field, rather than from the toolbar: tapping away closes it. */
+  const autoKeyboard = useRef(false);
+  /** When a touch last tapped the picture and asked where the focus went (askFocus). */
+  const tappedAt = useRef(-Infinity);
+  /** Keys arrived with the on-screen keyboard closed: a hardware keyboard, which needs no other. */
+  const hardwareKeys = useRef(false);
   const [touchDevice] = useState(() => typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0);
   const [cursor, setCursor] = useState('default');
   const [dragging, setDragging] = useState(false);
@@ -159,21 +173,62 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   const resumePlayback = useRef<(() => void) | null>(null);
   const initialVideo = useRef(video);
 
-  const updateKeyboard = (open: boolean) => {
-    if (keyboardRequested.current === open) return;
+  const updateKeyboard = (open: boolean, kind: TextKeyboard = 'text') => {
+    const keys = keysRef.current;
+    if (keyboardRequested.current === open) {
+      // An open keyboard changes for another kind of field (an email address after a name).
+      if (open && keys && keys.inputMode !== kind) keys.inputMode = kind;
+      if (open) setKeyboardKind(kind);
+      return;
+    }
     // A key pressed before changing mode must be released on that original transport.
     textInputRef.current?.reset();
-    if (keysRef.current) keysRef.current.value = '';
+    if (keys) keys.value = '';
     keyboardRequested.current = open;
     setKeyboardOpen(open);
+    setKeyboardKind(kind);
     callbacks.current.onKeyboardChange?.(open);
-    const keys = keysRef.current;
     if (!keys) return;
     // iOS requires focus during the toolbar's user gesture, before React's next render.
-    keys.inputMode = open ? 'text' : 'none';
+    keys.inputMode = open ? kind : 'none';
     keys.readOnly = !open && touchDevice;
     if (open) keys.focus({ preventScroll: true });
     else keys.blur();
+  };
+
+  /**
+   * The agent's answer to a tap's focus question (askFocus): the keyboard opens for a text field
+   * and an opened one closes when the focus leaves it; one opened from the toolbar stays open.
+   * Android opens the keyboard for a field focused within a few seconds of a tap; iOS only for one
+   * focused in the tap itself, so the tap gave the textarea the focus without a keyboard (arm).
+   */
+  const textFocused = (keyboard: TextKeyboard | null) => {
+    const keys = keysRef.current;
+    const box = boxRef.current;
+    if (!keys || !box) return;
+    if (keyboardRequested.current) {
+      if (keyboard) updateKeyboard(true, keyboard);
+      else if (!autoKeyboard.current) updateKeyboard(true);
+      else {
+        autoKeyboard.current = false;
+        updateKeyboard(false);
+        box.focus({ preventScroll: true });
+      }
+      return;
+    }
+    const armed = document.activeElement === keys;
+    if (keyboard && !hardwareKeys.current && Date.now() - tappedAt.current < TEXT_FOCUS_MS
+      && (armed || (!appleTouch() && document.activeElement === box))) {
+      autoKeyboard.current = true;
+      updateKeyboard(true, keyboard);
+    } else if (armed && !keyboard) {
+      disarm();
+      box.focus({ preventScroll: true });
+    }
+  };
+  /** The closed keyboard's textarea takes no typing again after a tap armed it. */
+  const disarm = () => {
+    if (keysRef.current && !keyboardRequested.current) keysRef.current.readOnly = touchDevice;
   };
 
   useEffect(() => {
@@ -250,6 +305,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       onVideo: (q) => callbacks.current.onVideo?.(q),
       onTransfer: (update) => callbacks.current.onTransfer?.(update),
       onAutomation: (status) => callbacks.current.onAutomation?.(status),
+      onTextFocus: textFocused,
     });
     browserRef.current = browser;
     // Hidden pages make no connection attempts and check their socket when shown again; reconnects
@@ -420,6 +476,21 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         const at = rotatedRef.current ? rotate(x, y, boxFrame()) : { x, y };
         showTap(box, at.x, at.y, true);
       },
+      tap: (x, y) => {
+        // Only a phone's or a tablet's own screen: a touchscreen laptop has its keyboard.
+        const browser = browserRef.current;
+        if (!browser?.answersFocus || typeof window.matchMedia !== 'function' || !window.matchMedia('(pointer: coarse)').matches) return;
+        if (hardwareKeys.current && !keyboardRequested.current) return;
+        const keys = keysRef.current;
+        if (keys && !keyboardRequested.current && appleTouch()) {
+          // Armed: focused in this gesture, which iOS requires, and no keyboard until a text field asks.
+          keys.inputMode = 'none';
+          keys.readOnly = false;
+          keys.focus({ preventScroll: true });
+        }
+        tappedAt.current = Date.now();
+        browser.askFocus(x, y);
+      },
       activity: () => callbacks.current.onInput?.(),
     });
     touchRef.current = touch;
@@ -469,7 +540,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       if (e.pointerType === 'touch') {
         if (touch.pointerDown(touchEvent(e))) {
           capture(e);
-          if (!keyboardRequested.current) box.focus({ preventScroll: true });
+          // An armed textarea keeps the focus: the next tap arms it again in any case.
+          if (!keyboardRequested.current && document.activeElement !== keysRef.current) box.focus({ preventScroll: true });
         }
         e.preventDefault();
         return;
@@ -665,6 +737,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       else boxRef.current?.focus({ preventScroll: true });
     },
     toggleKeyboard: () => {
+      autoKeyboard.current = false;
       updateKeyboard(!keyboardRequested.current);
       if (!keyboardRequested.current) boxRef.current?.focus({ preventScroll: true });
     },
@@ -690,6 +763,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         // screen with the keyboard closed (an iPad with a hardware keyboard): focus the textarea
         // first, which receives the paste that this keydown goes on to perform.
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && document.activeElement !== keysRef.current) keysRef.current?.focus({ preventScroll: true });
+        // A tapped text field then leaves the on-screen keyboard closed (textFocused).
+        if (!keyboardRequested.current) hardwareKeys.current = true;
         if (textInputRef.current?.keyDown(e.nativeEvent)) e.preventDefault();
       }}
       onKeyUp={(e) => { if (textInputRef.current?.keyUp(e.nativeEvent)) e.preventDefault(); }}
@@ -697,6 +772,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
           textInputRef.current?.reset();
           updateKeyboard(false);
+          disarm();
         }
       }}
       // On the box rather than the textarea: a paste reaches whichever of the two has focus.
@@ -744,7 +820,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         autoCorrect="off"
         spellCheck={false}
         tabIndex={-1}
-        inputMode={keyboardOpen ? 'text' : 'none'}
+        inputMode={keyboardOpen ? keyboardKind : 'none'}
         readOnly={touchDevice && !keyboardOpen}
         style={{ position: 'absolute', left: 0, top: 0, width: 1, height: 1, fontSize: 16, opacity: 0, border: 0, padding: 0, resize: 'none' }}
       />

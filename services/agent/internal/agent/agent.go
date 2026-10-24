@@ -43,8 +43,9 @@ import (
 // the gateway, refuses a symlinked upload directory, and closes the firewall only on a real IP
 // mismatch or repeated failed checks, opening it again after a check passes. 0.6.0 replaces a
 // tunnel that answers nothing (keepalive), closes it with a close frame when stopping, and tells
-// the gateway in the next hello why the previous tunnel ended.
-const Version = "0.6.0"
+// the gateway in the next hello why the previous tunnel ended. 0.7.0 tells a touch viewer where the
+// keyboard focus went after each tap, so its on-screen keyboard opens for a text field (focus.go).
+const Version = "0.7.0"
 
 // Tunnel keepalive, with a gateway whose welcome says keepalive (it answers {"t":"ping"} with
 // {"t":"pong"} without waking its object): a tunnel the gateway has sent nothing on for
@@ -74,6 +75,10 @@ type Browser interface {
 	// DropFiles drops files (paths as Chrome sees them) on the page under a point of the remote
 	// screen; false means no page is there.
 	DropFiles(ctx context.Context, x, y int, paths []string) (bool, error)
+	// TextFocus opens a reading of the keyboard focus for a viewer's tap at (x, y) on the remote
+	// screen: sample answers with the keyboard a focused text field wants (an inputmode), "" when
+	// the focus is elsewhere, and false when nothing could tell; done releases what it holds.
+	TextFocus(ctx context.Context, x, y int) (sample func(context.Context) (string, bool), done func(), err error)
 }
 
 // Neko opens a signaling relay to neko on the loopback interface for one viewer session.
@@ -147,6 +152,8 @@ type Agent struct {
 	stalled     *websocket.Conn
 	lastInputAt time.Time
 	transfers   map[string]*transfer
+	// The focus question each viewer asked last, while it is answered (focus.go).
+	focusWatches map[string]*focusWatch
 	// clipboardQuietUntil: neko's clipboard reports are not relayed until then (files.go).
 	clipboardQuietUntil time.Time
 	// Coding-agent bridges (automation.go) and who may drive the browser (control.go).
@@ -791,6 +798,10 @@ func (a *Agent) fromViewer(ctx context.Context, sessionID string, data json.RawM
 	case "neko":
 		if s == nil {
 			a.viewerError(ctx, sessionID, relayID, "relay_unavailable")
+			return
+		}
+		if q, ok := focusAsked(f.Data); ok {
+			a.watchFocus(ctx, sessionID, relayID, q)
 			return
 		}
 		if err := s.Send(f.Data); err != nil {

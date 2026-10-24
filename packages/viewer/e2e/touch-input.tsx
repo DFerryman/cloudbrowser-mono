@@ -10,6 +10,8 @@ const wire: { event: string; payload?: any }[] = [];
 // What an agent received of pasted or dropped files.
 const transfers: { action: string; x?: number; y?: number; names: string[]; text: string; done: boolean }[] = [];
 const held = new Set<number>();
+// The agent's answer to each focus question (agent 0.7.0): a keyboard, '' for none, or no answer.
+let focusAnswer: string | undefined;
 const remoteInput = document.createElement('textarea');
 const remoteScroll = document.createElement('div');
 remoteScroll.style.cssText = 'position:fixed;left:-10000px;top:0;width:320px;height:240px;overflow:scroll;';
@@ -65,6 +67,13 @@ class FixtureSocket {
     const frame = JSON.parse(raw);
     if (typeof frame.t === 'string' && frame.t.startsWith('file_')) return this.file(frame);
     if (frame.t !== 'neko') throw new Error('All input must use the ordered Neko transport');
+    if (frame.data.event === 'cloudbrowser/focus') {
+      // The agent keeps the question from neko and answers after the tap's click.
+      wire.push(frame.data);
+      const answer = focusAnswer;
+      if (answer !== undefined) setTimeout(() => this.push({ t: 'neko', data: { event: 'cloudbrowser/focus', payload: { id: frame.data.payload.id, keyboard: answer } } }), 60);
+      return;
+    }
     receiveInput(frame.data);
   }
   close() { this.readyState = 3; this.onclose?.(); }
@@ -193,6 +202,11 @@ createRoot(document.getElementById('root')!).render(<Fixture />);
   clear() { calls.length = 0; wire.length = 0; transfers.length = 0; focusChanges.length = 0; textareaFocusCalls = 0; phase = null; },
   resetRemote() { remoteScroll.scrollTo(0, 0); remoteInput.value = ''; selectedAll = false; },
   socketBuffer(bytes: number) { FixtureSocket.last.bufferedAmount = bytes; },
+  /** The agent says it answers focus questions, as agent 0.7.0 does when the relay opens. */
+  announceFocus() { FixtureSocket.last.push({ t: 'neko', data: { event: 'cloudbrowser/features', payload: { textFocus: true } } }); },
+  answerFocus(keyboard: string | undefined) { focusAnswer = keyboard; },
+  /** An answer the agent sends on its own time: late, or to a question a later one replaced. */
+  pushFocus(id: number, keyboard: string) { FixtureSocket.last.push({ t: 'neko', data: { event: 'cloudbrowser/focus', payload: { id, keyboard } } }); },
   nativeKey(type: string, key: string, code = '', modifiers = {}) {
     document.querySelector('textarea')!.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, key, code, ...modifiers }));
   },

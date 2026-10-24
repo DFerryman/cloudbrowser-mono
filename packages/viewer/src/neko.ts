@@ -36,7 +36,17 @@ export const EV = {
   CLIPBOARD_SET: 'clipboard/set',
   CLIPBOARD_UPDATED: 'clipboard/updated',
   CURSOR_IMAGE: 'cursor/image',
+  /**
+   * Answered by the browser's agent, never relayed to neko (agent 0.7.0): where the keyboard focus
+   * went after a tap, and, when the viewer's relay opens, that the agent answers that question.
+   */
+  AGENT_FOCUS: 'cloudbrowser/focus',
+  AGENT_FEATURES: 'cloudbrowser/features',
 } as const;
+
+/** A keyboard a focused remote text field wants: an inputmode. */
+export type TextKeyboard = 'text' | 'search' | 'email' | 'url' | 'tel' | 'numeric' | 'decimal';
+export const TEXT_KEYBOARDS: readonly TextKeyboard[] = ['text', 'search', 'email', 'url', 'tel', 'numeric', 'decimal'];
 
 export interface SignalProvide {
   sdp: string;

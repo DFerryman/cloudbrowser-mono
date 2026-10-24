@@ -24,6 +24,16 @@ type fakeBrowser struct {
 	closed   int
 	inserted []string
 	drops    []drop
+	// focus is what each focus reading answers in turn, the last one again after that; focusAt
+	// records the tap each reading was opened for, and focusDone how many were released.
+	focus     []focusReading
+	focusAt   [][2]int
+	focusDone int
+}
+
+type focusReading struct {
+	keyboard string
+	ok       bool
 }
 
 type drop struct {
@@ -55,6 +65,29 @@ func (b *fakeBrowser) DropFiles(_ context.Context, x, y int, paths []string) (bo
 	defer b.mu.Unlock()
 	b.drops = append(b.drops, drop{x, y, paths})
 	return true, nil
+}
+
+func (b *fakeBrowser) TextFocus(_ context.Context, x, y int) (func(context.Context) (string, bool), func(), error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.focusAt = append(b.focusAt, [2]int{x, y})
+	readings := append([]focusReading(nil), b.focus...)
+	sample := func(context.Context) (string, bool) {
+		if len(readings) == 0 {
+			return "", false
+		}
+		r := readings[0]
+		if len(readings) > 1 {
+			readings = readings[1:]
+		}
+		return r.keyboard, r.ok
+	}
+	done := func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		b.focusDone++
+	}
+	return sample, done, nil
 }
 
 type fakeFirewall struct{ modes []string }

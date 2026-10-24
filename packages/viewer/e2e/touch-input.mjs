@@ -528,6 +528,118 @@ try {
   assert.deepEqual(desktop.errors, []);
   check('desktop click, hardware keyboard, and wheel remain usable');
   await desktop.context.close();
+
+  // The on-screen keyboard follows the remote focus (agent 0.7.0): a tap asks where the focus went,
+  // just ahead of its click, and the answer opens the keyboard for a text field or closes it.
+  const focusPage = async (apple) => {
+    const opened = await openPage(true);
+    // Chromium's emulation reports Linux; an iPhone or iPad reports its own platform.
+    if (apple) await opened.context.addInitScript(() => Object.defineProperty(navigator, 'platform', { get: () => 'iPad' }));
+    if (apple) {
+      await opened.page.reload();
+      await opened.page.waitForFunction(() => !!window.touchHarness && !!document.querySelector('textarea'));
+      await settle(opened.page);
+    }
+    await opened.page.evaluate(() => window.touchHarness.announceFocus());
+    const box = await opened.page.locator('video').boundingBox();
+    return { ...opened, at: { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 3) } };
+  };
+  const questions = (state) => state.wire.filter((f) => f.event === 'cloudbrowser/focus');
+  const tapFor = async (fp, answer, wait = 250) => {
+    await fp.page.evaluate((a) => window.touchHarness.answerFocus(a), answer);
+    await clear(fp.page);
+    await fp.page.touchscreen.tap(fp.at.x, fp.at.y);
+    await fp.page.waitForTimeout(wait);
+    return snapshot(fp.page);
+  };
+  const android = await focusPage(false);
+  state = await tapFor(android, 'email');
+  const asked = questions(state);
+  assert.equal(asked.length, 1, 'A tap asks once where the focus went');
+  const down = state.wire.findIndex((f) => f.event === 'control/buttondown');
+  assert.ok(down > state.wire.indexOf(asked[0]), 'The question goes ahead of the click, so the first reading is from before it');
+  const pressed = inputCalls(state, 'button')[0].args;
+  assert.deepEqual([asked[0].payload.x, asked[0].payload.y], [Math.round(pressed[2]), Math.round(pressed[3])], 'The question names the clicked point');
+  assert.equal(state.keyboard, 'true');
+  assert.equal(state.active, 'textarea');
+  assert.equal(state.inputMode, 'email');
+  assert.equal(state.readOnly, false);
+  check('a tapped text field opens the on-screen keyboard of its kind, after the tap (Android)');
+
+  state = await tapFor(android, 'tel');
+  assert.equal(state.keyboard, 'true');
+  assert.equal(state.inputMode, 'tel');
+  assert.equal(state.textareaFocusCalls, 0, 'Another field changes the open keyboard without refocusing');
+  state = await tapFor(android, '');
+  assert.equal(state.keyboard, 'false');
+  assert.notEqual(state.active, 'textarea');
+  assert.equal(state.inputMode, 'none');
+  assert.equal(state.readOnly, true);
+  check('the keyboard follows another field, and tapping away from any closes it');
+
+  await android.page.getByTestId('keyboard-toggle').tap();
+  state = await tapFor(android, '');
+  assert.equal(state.keyboard, 'true', 'A keyboard opened from the toolbar stays open off any field');
+  assert.equal(state.inputMode, 'text');
+  state = await tapFor(android, 'url');
+  assert.equal(state.inputMode, 'url');
+  state = await tapFor(android, '');
+  assert.equal(state.keyboard, 'true');
+  assert.equal(state.inputMode, 'text');
+  await android.page.getByTestId('keyboard-toggle').tap();
+  await settle(android.page);
+  assert.equal((await snapshot(android.page)).keyboard, 'false');
+  check('a keyboard opened from the toolbar stays open, taking the kind of a tapped field');
+
+  state = await tapFor(android, undefined);
+  const id = questions(state).at(-1).payload.id;
+  await android.page.evaluate((i) => window.touchHarness.pushFocus(i - 1, 'text'), id);
+  await settle(android.page);
+  assert.equal((await snapshot(android.page)).keyboard, 'false', 'An answer to a replaced question is stale');
+  await android.page.evaluate((i) => window.touchHarness.pushFocus(i, 'numeric'), id);
+  await settle(android.page);
+  state = await snapshot(android.page);
+  assert.equal(state.keyboard, 'true', 'A late answer to the last question still opens the keyboard');
+  assert.equal(state.inputMode, 'numeric');
+  await tapFor(android, '');
+  check('only the last question\'s answer counts');
+
+  await android.page.keyboard.press('b');
+  state = await tapFor(android, 'text');
+  assert.equal(questions(state).length, 0, 'Taps after hardware keys ask nothing');
+  assert.equal(state.keyboard, 'false');
+  assert.notEqual(state.active, 'textarea');
+  assert.deepEqual(android.errors, []);
+  check('a hardware keyboard keeps the on-screen keyboard closed in text fields');
+  await android.context.close();
+
+  const apple = await focusPage(true);
+  state = await tapFor(apple, undefined, 50);
+  assert.equal(questions(state).length, 1);
+  assert.equal(state.active, 'textarea', 'iOS opens a keyboard only for an element focused in the gesture: the tap arms the textarea');
+  assert.equal(state.readOnly, false);
+  assert.equal(state.inputMode, 'none', 'An armed textarea shows no keyboard until a text field asks');
+  assert.equal(state.keyboard, 'false');
+  await apple.page.evaluate((i) => window.touchHarness.pushFocus(i, 'search'), questions(state)[0].payload.id);
+  await settle(apple.page);
+  state = await snapshot(apple.page);
+  assert.equal(state.keyboard, 'true');
+  assert.equal(state.inputMode, 'search');
+  assert.equal(state.active, 'textarea');
+  check('iPad and iPhone: a tap arms the textarea in its gesture, and a text field\'s answer opens the keyboard');
+
+  state = await tapFor(apple, '');
+  assert.equal(state.keyboard, 'false');
+  assert.notEqual(state.active, 'textarea');
+  assert.equal(state.readOnly, true);
+  state = await tapFor(apple, '');
+  assert.notEqual(state.active, 'textarea', 'A tap off any field leaves the textarea disarmed');
+  assert.equal(state.readOnly, true);
+  assert.equal(state.inputMode, 'none');
+  assert.deepEqual(apple.errors, []);
+  check('iPad and iPhone: tapping away closes the keyboard and disarms the textarea');
+  await apple.context.close();
+
   console.log(JSON.stringify({ engine, checks, result: 'passed', swipeCoverage: engine === 'chromium' ? 'native CDP touch sequence' : 'not available in Playwright WebKit' }, null, 2));
 } catch (error) {
   console.error(JSON.stringify({ engine, checks, result: 'failed' }, null, 2));

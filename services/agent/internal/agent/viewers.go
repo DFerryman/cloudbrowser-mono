@@ -177,6 +177,8 @@ func (a *Agent) finishViewerOpen(p *viewerOpen) {
 	for _, msg := range buffer {
 		a.forwardViewer(p, msg)
 	}
+	// What this agent answers beyond neko, after neko's own first messages.
+	a.forwardViewer(p, featuresMessage)
 	p.forwardMu.Unlock()
 	go func() {
 		select {
@@ -260,6 +262,7 @@ func (a *Agent) closeViewer(sessionID string, relayIDs ...string) {
 		s.Close()
 	}
 	a.endSessionTransfers(sessionID)
+	a.endFocusWatch(sessionID)
 }
 
 func (a *Agent) closeSessions() {

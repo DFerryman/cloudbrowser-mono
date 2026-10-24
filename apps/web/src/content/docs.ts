@@ -92,7 +92,8 @@ const en: Article[] = [
       { h: 'Touch screens', id: 'touch' },
       { ul: [
         'Tap to click; swipe with one or two fingers to scroll.',
-        'Use the keyboard button in the toolbar to show or hide the software keyboard. Touching the picture keeps your choice.',
+        'Tap a text field, a search box or the address bar and the on-screen keyboard opens by itself, with the field’s own layout (email, numbers, web address); tapping outside any field closes it again. It stays closed while you type on a hardware keyboard.',
+        'The keyboard button in the toolbar shows or hides the on-screen keyboard yourself. A keyboard opened with it stays open wherever you tap, for pages that take typing outside a text field.',
         'Maximize hides the toolbar and gives the whole screen to the page; a small control in the corner keeps the keyboard and the way back a tap away. The maximized view stays within your browser (Add to Home Screen hides its address bar), because iPhone and iPad allow no typing in a fullscreen page.',
         'If the picture stops responding, More → Reconnect live view starts the connection again without leaving the page. Coming back to a tab that was in the background reconnects by itself.',
       ] },
@@ -409,7 +410,8 @@ const zh: Article[] = [
       { h: '触控屏', id: 'touch' },
       { ul: [
         '轻点即点击；单指或双指滑动即可滚动。',
-        '使用工具栏中的键盘按钮显示或隐藏软键盘。触摸画面不会改变你的选择。',
+        '点按文本框、搜索框或地址栏时，屏幕键盘会自动弹出，并使用该输入框对应的布局（电子邮件、数字、网址）；点按任何输入框以外的地方会再次收起。使用实体键盘打字时，屏幕键盘保持收起。',
+        '也可以用工具栏中的键盘按钮自行显示或隐藏屏幕键盘。用该按钮打开的键盘在你点按任何地方时都保持打开，适用于在输入框之外接收输入的页面。',
         '“最大化”会隐藏工具栏，把整个屏幕留给网页；角落里的小控件让键盘和退出始终触手可及。最大化画面保持在你的浏览器内（“添加到主屏幕”可隐藏地址栏），因为 iPhone 和 iPad 不允许在全屏页面中输入文字。',
         '如果画面没有响应，可在“更多”中选择“重新连接画面”，无需离开页面即可重新建立连接。从后台切回标签页时会自动重新连接。',
       ] },

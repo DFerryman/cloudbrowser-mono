@@ -60,6 +60,7 @@ func TestChromeAgainstRealBrowser(t *testing.T) {
 		t.Fatalf("insert text: %v", err)
 	}
 	testDropFiles(ctx, t, c)
+	testTextFocus(ctx, t, c)
 	if err := c.Close(ctx); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -69,6 +70,86 @@ func TestChromeAgainstRealBrowser(t *testing.T) {
 	case <-done:
 	case <-time.After(20 * time.Second):
 		t.Fatal("chrome did not exit after Browser.close")
+	}
+}
+
+// testTextFocus moves the focus around a page and reads which keyboard each element wants.
+func testTextFocus(ctx context.Context, t *testing.T, c *Chrome) {
+	t.Helper()
+	page := `<input id=text><input id=mail type=email><input id=num type=number><input id=box type=checkbox>
+<input id=otp inputmode=numeric><input id=locked readonly><textarea id=area></textarea><div id=edit contenteditable>x</div>
+<button id=button>b</button><div id=host></div><iframe id=frame srcdoc="<input id=inner type=url>"></iframe>
+<script>document.getElementById("host").attachShadow({mode: "open"}).innerHTML = "<input id=shadow type=search>";</script>`
+	var created struct {
+		TargetID string `json:"targetId"`
+	}
+	if err := c.CDP.Call(ctx, "", "Target.createTarget", map[string]any{"url": "data:text/html," + url.PathEscape(page)}, &created); err != nil {
+		t.Fatal(err)
+	}
+	var s struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := c.CDP.Call(ctx, "", "Target.attachToTarget", map[string]any{"targetId": created.TargetID, "flatten": true}, &s); err != nil {
+		t.Fatal(err)
+	}
+	// A headless page has the focus only when told it has.
+	if err := c.CDP.Call(ctx, s.SessionID, "Emulation.setFocusEmulationEnabled", map[string]any{"enabled": true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	sample, done, err := c.TextFocus(ctx, 10, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer done()
+	for _, f := range []struct{ focus, keyboard string }{
+		{`document.getElementById("text").focus()`, "text"},
+		{`document.getElementById("mail").focus()`, "email"},
+		{`document.getElementById("num").focus()`, "decimal"},
+		{`document.getElementById("box").focus()`, ""},
+		{`document.getElementById("otp").focus()`, "numeric"},
+		{`document.getElementById("locked").focus()`, ""},
+		{`document.getElementById("area").focus()`, "text"},
+		{`document.getElementById("edit").focus()`, "text"},
+		{`document.getElementById("button").focus()`, ""},
+		{`document.getElementById("host").shadowRoot.getElementById("shadow").focus()`, "search"},
+		{`document.getElementById("frame").contentDocument.getElementById("inner").focus()`, "url"},
+		{`document.activeElement.blur()`, ""},
+	} {
+		if err := c.CDP.Call(ctx, s.SessionID, "Runtime.evaluate", map[string]any{"expression": f.focus}, nil); err != nil {
+			t.Fatal(err)
+		}
+		keyboard, ok := sample(ctx)
+		if !ok || keyboard != f.keyboard {
+			t.Fatalf("%s: keyboard %q (%v), want %q", f.focus, keyboard, ok, f.keyboard)
+		}
+	}
+	c.CDP.cleanup("Target.detachFromTarget", map[string]any{"sessionId": s.SessionID})
+	c.CDP.cleanup("Target.closeTarget", map[string]any{"targetId": created.TargetID})
+}
+
+func TestInBrowserBar(t *testing.T) {
+	// A 1920×1080 window, maximized, with a 993-pixel-high page at ratio 1: 87 pixels of tabs and toolbar.
+	w := windowBounds{Left: 0, Top: 0, Width: 1920, Height: 1080}
+	for _, c := range []struct {
+		x, y float64
+		want bool
+	}{
+		{900, 63, true},   // the address bar
+		{292, 20, true},   // the new-tab button
+		{1860, 63, false}, // the profile button
+		{1897, 63, false}, // the menu
+		{900, 87, false},  // the page's first row
+		{900, 500, false}, // the page
+		{-1, 63, false},   // left of the window
+	} {
+		if got := inBrowserBar(c.x, c.y, w, 993, 1); got != c.want {
+			t.Fatalf("(%v, %v): %v, want %v", c.x, c.y, got, c.want)
+		}
+	}
+	// At a device ratio of 2 the page's 400 CSS pixels are 800 remote ones.
+	if !inBrowserBar(400, 150, windowBounds{Width: 800, Height: 1000}, 400, 2) || inBrowserBar(400, 250, windowBounds{Width: 800, Height: 1000}, 400, 2) {
+		t.Fatal("the bar ends where the page's device pixels start")
 	}
 }
 
