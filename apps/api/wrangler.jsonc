@@ -13,6 +13,13 @@
   "minify": true,
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
+  // Requests run next to D1's primary (Eastern North America), not at the visitor's edge: a
+  // handler's queries follow each other, and from Tokyo each one crossed the Pacific (a heartbeat
+  // took 1.1 s there, 0.6 s from Los Angeles). Measured per query: about 10 ms from here (Chicago),
+  // 30 ms from Virginia. Only fetch handlers move: the gateway's RPC calls (Internal) and the
+  // crons run where they are called. request.cf and CF-Connecting-IP still describe the visitor.
+  // Files fetched through the assets binding (/assets/*) are served from here too.
+  "placement": { "region": "aws:us-east-2" },
   // The web app is served from the same Worker, so /api is same-origin (no CORS). Every other path
   // is served from the assets without running the Worker: prerendered public pages (x.html at /x,
   // html_handling "auto-trailing-slash"), then index.html for the app's routes. The Worker runs

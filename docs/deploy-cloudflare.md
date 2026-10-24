@@ -62,6 +62,12 @@ Copy the D1 `database_id` into **all five** configs (each has the placeholder
 `00000000-0000-0000-0000-000000000000`): `apps/api/wrangler.jsonc`, `apps/engine/wrangler.jsonc`,
 `apps/engine/wrangler.reaper.jsonc`, `apps/reconciler/wrangler.jsonc`, `apps/gateway/wrangler.jsonc`.
 
+The api Worker runs next to the database (`placement` in `apps/api/wrangler.jsonc`), since its
+handlers make several queries one after another. Keep that region next to where D1 put the
+primary (`wrangler d1 info cloudbrowser` shows it; this deployment's is in Eastern North America,
+about 10 ms per query from `aws:us-east-2`). The gateway stays at the edge: its viewers' input
+and its Durable Objects, which sit near the VMs, must not detour through the database's region.
+
 ## 2. Email Service (sign-in codes and registration links)
 
 Dashboard → **Email Service** → **Email Sending** → onboard your domain (e.g. `example.com`). It
