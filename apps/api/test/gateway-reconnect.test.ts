@@ -14,6 +14,7 @@ function gateway(sockets: Socket[]) {
   vi.stubGlobal('WebSocketRequestResponsePair', class {});
   const ctx = {
     setWebSocketAutoResponse: vi.fn(),
+    getWebSocketAutoResponseTimestamp: () => null,
     getWebSockets: (tag: string) => sockets.filter((s) =>
       s.attachment.role === tag || (s.attachment.role === 'viewer' && tag === `session:${s.attachment.sessionId}`),
     ),
