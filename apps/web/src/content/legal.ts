@@ -38,8 +38,8 @@ const dpa: Article = {
       'We use our sub-processors under their data protection terms, and we remain responsible to you for their processing of your personal data.',
     ] },
     { h: '5. Where your personal data is processed' },
-    { p: 'Your browsers’ virtual machines, their disks and their recovery snapshots stay in the AWS region you choose when you create each browser; a browser’s region cannot change afterwards. The regions on offer are listed in the app; they include the UK, the EU and Switzerland as well as North and South America, Asia-Pacific, Israel and South Africa.' },
-    { p: 'Some of your personal data is stored in the United States whatever region you choose: each time a browser goes to sleep, an encrypted copy of its Chrome profile is stored in Cloudflare R2 in Eastern North America. Our account, browser and billing records are in a Cloudflare database in Eastern North America too.' },
+    { p: 'Your browsers’ virtual machines, their disks, their recovery snapshots and their encrypted profile archives stay in the AWS region you choose when you create each browser; a browser’s region cannot change afterwards. The regions on offer are listed in the app; they include the UK, the EU and Switzerland as well as North and South America, Asia-Pacific, Israel and South Africa.' },
+    { p: 'Each time a browser goes to sleep, an encrypted copy of its Chrome profile is stored in Amazon S3 in the browser’s own AWS region. Our own account, browser and billing records are in a Cloudflare database in Eastern North America (United States), whatever region you choose.' },
     { p: 'While you use a browser, the live view picture is relayed through Cloudflare’s TURN service at the Cloudflare location nearest you, and input, clipboard text, files and coding-agent screenshots pass through Cloudflare near your browser’s region. None of these are stored there.' },
     { p: 'Some regions are in countries without UK or EU adequacy. Your choice of region is your instruction about where your browser data is stored, and you are responsible for choosing a region that fits your obligations. Section 11 explains what is not yet in place for transfers.' },
     { h: '6. Personal data breaches' },
@@ -79,7 +79,7 @@ const dpa: Article = {
     { h: '11. What is not in place yet', id: 'not-yet' },
     { p: 'We would rather tell you than promise what we cannot do yet. Today:' },
     { ul: [
-      'Transfers: we have no transfer agreement with you, such as the UK International Data Transfer Agreement or the EU Standard Contractual Clauses, and we have not completed a transfer risk assessment, although encrypted profile archives and our records are stored in the United States (section 5).',
+      'Transfers: we have no transfer agreement with you, such as the UK International Data Transfer Agreement or the EU Standard Contractual Clauses, and we have not completed a transfer risk assessment, although our records are stored in the United States (section 5).',
       'Breaches: we have no written breach response procedure yet. The commitment in section 6 still applies.',
       'Account closure: not available in the app yet; closures are handled through support (section 8).',
       'Export: there is no way to download a browser’s files or profile through the service.',
@@ -113,8 +113,8 @@ const dpa: Article = {
     ] },
     { h: 'Annex C: Sub-processors', id: 'annex-c' },
     { ul: [
-      'Amazon Web Services: the virtual machines, encrypted disks, snapshots and IP addresses of your browsers. Handles everything stored in a browser. Location: the AWS region you choose for each browser.',
-      'Cloudflare, Inc.: hosting of the website, API and session gateway; our database; storage of encrypted profile archives; the live view relay; logs; email delivery. Stores encrypted profile archives, and relays the live view, input, clipboard text, files and coding-agent screenshots without storing them. Location: database and archives in Eastern North America (United States); relays on Cloudflare’s global network.',
+      'Amazon Web Services: the virtual machines, encrypted disks, snapshots, encrypted profile archives (Amazon S3) and IP addresses of your browsers. Handles everything stored in a browser. Location: the AWS region you choose for each browser.',
+      'Cloudflare, Inc.: hosting of the website, API and session gateway; our database; the live view relay; logs; email delivery. Relays the live view, input, clipboard text, files and coding-agent screenshots without storing them. Location: database in Eastern North America (United States); relays on Cloudflare’s global network.',
     ] },
     { p: 'Other parties that receive data but are not sub-processors of your personal data:' },
     { ul: [
@@ -127,7 +127,7 @@ const dpa: Article = {
     { ul: [
       'Chrome profile and downloads: the browser’s encrypted disk, in the region you chose. Kept until you delete the browser, or seven days after your credit runs out.',
       'Files uploaded into a browser: the browser’s disk. Cleared each time the browser wakes, and after 24 hours.',
-      'Encrypted profile archives: Cloudflare R2, Eastern North America. The last 10, plus one a day for 14 days; made unreadable and then deleted when the browser is deleted.',
+      'Encrypted profile archives: Amazon S3, in the browser’s region. The last 10, plus one a day for 14 days; made unreadable and then deleted when the browser is deleted.',
       'Recovery snapshots: AWS, in the browser’s region. Deleted when the recovery ends, within seven days.',
       'Live view picture, input, clipboard text, files and coding-agent screenshots: Cloudflare, in transit only. Not stored.',
     ] },
