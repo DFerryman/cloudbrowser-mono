@@ -1,0 +1,19 @@
+diff --git a/server/internal/webrtc/manager.go b/server/internal/webrtc/manager.go
+index 1a0c71e..9fccb25 100644
+--- a/server/internal/webrtc/manager.go
++++ b/server/internal/webrtc/manager.go
+@@ -189,6 +189,14 @@ func (manager *WebRTCManagerCtx) newPeerConnection(logger zerolog.Logger, codecs
+ 	settings.SetICETimeouts(disconnectedTimeout, failedTimeout, keepAliveInterval)
+ 	settings.SetNAT1To1IPs(manager.config.NAT1To1IPs, webrtc.ICECandidateTypeHost)
+ 	settings.SetLite(manager.config.ICELite)
++	// The viewer relays everything through TURN, so its only candidate is a relay: nominate the
++	// first pair that works instead of waiting up to 2 s for a better one that cannot come.
++	settings.SetSrflxAcceptanceMinWait(0)
++	settings.SetPrflxAcceptanceMinWait(0)
++	settings.SetRelayAcceptanceMinWait(0)
++	// ICE has already proven the peer's address with its credentials, and DTLS only reads from the
++	// selected pair: the cookie round trip (HelloVerifyRequest) only delays the first picture.
++	settings.SetDTLSInsecureSkipHelloVerify(true)
+ 	// make sure server answer sdp setup as passive, to not force DTLS renegotiation
+ 	// otherwise iOS renegotiation fails with: Failed to set SSL role for the transport.
+ 	settings.SetAnsweringDTLSRole(webrtc.DTLSRoleServer)
