@@ -10,6 +10,7 @@ export interface QualityCounters {
   freezeSeconds: number;
   jitterBufferDelay: number;
   jitterBufferEmitted: number;
+  jitterBufferTarget: number;
   decodeSeconds: number;
   dropped: number;
   nacks: number;
@@ -115,6 +116,7 @@ export class QualityWindow {
     const frozen = growth(b.freezeSeconds, a.freezeSeconds);
     const emitted = growth(b.jitterBufferEmitted, a.jitterBufferEmitted);
     const buffered = growth(b.jitterBufferDelay, a.jitterBufferDelay);
+    const targeted = growth(b.jitterBufferTarget, a.jitterBufferTarget);
     const decoding = growth(b.decodeSeconds, a.decodeSeconds);
     const dropped = growth(b.dropped, a.dropped);
     const count = (now: number, before: number) => { const n = growth(now, before); return n === null ? null : Math.round(n); };
@@ -147,6 +149,7 @@ export class QualityWindow {
       plis: count(b.plis, a.plis),
       keyframes: count(b.keyframes, a.keyframes),
       levelChanges: this.levelChanges,
+      jitterBufferTargetMs: emitted && targeted !== null ? round((targeted / emitted) * 1000, 1) : null,
     });
     // Values outside the contract's bounds (a broken counter) drop the report, not the view.
     return parsed.success ? parsed.data : null;

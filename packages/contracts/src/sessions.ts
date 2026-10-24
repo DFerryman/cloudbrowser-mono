@@ -162,6 +162,12 @@ export const LiveQualityReport = z.object({
   keyframes: z.number().int().min(0).max(100_000).nullable().optional(),
   /** Times the viewer switched picture level in the interval. */
   levelChanges: z.number().int().min(0).max(10_000).optional(),
+  /**
+   * The average delay the browser aimed to hold each frame for (its smoothing, and keeping the
+   * picture in step with the sound). `jitterBufferMs` above it is time frames waited for packets
+   * still missing, mostly resends. Optional: older viewers do not send it.
+   */
+  jitterBufferTargetMs: z.number().min(0).max(60_000).nullable().optional(),
 }).strict();
 export type LiveQualityReport = z.infer<typeof LiveQualityReport>;
 

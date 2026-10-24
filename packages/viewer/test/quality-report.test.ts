@@ -9,7 +9,7 @@ const stats = (over: Partial<ViewerStats> = {}): ViewerStats => ({
 /** A browser that reports only the basic counters (no freeze durations, jitter buffer or decode times). */
 const basic = (received: number, frames = Number.NaN): QualityCounters => ({
   lost: 0, received, freezes: 0, frames,
-  freezeSeconds: Number.NaN, jitterBufferDelay: Number.NaN, jitterBufferEmitted: Number.NaN, decodeSeconds: Number.NaN, dropped: Number.NaN,
+  freezeSeconds: Number.NaN, jitterBufferDelay: Number.NaN, jitterBufferEmitted: Number.NaN, jitterBufferTarget: Number.NaN, decodeSeconds: Number.NaN, dropped: Number.NaN,
   nacks: Number.NaN, retransmits: Number.NaN, plis: Number.NaN, keyframes: Number.NaN,
 });
 
@@ -22,6 +22,7 @@ describe('quality report window', () => {
       attemptId: ATTEMPT, durationMs: 30_000, readings: 1, rttMs: 100, gatewayRttMs: null, fps: null, kbps: null,
       loss: 0, freezes: 0, freezeMs: null, jitterBufferMs: null, decodeMs: null, framesDropped: null,
       quality: null, width: null, height: null, nacks: null, retransmits: null, plis: null, keyframes: null, levelChanges: 0,
+      jitterBufferTargetMs: null,
     });
   });
 
@@ -38,6 +39,16 @@ describe('quality report window', () => {
     expect(w.take(10_000, 'medium')).toMatchObject({ nacks: 600, retransmits: 575, plis: 3, keyframes: 3, levelChanges: 2 });
     w.add(ATTEMPT, 60_000, stats(), repairs(18_000, 640, 610, 4, 5), { inboundVideo: true });
     expect(w.take(10_000, 'medium')).toMatchObject({ nacks: 0, retransmits: 0, plis: 0, keyframes: 0, levelChanges: 0 });
+  });
+
+  it('splits how long frames waited into what the browser aimed for and the rest', () => {
+    const w = new QualityWindow();
+    const buffer = (received: number, delay: number, target: number, emitted: number): QualityCounters =>
+      ({ ...basic(received), jitterBufferDelay: delay, jitterBufferTarget: target, jitterBufferEmitted: emitted });
+    // 300 frames held 0.3 s on average, of which the browser aimed for 0.06 s: the rest waited for packets.
+    w.add(ATTEMPT, 0, stats(), buffer(0, 10, 2, 1000), { inboundVideo: true });
+    w.add(ATTEMPT, 30_000, stats(), buffer(9000, 100, 20, 1300), { inboundVideo: true });
+    expect(w.take(10_000, 'low')).toMatchObject({ jitterBufferMs: 300, jitterBufferTargetMs: 60 });
   });
 
   it('takes medians, continues from the last reading, and starts over for another attempt', () => {
