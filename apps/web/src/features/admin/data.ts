@@ -61,7 +61,7 @@ export function useAdmin<T>(path: string, opts: { refetchInterval?: number; enab
 }
 
 /** Page sizes for the console's server-paged lists. */
-export const ADMIN_PAGE = { alerts: 50, operations: 50, browsers: 50, ledger: 100, findings: 50, users: 50, audit: 100 } as const;
+export const ADMIN_PAGE = { alerts: 50, operations: 50, browsers: 50, ledger: 100, findings: 50, users: 50, closures: 50, audit: 100 } as const;
 
 /**
  * One page of a server-paged admin list (`limit`/`offset`). Fetches one row more than it shows
@@ -189,6 +189,26 @@ export type UserRow = {
   admin: boolean;
   /** The latest Terms of Service version the user accepted before paying; null before any. */
   termsVersion: string | null;
+  /** Set once the user closed the account (ClosureRow.status). */
+  closure: ClosureRow['status'] | null;
+};
+
+/** A closed account (api closure.ts): the ones still deleting browsers first. */
+export type ClosureRow = {
+  userId: string;
+  /** null once the personal data is erased. */
+  email: string | null;
+  status: 'closing' | 'closed';
+  reason: 'terms' | 'price' | 'not_needed' | 'other' | null;
+  requestedAt: string;
+  browsers: number;
+  closedAt: string | null;
+  /** Once every browser is purged: the balance and the part of it that was paid for, now (what was left at erasure, once erased). */
+  balanceMicros: number | null;
+  paidMicros: number | null;
+  /** That paid credit per order, newest first: what refunding it in full would be, tax included, in the order's currency. */
+  paidOrders: { orderId: string; provider: string; creditMicros: number; refundCents: number; currency: string }[] | null;
+  erasedAt: string | null;
 };
 
 type RatesRow = { compute: number; ip: number; storage: number; snapshot: number; transfer: number };

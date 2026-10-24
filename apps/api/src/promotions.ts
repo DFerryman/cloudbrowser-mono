@@ -4,7 +4,8 @@
  * platform already keeps, records a completion once, and credits the reward to the balance with a
  * unique reference, so a retried request or sweep never pays twice.
  *
- * Completion is checked when the user opens Promotions and by the api's 5-minute cron.
+ * Completion is checked when the user opens Promotions and by the api's 5-minute cron. A closed
+ * account earns nothing more: its rewards not yet credited are dropped when it closes (closure.ts).
  *
  * Rewards of tasks that need a top-up are capped per account at PROMOTION_TOPUP_SHARE_PERCENT of
  * its paid top-ups, so credit from promotions can never carry an account that does not pay.
@@ -122,6 +123,7 @@ async function recordCompletion(db: Db, task: TaskRow, userId: string, progress:
     WHERE id = ${task.id} AND enabled = 1 AND (starts_at IS NULL OR starts_at <= ${now.getTime()}) AND (ends_at IS NULL OR ends_at > ${now.getTime()})
       AND (max_completions IS NULL OR (SELECT count(*) FROM promotion_completions WHERE task_id = ${task.id}) < max_completions)
       AND (requires_topup = 0 OR (${hasTopup(sql`${userId}`)} AND ${withinShare(sql`${userId}`, sql`reward_micros`)}))
+      AND NOT EXISTS (SELECT 1 FROM account_closures WHERE user_id = ${userId})
     ON CONFLICT DO NOTHING RETURNING task_id`);
   return rows.length > 0;
 }
@@ -235,6 +237,7 @@ export async function promotionSweep(env: Env | null, db: Db, now = new Date()) 
         AND NOT EXISTS (SELECT 1 FROM promotion_completions c WHERE c.task_id = ${task.id} AND c.user_id = p.user_id)
         AND (${task.requiresTopup ? 0 : 1} = 1 OR (${hasTopup(sql`p.user_id`)} AND ${withinShare(sql`p.user_id`, sql`${task.rewardMicros}`)}))
         AND EXISTS (SELECT 1 FROM "user" u WHERE u.id = p.user_id)
+        AND NOT EXISTS (SELECT 1 FROM account_closures a WHERE a.user_id = p.user_id)
       LIMIT ${SWEEP_LIMIT}`);
     for (const c of candidates) {
       if (await recordCompletion(db, task, c.user_id, Number(c.value), now)) completed++;

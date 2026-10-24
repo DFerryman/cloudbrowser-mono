@@ -14,6 +14,7 @@ import { acknowledgeAlert } from '../notifications/admin.js';
 import { applyBalance, notifyHub, unfreezeAccount } from '../billing/ledger.js';
 import type { AppEnv } from '../env.js';
 import { systemOperation } from '../ops.js';
+import { unusedPaidCredit } from '../closure.js';
 import { pageQuery } from '../paging.js';
 import { problem } from '../problem.js';
 
@@ -45,6 +46,7 @@ const {
   pricingSettings: pricingSettingsTable,
   promotionTasks,
   promotionCompletions,
+  accountClosures,
 } = schema;
 
 export const adminRoute = new Hono<AppEnv>();
@@ -466,6 +468,7 @@ adminRoute.get('/users', async (c) => {
     .from(browserReservations)
     .where(inArray(browserReservations.userId, ids))
     .groupBy(browserReservations.userId);
+  const closures = await db.select({ userId: accountClosures.userId, status: accountClosures.status }).from(accountClosures).where(inArray(accountClosures.userId, ids));
   // The latest Terms version each user accepted: versions are ISO dates, so the greatest is the latest.
   const terms = await db
     .select({ userId: termsAcceptances.userId, version: sql<string>`max(${termsAcceptances.termsVersion})` })
@@ -490,6 +493,7 @@ adminRoute.get('/users', async (c) => {
         frozenAt: a?.frozenAt ?? null,
         admin: isAdminEmail(c.env, r.email),
         termsVersion: terms.find((x) => x.userId === r.id)?.version ?? null,
+        closure: closures.find((x) => x.userId === r.id)?.status ?? null,
       };
     }),
   );
@@ -559,6 +563,34 @@ adminRoute.post('/users/:id/unfreeze', async (c) => {
   await audit(db, c, 'user.unfreeze', `user:${id}`, { reason });
   c.executionCtx.waitUntil(notifyHub(c.env, id));
   return c.json({ ok: true });
+});
+
+// --- account closures (../closure.ts) ------------------------------------------------------------
+
+/**
+ * Closed accounts, the ones still being deleted first: the balance, the part of it that was paid
+ * for, and what refunding it would take per order, for support in a special case where a refund
+ * is agreed. Until the data is erased these are read from the ledger now, so a refund support already made
+ * is taken off; after, they are what was left at erasure. The email is shown until erasure.
+ */
+adminRoute.get('/closures', async (c) => {
+  const db = c.get('db');
+  const page = pageQuery(c, 100);
+  const rows = await db
+    .select({ closure: accountClosures, email: user.email })
+    .from(accountClosures)
+    .innerJoin(user, eq(user.id, accountClosures.userId))
+    .orderBy(sql`${accountClosures.status} = 'closed'`, desc(accountClosures.requestedAt))
+    .limit(page.limit)
+    .offset(page.offset);
+  return c.json(await Promise.all(rows.map(async (r) => {
+    const live = r.closure.status === 'closed' && !r.closure.erasedAt ? await unusedPaidCredit(db, r.closure.userId) : null;
+    return {
+      ...r.closure,
+      ...(live ? { balanceMicros: live.balanceMicros, paidMicros: live.paidMicros, paidOrders: live.orders } : {}),
+      email: r.closure.erasedAt ? null : r.email,
+    };
+  })));
 });
 
 // --- pricing and margin (page 6) ---------------------------------------------------------------

@@ -5,10 +5,10 @@
  * Everything goes through Cloudflare Email Service (the `send_email` binding `EMAIL`).
  */
 import { schema, type Db } from '@cloudbrowser/db';
-import { eq } from 'drizzle-orm';
+import { and, eq, notExists } from 'drizzle-orm';
 import type { Env } from '../env.js';
 
-const { user, notificationState } = schema;
+const { user, notificationState, accountClosures } = schema;
 
 export type Message = { subject: string; text: string; html?: string };
 
@@ -25,9 +25,13 @@ export async function sendTo(env: Env, to: string, message: Message, sender = 'N
   }
 }
 
-/** Emails a user by id. Best effort: a missing user, binding or failed send is logged, not thrown. */
+/**
+ * Emails a user by id. Best effort: a missing user, binding or failed send is logged, not thrown.
+ * A closed account gets none of these; its closure emails are sent to the address directly.
+ */
 export async function sendToUser(env: Env, db: Db, userId: string, message: Message): Promise<boolean> {
-  const [u] = await db.select({ email: user.email }).from(user).where(eq(user.id, userId));
+  const [u] = await db.select({ email: user.email }).from(user)
+    .where(and(eq(user.id, userId), notExists(db.select({ id: accountClosures.userId }).from(accountClosures).where(eq(accountClosures.userId, userId)))));
   if (!u || !env.EMAIL) return false;
   try {
     await sendTo(env, u.email, message);

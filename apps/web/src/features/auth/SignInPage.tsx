@@ -6,6 +6,7 @@ import { Link, useLocation, useNavigate, useSearchParams } from 'react-router';
 import { api, ApiError } from '../../lib/api.js';
 import { useI18n } from '../../lib/i18n.js';
 import { queryClient } from '../../lib/query.js';
+import { SUPPORT_EMAIL } from '../../lib/site.js';
 import { useSignedIn } from '../../site/hooks.js';
 import { AuthLayout, safeNext } from './AuthLayout.js';
 import { useTurnstile } from './turnstile.js';
@@ -70,8 +71,12 @@ export function SignInPage() {
     if (busy) return;
     setRegistrationRequired(false);
     void run(async () => {
-      const res = await api<{ method: 'passkey' | 'code' | 'register' }>('POST', '/api/auth/sign-in/check', { body: { email: address } });
+      const res = await api<{ method: 'passkey' | 'code' | 'register' | 'closed' }>('POST', '/api/auth/sign-in/check', { body: { email: address } });
       setCode('');
+      if (res.method === 'closed') {
+        setError(t('auth.closed', { email: SUPPORT_EMAIL }));
+        return;
+      }
       if (res.method === 'register') {
         setRegistrationRequired(true);
         return;

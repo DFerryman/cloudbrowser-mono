@@ -10,6 +10,7 @@ import { adminOrigin, isAdminOrigin, isAdminPath, requireAdmin } from './admin/a
 import { paymentProviders, processStoredWebhook } from './billing/providers.js';
 import { receiveStripeWebhook } from './billing/stripe-webhooks.js';
 import { billingSweep } from './billing/sweep.js';
+import { closureSweep } from './closure.js';
 import { receiveWebhook } from './billing/webhooks.js';
 import type { Context, MiddlewareHandler, Next } from 'hono';
 import { createAuth } from './auth.js';
@@ -230,12 +231,13 @@ export default {
     }
   },
 
-  /** Every 5 minutes: billing sweep (the 03:00–03:04 UTC run also reconciles with Stripe and Creem), alert delivery and promotion rewards. */
+  /** Every 5 minutes: billing sweep (the 03:00–03:04 UTC run also reconciles with Stripe and Creem), account closures, alert delivery and promotion rewards. */
   async scheduled(controller: ScheduledController, env: Env) {
     const at = new Date(controller.scheduledTime);
     const nightly = at.getUTCHours() === 3 && at.getUTCMinutes() < 5;
     const db = createDb(env.DB);
     console.log('billing sweep', JSON.stringify(await billingSweep(env, db, paymentProviders(env), new Date(), { nightly })));
+    console.log('account closures', JSON.stringify(await closureSweep(env, db, new Date()).catch((e) => ({ error: String(e) }))));
     console.log('promotions', JSON.stringify(await promotionSweep(env, db, new Date()).catch((e) => ({ error: String(e) }))));
     console.log('reward emails', await rewardNotices(env, db, new Date()).catch((e) => String(e)));
     // Admin watchers raise alerts; deliver afterwards so they go out in the same run.

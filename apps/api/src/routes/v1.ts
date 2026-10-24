@@ -30,7 +30,7 @@ import {
   signViewerToken,
   type RegionId,
 } from '@cloudbrowser/contracts';
-import { automationStatus, createAgentKey, revokeClient, revokeInstanceClientsStatements, setAccess, setControl } from '../automation.js';
+import { automationStatus, createAgentKey, revokeClient, setAccess, setControl } from '../automation.js';
 import { inTcpRelayTest, tcpRelayServers, turnIceServers } from '../turn.js';
 import { callerLocation, regionViews } from '../availability.js';
 import { awsInventory, billingRequired, prepaidAccess, reservationQuote, reservationWrite, eventRow, newId, schema, sha256Hex, settleRunningStatements } from '@cloudbrowser/db';
@@ -47,9 +47,11 @@ import { neverSleepQuote, neverSleepRefused } from '../never-sleep.js';
 import { endViewerSession, recordViewerHeartbeat } from '../viewer-presence.js';
 import { eventsRoute } from './events.js';
 import { promotionsRoute } from './promotions.js';
+import { accountRoute } from './account.js';
 import { resizeQuota } from '../storage.js';
+import { deleteBrowserPermanently } from '../deletion.js';
 
-const { browserInstances, regions, operations, viewerSessions, instanceHealth, placements, events, auditLog, agentCredentials, archiveKeys, agentCommands } = schema;
+const { browserInstances, regions, operations, viewerSessions, instanceHealth, placements, events, auditLog } = schema;
 
 /** The first agent that grows the file system and reports disk usage. */
 const RESIZE_AGENT_VERSION = '0.2.0';
@@ -338,31 +340,7 @@ v1.openapi(
     const earlier = await replayed(db, c.get('user').id, key, route);
     if (earlier) return c.json(earlier, 202);
     const row = await ownedInstance(c, c.req.valid('param').id);
-    const now = new Date();
-    const result = await enqueueOperation(c, {
-      instanceId: row.id,
-      kind: 'delete',
-      priority: 'delete',
-      key,
-      route,
-      params: { reason: 'user', purgeNow: true },
-      // One transaction: accepting a permanent deletion also invalidates every route back to the
-      // profile. Provider deletion is asynchronous and may be retried; access never waits for it.
-      before: [
-        ...settleRunningStatements(db, row.id, now),
-        db.update(browserInstances).set({ status: 'deleting', desiredState: 'deleted', deletedAt: sql`coalesce(${browserInstances.deletedAt}, ${now.getTime()})`, purgeAfter: sql`min(coalesce(${browserInstances.purgeAfter}, ${now.getTime()}), ${now.getTime()})`, updatedAt: now }).where(eq(browserInstances.id, row.id)),
-        db.update(viewerSessions).set({ endedAt: now }).where(and(eq(viewerSessions.instanceId, row.id), isNull(viewerSessions.endedAt))),
-        db.update(agentCredentials).set({ credentialHash: null, bootstrapHash: null, bootstrapExpiresAt: null, rotatedAt: now }).where(eq(agentCredentials.instanceId, row.id)),
-        db.update(archiveKeys).set({ wrappedKey: null, destroyedAt: now }).where(eq(archiveKeys.instanceId, row.id)),
-        db.update(schema.browserReservations).set({ reservedMicros: 0, updatedAt: now }).where(eq(schema.browserReservations.instanceId, row.id)),
-        db.update(agentCommands).set({ status: 'failed', reply: { error: 'Browser permanently deleted.' }, completedAt: now }).where(and(eq(agentCommands.instanceId, row.id), isNull(agentCommands.completedAt))),
-        ...revokeInstanceClientsStatements(db, row.id, now),
-      ],
-      after: [db.insert(auditLog).values({ actor: `user:${c.get('user').id}`, action: 'instance.delete_requested', target: `instance:${row.id}`, detail: { permanent: true }, createdAt: now })],
-    });
-    // Existing WebRTC sessions outlive their short-lived entry tokens. Close their signaling
-    // sockets now as well; the gateway's per-frame database checks are the lost-RPC backstop.
-    await c.env.GATEWAY?.revokeInstance(row.id).catch((e: unknown) => console.error('revoke deleted browser connections failed', row.id, e));
+    const result = await deleteBrowserPermanently(c, row, key, route);
     return c.json(result, 202);
   },
 );
@@ -1054,3 +1032,4 @@ v1.openapi(
 v1.route('/', eventsRoute);
 v1.route('/', billingRoute);
 v1.route('/', promotionsRoute);
+v1.route('/', accountRoute);

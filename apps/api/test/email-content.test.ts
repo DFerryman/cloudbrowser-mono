@@ -2,7 +2,10 @@ import { createDb } from '@cloudbrowser/db';
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../src/notifications/send.js';
 import { renderEmail } from '../src/notifications/template.js';
-import { lowBalanceMessage, noticeMessage, retentionMessage, rewardMessage, runwayMessage, sendAlreadyRegistered, sendRegistrationLink, sendSignInCode } from '../src/notifications/user.js';
+import {
+  closureCodeMessage, closureErasedMessage, closureStartedMessage, lowBalanceMessage, noticeMessage, retentionMessage, rewardMessage, runwayMessage,
+  sendAlreadyRegistered, sendRegistrationLink, sendSignInCode,
+} from '../src/notifications/user.js';
 import { setup } from './helpers.js';
 
 const url = 'https://nevazu.com';
@@ -90,6 +93,27 @@ describe('English transactional emails', () => {
     expect(messages[2]!.text).not.toContain('open it to resume');
     expect(messages[4]!.text).toContain('balance is now $7.00');
     expect(messages[5]!.text).not.toContain('balance is now');
+  });
+
+  it('states the closure code, what closing deleted, that the credit is forfeited, and the erasure', () => {
+    const code = closureCodeMessage(url, '042917');
+    assertEmail(code);
+    expect(code.subject).toBe('Your Nevazu account closure code: 042917');
+    expect(code.text).toContain('Your account closure code is 042917');
+    expect(code.text).toContain('Expires in 5 minutes');
+    expect(code.text).toContain('Nothing has changed yet');
+    const started = closureStartedMessage(url, { browsers: 2, eraseDays: 30, supportEmail: 'support@nevazu.com' });
+    assertEmail(started);
+    for (const fact of ['signed out everywhere', 'your 2 browsers and their data are being permanently deleted', 'credit left on your balance was forfeited', 'Questions: support@nevazu.com', 'After 30 days']) {
+      expect(started.text).toContain(fact);
+    }
+    const none = closureStartedMessage(url, { browsers: 0, eraseDays: 30, supportEmail: 'support@nevazu.com' });
+    assertEmail(none);
+    expect(none.text).toContain('you had no browsers to delete');
+    const erased = closureErasedMessage(url, { supportEmail: 'support@nevazu.com' });
+    assertEmail(erased);
+    expect(erased.text).toContain('last email we send to this address');
+    expect(erased.text).toContain('Questions: support@nevazu.com');
   });
 
   it('rejects executable action URLs and safely escapes every display field', () => {

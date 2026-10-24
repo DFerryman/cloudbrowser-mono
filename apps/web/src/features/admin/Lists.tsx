@@ -2,7 +2,7 @@ import { TERMS_VERSION } from '@cloudbrowser/contracts';
 import { Button, Dialog, Input, Label, Select, useToast } from '@cloudbrowser/ui';
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { ADMIN_PAGE, post, usd, useAdmin, useAdminAction, useAdminPage, when, type AlertRow, type OperationRow, type Row, type UserRow } from './data.js';
+import { ADMIN_PAGE, post, usd, useAdmin, useAdminAction, useAdminPage, when, type AlertRow, type ClosureRow, type OperationRow, type Row, type UserRow } from './data.js';
 import { useT } from './i18n.js';
 import { Json, Mono, PageTitle, Pill, ReasonDialog, StatusPill, Table } from './ui.js';
 
@@ -198,7 +198,7 @@ export function FindingsPage() {
 }
 
 export function UsersPage() {
-  const { t, errorText } = useT();
+  const { t, term, errorText } = useT();
   const toast = useToast();
   const [q, setQ] = useState('');
   const [query, setQuery] = useState('');
@@ -236,6 +236,7 @@ export function UsersPage() {
           <span>
             {u.email} {u.admin ? <Pill>{t('users.staff')}</Pill> : null} {u.twoFactorEnabled ? <Pill tone="ok">2FA</Pill> : null}{' '}
             {u.termsVersion ? <Pill tone={u.termsVersion === TERMS_VERSION ? 'ok' : 'warn'}>{t('users.terms', { version: u.termsVersion })}</Pill> : null}
+            {u.closure ? <Link to="/closures"><Pill tone={u.closure === 'closed' ? 'muted' : 'warn'}>{term(u.closure)}</Pill></Link> : null}
             <br />
             <Mono>{u.id}</Mono>
             {u.twoFactorEnabled ? (
@@ -319,6 +320,59 @@ export function UsersPage() {
         busy={thaw.isPending}
         onClose={() => setUnfreeze(null)}
         onConfirm={(reason) => unfreeze && thaw.mutate({ id: unfreeze.id, reason }, { onSuccess: () => setUnfreeze(null), onError: failed })}
+      />
+    </div>
+  );
+}
+
+/** In what currency an order was paid, in its smallest unit. */
+const orderMoney = (cents: number, currency: string) => {
+  const f = new Intl.NumberFormat('en-US', { style: 'currency', currency });
+  return f.format(cents / 10 ** (f.resolvedOptions().maximumFractionDigits ?? 2));
+};
+const ERASE_DAYS = 30;
+
+/** Closed accounts and their unused paid credit, for support in a special case where a refund is agreed (api closure.ts). */
+export function ClosuresPage() {
+  const { t, term } = useT();
+  const rows = useAdminPage<ClosureRow>('/closures', ADMIN_PAGE.closures);
+  return (
+    <div>
+      <PageTitle title={t('nav.closures')} />
+      <p className="mb-3 max-w-3xl text-xs text-muted">{t('closures.note')}</p>
+      <Table
+        rows={rows.rows}
+        pager={rows.pager}
+        rowKey={(r) => r.userId}
+        columns={[t('col.account'), t('col.requested'), t('col.status'), t('col.reason'), t('col.browsers'), t('col.finalBalance'), t('col.unusedPaid'), t('col.paidOrders'), t('col.erased')]}
+        empty={t('closures.empty')}
+        cells={(r) => [
+          <span>
+            {r.email ?? <span className="text-muted">{t('closures.erasedEmail')}</span>}
+            <br />
+            <Mono>{r.userId}</Mono>
+          </span>,
+          when(r.requestedAt),
+          <Pill tone={r.status === 'closed' ? 'muted' : 'warn'}>{term(r.status)}</Pill>,
+          r.reason ? t(`closures.reason.${r.reason}`) : '—',
+          r.browsers,
+          r.balanceMicros === null ? <span className="text-xs text-muted">{t('closures.pending')}</span> : <span className="tabular-nums">{usd(r.balanceMicros)}</span>,
+          r.paidMicros === null ? '—' : <span className="tabular-nums">{usd(r.paidMicros)}</span>,
+          r.paidOrders?.length ? (
+            <ul className="space-y-1">
+              {r.paidOrders.map((o) => (
+                <li key={o.orderId}>
+                  <span className="font-medium tabular-nums">{orderMoney(o.refundCents, o.currency)}</span> <span className="text-xs text-muted">{o.provider}</span>
+                  <br />
+                  <Mono>{o.orderId}</Mono>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            '—'
+          ),
+          r.erasedAt ? when(r.erasedAt) : <span className="text-xs text-muted">{t('closures.erasesOn', { when: when(new Date(new Date(r.requestedAt).getTime() + ERASE_DAYS * 86_400_000).toISOString()) })}</span>,
+        ]}
       />
     </div>
   );

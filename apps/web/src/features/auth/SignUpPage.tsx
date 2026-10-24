@@ -6,6 +6,7 @@ import { api, ApiError } from '../../lib/api.js';
 import { useI18n } from '../../lib/i18n.js';
 import { queryClient } from '../../lib/query.js';
 import { money } from '../../lib/money.js';
+import { SUPPORT_EMAIL } from '../../lib/site.js';
 import { usePublicPricing, useSignedIn } from '../../site/hooks.js';
 import { AuthLayout } from './AuthLayout.js';
 import { SecondFactor, sendError } from './SignInPage.js';
@@ -41,8 +42,10 @@ export function SignUpPage() {
     setBusy(true);
     setError(null);
     try {
-      const res = await api<{ method: 'registration' | 'code' }>('POST', '/api/auth/sign-up/start', { body: { email: address }, headers: await turnstile.headers() });
-      if (res.method === 'code') {
+      const res = await api<{ method: 'registration' | 'code' | 'closed' }>('POST', '/api/auth/sign-up/start', { body: { email: address }, headers: await turnstile.headers() });
+      if (res.method === 'closed') {
+        setError(t('auth.closed', { email: SUPPORT_EMAIL }));
+      } else if (res.method === 'code') {
         navigate(`/sign-in?email=${encodeURIComponent(address)}`, { replace: true, state: { emailCodeSentFor: address } });
       } else {
         setSent(true);

@@ -3,6 +3,7 @@ import { Link } from 'react-router';
 import { PageHeader, signOut } from '../../app/AppShell.js';
 import { DocsLink } from '../../app/DocsLink.js';
 import { useI18n, type Locale } from '../../lib/i18n.js';
+import { CloseAccount } from './CloseAccount.js';
 import { ConnectedAgents } from './ConnectedAgents.js';
 import { Passkeys } from './Passkeys.js';
 import { TwoFactorSettings } from './TwoFactor.js';
@@ -53,6 +54,7 @@ export function AccountPage() {
           </div>
         </Section>
         <ConnectedAgents className="lg:col-span-2" />
+        <CloseAccount className="lg:col-span-2" />
       </div>
     </>
   );

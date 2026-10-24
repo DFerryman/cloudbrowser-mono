@@ -30,6 +30,7 @@ const TITLES: Record<ErrorType, string> = {
   agent_key_limit: 'Too many access keys',
   agent_grant_limit: 'Too many sign-ins',
   terms_required: 'Confirm the Terms of Service',
+  invalid_code: 'The code is not valid',
   internal: 'Something went wrong',
 };
 

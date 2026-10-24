@@ -1025,6 +1025,49 @@ export const termsAcceptances = sqliteTable(
 );
 
 /**
+ * One paid order of a closed account: the unused paid credit on it, and what refunding that in
+ * full would take. Support's reference when the user asks for a refund; nothing pays it out.
+ */
+export type ClosureOrder = {
+  orderId: string;
+  /** `creem` | `stripe`: where support would refund it. */
+  provider: string;
+  /** Unused credit (before tax) bought with this order. */
+  creditMicros: number;
+  /** What refunding that credit would be on the order, tax included, in its currency's smallest unit. */
+  refundCents: number;
+  currency: string;
+};
+
+/**
+ * A closed account (Terms sections 8 and 9; migration 0040): `closing` while its browsers are
+ * deleted, `closed` once all are purged and the balance is final. `erased_at`: the personal data
+ * was erased and the balance left written off, 30 days after the closure. Neither sessions nor
+ * browsers can be created for a user with a row here (triggers). Owner: api.
+ */
+export const accountClosures = sqliteTable(
+  'account_closures',
+  {
+    userId: text('user_id')
+      .primaryKey()
+      .references(() => user.id),
+    status: text('status').notNull(),
+    /** contracts ClosureReason, when the user picked one. */
+    reason: text('reason'),
+    requestedAt: ts('requested_at').notNull(),
+    /** Browsers the closure deleted. */
+    browsers: integer('browsers').notNull().default(0),
+    closedAt: ts('closed_at'),
+    /** Set when `closed`: the final balance, the part of it paid for, and that part per order. */
+    balanceMicros: integer('balance_micros'),
+    paidMicros: integer('paid_micros'),
+    paidOrders: json<ClosureOrder[]>('paid_orders'),
+    erasedAt: ts('erased_at'),
+  },
+  (t) => [index('account_closures_status_idx').on(t.status)],
+);
+
+/**
  * Every payment webhook, keyed by its event id (Stripe's prefixed `stripe:`): duplicates are
  * ignored (page 6). Each is processed by its own provider.
  */
