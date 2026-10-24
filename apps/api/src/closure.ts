@@ -8,10 +8,11 @@
  *     browser is permanently deleted through the same path as Delete browser.
  *  2. Once every browser is purged, nothing meters any more (`closed`): the final balance is
  *     recorded with the part of it that was paid for, per order, for support.
- *  3. 30 days after the closure, the balance left is written off and the personal data erased: the
- *     email address and name are replaced, the browsers' names, session logs and agent records
- *     deleted. Billing records, Terms acceptances, the audit log and the browser ledger stay, tied
- *     to the anonymous user id, and the address can sign up again.
+ *  3. 30 days after the closure, even with a browser not purged yet, the balance left is written
+ *     off and the personal data erased: the email address and name are replaced, the browsers'
+ *     names, session logs and agent records deleted. Billing records, Terms acceptances, the audit
+ *     log and the browser ledger stay, tied to the anonymous user id, and the address can sign up
+ *     again.
  *
  * Closing refunds nothing by itself. A user who wants unused paid credit back writes to support,
  * who agrees it with them and refunds it by hand in the provider's dashboard; the provider's
@@ -29,7 +30,7 @@ import {
   type ClosureReason,
 } from '@cloudbrowser/contracts';
 import { newId, raiseAlert, schema, sha256Hex, type ClosureOrder, type Db } from '@cloudbrowser/db';
-import { and, desc, eq, inArray, isNotNull, isNull, like, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, like, ne, or, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { isAdminEmail } from './admin/access.js';
 import { revokeUserClients } from './automation.js';
@@ -42,7 +43,7 @@ import { systemOperation } from './ops.js';
 import { problem } from './problem.js';
 
 const {
-  accountClosures, admins, auditLog, automationClients, automationSessions, balanceTransactions, billingAccounts, browserInstances,
+  accountClosures, admins, alerts, auditLog, automationClients, automationSessions, balanceTransactions, billingAccounts, browserInstances,
   events, idempotencyKeys, invites, notificationState, oauthAuthorizationCodes, oauthSpentRefreshTokens, user, userNotices, verification,
   viewerSessions, session, passkey, twoFactor, account, adminStepUps,
 } = schema;
@@ -208,11 +209,12 @@ export async function closeAccount(c: Context<AppEnv>, input: { code: string; re
 
 /**
  * Moves every open closure on: deletes browsers the request missed, records the final balance once
- * all are purged, and erases the personal data 30 days after the closure.
+ * all are purged, tells support of a payment that arrived after the closure, and erases the
+ * personal data 30 days after the closure, whether or not every browser is purged by then.
  */
 export async function closureSweep(env: Env, db: Db, now = new Date()) {
-  const summary = { browsers: 0, closed: 0, erased: 0 };
-  const open = await db.select().from(accountClosures).where(isNull(accountClosures.erasedAt));
+  const summary = { browsers: 0, closed: 0, latePayments: 0, erased: 0 };
+  const open = await db.select().from(accountClosures).where(or(isNull(accountClosures.erasedAt), eq(accountClosures.status, 'closing')));
   for (const row of open) {
     try {
       if (row.status === 'closing') {
@@ -220,8 +222,10 @@ export async function closureSweep(env: Env, db: Db, now = new Date()) {
         summary.browsers += next.deleted;
         if (next.closed) summary.closed++;
       }
+      if (row.erasedAt) continue;
+      summary.latePayments += await latePayments(db, row, now);
       const [current] = await db.select().from(accountClosures).where(eq(accountClosures.userId, row.userId));
-      if (current!.status === 'closed' && now.getTime() - current!.requestedAt.getTime() >= CLOSURE_ERASE_DAYS * DAY) {
+      if (now.getTime() - current!.requestedAt.getTime() >= CLOSURE_ERASE_DAYS * DAY) {
         await eraseAccount(env, db, current!, now);
         summary.erased++;
       }
@@ -230,6 +234,30 @@ export async function closureSweep(env: Env, db: Db, now = new Date()) {
     }
   }
   return summary;
+}
+
+/**
+ * A top-up credited after the closure (a checkout paid in another tab, a late webhook, the nightly
+ * reconciliation): the user can no longer use it, so support is told to refund it, and a closed
+ * account's recorded balance is brought up to date.
+ */
+async function latePayments(db: Db, row: typeof accountClosures.$inferSelect, now: Date): Promise<number> {
+  const late = await db.select().from(balanceTransactions)
+    .where(and(eq(balanceTransactions.userId, row.userId), eq(balanceTransactions.kind, 'topup'), isNotNull(balanceTransactions.orderId), isNotNull(balanceTransactions.appliedAt), gte(balanceTransactions.createdAt, row.requestedAt)));
+  if (!late.length) return 0;
+  for (const p of late) {
+    // Once per payment, even after an operator acknowledged it.
+    const dedupeKey = `closure-late-payment:${p.orderId}`;
+    const [told] = await db.select({ id: alerts.id }).from(alerts).where(eq(alerts.dedupeKey, dedupeKey));
+    if (told) continue;
+    await raiseAlert(db, { source: 'billing', severity: 'warning', title: `A payment arrived after account ${row.userId} was closed: $${(p.amountMicros / 1e6).toFixed(2)} credit on order ${p.orderId}; refund it in ${p.actor === 'stripe' ? 'Stripe' : 'Creem'} (console → Closures)`,
+      detail: { userId: row.userId, orderId: p.orderId, creditMicros: p.amountMicros, grossAmountCents: p.grossAmountCents, currency: p.currency }, dedupeKey }, now);
+  }
+  if (row.status === 'closed') {
+    const { balanceMicros, paidMicros, orders } = await unusedPaidCredit(db, row.userId);
+    await db.update(accountClosures).set({ balanceMicros, paidMicros, paidOrders: orders }).where(eq(accountClosures.userId, row.userId));
+  }
+  return late.length;
 }
 
 async function advanceClosing(env: Env, db: Db, row: typeof accountClosures.$inferSelect, now: Date) {

@@ -249,6 +249,36 @@ describe('closing an account', () => {
     expect(rows('SELECT balance_micros FROM billing_accounts WHERE user_id = ?', userId)).toEqual([{ balance_micros: 0 }]);
   });
 
+  it('tells support once of a payment that arrives after the closure, and counts it in the recorded balance', async () => {
+    await close(await code());
+    await sweep();
+    expect(closure()).toMatchObject({ status: 'closed', balance_micros: 0, paid_micros: 0 });
+    // A checkout left open in another tab is paid after the closure.
+    await paid('ord_late', 1000, 200);
+    await sweep();
+    expect(closure()).toMatchObject({ balance_micros: 10_000_000, paid_micros: 10_000_000 });
+    const alert = () => rows('SELECT severity, title, acknowledged_at FROM alerts WHERE dedupe_key = ?', 'closure-late-payment:ord_late');
+    expect(alert()).toEqual([expect.objectContaining({ severity: 'warning', title: expect.stringContaining('$10.00 credit on order ord_late; refund it in Creem') })]);
+    t.d1.sqlite.prepare('UPDATE alerts SET acknowledged_at = ? WHERE dedupe_key = ?').run(Date.now(), 'closure-late-payment:ord_late');
+    await sweep();
+    expect(alert()).toHaveLength(1);
+  });
+
+  it('erases the data after 30 days even while a browser is still not purged, and finishes deleting it after', async () => {
+    const id = await createBrowser('Stuck');
+    await close(await code());
+    await t.settle();
+    const requested = Number(closure()!.requested_at);
+    await sweep(new Date(requested + 30 * DAY));
+    expect(closure()).toMatchObject({ status: 'closing', erased_at: expect.any(Number) });
+    expect(rows('SELECT email FROM user WHERE id = ?', userId)).toEqual([{ email: erasedEmail(userId) }]);
+    await reaper();
+    await sweep(new Date(requested + 31 * DAY));
+    expect(rows('SELECT status FROM browser_instances WHERE id = ?', id)).toEqual([{ status: 'purged' }]);
+    expect(closure()).toMatchObject({ status: 'closed' });
+    expect(rows(`SELECT action FROM audit_log WHERE action = 'account.erased'`)).toHaveLength(1);
+  });
+
   it('is refused during a dispute hold, with a suspended browser, and for operators', async () => {
     const id = await createBrowser('Held');
     t.d1.sqlite.prepare('UPDATE browser_instances SET suspended_at = ?, suspended_reason = ? WHERE id = ?').run(Date.now(), 'abuse report', id);
