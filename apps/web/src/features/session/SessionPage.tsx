@@ -30,7 +30,7 @@ import {
 } from 'lucide-react';
 import { COMBOS, qualityLevel, type AutomationStatus, type ConnectionIssue, type TransferUpdate, type ViewerState, type ViewerStats } from '@cloudbrowser/viewer';
 import { RemoteBrowserView, type RemoteBrowserHandle } from '@cloudbrowser/viewer/react';
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { api, ApiError } from '../../lib/api.js';
 import { useI18n } from '../../lib/i18n.js';
@@ -203,6 +203,9 @@ export function SessionPage() {
   // click takes control, and the banner is where control is handed back or screenshots paused.
   const [automation, setAutomation] = useState<AutomationStatus | null>(null);
   const setControl = useSetControl();
+  /** The robot button (toolbar or maximized controls) and the picture, where its speech bubble is placed. */
+  const agentButtonRef = useRef<HTMLButtonElement>(null);
+  const pictureRef = useRef<HTMLDivElement>(null);
   /** On a touch screen: the visible part of the page (the visual viewport), in page coordinates; the frame is laid out exactly there. */
   const [visibleArea, setVisibleArea] = useState<{ top: number; left: number; width: number; height: number } | null>(() =>
     touchScreen && typeof window !== 'undefined' ? { top: 0, left: 0, width: window.innerWidth, height: window.innerHeight } : null);
@@ -619,6 +622,36 @@ export function SessionPage() {
     return () => clearTimeout(timer);
   }, [agentNotice]);
   const setAgentMode = (mode: AgentControlMode) => setControl.mutate({ id, mode }, { onError: (e) => toast(errorMessage(e), 'error') });
+  // The agent asks for control while the user holds it (docs/agent-access.md): a speech bubble at
+  // the robot button says so until the user answers, says "not now", or the agent stops asking.
+  const requestUntil = agentShown && automation && automation.control.mode !== 'agent' ? automation.requestUntil : null;
+  const [asking, setAsking] = useState(false);
+  useEffect(() => {
+    const left = requestUntil === null ? 0 : requestUntil - Date.now();
+    setAsking(left > 0);
+    if (left <= 0) return;
+    const timer = setTimeout(() => setAsking(false), left);
+    return () => clearTimeout(timer);
+  }, [requestUntil]);
+  /** "Not now" holds for this ask: the bubble returns only once the agent stopped asking and asks again. */
+  const [requestDismissed, setRequestDismissed] = useState(false);
+  const [handingBack, setHandingBack] = useState(false);
+  useEffect(() => {
+    if (asking) return;
+    setRequestDismissed(false);
+    setHandingBack(false);
+  }, [asking]);
+  const requestShown = asking && !requestDismissed;
+  const requestTextId = useId();
+  const handBack = () => {
+    setHandingBack(true);
+    setControl.mutate({ id, mode: 'agent' }, {
+      onError: (e) => {
+        setHandingBack(false);
+        toast(errorMessage(e), 'error');
+      },
+    });
+  };
 
   const toggleRotated = () => {
     const next = !rotated;
@@ -685,6 +718,19 @@ export function SessionPage() {
     event.preventDefault();
     viewerRef.current?.focus();
   };
+  const agentControl = agentShown && automation ? (
+    <AgentControlMenu
+      status={automation}
+      busy={setControl.isPending}
+      asking={asking}
+      prompt={requestShown}
+      buttonRef={agentButtonRef}
+      describedBy={requestShown ? requestTextId : undefined}
+      onMode={setAgentMode}
+      onHandBack={handBack}
+      onCloseAutoFocus={refocusViewer}
+    />
+  ) : null;
 
   const disabledTool = (label: string, Icon: typeof Upload) => (
     <Button key={label} size="icon" variant="ghost" className="text-zinc-300 hover:bg-zinc-800" disabled aria-label={label} title={`${label} · ${t('session.needsStream')}`}>
@@ -726,7 +772,7 @@ export function SessionPage() {
               <span className="size-2 rounded-full bg-starting" aria-hidden /> {t('session.simulated')}
             </span>
           ) : null}
-          {agentShown && automation ? <AgentControlMenu status={automation} busy={setControl.isPending} onMode={setAgentMode} onCloseAutoFocus={refocusViewer} /> : null}
+          {agentControl}
           {rotateButton}
           {keyboardButton}
           <div className="hidden items-center gap-0.5 sm:flex">
@@ -872,6 +918,7 @@ export function SessionPage() {
       )}
 
       <div
+        ref={pictureRef}
         className="relative min-h-0 flex-1"
         onPointerDown={() => (hadInput.current = true)}
         onKeyDown={() => (hadInput.current = true)}
@@ -952,7 +999,7 @@ export function SessionPage() {
         {maximized ? (
           // The way out of the maximized view, with the keyboard still a tap away (it needs the toolbar's gesture, not the picture's).
           <div role="toolbar" aria-label={t('session.maximizedTools')} className="absolute right-3 bottom-3 z-30 flex items-center gap-0.5 border border-zinc-700 bg-zinc-950/85 p-1 backdrop-blur">
-            {agentShown && automation ? <AgentControlMenu status={automation} busy={setControl.isPending} onMode={setAgentMode} onCloseAutoFocus={refocusViewer} /> : null}
+            {agentControl}
             {keyboardButton}
             {rotateButton}
             {sizeButton}
@@ -962,8 +1009,25 @@ export function SessionPage() {
           // Who has control, said by the picture's edge, which covers nothing of the page.
           <div aria-hidden data-testid="agent-frame" data-control={AGENT_SIDE[agentKey]} className={cn('pointer-events-none absolute inset-0 z-10 transition-shadow duration-300', AGENT_FRAME[agentKey])} />
         ) : null}
-        {agentShown && agentNotice ? <AgentNotice state={agentNotice} raised={maximized} onDismiss={() => setAgentNotice(null)} /> : null}
-        {live && slowRtt !== null && !slowDismissed && !(agentShown && agentNotice) ? (
+        {/* Said once, in a live region present before it changes, so screen readers announce it. */}
+        <p id={requestTextId} role="status" className="sr-only">
+          {requestShown ? `${t('agents.request.title')}. ${t(handingBack ? 'agents.request.handingBack' : touchDevice ? 'agents.request.tap' : 'agents.request.click')}` : ''}
+        </p>
+        {requestShown ? (
+          <RequestBubble
+            anchor={agentButtonRef}
+            container={pictureRef}
+            pending={handingBack}
+            touch={touchDevice}
+            describedBy={requestTextId}
+            onDismiss={() => {
+              setRequestDismissed(true);
+              viewerRef.current?.focus();
+            }}
+          />
+        ) : null}
+        {agentShown && agentNotice && !requestShown ? <AgentNotice state={agentNotice} raised={maximized} onDismiss={() => setAgentNotice(null)} /> : null}
+        {live && slowRtt !== null && !slowDismissed && !(agentShown && agentNotice) && !requestShown ? (
           <SlowConnectionNotice rtt={slowRtt.rtt} region={slowRtt.region} raised={maximized} onDismiss={() => setSlowDismissed(true)} />
         ) : null}
         {session && !takenOver && i?.status === 'running' && sleepReason === 'idle' && idleLeft < IDLE_WARNING_MS ? (
@@ -987,21 +1051,25 @@ function agentState(status: AutomationStatus): AgentState {
   return controller === 'agent' ? 'agent' : 'idle';
 }
 
-/** Whose the browser is: the agent's while it may act (orange), the user's once they took over (blue). */
+/** Whose the browser is: the agent's while it may act (green), the user's once they took over (blue). */
 const AGENT_SIDE: Record<AgentState, 'agent' | 'user'> = { agent: 'agent', idle: 'agent', user: 'user', privacy: 'user', disconnected: 'user' };
 
 const AGENT_DOT: Record<AgentState, string> = {
-  agent: 'bg-orange-500 animate-pulse',
-  idle: 'bg-orange-500/60',
+  agent: 'bg-green-500 animate-pulse',
+  idle: 'bg-green-500/60',
   user: 'bg-blue-500',
   privacy: 'bg-blue-500',
   disconnected: 'bg-blue-500',
 };
 
-/** The outline around the picture: strongest while the agent is acting, quieter while it only may. */
+/**
+ * The outline around the picture: strongest while the agent is acting, thinner while it only may.
+ * Green 600 keeps 3:1 against a white page and 6:1 against a black one, as blue 500 does; green
+ * 500 falls to 2.2:1 on white, and a glow of it over the edge would too.
+ */
 const AGENT_FRAME: Record<AgentState, string> = {
-  agent: 'inset-ring-[3px] inset-ring-orange-500 inset-shadow-[0_0_28px] inset-shadow-orange-500/40',
-  idle: 'inset-ring-2 inset-ring-orange-500/50',
+  agent: 'inset-ring-[3px] inset-ring-green-600 inset-shadow-[0_0_28px] inset-shadow-green-600/40',
+  idle: 'inset-ring-2 inset-ring-green-600',
   user: 'inset-ring-[3px] inset-ring-blue-500 inset-shadow-[0_0_16px] inset-shadow-blue-500/25',
   privacy: 'inset-ring-[3px] inset-ring-blue-500 inset-shadow-[0_0_16px] inset-shadow-blue-500/25',
   disconnected: 'inset-ring-[3px] inset-ring-blue-500 inset-shadow-[0_0_16px] inset-shadow-blue-500/25',
@@ -1014,23 +1082,59 @@ const AGENT_FRAME: Record<AgentState, string> = {
  * the menu is where control is handed back, the agent paused, or a privacy pause (no screenshots
  * either) turned on and off.
  */
-function AgentControlMenu({ status, busy, onMode, onCloseAutoFocus }: {
+function AgentControlMenu({ status, busy, asking, prompt, buttonRef, describedBy, onMode, onHandBack, onCloseAutoFocus }: {
   status: AutomationStatus;
   busy: boolean;
+  /** The agent asks for control back; `prompt`: its speech bubble shows, and this button answers it. */
+  asking: boolean;
+  prompt: boolean;
+  buttonRef: RefObject<HTMLButtonElement | null>;
+  describedBy?: string;
   onMode: (mode: AgentControlMode) => void;
+  onHandBack: () => void;
   onCloseAutoFocus: (event: Event) => void;
 }) {
   const { t } = useI18n();
   const state = agentState(status);
   const { mode } = status.control;
-  const message = t(`agents.banner.${state}`);
+  const message = asking ? t('agents.banner.requesting') : t(`agents.banner.${state}`);
+  // The dot keeps the colour of whoever has control; a green circle around it, apart from it so
+  // the two colours never blend, says the agent asks for control, pulsing while the bubble points here.
+  const dot = (
+    <>
+      {prompt ? <span aria-hidden className="absolute top-1.5 right-1.5 size-2 animate-ping rounded-full bg-green-500" /> : null}
+      <span aria-hidden className={cn('absolute top-1.5 right-1.5 size-2 rounded-full ring-2 ring-zinc-950', asking && 'outline-1 outline-offset-2 outline-green-500', AGENT_DOT[state])} />
+    </>
+  );
+  // While the bubble asks, one tap hands control back, as the bubble says; "Not now" brings the menu back.
+  if (prompt) {
+    return (
+      <Button
+        ref={buttonRef}
+        size="icon"
+        variant="ghost"
+        className="relative text-zinc-300 hover:bg-zinc-800"
+        aria-label={t('agents.request.handBack')}
+        aria-describedby={describedBy}
+        title={t('agents.request.handBack')}
+        disabled={busy}
+        data-testid="agent-control"
+        data-request="prompt"
+        onPointerDown={(e) => e.preventDefault()}
+        onClick={onHandBack}
+      >
+        <Bot />
+        {dot}
+      </Button>
+    );
+  }
   return (
     <Menu
       onCloseAutoFocus={onCloseAutoFocus}
       trigger={
-        <Button size="icon" variant="ghost" className="relative text-zinc-300 hover:bg-zinc-800" aria-label={`${t('agents.chip')}: ${message}`} title={message} data-testid="agent-control">
+        <Button ref={buttonRef} size="icon" variant="ghost" className="relative text-zinc-300 hover:bg-zinc-800" aria-label={`${t('agents.chip')}: ${message}`} title={message} data-testid="agent-control" data-request={asking ? 'asking' : undefined}>
           <Bot />
-          <span aria-hidden className={cn('absolute top-1.5 right-1.5 size-2 rounded-full ring-2 ring-zinc-950', AGENT_DOT[state])} />
+          {dot}
         </Button>
       }
     >
@@ -1053,12 +1157,104 @@ function AgentControlMenu({ status, busy, onMode, onCloseAutoFocus }: {
 function AgentNotice({ state, raised, onDismiss }: { state: AgentState; raised: boolean; onDismiss: () => void }) {
   const { t } = useI18n();
   return (
-    <div role="status" data-testid="agent-notice" className={cn('absolute left-1/2 z-20 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-2 border border-l-2 border-zinc-700 bg-zinc-950/90 py-1 pr-1 pl-3 text-xs text-zinc-100 shadow-pop backdrop-blur', raised ? 'bottom-16' : 'bottom-3', AGENT_SIDE[state] === 'agent' ? 'border-l-orange-500' : 'border-l-blue-500')}>
-      <Bot className={cn('size-3.5 shrink-0', AGENT_SIDE[state] === 'agent' ? 'text-orange-400' : 'text-blue-400')} aria-hidden />
+    <div role="status" data-testid="agent-notice" className={cn('absolute left-1/2 z-20 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-2 border border-l-2 border-zinc-700 bg-zinc-950/90 py-1 pr-1 pl-3 text-xs text-zinc-100 shadow-pop backdrop-blur', raised ? 'bottom-16' : 'bottom-3', AGENT_SIDE[state] === 'agent' ? 'border-l-green-500' : 'border-l-blue-500')}>
+      <Bot className={cn('size-3.5 shrink-0', AGENT_SIDE[state] === 'agent' ? 'text-green-400' : 'text-blue-400')} aria-hidden />
       <span className="min-w-0">{t(`agents.banner.${state}`)}</span>
       <button type="button" className="grid size-6 shrink-0 place-items-center text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={t('agents.notice.dismiss')} onClick={onDismiss}>
         <X className="size-3.5" />
       </button>
+    </div>
+  );
+}
+
+/** The bubble's width at most, its distance from the picture's edges, and how far its tail may come to a corner. */
+const BUBBLE_WIDTH = 288;
+const BUBBLE_EDGE = 8;
+const BUBBLE_TAIL_INSET = 18;
+
+/**
+ * The agent's ask for control, as a speech bubble whose tail points at the robot button: below it
+ * in the toolbar, above it in the maximized view's controls. It stays inside the picture on a
+ * phone too, never takes focus from the live view (keys go to the remote browser), and the text
+ * is announced by the page's live region instead of here, so it is read once.
+ */
+function RequestBubble({ anchor, container, pending, touch, describedBy, onDismiss }: {
+  anchor: RefObject<HTMLElement | null>;
+  container: RefObject<HTMLElement | null>;
+  pending: boolean;
+  touch: boolean;
+  describedBy: string;
+  onDismiss: () => void;
+}) {
+  const { t } = useI18n();
+  const [place, setPlace] = useState<{ left: number; width: number; tail: number; top?: number; bottom?: number } | null>(null);
+  useLayoutEffect(() => {
+    const box = container.current;
+    if (!box) return;
+    const measure = () => {
+      const button = anchor.current;
+      if (!button) return setPlace(null);
+      const b = button.getBoundingClientRect();
+      const c = box.getBoundingClientRect();
+      const center = b.left + b.width / 2 - c.left;
+      const width = Math.min(BUBBLE_WIDTH, c.width - 2 * BUBBLE_EDGE);
+      const left = Math.max(BUBBLE_EDGE, Math.min(center - width + BUBBLE_TAIL_INSET, c.width - BUBBLE_EDGE - width));
+      const tail = Math.max(BUBBLE_TAIL_INSET / 2, Math.min(center - left, width - BUBBLE_TAIL_INSET / 2));
+      // The toolbar is above the picture; the maximized view's controls are inside it, at the bottom.
+      const below = b.top + b.height / 2 < c.top + c.height / 2;
+      setPlace(below
+        ? { left, width, tail, top: Math.max(BUBBLE_EDGE, b.bottom - c.top + BUBBLE_EDGE) }
+        : { left, width, tail, bottom: Math.max(BUBBLE_EDGE, c.bottom - b.top + BUBBLE_EDGE) });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(box);
+    window.addEventListener('resize', measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [anchor, container]);
+  if (!place) return null;
+  const below = place.top !== undefined;
+  return (
+    <div
+      data-testid="agent-request"
+      data-side={below ? 'below' : 'above'}
+      className="absolute z-30 flex items-start gap-2 border border-green-600 bg-zinc-950 py-2 pr-1 pl-3 text-sm text-zinc-100 shadow-pop [animation:cb-in_150ms_var(--ease-out)]"
+      style={{ left: place.left, width: place.width, top: place.top, bottom: place.bottom }}
+    >
+      {/* The tail: a square turned a quarter, half hidden behind the bubble, pointing at the robot button. */}
+      <span
+        aria-hidden
+        data-testid="agent-request-tail"
+        className={cn('absolute size-3 rotate-45 border-green-600 bg-zinc-950', below ? '-top-[7px] border-t border-l' : '-bottom-[7px] border-r border-b')}
+        style={{ left: place.tail - 6 }}
+      />
+      <div aria-hidden className="min-w-0 flex-1 py-0.5 leading-snug">
+        <p className="font-medium">{t('agents.request.title')}</p>
+        {pending ? (
+          <p className="mt-0.5 flex items-center gap-1.5 text-zinc-300">
+            <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-zinc-600 border-t-zinc-200" />
+            {t('agents.request.handingBack')}
+          </p>
+        ) : (
+          <p className="mt-0.5 text-zinc-300">{t(touch ? 'agents.request.tap' : 'agents.request.click')}</p>
+        )}
+      </div>
+      {pending ? null : (
+        <button
+          type="button"
+          className="grid size-8 shrink-0 place-items-center text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+          aria-label={t('agents.request.notNow')}
+          aria-describedby={describedBy}
+          title={t('agents.request.notNow')}
+          onPointerDown={(e) => e.preventDefault()}
+          onClick={onDismiss}
+        >
+          <X className="size-4" />
+        </button>
+      )}
     </div>
   );
 }

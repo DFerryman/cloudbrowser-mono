@@ -197,8 +197,12 @@ export type GatewayToViewer =
   /** Another tab or device opened this browser (one controller at a time). */
   | { t: 'taken_over' }
   | { t: 'file'; id: string; status: 'progress' | 'done' | 'error'; received?: number; reason?: string }
-  /** A coding agent's session is open (or not) and who may drive the browser (docs/agent-access.md). */
-  | { t: 'automation_status'; connected: boolean; control: ControlState };
+  /**
+   * A coding agent's session is open (or not) and who may drive the browser (docs/agent-access.md).
+   * `request`: while the user holds control, the agent asked for it back (an action refused for the
+   * control mode, or get_status waiting for control); shown for `remainingMs` unless a newer status says otherwise.
+   */
+  | { t: 'automation_status'; connected: boolean; control: ControlState; request?: { remainingMs: number } };
 
 /** Claims of the single-use viewer token (Ed25519, 60 s, page 2). */
 export const ViewerTokenClaims = z.object({

@@ -2258,6 +2258,28 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
+  it('reports a coding agent\'s ask for control as a time on this device, bounded', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    const reports: { connected: boolean; requestUntil: number | null }[] = [];
+    const { b } = setup([], { onAutomation: ({ connected, requestUntil }) => reports.push({ connected, requestUntil }) });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    const control = { controller: 'user', mode: 'user', epoch: 2 };
+    ws.push({ t: 'automation_status', connected: true, control });
+    ws.push({ t: 'automation_status', connected: true, control, request: { remainingMs: 30_000 } });
+    ws.push({ t: 'automation_status', connected: true, control, request: { remainingMs: 3_600_000 } });
+    ws.push({ t: 'automation_status', connected: true, control, request: { remainingMs: 'soon' } });
+    expect(reports).toEqual([
+      { connected: true, requestUntil: null },
+      { connected: true, requestUntil: 1_030_000 },
+      { connected: true, requestUntil: 1_060_000 },
+      { connected: true, requestUntil: null },
+    ]);
+    b.disconnect();
+    vi.useRealTimers();
+  });
+
   it('reconnects with a fresh token after the connection drops, but not after a take-over', async () => {
     vi.useFakeTimers();
     const { b, getConnectInfo, states } = setup();

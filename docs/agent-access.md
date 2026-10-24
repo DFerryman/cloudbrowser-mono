@@ -197,6 +197,25 @@ so a reconnect or restart never silently returns control to the agent; only an e
 (the live view's banner or Settings) does. The gateway refuses `act`, `attach_files` and
 `upload_file` under `user` and `privacy`, and screenshots under `privacy`, before the VM sees them.
 
+**Asking for control.** The live view shows the user when the agent asks for control while they
+hold it: a call refused for the control mode (from a key that may act), or a `get_status` waiting
+for control (`waitForControlMs`), counts as an ask. The browser's Durable Object keeps it in
+memory for 30 s after the ask (a waiting `get_status` adds its wait), sends it to viewers as
+`request: {remainingMs}` on `automation_status`, and announces an ask again only when it extends it
+by 5 s or more. A hand-back, a session's end, access turned off or a revocation clears it; an ask
+the agent stops repeating lapses. The live view turns the remaining time into a time on its own
+clock (at most 60 s) and shows a speech bubble at the robot button, below it in the toolbar or
+above it in the maximized view's controls: "A coding agent is asking for control", and to tap or
+click the robot icon to hand it back. While the bubble shows, that button hands control back in
+one tap ("Handing control back…" until the gateway confirms); "Not now" closes the bubble for
+this ask, and the robot's dot keeps a green circle and its menu again. The text is announced once
+through a live region, and the bubble never takes focus from the live view. The refusal's hint
+and the server instructions tell the agent that the user is shown its ask.
+
+The outline and the robot's dot are green (outline `green-600`, 3.2:1 against a white page and
+6.5:1 against a black one) while the agent may act, and blue (`blue-500`, 3.8:1 and 5.6:1) once
+the user took over; `apps/web/e2e/session-agent-control.mjs` measures both on white and black.
+
 ## Security
 
 - Access is per browser, on by default, and can be unchecked at creation or turned off later.
@@ -368,7 +387,11 @@ Security Level, for `GET`, `HEAD` and `OPTIONS`; `/api/oauth/` is already covere
 - `apps/gateway/test/mcp-session.test.ts`: lazy open, blob reassembly, coordinate mapping
   (1280×720 to 1920×1080, drag paths), `stale_screenshot` without the VM, protocol 1 VMs,
   serialization, mode and view-only refusals, `busy_other_agent` then hand-over, idle and hard
-  close, eviction, tunnel loss and resume, cancellation, revocation and the control long poll.
+  close, eviction, tunnel loss and resume, cancellation, revocation, the control long poll, and the
+  ask for control (refusals, waits, view-only keys, hand-back, access off, lapse).
+- `apps/web/e2e/session-agent-control.mjs`: the outline's colours and contrast, the notice, the
+  robot's menu, and the ask's bubble (placement, one-tap hand-back and its pending state,
+  "Not now", lapse, a phone and the maximized view).
 - `apps/gateway/test/mcp-upload.test.ts`: inline content and its limit, upload URLs (`409`, `410`,
   `411`, length mismatch, the acknowledgement window, SHA-256), VM failures, attaching.
 - `apps/gateway/test/robustness.test.ts`: the gateway's per-socket budgets and failure isolation.
