@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { agentHandoff, agentServer, agentSetups, keyEnvCommands, keyEnvName, mcpConfig, serverName, SETUP_GUIDE_URL } from '../src/features/instances/agent-setup.js';
+import { DOCS } from '../src/content/docs.js';
+import type { Block } from '../src/content/types.js';
+import { agentHandoff, agentServer, agentSetups, keyEnvCommands, keyEnvName, mcpConfig, serverName, SETUP_GUIDE_URL, signInConfig, signInHandoff, signInSetups } from '../src/features/instances/agent-setup.js';
 
 const url = 'https://connect.nevazu.com/mcp/abc123';
 const server = agentServer({ url, browserName: 'Work' });
@@ -53,5 +55,41 @@ describe('coding-agent setup', () => {
     const { unix, windows } = keyEnvCommands('NEVAZU_WORK_KEY', 'nvzk_abc');
     expect(unix).toContain(`echo 'export NEVAZU_WORK_KEY="nvzk_abc"' >> ~/.zshrc`);
     expect(windows).toContain('setx NEVAZU_WORK_KEY "nvzk_abc"');
+  });
+
+  it('signs an agent in with the URL alone: no key, no header, no variable', () => {
+    expect(JSON.parse(signInConfig(server))).toEqual({ mcpServers: { 'nevazu-work': { type: 'http', url } } });
+    const handoff = signInHandoff(server, 'Work');
+    expect(handoff).toContain(signInConfig(server));
+    expect(handoff).toContain(SETUP_GUIDE_URL);
+    expect(handoff).toContain('Signing in instead of a key');
+    expect(handoff).not.toMatch(/NEVAZU_WORK_KEY|nvzk_|Bearer/);
+    const setups = signInSetups(server);
+    expect(setups.map((s) => s.client)).toEqual(['claude-code', 'claude-app', 'codex', 'cursor', 'vscode', 'windsurf', 'gemini', 'opencode', 'other']);
+    for (const setup of setups) {
+      expect(setup.code).toContain(url);
+      expect(setup.code).not.toMatch(/KEY|Authorization|Bearer|headers/);
+    }
+    const code = (client: string) => setups.find((s) => s.client === client)!.code;
+    expect(code('claude-code')).toBe(`claude mcp add --transport http --scope user nevazu-work ${url}`);
+    expect(code('claude-app')).toBe(url);
+    expect(code('codex')).toContain('codex mcp login nevazu-work');
+    expect(JSON.parse(code('cursor'))).toEqual({ mcpServers: { 'nevazu-work': { url } } });
+    expect(JSON.parse(code('vscode'))).toEqual({ servers: { 'nevazu-work': { type: 'http', url } } });
+    expect(JSON.parse(code('windsurf'))).toEqual({ mcpServers: { 'nevazu-work': { serverUrl: url } } });
+    expect(JSON.parse(code('gemini'))).toEqual({ mcpServers: { 'nevazu-work': { httpUrl: url } } });
+    expect(JSON.parse(code('opencode')).mcp['nevazu-work']).toEqual({ type: 'remote', url, enabled: true });
+  });
+
+  it('has the guide section the sign-in handoff names, with every client, in each language', () => {
+    for (const articles of Object.values(DOCS)) {
+      const blocks = articles.find((a) => a.slug === 'agent-setup')!.blocks;
+      const at = blocks.findIndex((b) => 'h' in b && b.id === 'sign-in');
+      expect(at).toBeGreaterThan(0);
+      const section = blocks.slice(at + 1, blocks.findIndex((b, i) => i > at && 'h' in b));
+      const folded = section.filter((b): b is Extract<Block, { details: string }> => 'details' in b);
+      expect(folded).toHaveLength(signInSetups(server).length);
+    }
+    expect(DOCS.en.find((a) => a.slug === 'agent-setup')!.blocks).toContainEqual({ h: 'Signing in instead of a key', id: 'sign-in' });
   });
 });

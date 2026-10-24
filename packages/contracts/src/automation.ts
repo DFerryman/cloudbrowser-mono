@@ -323,6 +323,8 @@ export const AutomationStatus = z.object({
   mode: AgentControlMode,
   /** The remote MCP server URL for this browser (empty while the gateway is not configured). */
   mcpUrl: z.string(),
+  /** Whether agents may sign in with OAuth instead of a key (the `MCP_OAUTH` switch). */
+  signIn: z.boolean(),
   clients: z.array(AutomationClient),
   /** The coding agent's session open now, if any. */
   session: z.object({ id: z.string(), clientId: z.string(), startedAt: z.string(), lastSeenAt: z.string() }).nullable(),

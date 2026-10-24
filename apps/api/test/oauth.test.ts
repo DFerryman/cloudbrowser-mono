@@ -215,6 +215,10 @@ describe('OAuth sign-in for coding agents', () => {
     // The browser's panel lists it beside the keys.
     const status = await t.call('GET', `/api/v1/instances/${instanceId}/automation`);
     expect(status.body.clients).toEqual([expect.objectContaining({ id: row.id, kind: 'oauth', name: 'Cursor', keyPrefix: null, capability: 'view', verifiedHost: null })]);
+    // The web app offers sign-in only once it is switched on.
+    expect(status.body.signIn).toBe(false);
+    Object.assign(t.env, { MCP_OAUTH: 'on' });
+    expect((await t.call('GET', `/api/v1/instances/${instanceId}/automation`)).body.signIn).toBe(true);
 
     // A code seen again revokes what was made with it.
     expect((await exchange(clientId, code)).body).toMatchObject({ error: 'invalid_grant', error_description: expect.stringContaining('already used') });

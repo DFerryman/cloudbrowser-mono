@@ -48,6 +48,8 @@ export const router = createBrowserRouter([{ errorElement: <RouteError />, child
   { path: '/sign-up', element: <SignUpPage /> },
   { path: '/sign-up/complete', element: <SignUpCompletePage /> },
   { path: '/register', element: <Navigate to="/sign-up" replace /> },
+  // A coding agent's OAuth sign-in (docs/agent-access.md): its own page, signing in first when needed.
+  { path: '/oauth/authorize', lazy: async () => ({ Component: (await import('./features/oauth/AuthorizePage.js')).AuthorizePage }) },
   { path: '/admin/*', element: <AdminRedirect /> },
   // The session view has its own dark full-screen layout, still behind the auth check.
   // The viewer is loaded on demand (page 1, "Performance and quality").

@@ -1,4 +1,4 @@
-import { agentServer, agentSetups, mcpConfig, type AgentClient } from '../features/instances/agent-setup.js';
+import { agentServer, agentSetups, mcpConfig, signInConfig, signInSetups, type AgentClient, type SignInClient } from '../features/instances/agent-setup.js';
 import type { Locale } from '../lib/i18n.js';
 import type { Article, Block } from './types.js';
 
@@ -8,6 +8,14 @@ const EXAMPLE_SERVER = agentServer({ url: 'https://connect.nevazu.com/mcp/BROWSE
 /** "Coding agent setup", one folded section per client, from the same snippets the app shows. */
 function clientSetupBlocks(text: Record<AgentClient, string>, otherTitle: string): Block[] {
   return agentSetups(EXAMPLE_SERVER).map((setup) => ({
+    details: setup.client === 'other' ? otherTitle : setup.label,
+    blocks: [{ p: text[setup.client] }, { code: setup.code, label: setup.where }],
+  }));
+}
+
+/** "Signing in instead of a key", one folded section per client, from the same steps the app shows. */
+function signInBlocks(text: Record<SignInClient, string>, otherTitle: string): Block[] {
+  return signInSetups(EXAMPLE_SERVER).map((setup) => ({
     details: setup.client === 'other' ? otherTitle : setup.label,
     blocks: [{ p: text[setup.client] }, { code: setup.code, label: setup.where }],
   }));
@@ -139,9 +147,9 @@ const en: Article[] = [
     title: 'Coding agent setup',
     summary: 'For coding agents: how to add a Nevazu browser to your own MCP configuration in Claude Code, Codex, Cursor, VS Code, Windsurf, Gemini CLI, OpenCode or any other client.',
     blocks: [
-      { p: 'This page is written for coding agents, and for anyone who wants to see what their agent will do. A Nevazu user hands their agent a short setup from a browser’s Connect a coding agent dialog. It names the server (for example nevazu-work), its URL (https://connect.nevazu.com/mcp/ followed by the browser’s ID) and the environment variable that holds the browser’s access key (for example NEVAZU_WORK_KEY), in this standard form:' },
+      { p: 'This page is written for coding agents, and for anyone who wants to see what their agent will do. A Nevazu user hands their agent a short setup from a browser’s Connect a coding agent dialog. It names the server (for example nevazu-work) and its URL (https://connect.nevazu.com/mcp/ followed by the browser’s ID). A setup for an access key also names the environment variable that holds the key (for example NEVAZU_WORK_KEY), in this standard form:' },
       { code: mcpConfig(EXAMPLE_SERVER), label: 'mcpServers' },
-      { p: 'The examples below use these names. Use the ones from the setup you were given, and follow the section for the client you are.' },
+      { p: 'The examples below use these names. Use the ones from the setup you were given, and follow the section for the client you are. A setup with no key variable is for signing in: follow Signing in instead of a key.' },
       { h: 'Rules', id: 'rules' },
       { ul: [
         'The user creates the access key and saves it in the environment variable themselves. Refer to the variable as shown for your client. Never ask for the key, print it, or write its value into a file or a message.',
@@ -161,9 +169,32 @@ const en: Article[] = [
         opencode: 'Merge this into ~/.config/opencode/opencode.json (or opencode.json in a project), keeping the configuration already there. OpenCode substitutes {env:NEVAZU_WORK_KEY} when it loads its configuration; oauth: false stops it from trying to sign in with OAuth.',
         other: 'Any client that speaks MCP over Streamable HTTP connects with the URL and an Authorization header carrying the key. Use the client’s own way of reading an environment variable; if it has none, tell the user where to put the key themselves. The curl command checks the key by listing the tools.',
       }, 'Any other client'),
+      { h: 'Signing in instead of a key', id: 'sign-in' },
+      { p: 'A setup for signing in names the server and its URL but no key variable:' },
+      { code: signInConfig(EXAMPLE_SERVER), label: 'mcpServers' },
+      { p: 'Add the server by its URL alone and let your client sign in with OAuth, the authorization MCP defines. On the first connection the server answers 401 with where to sign in, your client registers itself, and a Nevazu page opens in the user’s web browser, where they approve the agent and choose how long it lasts (1, 7, 30 or 90 days). Your client keeps the tokens and renews them. When the sign-in ends or the user disconnects it, the server answers 401 again and the user signs in once more.' },
+      { ul: [
+        'Do not add an Authorization header, an environment variable or a key. Never ask the user for a key or a token.',
+        'The rules above still apply: the user-level configuration, keeping the servers already there, one server per browser.',
+        'If your client signs in only when the user acts (a command or a button), tell the user exactly what to run or press. If you cannot open a web browser yourself, give the user the link your client prints.',
+        'Once the user has approved, check the connection with get_status, then take a screenshot.',
+      ] },
+      ...signInBlocks({
+        'claude-code': 'Run this in a terminal, then restart Claude Code. In Claude Code, /mcp lists the server as needing authentication: choose it, then Authenticate, and the sign-in opens in the user’s web browser. Claude Code keeps the tokens and renews them.',
+        'claude-app': 'For Claude on the web, desktop or mobile: in Settings → Connectors, choose Add custom connector, give it a name and paste this URL, then Connect. The Nevazu page opens to approve it. On a Team or Enterprise plan, an owner may need to add the connector first.',
+        codex: 'Add this to ~/.codex/config.toml (create the file if it is missing), then run codex mcp login nevazu-work in a terminal: Codex opens the sign-in in the user’s web browser and keeps the tokens. The same server in one command: codex mcp add nevazu-work --url https://connect.nevazu.com/mcp/BROWSER_ID. If Codex says login is not supported, update it.',
+        cursor: 'Merge this into ~/.cursor/mcp.json, keeping any servers already there. Cursor’s MCP settings show that the server needs to sign in; choose its button (Connect or Login), and the sign-in opens in the user’s web browser and returns to Cursor.',
+        vscode: 'Merge this into the user MCP configuration (the command MCP: Open User Configuration), keeping the entries already there. When the server starts, VS Code asks to allow it to sign in, opens the Nevazu page, and keeps the sign-in under Accounts.',
+        windsurf: 'Merge this into ~/.codeium/windsurf/mcp_config.json, keeping any servers already there, then refresh the MCP servers in Windsurf. Windsurf opens the sign-in when the server first connects; if your version cannot sign in, use an access key instead.',
+        gemini: 'Merge this into ~/.gemini/settings.json, keeping the settings already there. Gemini CLI finds the sign-in when it connects; if it does not start by itself, run /mcp auth nevazu-work.',
+        opencode: 'Merge this into ~/.config/opencode/opencode.json (or opencode.json in a project), keeping the configuration already there. OpenCode starts the sign-in when it connects; opencode mcp auth nevazu-work starts it by hand.',
+        other: 'Any client that implements MCP authorization (OAuth 2.1 with PKCE) signs in by itself. It finds Nevazu from the 401 response, registers with Dynamic Client Registration or a Client ID Metadata Document, and returns to a local callback (http://127.0.0.1 or localhost, any port), its own app scheme, or claude.ai, chatgpt.com or vscode.dev. A client that cannot sign in needs an access key instead.',
+      }, 'Any other client'),
       { h: 'If it does not connect', id: 'troubleshooting' },
       { ul: [
         '401 Unauthorized: the key did not arrive or is not valid. The variable may be empty in the environment the client started from (the literal ${…} is then sent), or the key was revoked or has expired. The user can create a new key in the browser’s Settings → Coding agent access.',
+        '401 Unauthorized with a sign-in: it has ended or the user disconnected it. Start the sign-in again as shown for your client; the user approves it again.',
+        'The Nevazu page says the request cannot be approved: it gives the reason, such as a callback Nevazu does not accept. Use a local callback, or an access key.',
         '429 Too many failed attempts: wait a minute before trying again.',
         'A tool says the browser is not running: ask the user to open it in Nevazu. A coding agent cannot wake a sleeping browser.',
         'A tool says coding agent access is off: the user turns on Allow coding agents to connect in the browser’s settings.',
@@ -423,9 +454,9 @@ const zh: Article[] = [
     title: '编程智能体配置',
     summary: '写给编程智能体：如何在 Claude Code、Codex、Cursor、VS Code、Windsurf、Gemini CLI、OpenCode 或其他客户端中，把 Nevazu 浏览器加入自己的 MCP 配置。',
     blocks: [
-      { p: '本页写给编程智能体，也写给想了解智能体会做什么的人。Nevazu 用户会从浏览器的“连接编程智能体”对话框中复制一段简短的配置交给智能体。其中包含服务器名称（例如 nevazu-work）、地址（https://connect.nevazu.com/mcp/ 加浏览器 ID），以及保存该浏览器访问密钥的环境变量（例如 NEVAZU_WORK_KEY），格式如下：' },
+      { p: '本页写给编程智能体，也写给想了解智能体会做什么的人。Nevazu 用户会从浏览器的“连接编程智能体”对话框中复制一段简短的配置交给智能体。其中包含服务器名称（例如 nevazu-work）和地址（https://connect.nevazu.com/mcp/ 加浏览器 ID）。使用访问密钥的配置还包含保存密钥的环境变量（例如 NEVAZU_WORK_KEY），格式如下：' },
       { code: mcpConfig(EXAMPLE_SERVER), label: 'mcpServers' },
-      { p: '下面的示例使用这些名称。请换成你收到的配置中的名称，并按照你所属客户端的那一节操作。' },
+      { p: '下面的示例使用这些名称。请换成你收到的配置中的名称，并按照你所属客户端的那一节操作。没有密钥变量的配置用于登录：请按“用登录代替密钥”一节操作。' },
       { h: '规则', id: 'rules' },
       { ul: [
         '访问密钥由用户自己创建并保存到环境变量中。按你的客户端所示引用这个变量。不要向用户索要密钥，不要打印它，也不要把它的值写进任何文件或消息。',
@@ -445,9 +476,32 @@ const zh: Article[] = [
         opencode: '合并到 ~/.config/opencode/opencode.json（或项目中的 opencode.json），保留已有的配置。OpenCode 加载配置时替换 {env:NEVAZU_WORK_KEY}；oauth: false 让它不尝试用 OAuth 登录。',
         other: '任何通过 Streamable HTTP 使用 MCP 的客户端，都用这个地址和携带密钥的 Authorization 请求头连接。请用客户端自己读取环境变量的方式；如果没有，告诉用户自己把密钥填在哪里。curl 命令通过列出工具来检查密钥。',
       }, '其他客户端'),
+      { h: '用登录代替密钥', id: 'sign-in' },
+      { p: '用于登录的配置只写明服务器名称和地址，没有密钥变量：' },
+      { code: signInConfig(EXAMPLE_SERVER), label: 'mcpServers' },
+      { p: '只用地址加入服务器，让客户端通过 OAuth（MCP 定义的授权方式）登录。第一次连接时服务器返回 401 并告知在哪里登录，客户端自行注册，用户的网页浏览器会打开一个 Nevazu 页面，用户在那里批准智能体并选择有效期（1、7、30 或 90 天）。客户端保存令牌并自动续期。登录到期或被用户断开后，服务器会再次返回 401，用户重新登录即可。' },
+      { ul: [
+        '不要添加 Authorization 请求头、环境变量或密钥。不要向用户索要密钥或令牌。',
+        '上面的规则同样适用：使用用户级配置，保留已有的服务器，每个浏览器一个服务器。',
+        '如果你的客户端只在用户操作（一条命令或一个按钮）时才登录，请准确告诉用户要运行什么或点哪里。如果你自己无法打开网页浏览器，把客户端给出的链接交给用户。',
+        '用户批准后，用 get_status 检查连接，然后截图。',
+      ] },
+      ...signInBlocks({
+        'claude-code': '在终端中运行，然后重启 Claude Code。在 Claude Code 中，/mcp 会显示该服务器需要认证：选择它，再选 Authenticate，登录页会在用户的网页浏览器中打开。Claude Code 保存令牌并自动续期。',
+        'claude-app': '适用于网页版、桌面版和移动版 Claude：在 Settings → Connectors 中选择 Add custom connector，填写名称并粘贴这个地址，然后连接。会打开 Nevazu 页面进行批准。在 Team 或 Enterprise 方案中，可能需要所有者先添加该连接器。',
+        codex: '加入 ~/.codex/config.toml（文件不存在就创建），然后在终端中运行 codex mcp login nevazu-work：Codex 会在用户的网页浏览器中打开登录页并保存令牌。也可以用一条命令加入同一个服务器：codex mcp add nevazu-work --url https://connect.nevazu.com/mcp/BROWSER_ID。如果 Codex 提示不支持登录，请更新它。',
+        cursor: '合并到 ~/.cursor/mcp.json，保留已有的服务器。Cursor 的 MCP 设置会显示该服务器需要登录；点击它的按钮（Connect 或 Login），登录页会在用户的网页浏览器中打开，完成后返回 Cursor。',
+        vscode: '合并到用户 MCP 配置（命令 MCP: Open User Configuration），保留已有的条目。服务器启动时，VS Code 会询问是否允许它登录，然后打开 Nevazu 页面，并把登录保存在“账户”中。',
+        windsurf: '合并到 ~/.codeium/windsurf/mcp_config.json，保留已有的服务器，然后在 Windsurf 中刷新 MCP 服务器。服务器第一次连接时 Windsurf 会打开登录页；如果你的版本不支持登录，请改用访问密钥。',
+        gemini: '合并到 ~/.gemini/settings.json，保留已有的设置。Gemini CLI 连接时会发现需要登录；如果没有自动开始，运行 /mcp auth nevazu-work。',
+        opencode: '合并到 ~/.config/opencode/opencode.json（或项目中的 opencode.json），保留已有的配置。OpenCode 连接时会开始登录；也可以用 opencode mcp auth nevazu-work 手动开始。',
+        other: '任何实现了 MCP 授权（OAuth 2.1 与 PKCE）的客户端都会自行登录：它从 401 响应中找到 Nevazu，通过动态客户端注册（Dynamic Client Registration）或客户端 ID 元数据文档（Client ID Metadata Document）注册，并返回到本地回调地址（http://127.0.0.1 或 localhost，任意端口）、它自己的应用协议，或 claude.ai、chatgpt.com、vscode.dev。不能登录的客户端请改用访问密钥。',
+      }, '其他客户端'),
       { h: '连接不上时', id: 'troubleshooting' },
       { ul: [
         '401 Unauthorized：密钥没有送达或无效。可能是客户端启动时的环境中变量为空（此时发送的是字面的 ${…}），也可能密钥已被撤销或已过期。用户可以在浏览器的“设置 → 编程智能体访问”中创建新密钥。',
+        '登录后出现 401 Unauthorized：登录已到期或被用户断开。按你所属客户端的方式重新发起登录，由用户再次批准。',
+        'Nevazu 页面提示无法批准该请求：页面会说明原因，例如不接受的回调地址。请使用本地回调地址，或改用访问密钥。',
         '429 失败次数过多：等一分钟再试。',
         '工具提示浏览器未运行：请用户在 Nevazu 中打开它。编程智能体无法唤醒休眠的浏览器。',
         '工具提示编程智能体访问已关闭：用户需要在浏览器设置中开启“允许编程智能体连接”。',

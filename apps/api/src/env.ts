@@ -32,6 +32,11 @@ export interface Env {
   EMAIL_FROM?: string;
   /** Public WebSocket URL of the session gateway, e.g. wss://connect.example.com. */
   GATEWAY_URL?: string;
+  /**
+   * `on`: the web app offers coding agents OAuth sign-in beside keys (docs/agent-access.md, "OAuth
+   * sign-in"). Set together with the gateway's MCP_OAUTH, which makes agents discover it.
+   */
+  MCP_OAUTH?: string;
   /** Trusted gateway RPC: deletion closes existing agent and viewer connections immediately. */
   GATEWAY?: {
     revokeInstance(instanceId: string): Promise<void>;

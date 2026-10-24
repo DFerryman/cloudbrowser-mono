@@ -5,6 +5,10 @@
  * the per-client steps (/docs/agent-setup), which the agent follows for whichever client it is.
  * Every client below refers to the variable, so the key never passes through the agent's chat or
  * lands in its configuration.
+ *
+ * Signing in (OAuth) needs no key at all: the configuration is the URL alone, the client finds the
+ * sign-in from the server's answer, and the owner approves it on nevazu.com (signInHandoff,
+ * signInSetups).
  */
 
 /** The steps for each client, as markdown an agent can read (the docs article "agent-setup"). */
@@ -141,6 +145,68 @@ export function agentSetups(server: AgentServer): AgentSetup[] {
         '# Check the key (lists the tools):',
         `curl -s ${url} -H "Authorization: Bearer $${env}" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`,
       ].join('\n'),
+    },
+  ];
+}
+
+// --- signing in instead of a key ---------------------------------------------------------------
+
+/** Clients set up for signing in; the Claude apps (claude.ai, Desktop) add a connector by URL. */
+export type SignInClient = AgentClient | 'claude-app';
+
+export interface SignInSetup {
+  client: SignInClient;
+  label: string;
+  where: string;
+  code: string;
+}
+
+/** The configuration for signing in: the URL alone, no header. */
+export function signInConfig({ name, url }: AgentServer): string {
+  return json({ mcpServers: { [name]: { type: 'http', url } } });
+}
+
+/** What the user pastes into their agent to sign it in: the server, the steps, and who approves. */
+export function signInHandoff(server: AgentServer, browserName: string): string {
+  const label = browserName.replace(/\s+/g, ' ').trim();
+  return [
+    `Add my Nevazu cloud browser "${label}" to your own MCP configuration as a remote server (Streamable HTTP), so you can use it from now on. It needs no key: you sign in with my Nevazu account (OAuth) and I approve it. The configuration, in the standard mcpServers format:`,
+    '',
+    signInConfig(server),
+    '',
+    `Follow the sign-in steps for your client (Claude Code, Codex, Cursor, VS Code, Windsurf, Gemini CLI, OpenCode or any other MCP client), in the section "Signing in instead of a key": ${SETUP_GUIDE_URL}`,
+    '',
+    'Do not add an Authorization header or ask me for a key. Once the server is added, start its sign-in, or tell me the command or button that starts it if only I can. A Nevazu page opens in my web browser, where I approve it and choose how long it lasts. Then check the connection with its get_status tool.',
+  ].join('\n');
+}
+
+/** The per-client steps for signing in: the server by URL, then the client's own sign-in. */
+export function signInSetups(server: AgentServer): SignInSetup[] {
+  const { name, url } = server;
+  return [
+    { client: 'claude-code', label: 'Claude Code', where: 'Terminal', code: `claude mcp add --transport http --scope user ${name} ${url}` },
+    { client: 'claude-app', label: 'Claude app', where: 'Settings → Connectors → Add custom connector', code: url },
+    {
+      client: 'codex',
+      label: 'Codex',
+      where: '~/.codex/config.toml',
+      code: [`[mcp_servers.${name}]`, `url = "${url}"`, 'tool_timeout_sec = 90', '', `# Then sign in from a terminal: codex mcp login ${name}`].join('\n'),
+    },
+    { client: 'cursor', label: 'Cursor', where: '~/.cursor/mcp.json', code: json({ mcpServers: { [name]: { url } } }) },
+    { client: 'vscode', label: 'VS Code', where: 'MCP: Open User Configuration', code: json({ servers: { [name]: { type: 'http', url } } }) },
+    { client: 'windsurf', label: 'Windsurf', where: '~/.codeium/windsurf/mcp_config.json', code: json({ mcpServers: { [name]: { serverUrl: url } } }) },
+    { client: 'gemini', label: 'Gemini CLI', where: '~/.gemini/settings.json', code: json({ mcpServers: { [name]: { httpUrl: url } } }) },
+    {
+      client: 'opencode',
+      label: 'OpenCode',
+      where: '~/.config/opencode/opencode.json',
+      code: json({ $schema: 'https://opencode.ai/config.json', mcp: { [name]: { type: 'remote', url, enabled: true } } }),
+    },
+    {
+      client: 'other',
+      label: 'Other',
+      where: 'Any MCP client (Streamable HTTP)',
+      code: [`URL: ${url}`, 'No header: the client signs in with OAuth (MCP authorization), which it discovers from the server.'].join('\n'),
     },
   ];
 }
