@@ -28,7 +28,10 @@ async function fromEdge(body: unknown, cf: Record<string, unknown>) {
 
 beforeEach(async () => {
   t = setup();
-  writeDataPoint = vi.fn();
+  // Analytics Engine refuses a data point with more than 20 blobs, 20 doubles or 1 index.
+  writeDataPoint = vi.fn((point: { indexes: unknown[]; blobs: unknown[]; doubles: unknown[] }) => {
+    if (point.indexes.length > 1 || point.blobs.length > 20 || point.doubles.length > 20) throw new Error('data point over the Analytics Engine limits');
+  });
   Object.assign(t.env, { LIVE_QUALITY: { writeDataPoint } });
   t.d1.sqlite.exec("INSERT INTO invites(email) VALUES('quality@example.com'),('other-quality@example.com')");
   await signIn(t, 'quality@example.com');
@@ -53,8 +56,8 @@ describe('live quality reports', () => {
     expect(writeDataPoint).toHaveBeenCalledTimes(1);
     expect(writeDataPoint).toHaveBeenCalledWith({
       indexes: ['tyo1'],
-      blobs: ['tyo1', 'TH', 'BKK', '23969', 'high', 'relay', 'udp', instanceId, sessionId, report.attemptId, ''],
-      doubles: [60_000, 30, 290, 41, 24.5, 2400, 0.0099, 3, 300, 50, 5, 15, 1920, 1080, -1, -1, -1, -1, -1, -1, -1],
+      blobs: ['tyo1', 'TH', 'BKK', '23969', 'high', 'relay', 'udp', instanceId, sessionId, report.attemptId, '', ''],
+      doubles: [60_000, 30, 290, 41, 24.5, 2400, 0.0099, 3, 300, 50, 5, 15, 1920, 1080, -1, -1, -1, -1, -1, -1],
     });
   });
 
@@ -65,22 +68,22 @@ describe('live quality reports', () => {
     expect((await t.call('POST', endpoint(), sparse)).status).toBe(204);
     expect(writeDataPoint).toHaveBeenCalledWith({
       indexes: ['tyo1'],
-      blobs: ['tyo1', '', '', '', '', '', '', instanceId, sessionId, report.attemptId, ''],
-      doubles: [60_000, 30, -1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+      blobs: ['tyo1', '', '', '', '', '', '', instanceId, sessionId, report.attemptId, '', ''],
+      doubles: [60_000, 30, -1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
     });
   });
 
   it('appends repairs, level changes and the reporting build after the original fields', async () => {
-    const repaired = { ...report, nacks: 600, retransmits: 575, plis: 3, keyframes: 4, levelChanges: 2, jitterBufferTargetMs: 20, jitterBufferMinimumMs: 8 };
+    const repaired = { ...report, nacks: 600, retransmits: 575, plis: 3, keyframes: 4, levelChanges: 2, jitterBufferTargetMs: 20, jitterBufferMinimumMs: 8.4 };
     expect((await t.call('POST', endpoint(), repaired, { 'x-client-build': '4070ce5a1b2c' })).status).toBe(204);
     expect(writeDataPoint).toHaveBeenCalledWith({
       indexes: ['tyo1'],
-      blobs: ['tyo1', '', '', '', 'high', 'relay', 'udp', instanceId, sessionId, report.attemptId, '4070ce5a1b2c'],
-      doubles: [60_000, 30, 290, 41, 24.5, 2400, 0.0099, 3, 300, 50, 5, 15, 1920, 1080, 600, 575, 3, 4, 2, 20, 8],
+      blobs: ['tyo1', '', '', '', 'high', 'relay', 'udp', instanceId, sessionId, report.attemptId, '4070ce5a1b2c', '8'],
+      doubles: [60_000, 30, 290, 41, 24.5, 2400, 0.0099, 3, 300, 50, 5, 15, 1920, 1080, 600, 575, 3, 4, 2, 20],
     });
     // Unknown counts are -1, as for the original fields.
     expect((await t.call('POST', endpoint(), { ...repaired, nacks: null, plis: null })).status).toBe(204);
-    expect(writeDataPoint.mock.calls.at(-1)![0].doubles.slice(14)).toEqual([-1, 575, -1, 4, 2, 20, 8]);
+    expect(writeDataPoint.mock.calls.at(-1)![0].doubles.slice(14)).toEqual([-1, 575, -1, 4, 2, 20]);
   });
 
   it('rejects unknown fields and out-of-range values before writing', async () => {

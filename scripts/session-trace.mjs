@@ -83,10 +83,11 @@ async function quality(column, value, from) {
   const sql = `SELECT timestamp, blob2 AS country, blob3 AS colo, blob5 AS level, blob6 AS candidate, blob7 AS relay, blob10 AS attempt, blob11 AS build,
     double1 AS duration, double3 AS rtt, double4 AS gateway_rtt, double5 AS fps, double6 AS kbps, double7 AS loss, double8 AS freezes,
     double9 AS freeze_ms, double12 AS dropped, double13 AS width, double14 AS height, double15 AS nacks, double16 AS retransmits,
-    double17 AS plis, double18 AS keyframes, double19 AS level_changes, double10 AS held, double20 AS held_target, double21 AS held_min
+    double17 AS plis, double18 AS keyframes, double19 AS level_changes, double10 AS held, double20 AS held_target, blob12 AS held_min
     FROM cloudbrowser_live_quality WHERE ${column} = '${value}' AND timestamp > toDateTime(${Math.floor(from / 1000)}) ORDER BY timestamp`;
   try {
-    return (await cf('/analytics_engine/sql', sql, true)).data ?? [];
+    // blob12 is a number as text, '' when unknown: a data point's 20 doubles were all in use.
+    return ((await cf('/analytics_engine/sql', sql, true)).data ?? []).map((r) => ({ ...r, held_min: r.held_min ? Number(r.held_min) : -1 }));
   } catch (error) {
     return [{ error: String(error.message ?? error) }];
   }
