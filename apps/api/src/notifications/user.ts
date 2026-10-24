@@ -13,7 +13,7 @@
  * | Reward credited               | A promotion's reward reached the balance          | One email for all rewards credited together, at most one per REWARD_COOLDOWN_MS |
  * | Coding-agent key created      | The owner created an access key for a browser     | Once per key (keys are rate limited like every API write) |
  * | Account closure code          | The user asks to close their account              | One a minute at most (closure.ts)                      |
- * | Account closed / data erased  | The closure is accepted; the personal data is erased | Once each (closure.ts)                              |
+ * | Account closed / data erased  | The closure is accepted; 30 days later the data is erased | Once each (closure.ts)                         |
  *
  * A closed account gets nothing else: sendToUser skips it, and the closure emails go to the address
  * the account had when they were sent.
@@ -167,28 +167,26 @@ export function closureCodeMessage(appUrl: string, code: string): Message {
   });
 }
 
-/** The closure was accepted: what was deleted, what is refunded and what is kept. */
-export function closureStartedMessage(appUrl: string, input: { browsers: number; refundMicros: number; refundDays: number; eraseDays: number; supportEmail: string }): Message {
+/** The closure was accepted: what was deleted, how to ask about a refund, and what is kept. */
+export function closureStartedMessage(appUrl: string, input: { browsers: number; eraseDays: number; supportEmail: string }): Message {
   const browsers = `${input.browsers} ${input.browsers === 1 ? 'browser' : 'browsers'}`;
   return renderEmail(appUrl, {
     subject: 'Your Nevazu account is closed',
     category: 'Your account',
     title: 'Your account is closed.',
-    preview: 'We are deleting your browsers and will refund your unused credit.',
+    preview: 'You are signed out everywhere and your browsers are being deleted.',
     paragraphs: [
       `As you asked, your Nevazu account is closed. You have been signed out everywhere and ${input.browsers ? `your ${browsers} and their data are being permanently deleted` : 'you had no browsers to delete'}.`,
-      input.refundMicros > 0
-        ? `We will refund your unused paid credit, about ${usd(input.refundMicros)}, to your original payment method within ${input.refundDays} days. The exact amount is fixed once your browsers are deleted. The payment provider sends the receipt.`
-        : 'You have no unused paid credit to refund. Promotional and signup credit is not refunded.',
-      `Your email address and other personal data are erased once the refund is made, and within ${input.eraseDays} days at the latest. We keep billing records and your acceptance of the Terms of Service as the law and our Privacy Policy describe.`,
+      `Closing your account does not refund your credit by itself. To ask about a refund of credit you paid for and have not used, write to ${input.supportEmail} from this address within ${input.eraseDays} days.`,
+      `After ${input.eraseDays} days your email address and other personal data are erased. We keep billing records and your acceptance of the Terms of Service as the law and our Privacy Policy describe.`,
     ],
-    details: [{ label: 'Browsers deleted', value: String(input.browsers) }, { label: 'Refund', value: input.refundMicros > 0 ? `about ${usd(input.refundMicros)}` : 'none' }],
+    details: [{ label: 'Browsers deleted', value: String(input.browsers) }],
     note: `If you did not close your account, write to ${input.supportEmail} at once.`,
   });
 }
 
 /** The last email to the address: the personal data is being erased now. */
-export function closureErasedMessage(appUrl: string, input: { refundMicros: number; refunded: boolean; supportEmail: string }): Message {
+export function closureErasedMessage(appUrl: string, input: { supportEmail: string }): Message {
   return renderEmail(appUrl, {
     subject: 'Your Nevazu account data has been erased',
     category: 'Your account',
@@ -196,14 +194,9 @@ export function closureErasedMessage(appUrl: string, input: { refundMicros: numb
     preview: 'This is the last email we send to this address.',
     paragraphs: [
       'The closure of your Nevazu account is complete. Your email address and other personal data are erased now, and this is the last email we send to this address.',
-      input.refundMicros <= 0
-        ? 'There was no unused paid credit to refund.'
-        : input.refunded
-          ? `Your refund of ${usd(input.refundMicros)} has been made to your original payment method.`
-          : `Your refund of ${usd(input.refundMicros)} is still being processed and will reach your original payment method. The payment provider sends the receipt.`,
       'You can create a new account with this address at any time. Nothing from the closed account carries over.',
     ],
-    note: `Questions about your refund: ${input.supportEmail}.`,
+    note: `Questions: ${input.supportEmail}.`,
   });
 }
 

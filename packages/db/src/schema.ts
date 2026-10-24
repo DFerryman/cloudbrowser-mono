@@ -1024,23 +1024,26 @@ export const termsAcceptances = sqliteTable(
   (t) => [uniqueIndex('terms_acceptances_user_version_unique').on(t.userId, t.termsVersion)],
 );
 
-/** One planned refund of a closed account: credit owed back on one paid order, and what to refund on it. */
-export type ClosureRefund = {
+/**
+ * One paid order of a closed account: the unused paid credit on it, and what refunding that in
+ * full would take. Support's reference when the user asks for a refund; nothing pays it out.
+ */
+export type ClosureOrder = {
   orderId: string;
-  /** `creem` | `stripe`: where the operator refunds it. */
+  /** `creem` | `stripe`: where support would refund it. */
   provider: string;
-  /** Credit (before tax) given back on this order. */
+  /** Unused credit (before tax) bought with this order. */
   creditMicros: number;
-  /** What to refund on the order, tax included, in its currency's smallest unit. */
+  /** What refunding that credit would be on the order, tax included, in its currency's smallest unit. */
   refundCents: number;
   currency: string;
 };
 
 /**
  * A closed account (Terms sections 8 and 9; migration 0040): `closing` while its browsers are
- * deleted, `refund_due` once the unused paid credit is fixed and waits for an operator, `closed`
- * when nothing more is owed. `erased_at`: the personal data was erased (after the refund, or 30
- * days at the latest). Sessions cannot be created for a user with a row here (trigger). Owner: api.
+ * deleted, `closed` once all are purged and the balance is final. `erased_at`: the personal data
+ * was erased and the balance left written off, 30 days after the closure. Sessions cannot be
+ * created for a user with a row here (trigger). Owner: api.
  */
 export const accountClosures = sqliteTable(
   'account_closures',
@@ -1054,14 +1057,12 @@ export const accountClosures = sqliteTable(
     requestedAt: ts('requested_at').notNull(),
     /** Browsers the closure deleted. */
     browsers: integer('browsers').notNull().default(0),
-    refundMicros: integer('refund_micros'),
-    refundPlan: json<ClosureRefund[]>('refund_plan'),
-    refundDueAt: ts('refund_due_at'),
-    refundRecordedAt: ts('refund_recorded_at'),
-    /** `webhook` (the provider's refund events) or `admin:<id>` (refunded another way). */
-    refundRecordedBy: text('refund_recorded_by'),
-    erasedAt: ts('erased_at'),
     closedAt: ts('closed_at'),
+    /** Set when `closed`: the final balance, the part of it paid for, and that part per order. */
+    balanceMicros: integer('balance_micros'),
+    paidMicros: integer('paid_micros'),
+    paidOrders: json<ClosureOrder[]>('paid_orders'),
+    erasedAt: ts('erased_at'),
   },
   (t) => [index('account_closures_status_idx').on(t.status)],
 );

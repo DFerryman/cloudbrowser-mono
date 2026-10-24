@@ -6,15 +6,16 @@
  *     session, passkey, authenticator app and pending sign-in code is deleted, and no new session
  *     can be created (trigger, migration 0040); coding-agent keys and sign-ins are revoked; every
  *     browser is permanently deleted through the same path as Delete browser.
- *  2. Once every browser is purged, nothing meters any more and the refund is fixed: the unused
- *     paid credit, split over the newest paid orders first (`refund_due`). An operator pays it out
- *     in the provider's dashboard (Creem's API refunds only whole transactions); the provider's
- *     refund webhooks record it, or the operator marks it recorded in the console.
- *  3. When nothing more is owed (`closed`), credit left over (promotional, signup, rounding) is
- *     written off, and the personal data is erased: the email address and name are replaced, the
- *     browsers' names, session logs and agent records deleted. Billing records, Terms acceptances,
- *     the audit log and the browser ledger stay, tied to the anonymous user id. If a refund is
- *     still owed after 30 days, the data is erased anyway and the refund stays due.
+ *  2. Once every browser is purged, nothing meters any more (`closed`): the final balance is
+ *     recorded with the part of it that was paid for, per order, for support.
+ *  3. 30 days after the closure, the balance left is written off and the personal data erased: the
+ *     email address and name are replaced, the browsers' names, session logs and agent records
+ *     deleted. Billing records, Terms acceptances, the audit log and the browser ledger stay, tied
+ *     to the anonymous user id, and the address can sign up again.
+ *
+ * Closing refunds nothing by itself. A user who wants unused paid credit back writes to support,
+ * who agrees it with them and refunds it by hand in the provider's dashboard; the provider's
+ * refund webhook takes it off the balance as for any refund (billing/ledger.ts).
  *
  * Self-serve closure is refused during a payment dispute hold, while an operator has suspended a
  * browser, and for operators' own accounts; support handles those.
@@ -23,13 +24,12 @@ import {
   CLOSURE_CODE_ATTEMPTS,
   CLOSURE_CODE_SECONDS,
   CLOSURE_ERASE_DAYS,
-  CLOSURE_REFUND_DAYS,
   type ClosureBlocker,
   type ClosurePreview,
   type ClosureReason,
 } from '@cloudbrowser/contracts';
-import { newId, raiseAlert, schema, sha256Hex, type ClosureRefund, type Db } from '@cloudbrowser/db';
-import { and, desc, eq, gte, inArray, isNotNull, isNull, like, ne, or, sql } from 'drizzle-orm';
+import { newId, raiseAlert, schema, sha256Hex, type ClosureOrder, type Db } from '@cloudbrowser/db';
+import { and, desc, eq, inArray, isNotNull, isNull, like, ne, or, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { isAdminEmail } from './admin/access.js';
 import { revokeUserClients } from './automation.js';
@@ -50,9 +50,6 @@ const {
 /** As on the site (apps/web/src/lib/site.ts). */
 const SUPPORT_EMAIL = 'support@nevazu.com';
 const DAY = 86_400_000;
-/** A refund still owed this long after the closure raises a critical alert. */
-const REFUND_OVERDUE_DAYS = 21;
-/** One cent of credit per order: what rounding between cents and micro-dollars may leave. */
 const CENT_MICROS = 10_000;
 /** What an erased account's address becomes: unique, and undeliverable (RFC 2606 `.invalid`). */
 export const erasedEmail = (userId: string) => `${userId}@closed.invalid`;
@@ -74,13 +71,13 @@ export async function closureBlocker(db: Db, env: Env, userId: string, email: st
 }
 
 /**
- * The unused paid credit and how to refund it: the smaller of the balance and the paid credit not
- * yet refunded or disputed. Credit that was not paid for (signup, promotions, operator credit)
- * counts as spent first and is never refunded. The refund goes to the newest paid orders first,
- * each up to its unrefunded credit; on each the amount to refund is that credit's share of what
- * was paid, tax included, which the refund webhook maps back to the same credit (billing/ledger.ts).
+ * The unused paid credit, support's reference for a refund: the smaller of the balance and the
+ * paid credit not yet refunded or disputed. Credit that was not paid for (signup, promotions,
+ * operator credit) counts as spent first. It is split over the newest paid orders first, each up
+ * to its unrefunded credit; on each, refunding it would be that credit's share of what was paid,
+ * tax included, which the refund webhook maps back to the same credit (billing/ledger.ts).
  */
-export async function refundPlan(db: Db, userId: string): Promise<{ balanceMicros: number; refundMicros: number; forfeitMicros: number; plan: ClosureRefund[] }> {
+export async function unusedPaidCredit(db: Db, userId: string): Promise<{ balanceMicros: number; paidMicros: number; orders: ClosureOrder[] }> {
   const [acct] = await db.select({ balance: billingAccounts.balanceMicros }).from(billingAccounts).where(eq(billingAccounts.userId, userId));
   const balanceMicros = acct?.balance ?? 0;
   const paid = await db.select().from(balanceTransactions)
@@ -90,25 +87,25 @@ export async function refundPlan(db: Db, userId: string): Promise<{ balanceMicro
     .where(and(eq(balanceTransactions.userId, userId), inArray(balanceTransactions.kind, ['refund', 'dispute']), isNotNull(balanceTransactions.orderId), isNotNull(balanceTransactions.appliedAt)))
     .groupBy(balanceTransactions.orderId)).map((r) => [r.orderId, Number(r.micros)]));
   const orders = paid.map((p) => ({ p, left: Math.max(0, p.amountMicros + (reversed.get(p.orderId) ?? 0)) })).filter((o) => o.left > 0);
-  const refundMicros = Math.max(0, Math.min(balanceMicros, orders.reduce((a, o) => a + o.left, 0)));
-  const plan: ClosureRefund[] = [];
-  let owed = refundMicros;
-  for (const { p, left } of orders) {
-    if (owed <= 0) break;
-    const creditMicros = Math.min(left, owed);
-    owed -= creditMicros;
+  const paidMicros = Math.max(0, Math.min(balanceMicros, orders.reduce((a, o) => a + o.left, 0)));
+  const split: ClosureOrder[] = [];
+  let left = paidMicros;
+  for (const o of orders) {
+    if (left <= 0) break;
+    const creditMicros = Math.min(o.left, left);
+    left -= creditMicros;
     // Older rows without the amount paid are taken as untaxed.
-    const refundCents = p.grossAmountCents ? Math.round((creditMicros * p.grossAmountCents) / p.amountMicros) : Math.round(creditMicros / CENT_MICROS);
-    plan.push({ orderId: p.orderId!, provider: p.actor === 'stripe' ? 'stripe' : 'creem', creditMicros, refundCents, currency: p.currency ?? 'USD' });
+    const refundCents = o.p.grossAmountCents ? Math.round((creditMicros * o.p.grossAmountCents) / o.p.amountMicros) : Math.round(creditMicros / CENT_MICROS);
+    split.push({ orderId: o.p.orderId!, provider: o.p.actor === 'stripe' ? 'stripe' : 'creem', creditMicros, refundCents, currency: o.p.currency ?? 'USD' });
   }
-  return { balanceMicros, refundMicros, forfeitMicros: Math.max(0, balanceMicros - refundMicros), plan };
+  return { balanceMicros, paidMicros, orders: split };
 }
 
 export async function closurePreview(db: Db, env: Env, u: { id: string; email: string }): Promise<ClosurePreview> {
   const browsers = await db.select({ id: browserInstances.id, name: browserInstances.name }).from(browserInstances)
     .where(and(eq(browserInstances.userId, u.id), ne(browserInstances.status, 'purged'))).orderBy(browserInstances.createdAt);
-  const { balanceMicros, refundMicros, forfeitMicros } = await refundPlan(db, u.id);
-  return { blocker: await closureBlocker(db, env, u.id, u.email), browsers, balanceMicros, refundMicros, forfeitMicros };
+  const [acct] = await db.select({ balance: billingAccounts.balanceMicros }).from(billingAccounts).where(eq(billingAccounts.userId, u.id));
+  return { blocker: await closureBlocker(db, env, u.id, u.email), browsers, balanceMicros: acct?.balance ?? 0 };
 }
 
 function refuse(blocker: ClosureBlocker): never {
@@ -178,7 +175,7 @@ export async function closeAccount(c: Context<AppEnv>, input: { code: string; re
   if (blocker) refuse(blocker);
   const codeId = await checkClosureCode(db, u.id, input.code, now);
   const live = await db.select().from(browserInstances).where(and(eq(browserInstances.userId, u.id), ne(browserInstances.status, 'purged')));
-  const estimate = await refundPlan(db, u.id);
+  const credit = await unusedPaidCredit(db, u.id);
   const [recorded] = await db.batch([
     db.insert(accountClosures).values({ userId: u.id, status: 'closing', reason: input.reason ?? null, requestedAt: now, browsers: live.length })
       .onConflictDoNothing().returning({ userId: accountClosures.userId }),
@@ -190,7 +187,7 @@ export async function closeAccount(c: Context<AppEnv>, input: { code: string; re
     db.update(user).set({ twoFactorEnabled: false, updatedAt: now }).where(eq(user.id, u.id)),
     db.delete(userNotices).where(and(eq(userNotices.userId, u.id), isNull(userNotices.sentAt))),
     db.insert(auditLog).values({ actor: `user:${u.id}`, action: 'account.closure_requested', target: `user:${u.id}`,
-      detail: { reason: input.reason ?? null, browsers: live.length, refundEstimateMicros: estimate.refundMicros, verifiedBy: 'email_code' }, createdAt: now }),
+      detail: { reason: input.reason ?? null, browsers: live.length, balanceMicros: credit.balanceMicros, paidMicros: credit.paidMicros, verifiedBy: 'email_code' }, createdAt: now }),
   ]);
   if (!recorded.length) throw problem(409, 'invalid_state', 'This account is already being closed.');
   await revokeUserClients(db, c.env, u.id, now, 'account_closed').catch((e) => console.error('closure: revoke agent access failed', u.id, e));
@@ -199,42 +196,32 @@ export async function closeAccount(c: Context<AppEnv>, input: { code: string; re
     await deleteBrowserPermanently(c, row, `closure:${row.id}`, `DELETE /v1/instances/${row.id}`, { closure: true })
       .catch((e) => console.error('closure: browser delete deferred to the sweep', row.id, e));
   }
-  await raiseAlert(db, { source: 'billing', severity: 'info', title: `Account ${u.id} was closed by its owner: ${live.length} browsers deleted, refund estimate $${(estimate.refundMicros / 1e6).toFixed(2)}`,
-    detail: { userId: u.id, browsers: live.length, refundEstimateMicros: estimate.refundMicros } }, now);
-  c.executionCtx.waitUntil(sendTo(c.env, u.email, closureStartedMessage(c.env.APP_URL, {
-    browsers: live.length, refundMicros: estimate.refundMicros, refundDays: CLOSURE_REFUND_DAYS, eraseDays: CLOSURE_ERASE_DAYS, supportEmail: SUPPORT_EMAIL,
-  })).catch((e) => console.error('closure email failed', u.id, e)));
-  return { browsers: live.length, refundMicros: estimate.refundMicros };
+  await raiseAlert(db, { source: 'billing', severity: 'info', title: `Account ${u.id} was closed by its owner: ${live.length} browsers deleted, $${(credit.paidMicros / 1e6).toFixed(2)} unused paid credit (refunded only if the user asks support)`,
+    detail: { userId: u.id, browsers: live.length, balanceMicros: credit.balanceMicros, paidMicros: credit.paidMicros } }, now);
+  c.executionCtx.waitUntil(sendTo(c.env, u.email, closureStartedMessage(c.env.APP_URL, { browsers: live.length, eraseDays: CLOSURE_ERASE_DAYS, supportEmail: SUPPORT_EMAIL }))
+    .catch((e) => console.error('closure email failed', u.id, e)));
+  return { browsers: live.length };
 }
 
 // ---------------------------------------------------------------------------------------------
 // After closing: the api's 5-minute cron
 
 /**
- * Moves every open closure on: deletes browsers the request missed, fixes the refund once all are
- * purged, notices recorded refunds, and erases the personal data when nothing more is owed or the
- * 30 days are up.
+ * Moves every open closure on: deletes browsers the request missed, records the final balance once
+ * all are purged, and erases the personal data 30 days after the closure.
  */
 export async function closureSweep(env: Env, db: Db, now = new Date()) {
-  const summary = { browsers: 0, refundsDue: 0, closed: 0, erased: 0 };
-  const open = await db.select().from(accountClosures).where(or(ne(accountClosures.status, 'closed'), isNull(accountClosures.erasedAt)));
+  const summary = { browsers: 0, closed: 0, erased: 0 };
+  const open = await db.select().from(accountClosures).where(isNull(accountClosures.erasedAt));
   for (const row of open) {
     try {
       if (row.status === 'closing') {
         const next = await advanceClosing(env, db, row, now);
         summary.browsers += next.deleted;
-        if (next.status === 'refund_due') summary.refundsDue++;
-        if (next.status === 'closed') summary.closed++;
-      } else if (row.status === 'refund_due' && await refundRecorded(db, row)) {
-        await settleClosure(db, row.userId, 'webhook', now);
-        summary.closed++;
-      } else if (row.status === 'refund_due' && now.getTime() - row.requestedAt.getTime() >= REFUND_OVERDUE_DAYS * DAY) {
-        await raiseAlert(db, { source: 'billing', severity: 'critical', title: `Refund for closed account ${row.userId} is still owed after ${REFUND_OVERDUE_DAYS} days`,
-          detail: { userId: row.userId, refundMicros: row.refundMicros, plan: row.refundPlan }, dedupeKey: `closure-refund-overdue:${row.userId}` }, now);
+        if (next.closed) summary.closed++;
       }
       const [current] = await db.select().from(accountClosures).where(eq(accountClosures.userId, row.userId));
-      const due = current!.status === 'closed' || (current!.status === 'refund_due' && now.getTime() - current!.requestedAt.getTime() >= CLOSURE_ERASE_DAYS * DAY);
-      if (!current!.erasedAt && due) {
+      if (current!.status === 'closed' && now.getTime() - current!.requestedAt.getTime() >= CLOSURE_ERASE_DAYS * DAY) {
         await eraseAccount(env, db, current!, now);
         summary.erased++;
       }
@@ -263,52 +250,29 @@ async function advanceClosing(env: Env, db: Db, row: typeof accountClosures.$inf
       await raiseAlert(db, { source: 'billing', severity: 'warning', title: `Closed account ${row.userId}: ${left.length} browsers still not purged after a day`,
         detail: { userId: row.userId, browsers: left.map((b) => ({ id: b.id, status: b.status })) }, dedupeKey: `closure-browsers:${row.userId}` }, now);
     }
-    return { deleted, status: 'closing' as const };
+    return { deleted, closed: false };
   }
   // Every browser is purged: nothing meters any more, so the balance is final.
-  const { refundMicros, plan } = await refundPlan(db, row.userId);
-  await db.update(accountClosures).set({ status: 'refund_due', refundMicros, refundPlan: plan, refundDueAt: now }).where(and(eq(accountClosures.userId, row.userId), eq(accountClosures.status, 'closing')));
-  if (refundMicros === 0) {
-    await settleClosure(db, row.userId, null, now);
-    return { deleted, status: 'closed' as const };
-  }
-  await raiseAlert(db, { source: 'billing', severity: 'warning', title: `Refund due for closed account ${row.userId}: $${(refundMicros / 1e6).toFixed(2)} on ${plan.length} ${plan.length === 1 ? 'order' : 'orders'}; refund it in ${[...new Set(plan.map((p) => p.provider))].join(' and ')} (console → Closures)`,
-    detail: { userId: row.userId, refundMicros, plan }, dedupeKey: `closure-refund:${row.userId}` }, now);
-  return { deleted, status: 'refund_due' as const };
-}
-
-/** Whether the provider's refund webhooks have recorded the planned refunds, give or take a cent an order. */
-async function refundRecorded(db: Db, row: typeof accountClosures.$inferSelect) {
-  const plan = row.refundPlan ?? [];
-  if (!plan.length || !row.refundDueAt) return true;
-  const [r] = await db.select({ micros: sql<number>`coalesce(-sum(${balanceTransactions.amountMicros}), 0)` }).from(balanceTransactions)
-    .where(and(eq(balanceTransactions.userId, row.userId), eq(balanceTransactions.kind, 'refund'), inArray(balanceTransactions.orderId, plan.map((p) => p.orderId)),
-      gte(balanceTransactions.createdAt, row.refundDueAt), isNotNull(balanceTransactions.appliedAt)));
-  return Number(r?.micros ?? 0) >= (row.refundMicros ?? 0) - plan.length * CENT_MICROS;
+  const { balanceMicros, paidMicros, orders } = await unusedPaidCredit(db, row.userId);
+  await db.update(accountClosures).set({ status: 'closed', closedAt: now, balanceMicros, paidMicros, paidOrders: orders })
+    .where(and(eq(accountClosures.userId, row.userId), eq(accountClosures.status, 'closing')));
+  return { deleted, closed: true };
 }
 
 /**
- * Nothing more is owed (`closed`): the refund was recorded by `by` (null when none was due), and
- * credit left over is written off so the closed account holds no balance.
+ * Erases the personal data of a closed account (step 3 above), after its last email. Credit still
+ * on the balance (not refunded through support) is written off so the account holds none.
  */
-export async function settleClosure(db: Db, userId: string, by: string | null, now: Date) {
-  const closed = await db.update(accountClosures).set({ status: 'closed', closedAt: now, ...(by ? { refundRecordedAt: now, refundRecordedBy: by } : {}) })
-    .where(and(eq(accountClosures.userId, userId), eq(accountClosures.status, 'refund_due'))).returning({ userId: accountClosures.userId });
-  if (!closed.length) return false;
-  const [acct] = await db.select({ balance: billingAccounts.balanceMicros }).from(billingAccounts).where(eq(billingAccounts.userId, userId));
-  if (acct && acct.balance > 0) {
-    await applyBalance(db, { userId, kind: 'adjustment', amountMicros: -acct.balance, reference: `closure:${userId}`, description: 'Account closed: credit not refunded', actor: 'closure' }, now);
-  }
-  return true;
-}
-
-/** Erases the personal data of a closed account (step 3 above), after its last email. */
 export async function eraseAccount(env: Env, db: Db, row: typeof accountClosures.$inferSelect, now: Date) {
   const [u] = await db.select({ email: user.email }).from(user).where(eq(user.id, row.userId));
   if (!u) return;
   const email = u.email.toLowerCase();
+  const [acct] = await db.select({ balance: billingAccounts.balanceMicros }).from(billingAccounts).where(eq(billingAccounts.userId, row.userId));
+  if (acct && acct.balance > 0) {
+    await applyBalance(db, { userId: row.userId, kind: 'adjustment', amountMicros: -acct.balance, reference: `closure:${row.userId}`, description: 'Account closed: credit not refunded', actor: 'closure' }, now);
+  }
   if (u.email !== erasedEmail(row.userId) && env.EMAIL) {
-    await sendTo(env, u.email, closureErasedMessage(env.APP_URL, { refundMicros: row.refundMicros ?? 0, refunded: row.status === 'closed', supportEmail: SUPPORT_EMAIL }))
+    await sendTo(env, u.email, closureErasedMessage(env.APP_URL, { supportEmail: SUPPORT_EMAIL }))
       .catch((e) => console.error('closure: final email failed', row.userId, e));
   }
   const clients = db.select({ id: automationClients.id }).from(automationClients).where(eq(automationClients.userId, row.userId));
@@ -332,7 +296,7 @@ export async function eraseAccount(env: Env, db: Db, row: typeof accountClosures
     db.delete(account).where(eq(account.userId, row.userId)),
     db.delete(adminStepUps).where(eq(adminStepUps.userId, row.userId)),
     db.update(accountClosures).set({ erasedAt: now }).where(eq(accountClosures.userId, row.userId)),
-    db.insert(auditLog).values({ actor: 'closure', action: 'account.erased', target: `user:${row.userId}`, detail: { status: row.status }, createdAt: now }),
+    db.insert(auditLog).values({ actor: 'closure', action: 'account.erased', target: `user:${row.userId}`, detail: { writtenOffMicros: Math.max(0, acct?.balance ?? 0) }, createdAt: now }),
   ]);
   await notifyHub(env, row.userId);
 }

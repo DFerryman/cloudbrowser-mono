@@ -14,7 +14,6 @@ import { acknowledgeAlert } from '../notifications/admin.js';
 import { applyBalance, notifyHub, unfreezeAccount } from '../billing/ledger.js';
 import type { AppEnv } from '../env.js';
 import { systemOperation } from '../ops.js';
-import { eraseAccount, settleClosure } from '../closure.js';
 import { pageQuery } from '../paging.js';
 import { problem } from '../problem.js';
 
@@ -568,8 +567,9 @@ adminRoute.post('/users/:id/unfreeze', async (c) => {
 // --- account closures (../closure.ts) ------------------------------------------------------------
 
 /**
- * Closed accounts, open ones first: the refund each one is owed and how to split it over the
- * paid orders. The email is shown until the account's personal data is erased.
+ * Closed accounts, the ones still being deleted first: the final balance, the part of it that was
+ * paid for, and what refunding it would take per order, for support when a user asks for a refund.
+ * The email is shown until the account's personal data is erased.
  */
 adminRoute.get('/closures', async (c) => {
   const db = c.get('db');
@@ -582,26 +582,6 @@ adminRoute.get('/closures', async (c) => {
     .limit(page.limit)
     .offset(page.offset);
   return c.json(rows.map((r) => ({ ...r.closure, email: r.closure.erasedAt ? null : r.email })));
-});
-
-/**
- * The refund of a closed account was paid some other way than a refund the provider reports by
- * webhook (an order it would not refund, a bank transfer). Nothing more is owed: leftover credit is
- * written off, and the personal data is erased on the spot.
- */
-adminRoute.post('/closures/:id/refund-recorded', async (c) => {
-  const db = c.get('db');
-  const id = c.req.param('id');
-  const { reason } = await body(c, z.object({ reason: z.string().trim().min(3).max(500) }));
-  const [row] = await db.select().from(accountClosures).where(eq(accountClosures.userId, id));
-  if (!row) throw problem(404, 'not_found');
-  if (row.status !== 'refund_due') throw problem(409, 'invalid_state', row.status === 'closing' ? 'The refund is fixed once every browser is deleted.' : 'Nothing is owed on this closure.');
-  const now = new Date();
-  await settleClosure(db, id, actor(c), now);
-  await audit(db, c, 'closure.refund_recorded', `user:${id}`, { reason, refundMicros: row.refundMicros });
-  const [settled] = await db.select().from(accountClosures).where(eq(accountClosures.userId, id));
-  if (settled && !settled.erasedAt) await eraseAccount(c.env, db, settled, now);
-  return c.json({ ok: true });
 });
 
 // --- pricing and margin (page 6) ---------------------------------------------------------------

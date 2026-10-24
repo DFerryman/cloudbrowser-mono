@@ -1,5 +1,5 @@
-import { CLOSURE_ERASE_DAYS, CLOSURE_REFUND_DAYS, type ClosurePreview, type ClosureReason, type ClosureResult } from '@cloudbrowser/contracts';
-import { Button, Dialog, Hint, Label, Section, Select } from '@cloudbrowser/ui';
+import { CLOSURE_ERASE_DAYS, type ClosurePreview, type ClosureReason, type ClosureResult } from '@cloudbrowser/contracts';
+import { Button, Dialog, Label, Section, Select } from '@cloudbrowser/ui';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { ExternalLink, Loader2 } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
@@ -15,9 +15,9 @@ import { useMe } from '../instances/hooks.js';
 const REASONS: ClosureReason[] = ['terms', 'price', 'not_needed', 'other'];
 
 /**
- * Closing the account (Terms sections 8 and 9): first what it does (the browsers deleted, the
- * refund, what is kept), then a code sent to the account's email and a box the user ticks. The
- * api signs the user out everywhere, so success leaves the app for the closed page.
+ * Closing the account (Terms sections 8 and 9): first what it does (the browsers deleted, where to
+ * ask about a refund, what is kept), then a code sent to the account's email and a box the user
+ * ticks. The api signs the user out everywhere, so success leaves the app for the closed page.
  */
 export function CloseAccount({ className }: { className?: string }) {
   const { t } = useI18n();
@@ -45,9 +45,9 @@ function CloseAccountDialog({ open, onClose }: { open: boolean; onClose: () => v
   const close = useMutation({
     mutationFn: () => api<ClosureResult>('POST', '/account/closure', { body: { code, confirm: true, ...(reason ? { reason } : {}) } }),
     // A full load, as after signing out: nothing of the session stays in memory.
-    onSuccess: (result) => {
+    onSuccess: () => {
       queryClient.clear();
-      window.location.assign(`/account-closed?refund=${result.refundMicros}`);
+      window.location.assign('/account-closed');
     },
   });
   // Every opening starts over: the box is the user's own act, never carried over.
@@ -65,10 +65,10 @@ function CloseAccountDialog({ open, onClose }: { open: boolean; onClose: () => v
   const usd = (micros: number) => money(micros, locale);
   const blocked = p?.blocker ? t(`account.close.blocked.${p.blocker}`, { email: SUPPORT_EMAIL }) : null;
   const sendCode = () => send.mutate(undefined, { onSuccess: () => setStep('confirm') });
-  const link = (href: string, label: string) => (
-    <a href={href} target="_blank" rel="noopener" className="inline-flex items-center gap-1 text-accent underline underline-offset-2 hover:text-fg">
+  const link = (href: string, label: string, external = true) => (
+    <a href={href} {...(external ? { target: '_blank', rel: 'noopener' } : {})} className="inline-flex items-center gap-1 text-accent underline underline-offset-2 hover:text-fg">
       {label}
-      <ExternalLink className="size-3.5" aria-hidden />
+      {external ? <ExternalLink className="size-3.5" aria-hidden /> : null}
     </a>
   );
 
@@ -119,25 +119,13 @@ function CloseAccountDialog({ open, onClose }: { open: boolean; onClose: () => v
               </ul>
             ) : null}
           </div>
-          <dl className="divide-y divide-border border-y border-border">
+          <dl className="border-y border-border">
             <div className="flex justify-between gap-4 py-2.5">
               <dt className="text-muted">{t('account.close.balance')}</dt>
               <dd className="tabular-nums">{usd(p.balanceMicros)}</dd>
             </div>
-            <div className="flex justify-between gap-4 py-2.5">
-              <dt>
-                {t('account.close.refund')}
-                <Hint className="mt-0.5">{t('account.close.refundNote', { days: CLOSURE_REFUND_DAYS })}</Hint>
-              </dt>
-              <dd className="font-semibold tabular-nums">{usd(p.refundMicros)}</dd>
-            </div>
-            {p.forfeitMicros > 0 ? (
-              <div className="flex justify-between gap-4 py-2.5">
-                <dt className="text-muted">{t('account.close.forfeit')}</dt>
-                <dd className="tabular-nums text-muted">{usd(p.forfeitMicros)}</dd>
-              </div>
-            ) : null}
           </dl>
+          <p data-testid="close-refund">{rich(t('account.close.refundAsk', { days: CLOSURE_ERASE_DAYS }), { email: link(`mailto:${SUPPORT_EMAIL}`, SUPPORT_EMAIL, false) })}</p>
           <p className="text-muted">
             {rich(t('account.close.kept', { days: CLOSURE_ERASE_DAYS }), { privacy: link('/privacy', t('footer.privacy')) })}{' '}
             {rich(t('account.close.terms'), { terms: link('/terms', t('footer.terms')) })}

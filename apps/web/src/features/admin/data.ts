@@ -193,24 +193,22 @@ export type UserRow = {
   closure: ClosureRow['status'] | null;
 };
 
-/** A closed account (api closure.ts): open ones first. */
+/** A closed account (api closure.ts): the ones still deleting browsers first. */
 export type ClosureRow = {
   userId: string;
   /** null once the personal data is erased. */
   email: string | null;
-  status: 'closing' | 'refund_due' | 'closed';
+  status: 'closing' | 'closed';
   reason: 'terms' | 'price' | 'not_needed' | 'other' | null;
   requestedAt: string;
   browsers: number;
-  /** Fixed once every browser is deleted. */
-  refundMicros: number | null;
-  /** What to refund on each paid order, newest first; refundCents is in the order's currency, tax included. */
-  refundPlan: { orderId: string; provider: string; creditMicros: number; refundCents: number; currency: string }[] | null;
-  refundDueAt: string | null;
-  refundRecordedAt: string | null;
-  refundRecordedBy: string | null;
-  erasedAt: string | null;
   closedAt: string | null;
+  /** Set once every browser is purged: the final balance, and the part of it that was paid for. */
+  balanceMicros: number | null;
+  paidMicros: number | null;
+  /** That paid credit per order, newest first: what refunding it in full would be, tax included, in the order's currency. */
+  paidOrders: { orderId: string; provider: string; creditMicros: number; refundCents: number; currency: string }[] | null;
+  erasedAt: string | null;
 };
 
 type RatesRow = { compute: number; ip: number; storage: number; snapshot: number; transfer: number };

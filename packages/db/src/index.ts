@@ -2,7 +2,7 @@ import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1';
 import * as schema from './schema.js';
 
 export * as schema from './schema.js';
-export type { Fingerprint, ClosureRefund } from './schema.js';
+export type { Fingerprint, ClosureOrder } from './schema.js';
 export { newId, sha256Hex } from './ids.js';
 export { operationRow, OPERATION_DEADLINE_MIN, type OperationMessage, type AgentCommandsMessage } from './operations.js';
 

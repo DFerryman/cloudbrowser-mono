@@ -21,14 +21,12 @@ const preview: ClosurePreview = {
   blocker: null,
   browsers: [{ id: 'b1', name: 'Work' }, { id: 'b2', name: 'Shopping' }],
   balanceMicros: 26_500_000,
-  refundMicros: 25_000_000,
-  forfeitMicros: 1_500_000,
 };
 
 let rendered: ReturnType<typeof create>;
 const assign = vi.fn();
 
-function respond(p: ClosurePreview, close: unknown = { browsers: 2, refundMicros: 25_000_000 }) {
+function respond(p: ClosurePreview, close: unknown = { browsers: 2 }) {
   vi.mocked(api).mockImplementation(async (method: string, path: string) => {
     if (path === '/me') return { user: { email: 'owner@example.com' } };
     if (method === 'GET' && path === '/account/closure') return p;
@@ -76,9 +74,8 @@ test('shows what closing does, then closes with the emailed code and the box tic
   expect(page).toContain('Work');
   expect(page).toContain('Shopping');
   expect(page).toContain('$26.50');
-  expect(page).toContain('$25.00');
-  expect(page).toContain('Not refunded (signup, promotional or courtesy credit)');
-  expect(page).toContain('$1.50');
+  expect(page).toContain('Closing does not refund your credit by itself. To ask about a refund of credit you paid for and have not used, write to support@nevazu.com from this email address, before you close or within 30 days after.');
+  expect(rendered.root.find((n) => n.type === 'a' && n.props.href === 'mailto:support@nevazu.com')).toBeTruthy();
 
   await act(async () => rendered.root.find((n) => n.type === 'select').props.onChange({ target: { value: 'terms' } }));
   await act(async () => byTestId('close-send-code').props.onClick());
@@ -95,7 +92,7 @@ test('shows what closing does, then closes with the emailed code and the box tic
   await act(async () => confirm().props.onClick());
   await settle();
   expect(vi.mocked(api)).toHaveBeenLastCalledWith('POST', '/account/closure', { body: { code: '123456', confirm: true, reason: 'terms' } });
-  expect(assign).toHaveBeenCalledWith('/account-closed?refund=25000000');
+  expect(assign).toHaveBeenCalledWith('/account-closed');
 });
 
 test('a wrong code keeps the dialog open with the reason', async () => {
@@ -122,14 +119,8 @@ test('refuses here during a dispute hold, and says whom to write to', async () =
   expect(byTestId('close-send-code').props.disabled).toBe(true);
 });
 
-test('the closed page states the refund, or that there is none', async () => {
-  await render(<AccountClosedPage />, '/account-closed?refund=25000000');
-  expect(text()).toContain('We will refund $25.00 to your original payment method within 14 days.');
-  await act(async () => rendered.unmount());
-  await render(<AccountClosedPage />, '/account-closed?refund=0');
-  expect(text()).toContain('There was no unused paid credit to refund.');
-  await act(async () => rendered.unmount());
+test('the closed page says where to ask about a refund, and when the data is erased', async () => {
   await render(<AccountClosedPage />, '/account-closed');
-  expect(text()).not.toContain('refund $');
-  expect(text()).toContain('Your personal data is erased once the refund is made, at the latest 30 days from now.');
+  expect(text()).toContain('To ask about a refund of credit you paid for and have not used, write to support@nevazu.com from your account’s email address within 30 days.');
+  expect(text()).toContain('Your personal data is erased 30 days from now.');
 });
