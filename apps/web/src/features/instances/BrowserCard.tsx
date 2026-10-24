@@ -39,6 +39,8 @@ function useBrowserActions(i: Instance) {
   const update = useUpdateInstance();
   const billing = useBilling();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Rename was chosen: the name is edited once the menu has closed (see menu).
+  const renaming = useRef(false);
   const [agentOpen, setAgentOpen] = useState(false);
   const run = (p: Promise<unknown>) => p.catch((e) => toast(errorMessage(e), 'error'));
 
@@ -100,6 +102,9 @@ function useBrowserActions(i: Instance) {
     </>
   );
 
+  // A closing menu gives focus back to its trigger. Started from Rename itself, the edit lost its
+  // focus to the trigger at once, and its blur ended it: the name is edited once the menu has
+  // closed, with focus kept from the trigger.
   const menu = (onRename: () => void) => (
     <Menu
       trigger={
@@ -107,8 +112,14 @@ function useBrowserActions(i: Instance) {
           <MoreHorizontal />
         </Button>
       }
+      onCloseAutoFocus={(event) => {
+        if (!renaming.current) return;
+        renaming.current = false;
+        event.preventDefault();
+        onRename();
+      }}
     >
-      <MenuItem disabled={deleted} onSelect={onRename}>
+      <MenuItem disabled={deleted} onSelect={() => { renaming.current = true; }}>
         <Pencil /> {t('browsers.rename')}
       </MenuItem>
       <MenuItem disabled={!i.ipAddress} onSelect={() => i.ipAddress && void navigator.clipboard.writeText(i.ipAddress).then(() => toast(t('browsers.copied')), () => {})}>
@@ -147,7 +158,10 @@ function InlineName({ name, editing, setEditing, onSave, disabled, className }: 
   useEffect(() => {
     if (editing) {
       setDraft(name);
-      requestAnimationFrame(() => ref.current?.select());
+      requestAnimationFrame(() => {
+        ref.current?.focus();
+        ref.current?.select();
+      });
     }
   }, [editing, name]);
   if (editing) {
