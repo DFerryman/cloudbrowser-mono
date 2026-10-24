@@ -69,10 +69,36 @@ export const AgentHello = z.object({
   /** A report the gateway cannot read is dropped: it must never refuse the tunnel. */
   previous: AgentTunnelEnd.optional().catch(undefined),
 });
+const streamCount = z.number().nonnegative().max(Number.MAX_SAFE_INTEGER);
+/**
+ * heartbeat.stream (agent 0.8.0), while a viewer is connected: what the VM itself saw of the live
+ * view since its previous heartbeat, from neko's /metrics and /proc/stat. Per video level the
+ * frames per second and kbit/s its encoder produced, the pipelines started (a viewer joining the
+ * level or switching to it) and whether it ran the whole interval (only then is `fps` the
+ * encoder's rate; 0 is a stalled encoder); NACKs and packets lost as viewers' RTCP reported them;
+ * neko's CPU in percent of one core (its encoders included); the VM's in percent of all its CPUs,
+ * and the share the hypervisor took (steal: a burstable instance out of credits, or a busy host).
+ */
+export const AgentStreamReport = z.object({
+  seconds: z.number().positive().max(3600),
+  levels: z.record(z.string().regex(/^[a-z][a-z0-9_]{0,15}$/), z.object({
+    fps: z.number().nonnegative().max(1000),
+    kbps: z.number().nonnegative().max(1_000_000),
+    starts: z.number().int().nonnegative().max(100_000),
+    whole: z.boolean(),
+  }).strict()).refine((levels) => Object.keys(levels).length <= 8).optional(),
+  nacks: streamCount.optional(),
+  lost: streamCount.optional(),
+  nekoCpuPct: z.number().nonnegative().max(100_000).optional(),
+  cpuPct: z.number().min(0).max(100).optional(),
+  stealPct: z.number().min(0).max(100).optional(),
+}).strict();
+export type AgentStreamReport = z.infer<typeof AgentStreamReport>;
+
 export const AgentEvent = z.object({
   t: z.literal('event'),
   kind: AgentEventKind,
-  /** ready: { chromeMajor, agentVersion }, heartbeat: { viewers, lastInputAt, disk: { usedBytes, totalBytes }, netTxBytes }, ip_check: IpCheckResult */
+  /** ready: { chromeMajor, agentVersion }, heartbeat: { viewers, lastInputAt, disk: { usedBytes, totalBytes }, netTxBytes, stream?: AgentStreamReport }, ip_check: IpCheckResult */
   data: z.record(z.string(), z.unknown()).default({}),
 });
 export const AgentReply = z.object({

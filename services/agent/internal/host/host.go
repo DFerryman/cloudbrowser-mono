@@ -14,8 +14,36 @@ import (
 
 // Linux is the real VM.
 type Linux struct {
-	// SysClassNet is /sys/class/net (tests point it elsewhere).
+	// SysClassNet is /sys/class/net and ProcStat /proc/stat (tests point them elsewhere).
 	SysClassNet string
+	ProcStat    string
+}
+
+// CPUTimes is the time every CPU of the VM spent busy, taken by the hypervisor (steal: a burstable
+// instance out of CPU credits, or a busy host), and in all, since boot, in clock ticks.
+func (l Linux) CPUTimes() (busy, steal, total uint64, err error) {
+	path := l.ProcStat
+	if path == "" {
+		path = "/proc/stat"
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	line, _, _ := strings.Cut(string(raw), "\n")
+	fields := strings.Fields(line)
+	// cpu user nice system idle iowait irq softirq steal (guest time is already in user).
+	if len(fields) < 9 || fields[0] != "cpu" {
+		return 0, 0, 0, fmt.Errorf("unexpected %s", path)
+	}
+	var t [8]uint64
+	for i := range t {
+		if t[i], err = strconv.ParseUint(fields[i+1], 10, 64); err != nil {
+			return 0, 0, 0, fmt.Errorf("unexpected %s: %w", path, err)
+		}
+	}
+	busy = t[0] + t[1] + t[2] + t[5] + t[6]
+	return busy, t[7], busy + t[3] + t[4] + t[7], nil
 }
 
 // NetTxBytes is the bytes sent by every network interface except loopback since boot. The browser
