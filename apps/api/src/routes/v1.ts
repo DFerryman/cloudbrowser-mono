@@ -55,6 +55,8 @@ const { browserInstances, regions, operations, viewerSessions, instanceHealth, p
 
 /** The first agent that grows the file system and reports disk usage. */
 const RESIZE_AGENT_VERSION = '0.2.0';
+/** How long a viewer's TURN credentials last: a working day of one view (Cloudflare allows up to 48 h). */
+const VIEWER_TURN_TTL_S = 12 * 3600;
 const newerOrEqual = (v: string | null, min: string) => {
   if (!v) return false;
   const a = v.split('.').map(Number);
@@ -854,12 +856,13 @@ v1.openapi(
     if (c.env.API_LIMITER && !(await c.env.API_LIMITER.limit({ key: `connect:${s.userId}` })).success) throw problem(429, 'rate_limited');
     // The credit check, the placement and the TURN credentials are independent: fetch them
     // together rather than one after another, so the viewer can start its handshake sooner.
-    // Nothing is returned unless every check passes. The TURN credentials stay valid for an hour
+    // Nothing is returned unless every check passes. The TURN credentials stay valid for 12 hours
     // although the gateway token lasts 60 s: the relay checks them again each time the allocation
-    // is refreshed, so they must outlast the view they carry, not just its handshake. A view that
-    // reconnects fetches new ones here, within the rate limit above.
+    // is refreshed and disconnects it once they expire, so they must outlast the view they carry,
+    // not just its handshake: an hour would cut any view that lasted longer. A view that reconnects
+    // fetches new ones here, within the rate limit above, so a user can hold fresh ones anyway.
     const turn = c.env.GATEWAY_URL && c.env.VIEWER_TOKEN_PRIVATE_KEY
-      ? turnIceServers(c.env, 3600).then((servers) => ({ servers }), (error: unknown) => ({ error }))
+      ? turnIceServers(c.env, VIEWER_TURN_TTL_S).then((servers) => ({ servers }), (error: unknown) => ({ error }))
       : null;
     const [, [p]] = await Promise.all([
       requireViewerCredit(db, s.userId, s.instanceId),
