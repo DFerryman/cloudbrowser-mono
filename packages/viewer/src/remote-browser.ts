@@ -1,6 +1,6 @@
 import type { ControlState, GatewayToViewer, IceServer, LiveQualityReport } from '@cloudbrowser/contracts';
 import { ConnectionDiagnostic, ConnectionMediaSnapshot, STREAM, VIDEO_QUALITIES, type VideoQuality } from '@cloudbrowser/contracts';
-import { ANY_SHAPE_VIDEO, decode, EV, fitScreen, sameScreen, screenOf, shapedScreen, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
+import { ANY_SHAPE_VIDEO, decode, EV, fitScreen, sameScreen, screenOf, shapedScreen, TEXT_KEYBOARDS, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide, type TextKeyboard } from './neko.js';
 import { levelMemory, QualityController, startingQuality, type VideoPreference } from './quality.js';
 import { KEYSYM, keyIdentity, keysymFor, keysymForName, matchingKeyIdentity, unidentifiedKey, type KeyIdentityEvent } from './keyboard.js';
 import { readStats, type ViewerStats } from './stats.js';
@@ -66,6 +66,12 @@ export interface RemoteBrowserOptions {
   onInputError?: (reason: InputFailure, issue: ConnectionIssue | null) => void;
   /** A coding agent connected, left, took or lost control; the gateway sends it on connect and on every change. */
   onAutomation?: (status: AutomationStatus) => void;
+  /**
+   * The answer to the latest askFocus: the keyboard the remote text field that now has the focus
+   * wants, or null when the focus is not in a text field. It can come twice for one tap: as soon
+   * as a new text field has the focus, and once the focus settled.
+   */
+  onTextFocus?: (keyboard: TextKeyboard | null) => void;
   /** Map Cmd → Ctrl and Option → Alt (macOS default, page 5). */
   macToPc?: boolean;
   /** Picture quality; the sharpest level by default, adapting to the connection (starting where this device held last, or one below). */
@@ -202,6 +208,10 @@ export class RemoteBrowser {
   private videoId: VideoQuality | null = null;
   /** neko's videos (system/init). Browsers on an image older than the quality ladder offer one. */
   private offeredVideos: string[] = [];
+  /** The agent answers focus questions (cloudbrowser/features); it says so on each connection. */
+  private focusAnswered = false;
+  /** The last focus question's id: only its answers count. */
+  private focusQuestion = 0;
   private counters: { lost: number; received: number; freezes: number; frames: number; at: number } | null = null;
   /** The live picture's readings and gateway round trips since the last quality report. */
   private readonly qualityWindow = new QualityWindow();
@@ -290,6 +300,21 @@ export class RemoteBrowser {
     return this.offeredVideos.includes(ANY_SHAPE_VIDEO);
   }
 
+  /** Whether the browser's agent says where the keyboard focus went after a tap (askFocus). */
+  get answersFocus() {
+    return this.focusAnswered;
+  }
+
+  /**
+   * Asks where the keyboard focus goes after a tap at (x, y) on the remote screen; onTextFocus
+   * answers. Sent just ahead of the tap's click on the same ordered socket, so the agent reads the
+   * focus from before the click first. False when the agent does not answer.
+   */
+  askFocus(x: number, y: number): boolean {
+    if (!this.focusAnswered) return false;
+    return this.sendInput({ event: EV.AGENT_FOCUS, payload: { id: ++this.focusQuestion, x: Math.round(x), y: Math.round(y) } });
+  }
+
   /** A changed preference applies at once to a live stream, without reconnecting. */
   setVideoPreference(video: VideoPreference) {
     if (video.quality === this.video.quality && video.auto === this.video.auto) return;
@@ -364,6 +389,8 @@ export class RemoteBrowser {
     this.screenConfigurations = [];
     this.remoteScreen = null;
     this.appliedScreen = '';
+    // Each relay says again what its agent answers.
+    this.focusAnswered = false;
     this.stopped = false;
     this.deferred = false;
     this.carryInput = false;
@@ -1215,6 +1242,20 @@ export class RemoteBrowser {
       case EV.CURSOR_IMAGE: {
         const p = msg.payload as { uri?: string; x?: number; y?: number } | undefined;
         if (p?.uri) this.opts.onCursor?.(`url(${p.uri}) ${p.x ?? 0} ${p.y ?? 0}, default`);
+        return;
+      }
+      case EV.AGENT_FEATURES:
+        this.focusAnswered = (msg.payload as { textFocus?: unknown } | undefined)?.textFocus === true;
+        return;
+      case EV.AGENT_FOCUS: {
+        const answer = msg.payload as { id?: unknown; keyboard?: unknown } | undefined;
+        // An answer to a question a later tap replaced is stale.
+        if (answer?.id !== this.focusQuestion || typeof answer.keyboard !== 'string') return;
+        const keyboard = TEXT_KEYBOARDS.find((k) => k === answer.keyboard) ?? null;
+        if (answer.keyboard && !keyboard) return;
+        try {
+          this.opts.onTextFocus?.(keyboard);
+        } catch { /* A focus callback cannot affect the connection. */ }
         return;
       }
       case EV.SYSTEM_DISCONNECT:

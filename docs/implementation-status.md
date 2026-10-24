@@ -334,6 +334,25 @@ Cloudflare deployment.
   More → *Input diagnostics* (or `?debug=input`) draws a marker at the registered point of each
   pointer down and up, in the box, with the geometry behind the mapping: it shows beside the
   finger exactly when painting and hit-testing disagree.
+- **On-screen keyboard follows the remote focus** (agent 0.7.0, `services/agent/internal/agent/focus.go`,
+  `internal/chrome/focus.go`): right before a touch tap's click, on a phone or tablet
+  (`pointer: coarse`), the viewer asks on its input socket where the focus goes
+  (`{"event":"cloudbrowser/focus","payload":{"id","x","y"}}`, a neko-shaped message the agent keeps
+  from neko, so the gateway needs no new frame type). The agent reads the focused element over
+  DevTools without changing the page or reading values (open shadow roots and same-origin frames
+  followed, a cross-origin frame read in its own target, `inputmode="none"` honoured; Chrome's
+  address bar counts when no page has the focus after a tap in the toolbar, left of its buttons)
+  every 25 ms and answers on the viewer's relay with the keyboard a text field wants (`text`,
+  `search`, `email`, `url`, `tel`, `numeric`, `decimal`) or `""`: at once for a newly focused text
+  field and once more where the focus settled 400 ms after the question. The viewer opens the
+  on-screen keyboard with that layout and closes one it opened when the focus leaves the field; a
+  keyboard opened from the toolbar stays open. Android opens the keyboard for a field focused
+  within its 5 s of user activation after the tap; iOS only for one focused within the gesture, so
+  on iPhone and iPad the tap itself focuses the viewer's textarea with `inputmode="none"` and the
+  answer changes its `inputmode`, which WebKit takes as a reason to show the keyboard. Keys from a
+  hardware keyboard with the on-screen keyboard closed stop the automatic keyboard for that view.
+  The agent announces it (`cloudbrowser/features`, `textFocus: true`) when the viewer's relay
+  opens; viewers ask nothing of an older agent.
 - **Touch gestures** (`packages/viewer/src/touch.ts`): a tap clicks, and a second tap within
   400 ms and 24 px clicks exactly where the first did, so Chrome counts a double-click (it allows
   4 remote pixels). A finger held still for 0.5 s right-clicks when it lifts, or drags with the left

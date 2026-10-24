@@ -632,6 +632,45 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
+  it('asks the agent where a tap put the focus, ahead of the click, and passes on only the last answer', async () => {
+    const answers: (string | null)[] = [];
+    const { b } = setup([], { onTextFocus: (keyboard) => answers.push(keyboard) });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    await readyInput(ws);
+    // An agent older than 0.7.0 never says it answers: nothing is asked.
+    expect(b.askFocus(10, 20)).toBe(false);
+    expect(ws.neko('cloudbrowser/focus')).toEqual([]);
+    ws.push({ t: 'neko', data: { event: 'cloudbrowser/features', payload: { textFocus: true } } });
+    expect(b.answersFocus).toBe(true);
+    ws.sent.length = 0;
+    expect(b.askFocus(10.4, 19.6)).toBe(true);
+    b.button(true, 0, 10, 20);
+    b.button(false, 0, 10, 20);
+    const events = ws.sent.map((frame: any) => frame.data.event);
+    expect(events[0]).toBe('cloudbrowser/focus');
+    expect(events.filter((e: string) => e === 'cloudbrowser/focus')).toHaveLength(1);
+    expect(events.indexOf('control/buttondown')).toBeGreaterThan(0);
+    expect(ws.neko('cloudbrowser/focus')).toEqual([{ id: 1, x: 10, y: 20 }]);
+    b.askFocus(30, 40);
+    // The first question's answer arrives after the second was asked: it is stale.
+    ws.push({ t: 'neko', data: { event: 'cloudbrowser/focus', payload: { id: 1, keyboard: 'text' } } });
+    ws.push({ t: 'neko', data: { event: 'cloudbrowser/focus', payload: { id: 2, keyboard: 'email' } } });
+    // A keyboard this viewer does not know, and a malformed answer, are left out.
+    ws.push({ t: 'neko', data: { event: 'cloudbrowser/focus', payload: { id: 2, keyboard: 'emoji' } } });
+    ws.push({ t: 'neko', data: { event: 'cloudbrowser/focus', payload: { id: 2 } } });
+    ws.push({ t: 'neko', data: { event: 'cloudbrowser/focus', payload: { id: 2, keyboard: '' } } });
+    expect(answers).toEqual(['email', null]);
+    // The next connection's agent says again whether it answers (an older image's agent does not).
+    b.disconnect();
+    await b.connect();
+    const again = FakeWS.all.at(-1)!;
+    await readyInput(again);
+    expect(b.answersFocus).toBe(false);
+    expect(b.askFocus(1, 2)).toBe(false);
+    b.disconnect();
+  });
+
   it('maps all US shifted punctuation and newline/tab without using the page-only IME path', async () => {
     const { b } = setup();
     await b.connect();

@@ -209,6 +209,28 @@ describe('TouchGestureController with time', () => {
     expect(button.mock.calls).toEqual([[true, 40, 60, 2], [false, 40, 60, 2]]);
   });
 
+  it('says where a tap is about to click, from its pointerup, and nothing for other gestures', () => {
+    const order: string[] = [];
+    const tap = vi.fn((x: number, y: number) => order.push(`tap ${x},${y}`));
+    const { gestures } = setup({ tap, button: vi.fn((down: boolean) => order.push(down ? 'down' : 'up')) });
+    gestures.pointerDown(pointer(1, 20, 30));
+    expect(tap).not.toHaveBeenCalled();
+    gestures.pointerUp(pointer(1, 20, 30));
+    expect(order).toEqual(['tap 40,60', 'down', 'up']);
+    // A scroll, a long press and a two-finger tap ask nothing.
+    gestures.pointerDown(pointer(2, 100, 100));
+    gestures.pointerMove(pointer(2, 100, 60));
+    gestures.pointerUp(pointer(2, 100, 60));
+    gestures.pointerDown(pointer(3, 200, 200));
+    vi.advanceTimersByTime(HOLD_MS + 10);
+    gestures.pointerUp(pointer(3, 200, 200));
+    gestures.pointerDown(pointer(4, 50, 50));
+    gestures.pointerDown(pointer(5, 70, 50));
+    gestures.pointerUp(pointer(4, 50, 50));
+    gestures.pointerUp(pointer(5, 70, 50));
+    expect(tap).toHaveBeenCalledOnce();
+  });
+
   it('drags with the left button from where a finger was held, once it moves', () => {
     const { gestures, move, button, scroll } = setup({ held: vi.fn() });
     gestures.pointerDown(pointer(1, 100, 100));

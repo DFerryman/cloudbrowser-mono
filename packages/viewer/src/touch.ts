@@ -55,6 +55,8 @@ export interface TouchGestureOptions {
   zoomed?(): boolean;
   /** A finger has been held long enough to right-click or drag, at the position the events carry. */
   held?(x: number, y: number): void;
+  /** A tap is about to click at these remote coordinates, from the tap's own pointerup. */
+  tap?(x: number, y: number): void;
   activity?(): void;
   /** Movement needed to distinguish a one-finger scroll from a tap. Defaults to 8 CSS pixels. */
   thresholdPx?: number;
@@ -225,6 +227,7 @@ export class TouchGestureController {
         } else {
           this.lastTap = { local, remote: tap, at: now };
         }
+        this.options.tap?.(tap.x, tap.y);
         this.click(tap);
       }
     } else if (this.mode === 'held' && lastFinger && this.pressAt) {

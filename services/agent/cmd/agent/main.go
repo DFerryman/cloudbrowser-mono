@@ -207,6 +207,9 @@ func (f fakeBrowser) InsertText(context.Context, string) error { return nil }
 func (f fakeBrowser) DropFiles(context.Context, int, int, []string) (bool, error) {
 	return true, nil
 }
+func (f fakeBrowser) TextFocus(context.Context, int, int) (func(context.Context) (string, bool), func(), error) {
+	return func(context.Context) (string, bool) { return "", true }, func() {}, nil
+}
 
 // execClipboard sets the X clipboard inside the browser container with xclip, as neko does. xclip
 // reads the data, then forks to serve it until another program owns the clipboard; its output goes
