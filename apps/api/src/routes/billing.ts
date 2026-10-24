@@ -14,6 +14,7 @@ import {
   Problem,
   RedirectResult,
   RegionPricing,
+  TERMS_VERSION,
 } from '@cloudbrowser/contracts';
 import { accountRunway, newId, pricingSettings, raiseAlert, schema } from '@cloudbrowser/db';
 import { and, desc, eq, sql } from 'drizzle-orm';
@@ -22,13 +23,14 @@ import { offeredTopupPacks } from '../billing/ledger.js';
 import { checkoutProvider, paymentProviders, type PaymentProvider } from '../billing/providers.js';
 import { StripeError } from '../billing/stripe.js';
 import { retentionState } from '../billing/retention.js';
+import { acceptedCurrentTerms, storeCurrentTerms } from '../billing/terms.js';
 import type { AppEnv } from '../env.js';
 import { billingAccount, entitlementsFor } from '../limits.js';
 import { allRegionPricing, regionPrice } from '../pricing.js';
 import { problem } from '../problem.js';
 import { accountUsage, monthOf, monthTotals } from '../usage.js';
 
-const { billingCustomers, stripeCustomers, topupCheckouts, balanceTransactions, browserReservations } = schema;
+const { billingCustomers, stripeCustomers, topupCheckouts, termsAcceptances, balanceTransactions, browserReservations } = schema;
 
 export const billingRoute = new OpenAPIHono<AppEnv>({
   defaultHook: (result) => {
@@ -129,6 +131,8 @@ billingRoute.openapi(
       retained: retention.retained.map((r) => ({ ...r, regionId: r.regionId as BillingState['retained'][number]['regionId'], deletesAt: r.deletesAt.toISOString() })),
       restoreNeededMicros: retention.restoreNeededMicros,
       topUps,
+      termsVersion: TERMS_VERSION,
+      termsAccepted: await acceptedCurrentTerms(db, user.id),
       month: { month, ...(await monthTotals(db, user.id, month)) },
     };
     return c.json(out, 200);
@@ -178,7 +182,7 @@ billingRoute.openapi(
     method: 'post',
     path: '/billing/checkout',
     tags: ['billing'],
-    description: 'Starts a hosted checkout for a top-up with the payment provider taking top-ups (Stripe, else Creem). The balance is credited from the provider’s record of the paid checkout, never from the redirect.',
+    description: 'Starts a hosted checkout for a top-up with the payment provider taking top-ups (Stripe, else Creem). The user must have accepted the current Terms of Service, now (`acceptedTermsVersion`, recorded once per version) or on an earlier top-up; otherwise 409 `terms_required`. The balance is credited from the provider’s record of the paid checkout, never from the redirect.',
     request: { body: { content: { 'application/json': { schema: CheckoutBody } }, required: true } },
     responses: { 200: json(RedirectResult, 'Hosted checkout URL'), ...problems },
   }),
@@ -186,11 +190,43 @@ billingRoute.openapi(
     const provider = requireProvider(c);
     const db = c.get('db');
     const user = c.get('user');
-    const { productId } = c.req.valid('json');
+    const { productId, acceptedTermsVersion } = c.req.valid('json');
+    // A tab still showing older Terms: the user reloads, reads the new ones and confirms again.
+    if (acceptedTermsVersion !== undefined && acceptedTermsVersion !== TERMS_VERSION) {
+      throw problem(409, 'terms_required', 'The Terms of Service have changed. Reload the page, read them and confirm again.');
+    }
+    const accepting = acceptedTermsVersion === TERMS_VERSION;
+    if (!accepting && !(await acceptedCurrentTerms(db, user.id))) {
+      throw problem(409, 'terms_required', 'Confirm that you have read the Terms of Service before you pay. If the page shows no box to tick, reload it.');
+    }
     const packs = await offeredTopupPacks(db, provider);
     if (!packs.some((p) => p.productId === productId)) throw problem(400, 'validation_failed', 'Unknown top-up.');
     const attemptId = newId();
-    await db.insert(topupCheckouts).values({ id: attemptId, userId: user.id, productId, provider: provider.id, createdAt: new Date() });
+    const now = new Date();
+    if (accepting) await storeCurrentTerms(c.env, db, c.req.url, now);
+    // The acceptance is written with the attempt, before the provider is asked; a version already
+    // accepted keeps its first record.
+    await db.batch([
+      db.insert(topupCheckouts).values({ id: attemptId, userId: user.id, productId, provider: provider.id, createdAt: now }),
+      ...(accepting
+        ? [
+            db
+              .insert(termsAcceptances)
+              .values({
+                id: newId(),
+                userId: user.id,
+                termsVersion: TERMS_VERSION,
+                context: 'checkout',
+                topupCheckoutId: attemptId,
+                ip: c.req.header('cf-connecting-ip') ?? null,
+                country: c.req.header('cf-ipcountry') ?? null,
+                userAgent: c.req.header('user-agent')?.slice(0, 300) ?? null,
+                acceptedAt: now,
+              })
+              .onConflictDoNothing(),
+          ]
+        : []),
+    ]);
     let out: { id: string; url: string };
     if (provider.id === 'stripe') {
       const [customer] = await db.select().from(stripeCustomers).where(eq(stripeCustomers.userId, user.id));
@@ -201,6 +237,7 @@ billingRoute.openapi(
         email: user.email,
         customerId: customer?.stripeCustomerId ?? null,
         appUrl: c.env.APP_URL,
+        termsVersion: TERMS_VERSION,
       });
       if (stripe.staleCustomer && customer) await db.delete(stripeCustomers).where(eq(stripeCustomers.stripeCustomerId, customer.stripeCustomerId));
       if (!stripe.termsCheckbox) {
@@ -218,7 +255,7 @@ billingRoute.openapi(
         requestId: attemptId,
         successUrl: `${c.env.APP_URL}/billing/success`,
         email: user.email,
-        metadata: { userId: user.id, attemptId },
+        metadata: { userId: user.id, attemptId, termsVersion: TERMS_VERSION },
       });
     }
     if (out.id) await db.update(topupCheckouts).set({ checkoutId: out.id }).where(eq(topupCheckouts.id, attemptId));

@@ -1,6 +1,6 @@
 import * as D from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useRef, type ReactNode } from 'react';
 import { cn } from './cn.js';
 import { useFullscreenElement } from './fullscreen.js';
 
@@ -30,11 +30,21 @@ export function Dialog({
   size?: 'md' | 'lg';
 }) {
   const container = useFullscreenElement();
+  // Dialogs here open from state, not a Radix trigger: give focus back to what opened them.
+  const opener = useRef<HTMLElement | null>(null);
   return (
     <D.Root open={open} onOpenChange={onOpenChange}>
       <D.Portal container={container}>
         <D.Overlay className="fixed inset-0 z-40 bg-black/40 [animation:cb-fade_150ms_var(--ease-out)]" />
         <D.Content
+          onOpenAutoFocus={() => {
+            opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          }}
+          onCloseAutoFocus={(e) => {
+            if (!opener.current?.isConnected) return;
+            e.preventDefault();
+            opener.current.focus();
+          }}
           className={cn(
             'fixed z-50 flex flex-col overflow-hidden border border-border bg-bg shadow-float',
             'inset-x-0 bottom-0 max-h-[92dvh] [animation:cb-sheet_200ms_var(--ease-out)]',

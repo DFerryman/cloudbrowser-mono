@@ -78,6 +78,9 @@ export const BillingState = z.object({
   retained: z.array(z.object({ id: z.string(), name: z.string(), regionId: RegionId, deletesAt: z.string() })),
   restoreNeededMicros: z.number().int().nullable(),
   topUps: z.array(TopUpPack),
+  /** The current Terms of Service version, and whether this user has accepted it: top-ups need it. */
+  termsVersion: z.string(),
+  termsAccepted: z.boolean(),
   /** This calendar month (UTC). */
   month: UsageTotals.extend({ month: z.string() }),
 });
@@ -92,7 +95,17 @@ export const BalanceTransaction = z.object({
 });
 export type BalanceTransaction = z.infer<typeof BalanceTransaction>;
 
-export const CheckoutBody = z.object({ productId: z.string().min(1).max(128) });
+export const CheckoutBody = z.object({
+  productId: z.string().min(1).max(128),
+  /**
+   * The Terms of Service version (`TERMS_VERSION`) the user just confirmed having read, by ticking
+   * the box in the dialog shown before checkout. Needed until the user has accepted the current
+   * version once (`BillingState.termsAccepted`); without it, or with an older version, the
+   * checkout is refused with `terms_required`. Each acceptance is recorded once per version.
+   */
+  acceptedTermsVersion: z.string().max(64).optional(),
+});
+export type CheckoutBody = z.infer<typeof CheckoutBody>;
 /** Whose receipts to open; by default the provider taking top-ups, else the other. */
 export const PortalQuery = z.object({ provider: PaymentProviderId.optional() });
 export const RedirectResult = z.object({ url: z.string().url() });

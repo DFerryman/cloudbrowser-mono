@@ -1,4 +1,4 @@
-import { browserEstimate, costRates, customerRates, minimumMarkupPercent, priceVersion, ProviderPriceSheet, splitUsagePeriod } from '@cloudbrowser/contracts';
+import { browserEstimate, costRates, customerRates, minimumMarkupPercent, priceVersion, ProviderPriceSheet, splitUsagePeriod, TERMS_VERSION } from '@cloudbrowser/contracts';
 import { meterUsage } from '@cloudbrowser/engine';
 import { createDb, prepaidAccess, prepaidBalance, reservationQuote } from '@cloudbrowser/db';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -87,7 +87,7 @@ const balance = async () => (await t.call('GET', '/api/v1/billing')).body.balanc
 
 /** Starts a top-up checkout as the signed-in user and pays it in Creem. */
 async function topUp(productId = 'prod_10') {
-  const res = await t.call('POST', '/api/v1/billing/checkout', { productId });
+  const res = await t.call('POST', '/api/v1/billing/checkout', { productId, acceptedTermsVersion: TERMS_VERSION });
   expect(res.body.url).toMatch(/^https:\/\/checkout\.test\//);
   const id = String(res.body.url).split('/').pop()!;
   return { id, paid: creem.pay(id) };
@@ -172,13 +172,13 @@ describe('prepaid balance', () => {
       { productId: 'prod_10', name: '$10 credit', amountCents: 1000, currency: 'USD' },
       { productId: 'prod_25', name: '$25 credit', amountCents: 2500, currency: 'USD' },
     ]);
-    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_sub' })).body.type).toBe('validation_failed');
+    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_sub', acceptedTermsVersion: TERMS_VERSION })).body.type).toBe('validation_failed');
   });
 
   it('credits a top-up once, from Creem’s record of the paid checkout, never from the redirect', async () => {
     prepaid();
     await t.call('GET', '/api/v1/billing');
-    const res = await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_10' });
+    const res = await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_10', acceptedTermsVersion: TERMS_VERSION });
     const id = String(res.body.url).split('/').pop()!;
     expect(creem.checkouts.get(id)).toMatchObject({ product: 'prod_10', metadata: { userId } });
     // The buyer comes back before paying: nothing is credited.
@@ -289,7 +289,7 @@ describe('prepaid balance', () => {
 
   it('answers 503 when Creem is not configured', async () => {
     Object.assign(t.env, { CREEM_API_KEY: undefined });
-    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_10' })).body.type).toBe('billing_unavailable');
+    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_10', acceptedTermsVersion: TERMS_VERSION })).body.type).toBe('billing_unavailable');
     expect((await t.call('GET', '/api/v1/billing')).body.enabled).toBe(false);
   });
 });

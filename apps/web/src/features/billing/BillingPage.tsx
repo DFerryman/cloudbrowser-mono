@@ -1,7 +1,7 @@
-import { UsageItem, type BillingState, type UsageTotals } from '@cloudbrowser/contracts';
+import { TERMS_VERSION, UsageItem, type BillingState, type TopUpPack, type UsageTotals } from '@cloudbrowser/contracts';
 import { Button, Card, cn, Eyebrow, Hint, Pagination, Section, Select, Skeleton, usePaged, useToast } from '@cloudbrowser/ui';
 import { AlertTriangle, ExternalLink, Gift } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { PageHeader } from '../../app/AppShell.js';
 import { DocsLink } from '../../app/DocsLink.js';
@@ -11,7 +11,8 @@ import { cents, money } from '../../lib/money.js';
 import { useRegionInfo } from '../instances/hooks.js';
 import { fundedHours, isLowBalance, runwayLabel } from './access.js';
 import { DailyCharges } from './DailyCharges.js';
-import { currentMonth, monthLabel, recentMonths, useAccountUsage, useBilling, useCheckout, usePortal, useTransactions } from './hooks.js';
+import { currentMonth, isTermsRequired, monthLabel, recentMonths, useAccountUsage, useBilling, useCheckout, usePortal, useTransactions } from './hooks.js';
+import { TermsConsentDialog } from './TermsConsentDialog.js';
 import { LoadError } from '../../app/LoadError.js';
 
 /** One ramp of the accent, strongest for the largest item, so the breakdown reads as one family. */
@@ -97,7 +98,44 @@ function BalanceCard({ state }: { state: BillingState }) {
         : isLowBalance(state)
           ? t('billing.low')
           : null;
-  const topUp = (productId: string) => checkout.mutate(productId, { onError: (e) => toast(errorMessage(e), 'error') });
+  // Until the user has accepted the current Terms, a top-up first asks for them (TermsConsentDialog).
+  const [consentFor, setConsentFor] = useState<TopUpPack | null>(null);
+  const [redirecting, setRedirecting] = useState(false);
+  const busy = checkout.isPending || redirecting;
+  // Back from the payment page through the browser's cache: the page is as it was left, buttons included.
+  useEffect(() => {
+    const restored = (e: PageTransitionEvent) => e.persisted && (setRedirecting(false), checkout.reset());
+    window.addEventListener('pageshow', restored);
+    return () => window.removeEventListener('pageshow', restored);
+  }, [checkout.reset]);
+  const pay = (pack: TopUpPack, acceptedTermsVersion?: string) =>
+    checkout.mutate(
+      { productId: pack.productId, acceptedTermsVersion },
+      {
+        onSuccess: ({ url }) => {
+          setRedirecting(true);
+          window.location.assign(url);
+        },
+        onError: (e) => {
+          // In the dialog the error shows there; a direct top-up the server wants confirmed opens it.
+          if (acceptedTermsVersion) return;
+          if (!isTermsRequired(e)) return toast(errorMessage(e), 'error');
+          checkout.reset();
+          setConsentFor(pack);
+        },
+      },
+    );
+  const termsAccepted = state.termsAccepted && state.termsVersion === TERMS_VERSION;
+  const topUp = (pack: TopUpPack) => {
+    if (termsAccepted) return pay(pack);
+    checkout.reset();
+    setConsentFor(pack);
+  };
+  const cancelConsent = () => {
+    // A checkout still being created is dropped: reset() keeps its success from redirecting.
+    if (checkout.isPending) checkout.reset();
+    setConsentFor(null);
+  };
 
   return (
     <Card id="top-up" className="flex scroll-mt-6 flex-col p-5 md:p-6">
@@ -139,19 +177,28 @@ function BalanceCard({ state }: { state: BillingState }) {
         ) : state.topUps.length === 0 ? (
           <p className="text-sm text-muted">{t('billing.noTopUps')}</p>
         ) : state.topUps.length === 1 ? (
-          <Button variant="primary" className="w-full justify-center" disabled={checkout.isPending || state.frozen} onClick={() => topUp(state.topUps[0]!.productId)}>
+          <Button variant="primary" className="w-full justify-center" disabled={busy || state.frozen} onClick={() => topUp(state.topUps[0]!)}>
             {t('billing.topUp')}
           </Button>
         ) : (
           <div className="grid grid-cols-2 gap-2">
             {state.topUps.map((p) => (
-              <Button key={p.productId} variant="secondary" className="justify-center tabular-nums" disabled={checkout.isPending || state.frozen} onClick={() => topUp(p.productId)}>
+              <Button key={p.productId} variant="secondary" className="justify-center tabular-nums" disabled={busy || state.frozen} onClick={() => topUp(p)}>
                 {money(cents(p.amountCents), locale)}
               </Button>
             ))}
           </div>
         )}
         {state.enabled && state.topUps.length ? <Hint className="mt-2">{t(state.provider === 'stripe' ? 'billing.topUpHintStripe' : 'billing.topUpHint')}</Hint> : null}
+        <TermsConsentDialog
+          open={consentFor !== null}
+          amount={consentFor ? money(cents(consentFor.amountCents), locale) : ''}
+          provider={state.provider}
+          busy={busy}
+          error={consentFor ? checkout.error : null}
+          onConfirm={() => consentFor && pay(consentFor, TERMS_VERSION)}
+          onCancel={cancelConsent}
+        />
       </div>
 
       {alert ? (

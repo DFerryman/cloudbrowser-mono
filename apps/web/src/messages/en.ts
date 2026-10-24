@@ -465,6 +465,15 @@ export const en = {
   'billing.unavailable': 'Payments are not set up on this deployment yet.',
   'billing.receipts': 'Receipts',
   'billing.receiptsFrom': '{provider} receipts',
+  'consent.title': 'Before you pay',
+  'consent.description': 'We ask once for each version of our Terms of Service. If they change, we ask again before your next payment.',
+  'consent.summary': 'You are adding {amount} of credit. Next, you pay on {provider}’s secure checkout page.',
+  'consent.checkbox': 'I have read the {terms}',
+  'consent.newTab': 'The Terms open in a new tab, so this window stays as it is.',
+  'consent.confirm': 'Confirm and pay',
+  'consent.opening': 'Opening checkout…',
+  'consent.changed': 'The Terms of Service were just updated. Reload the page to read the new version, then confirm again.',
+  'consent.reload': 'Reload',
   'billing.thisMonth': "Charged this month",
   'billing.monthTotal': '{amount} in {month}',
   'billing.item.compute': 'Compute',
@@ -987,6 +996,7 @@ export const en = {
   'oauth.error.invalid_target': 'The browser the app asked for is not in the account you are signed in to, or it was deleted.',
   'error.agent_key_limit': 'This browser already has 10 active access keys. Revoke one you no longer use first.',
   'error.agent_grant_limit': 'This browser already has 10 active sign-ins. Disconnect one you no longer use first.',
+  'error.terms_required': 'Confirm that you have read the Terms of Service before you pay.',
   'error.agent_access_off': 'Coding agent access is turned off for this browser.',
   // Search engines and AI assistants: page titles and descriptions of the prerendered public pages
   // (src/prerender), and the text shown there before live data is filled in.

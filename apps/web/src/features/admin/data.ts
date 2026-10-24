@@ -187,6 +187,8 @@ export type UserRow = {
   frozenAt: string | null;
   twoFactorEnabled: boolean;
   admin: boolean;
+  /** The latest Terms of Service version the user accepted before paying; null before any. */
+  termsVersion: string | null;
 };
 
 type RatesRow = { compute: number; ip: number; storage: number; snapshot: number; transfer: number };

@@ -1,4 +1,4 @@
-import type { AccountUsage, BalanceTransaction, BillingState, PaymentProviderId, RegionPricing } from '@cloudbrowser/contracts';
+import type { AccountUsage, BalanceTransaction, BillingState, CheckoutBody, PaymentProviderId, RegionPricing } from '@cloudbrowser/contracts';
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { api, ApiError } from '../../lib/api.js';
 import { keys, queryClient } from '../../lib/query.js';
@@ -23,13 +23,19 @@ export function useTransactions(page: number, size: number) {
 export const useAccountUsage = (month: string) =>
   useQuery({ queryKey: keys.usage(month), queryFn: () => api<AccountUsage>('GET', `/usage?month=${month}`) });
 
-/** Checkout and the receipts portal are pages hosted by the payment provider (Stripe or Creem): the app only redirects to them. */
+/**
+ * Checkout and the receipts portal are pages hosted by the payment provider (Stripe or Creem): the
+ * app only redirects to them. The caller redirects, in `mutate`'s own onSuccess, so a checkout the
+ * user cancelled while it was being created (`reset`) never navigates. `acceptedTermsVersion` is
+ * sent when the user has just ticked the Terms box (TermsConsentDialog).
+ */
 export function useCheckout() {
   return useMutation({
-    mutationFn: (productId: string) => api<{ url: string }>('POST', '/billing/checkout', { body: { productId } }),
-    onSuccess: ({ url }) => window.location.assign(url),
+    mutationFn: (body: CheckoutBody) => api<{ url: string }>('POST', '/billing/checkout', { body }),
+    onError: () => queryClient.invalidateQueries({ queryKey: keys.billing }),
   });
 }
+export const isTermsRequired = (error: unknown) => error instanceof ApiError && error.problem.type === 'terms_required';
 
 export function usePortal() {
   return useMutation({

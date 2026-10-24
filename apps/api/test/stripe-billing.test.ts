@@ -1,3 +1,4 @@
+import { TERMS_VERSION } from '@cloudbrowser/contracts';
 import { createDb } from '@cloudbrowser/db';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
@@ -219,7 +220,7 @@ async function creemWebhook(e: Json) {
 
 /** Starts a top-up as the signed-in user; returns the Checkout Session id. */
 async function checkout(productId = 'price_10usd00001') {
-  const res = await t.call('POST', '/api/v1/billing/checkout', { productId });
+  const res = await t.call('POST', '/api/v1/billing/checkout', { productId, acceptedTermsVersion: TERMS_VERSION });
   expect(res.status).toBe(200);
   return String(res.body.url).split('/').pop()!;
 }
@@ -266,7 +267,7 @@ describe('choosing the payment provider', () => {
     ]);
     // Recurring and non-USD prices, and Creem's products, are not offered while Stripe takes top-ups.
     for (const productId of ['price_monthly001', 'price_eur0000001', 'price_usdgbp0001', 'prod_creem10']) {
-      expect((await t.call('POST', '/api/v1/billing/checkout', { productId })).body.type).toBe('validation_failed');
+      expect((await t.call('POST', '/api/v1/billing/checkout', { productId, acceptedTermsVersion: TERMS_VERSION })).body.type).toBe('validation_failed');
     }
   });
 
@@ -285,7 +286,7 @@ describe('choosing the payment provider', () => {
       const b = (await t.call('GET', '/api/v1/billing')).body;
       expect(b, JSON.stringify(broken)).toMatchObject({ enabled: true, provider: 'creem', topUps: [{ productId: 'prod_creem10', amountCents: 1000 }] });
     }
-    const id = String((await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_creem10' })).body.url).split('/').pop()!;
+    const id = String((await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_creem10', acceptedTermsVersion: TERMS_VERSION })).body.url).split('/').pop()!;
     expect(creem.checkouts.get(id)).toMatchObject({ product: 'prod_creem10', metadata: { userId } });
     expect(sql('SELECT provider FROM topup_checkouts')).toEqual({ provider: 'creem' });
 
@@ -311,7 +312,7 @@ describe('choosing the payment provider', () => {
       const b = (await t.call('GET', '/api/v1/billing')).body;
       expect(b.provider).toBe('stripe');
       expect(b.topUps.map((p: { productId: string }) => p.productId)).toEqual(['price_10usd00001', 'price_anyusd0001', 'price_25usd00001']);
-      expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'price_10usd00001' })).status).toBe(200);
+      expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'price_10usd00001', acceptedTermsVersion: TERMS_VERSION })).status).toBe(200);
     } finally {
       vi.useRealTimers();
     }
@@ -321,13 +322,13 @@ describe('choosing the payment provider', () => {
     await t.call('GET', '/api/v1/billing');
     Object.assign(t.env, { STRIPE_TOPUP_PRICES: 'price_25usd00001' });
     expect((await t.call('GET', '/api/v1/billing')).body.topUps.map((p: { productId: string }) => p.productId)).toEqual(['price_25usd00001']);
-    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'price_10usd00001' })).body.type).toBe('validation_failed');
+    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'price_10usd00001', acceptedTermsVersion: TERMS_VERSION })).body.type).toBe('validation_failed');
   });
 
   it('answers 503 when neither provider is configured', async () => {
     Object.assign(t.env, { STRIPE_SECRET_KEY: undefined, CREEM_API_KEY: undefined });
     expect((await t.call('GET', '/api/v1/billing')).body).toMatchObject({ enabled: false, provider: null, topUps: [] });
-    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'price_10usd00001' })).body.type).toBe('billing_unavailable');
+    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'price_10usd00001', acceptedTermsVersion: TERMS_VERSION })).body.type).toBe('billing_unavailable');
     expect((await t.call('POST', '/api/v1/billing/portal')).body.type).toBe('billing_unavailable');
   });
 });
@@ -604,7 +605,7 @@ describe('Creem beside Stripe', () => {
   it('still credits, refunds and opens receipts for Creem payments while Stripe takes new top-ups', async () => {
     // A Creem checkout started before Stripe was configured.
     Object.assign(t.env, { STRIPE_SECRET_KEY: undefined });
-    const creemId = String((await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_creem10' })).body.url).split('/').pop()!;
+    const creemId = String((await t.call('POST', '/api/v1/billing/checkout', { productId: 'prod_creem10', acceptedTermsVersion: TERMS_VERSION })).body.url).split('/').pop()!;
     Object.assign(t.env, STRIPE_CONFIG);
     expect((await t.call('GET', '/api/v1/billing')).body.provider).toBe('stripe');
 
@@ -642,7 +643,7 @@ describe('Creem beside Stripe', () => {
     // The receipts of Stripe payments stay reachable.
     expect((await t.call('POST', '/api/v1/billing/portal')).body.url).toBe('https://billing.stripe.test/p/session/cus_new1');
     // A Stripe price is no longer sold.
-    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'price_25usd00001' })).body.type).toBe('validation_failed');
+    expect((await t.call('POST', '/api/v1/billing/checkout', { productId: 'price_25usd00001', acceptedTermsVersion: TERMS_VERSION })).body.type).toBe('validation_failed');
   });
 
   it('keeps a Stripe event until Stripe is configured, then applies it', async () => {

@@ -78,7 +78,7 @@ export interface Stripe {
    * the pay button); `staleCustomer` when the stored customer no longer exists in this account
    * and mode (Checkout then made a new one).
    */
-  createCheckout(input: { priceId: string; attemptId: string; userId: string; email: string; customerId: string | null; appUrl: string }): Promise<{ id: string; url: string; termsCheckbox: boolean; staleCustomer: boolean }>;
+  createCheckout(input: { priceId: string; attemptId: string; userId: string; email: string; customerId: string | null; appUrl: string; termsVersion: string }): Promise<{ id: string; url: string; termsCheckbox: boolean; staleCustomer: boolean }>;
   getCheckout(id: string): Promise<StripeCheckout>;
   /** The PaymentIntent a charge or a refund belongs to. */
   paymentIntentOf(object: 'charges' | 'refunds', id: string): Promise<string | null>;
@@ -236,7 +236,8 @@ export function stripeFrom(env: Env): Stripe | null {
         client_reference_id: input.attemptId,
         success_url: `${input.appUrl}/billing/success`,
         cancel_url: `${input.appUrl}/billing`,
-        metadata: ids,
+        // The Terms version the user confirmed on our side, also on Stripe's record of the payment.
+        metadata: { ...ids, termsVersion: input.termsVersion },
         payment_intent_data: { metadata: ids },
         // A returning buyer keeps one customer (one portal); Checkout saves the address and name
         // they enter on it, which automatic tax and tax id collection need.

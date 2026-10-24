@@ -1,8 +1,10 @@
 /** Shared setup: the api app with the engine in process and stand-ins for every binding. */
 
+import { TERMS_VERSION, termsDocumentPath } from '@cloudbrowser/contracts';
 import { createTestD1 } from '@cloudbrowser/db/testing';
 import engine from '@cloudbrowser/engine';
 import app from '../src/index.js';
+import { termsDocument } from '../../web/src/content/terms-document.js';
 
 export const ORIGIN = 'http://app.test';
 
@@ -63,7 +65,8 @@ export function setup(opts: { prices?: boolean; signupCreditCents?: number } = {
     AUTH_LIMITER: limiter(5),
     API_LIMITER: limiter(60),
     BETTER_AUTH_SECRET: 'test-secret-test-secret-test-secret',
-    ASSETS: { fetch: async () => new Response('<html>app</html>') },
+    // The built site: the app shell for every path, and the Terms document the build publishes.
+    ASSETS: { fetch: async (req: Request) => (new URL(req.url).pathname === termsDocumentPath(TERMS_VERSION) ? new Response(termsDocument()) : new Response('<html>app</html>')) },
     ENGINE: { fetch: (url: string, init?: RequestInit) => engine.fetch!(new Request(url, init) as never, engineEnv, ctx) },
   };
   let cookie = '';
