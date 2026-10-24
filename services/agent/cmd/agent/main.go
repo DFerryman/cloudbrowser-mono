@@ -186,6 +186,11 @@ func (n nekoAdapter) OpenWithProgress(ctx context.Context, sessionID string, toV
 
 func (n nekoAdapter) Probe(ctx context.Context) error { return n.r.Probe(ctx) }
 
+func (n nekoAdapter) StreamCounters(ctx context.Context) (agent.StreamCounters, error) {
+	c, err := n.r.Metrics(ctx)
+	return agent.StreamCounters(c), err
+}
+
 // OpenAutomation is a coding-agent bridge's own desktop session (docs/agent-access.md).
 func (n nekoAdapter) OpenAutomation(ctx context.Context, onEvent func(json.RawMessage)) (agent.AutomationSession, error) {
 	s, err := n.r.OpenAutomation(ctx, onEvent)

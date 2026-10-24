@@ -45,7 +45,9 @@ import (
 // tunnel that answers nothing (keepalive), closes it with a close frame when stopping, and tells
 // the gateway in the next hello why the previous tunnel ended. 0.7.0 tells a touch viewer where the
 // keyboard focus went after each tap, so its on-screen keyboard opens for a text field (focus.go).
-const Version = "0.7.0"
+// 0.8.0 reports what the VM saw of the live view in each heartbeat while a viewer is connected
+// (stream.go).
+const Version = "0.8.0"
 
 // Tunnel keepalive, with a gateway whose welcome says keepalive (it answers {"t":"ping"} with
 // {"t":"pong"} without waking its object): a tunnel the gateway has sent nothing on for
@@ -137,6 +139,9 @@ type Agent struct {
 	neko     Neko
 	firewall Firewall
 	log      *slog.Logger
+
+	// The previous heartbeat's stream sample (stream.go); only the heartbeat loop uses it.
+	streamLast *streamSample
 
 	mu                   sync.Mutex
 	conn                 *websocket.Conn
@@ -387,6 +392,7 @@ func (a *Agent) loops(ctx context.Context) {
 				data["lastInputAt"] = last.UTC().Format(time.RFC3339)
 			}
 			a.hostReport(data)
+			a.streamReport(ctx, viewers, data)
 			_ = a.event(ctx, "heartbeat", data)
 		case <-ip.C:
 			go a.selfCheck(ctx)

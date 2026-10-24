@@ -48,7 +48,9 @@ async function d1(sql, params = []) {
 
 // --- Workers logs: only fields the code logs on purpose ------------------------------------
 const FIELDS = ['stage', 'code', 'issue', 'source', 'role', 'event', 'instanceId', 'generation', 'sessionId', 'attemptId', 'relayId',
-  'peerSequence', 'elapsedMs', 'closeCode', 'wasClean', 'status', 'ignored', 'upMs', 'attempts', 'discardReason', 'clientBuild', 'media'];
+  'peerSequence', 'elapsedMs', 'closeCode', 'wasClean', 'status', 'ignored', 'upMs', 'attempts', 'discardReason', 'clientBuild', 'media',
+  // 'vm stream' (agent 0.7.0 heartbeats)
+  'viewers', 'seconds', 'levels', 'nacks', 'lost', 'nekoCpuPct', 'cpuPct', 'stealPct'];
 
 async function logs(key, value, from, to) {
   const out = [];
@@ -126,7 +128,32 @@ function verdict(attempt) {
 }
 
 const time = (ms) => new Date(ms).toISOString().replace('T', ' ').replace('Z', '');
+// Each level's own frame rate (STREAM.fps in packages/contracts/src/tiers.ts; square is full's shape-free twin).
+const LEVEL_FPS = { full: 30, high: 30, medium: 15, low: 10, square: 30 };
+// What the VM saw of the live view over one heartbeat (agent 0.7.0, docs/connection-diagnostics.md).
+function vmBits(e) {
+  const levels = Object.entries(e.levels ?? {}).map(([id, l]) => `${id} ${l.fps}fps/${l.kbps}kbps${l.starts ? ` started ${l.starts}` : ''}`);
+  return [`[encoder ${levels.join(', ') || 'idle'}]`, `[viewers' rtcp nack=${e.nacks ?? '?'} lost=${e.lost ?? '?'}]`,
+    `[cpu neko=${e.nekoCpuPct ?? '?'}% vm=${e.cpuPct ?? '?'}% steal=${e.stealPct ?? '?'}%]`, `viewers=${e.viewers ?? '?'}`];
+}
+/** Where the VM's side fell short over a session: an encoder below its level's frame rate, or CPU. */
+function vmVerdict(reports) {
+  if (!reports.length) return null;
+  const behind = [];
+  for (const r of reports) {
+    for (const [id, l] of Object.entries(r.levels ?? {})) {
+      // A level that started or stopped within the interval ran part of it only.
+      if (!l.starts && LEVEL_FPS[id] && l.fps < 0.8 * LEVEL_FPS[id] && l.fps > 0) behind.push(`${id} ${l.fps}/${LEVEL_FPS[id]} fps`);
+    }
+  }
+  const max = (k) => Math.max(...reports.map((r) => r[k] ?? 0));
+  const parts = [`${reports.length} heartbeats, CPU up to ${max('cpuPct')}% (neko up to ${max('nekoCpuPct')}% of a core), steal up to ${max('stealPct')}%`];
+  if (behind.length) parts.push(`the encoder fell behind ${behind.length} time(s): ${[...new Set(behind)].slice(0, 4).join(', ')}${max('cpuPct') > 85 || max('stealPct') > 5 ? ' (the VM ran out of CPU)' : ''}`);
+  else parts.push('the encoder kept its frame rate');
+  return parts.join('; ');
+}
 function line(e) {
+  if (e.message === 'vm stream') return `${time(e.at)}  vm       ${vmBits(e).join(' ')}`;
   const who = e.message === 'viewer connection' ? 'viewer ' : e.worker.includes('gateway') ? 'gateway' : e.worker.padEnd(7).slice(0, 7);
   const bits = [e.stage, e.code, e.issue && `issue=${e.issue}`, e.role && e.role !== 'viewer' && `role=${e.role}`, e.event,
     e.elapsedMs !== undefined && e.message !== 'viewer connection' && `+${e.elapsedMs}ms`, e.closeCode !== undefined && `close=${e.closeCode}`, e.status !== undefined && `status=${e.status}`,
@@ -176,7 +203,11 @@ for (const s of sessions) {
   const gatewayEvents = [];
   for (const a of attemptIds.slice(0, 20)) gatewayEvents.push(...(await logs('attemptId', a, from, to)).filter((e) => e.message !== 'viewer connection'));
   // The VM's tunnel to the gateway over the same time: a drop there explains a 'desktop' failure.
-  const tunnel = instanceId ? (await logs('instanceId', instanceId, from, to)).filter((e) => e.role === 'agent') : [];
+  const fromVm = instanceId ? await logs('instanceId', instanceId, from, to) : [];
+  const tunnel = fromVm.filter((e) => e.role === 'agent');
+  // The VM's heartbeats while this session could have been watching.
+  const until = Number(s.ended_at ?? s.last_seen_at ?? now) + 30_000;
+  const vm = fromVm.filter((e) => e.message === 'vm stream' && e.at >= Number(s.started_at) - 30_000 && e.at <= until);
   // The api logs a viewer's report when it arrives, often in a batch: place each at its attempt's
   // start plus its elapsedMs instead. The start is the earliest arrival less its elapsed time.
   const startOf = new Map();
@@ -185,7 +216,7 @@ for (const s of sessions) {
   for (const e of reported) e.at = Math.round(startOf.get(e.attemptId) + e.elapsedMs);
   viewerEvents.sort((a, b) => a.at - b.at);
   const seen = new Set();
-  const events = [...viewerEvents.filter((e) => !attemptOnly || e.attemptId === attemptOnly), ...gatewayEvents, ...tunnel]
+  const events = [...viewerEvents.filter((e) => !attemptOnly || e.attemptId === attemptOnly), ...gatewayEvents, ...tunnel, ...vm]
     .filter((e) => { const k = `${e.at}|${e.message}|${e.stage}|${e.attemptId}`; if (seen.has(k)) return false; seen.add(k); return true; })
     .sort((a, b) => a.at - b.at);
   const attempts = attemptIds.sort((a, b) => (startOf.get(a) ?? 0) - (startOf.get(b) ?? 0)).map((a) => {
@@ -194,7 +225,7 @@ for (const s of sessions) {
     return { attemptId: a, startedAt: viewer[0]?.at, clientBuild: viewer.find((e) => e.clientBuild)?.clientBuild, firstFrameMs: first?.elapsedMs,
       handshake: first?.media?.handshake, verdict: verdict({ viewer }), viewer };
   });
-  report.sessions.push({ session: s, events, attempts, quality: await quality(attemptOnly ? 'blob10' : 'blob9', attemptOnly ?? s.id, from) });
+  report.sessions.push({ session: s, events, attempts, vm: vmVerdict(vm), quality: await quality(attemptOnly ? 'blob10' : 'blob9', attemptOnly ?? s.id, from) });
 }
 
 if (flag('--json')) {
@@ -205,13 +236,14 @@ if (instance) {
   console.log(`browser ${instance.id}  region ${instance.region_id} (${instance.provider_region ?? '?'}, ${instance.instance_type ?? '?'}, ${instance.tier})  status ${instance.status}  generation ${instance.generation ?? '?'}`);
   console.log(`  agent ${instance.agent_version ?? '?'}  chrome ${instance.chrome_major ?? '?'}  last heartbeat ${instance.last_heartbeat_at ? time(Number(instance.last_heartbeat_at)) : '?'}`);
 }
-for (const { session: s, events, attempts, quality: q } of report.sessions) {
+for (const { session: s, events, attempts, vm, quality: q } of report.sessions) {
   console.log(`\nsession ${s.id}  ${time(Number(s.started_at))} → ${s.ended_at ? time(Number(s.ended_at)) : 'open'}  ${s.country ?? '?'}  ${String(s.user_agent ?? '').slice(0, 120)}`);
   for (const e of events) console.log(`  ${line(e)}`);
   for (const a of attempts) {
     const steps = a.handshake ? ` (candidate ${a.handshake.candidateMs ?? '?'} ms, ICE ${a.handshake.iceMs ?? '?'} ms, DTLS ${a.handshake.dtlsMs ?? '?'} ms after the offer)` : '';
     console.log(`  attempt ${a.attemptId}${a.clientBuild ? ` build ${a.clientBuild}` : ''}: ${a.firstFrameMs !== undefined ? `first frame at ${a.firstFrameMs} ms${steps}; ` : ''}${a.verdict}`);
   }
+  console.log(`  vm: ${vm ?? 'no stream reports (agent before 0.7.0, or no viewer connected)'}`);
   if (q.length) {
     console.log('  quality (per report):');
     for (const r of q) {

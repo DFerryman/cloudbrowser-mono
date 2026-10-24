@@ -202,3 +202,36 @@ describe('desktop readiness', () => {
     expect(health()).toEqual({ agent_ready_generation: 1, agent_ready_at: now.getTime() + 2000 });
   });
 });
+
+describe('vm stream', () => {
+  const stream = {
+    seconds: 15,
+    levels: { full: { fps: 29.6, kbps: 1480, starts: 0 }, high: { fps: 0.4, kbps: 20, starts: 1 } },
+    nacks: 60, lost: 5, nekoCpuPct: 80, cpuPct: 41, stealPct: 3,
+  };
+
+  it('logs every heartbeat\'s report while a viewer is connected, before the once-a-minute write', async () => {
+    const log = logs();
+    const now = Date.now();
+    const db = createDb(t.d1);
+    for (const seconds of [0, 15]) {
+      await agentMessage(t.env as never, db, instanceId, 1, { t: 'event', kind: 'heartbeat', data: { viewers: 1, stream } }, new Date(now + seconds * 1000));
+    }
+    const logged = log.mock.calls.filter(([message]) => message === 'vm stream');
+    expect(logged).toHaveLength(2);
+    expect(logged[0]![1]).toEqual({ instanceId, generation: 1, viewers: 1, ...stream });
+  });
+
+  it.each([
+    { label: 'an unknown field', bad: { ...stream, sessionId: 'admin-1--67pi' } },
+    { label: 'a level name that is not one', bad: { ...stream, levels: { 'http://x': { fps: 1, kbps: 1, starts: 0 } } } },
+    { label: 'a share over 100%', bad: { ...stream, cpuPct: 140 } },
+    { label: 'a negative count', bad: { ...stream, nacks: -1 } },
+  ])('logs nothing for $label, and the heartbeat still counts', async ({ bad }) => {
+    const log = logs();
+    const now = new Date();
+    await agentMessage(t.env as never, createDb(t.d1), instanceId, 1, { t: 'event', kind: 'heartbeat', data: { viewers: 1, stream: bad } }, now);
+    expect(log.mock.calls.some(([message]) => message === 'vm stream')).toBe(false);
+    expect(t.d1.sqlite.prepare('SELECT viewers FROM instance_health WHERE instance_id=?').get(instanceId)).toEqual({ viewers: 1 });
+  });
+});

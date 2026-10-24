@@ -159,9 +159,9 @@ trailing `+` for a tree with changes, `apps/web/vite.config.ts`); `viewer connec
 ### Tracing a session
 
 `scripts/session-trace.mjs` puts one live view on a single timeline: the viewer's milestones, the
-gateway's stages for each of its attempts, the VM tunnel's events, its quality reports and the
-browser's D1 rows (region, machine, agent and Chrome version), and ends with what stopped each
-attempt. It reads only the fields these logs are written with, never request headers.
+gateway's stages for each of its attempts, the VM tunnel's events and what the VM saw of the
+stream ("What the VM saw" below), its quality reports and the browser's D1 rows (region,
+machine, agent and Chrome version), and ends with what stopped each attempt. It reads only the fields these logs are written with, never request headers.
 
 ```sh
 CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… node scripts/session-trace.mjs <id> [--hours 24] [--json]
@@ -228,6 +228,38 @@ ORDER BY reports DESC
 the VM; `double4` is the route to the browser's gateway object. A high `double3` with a normal
 `double4` points at the media path (TURN, the VM's network); both high points at the viewer's
 own network, a VPN, or a detour such as mainland China's.
+
+### What the VM saw
+
+A viewer's report says what arrived; the VM's side says whether the picture was made and sent at
+its rate in the first place. From agent 0.7.0, each heartbeat (every 15 s) while a viewer is
+connected carries `stream`: the change in neko's own counters (`/metrics` on the VM's loopback)
+and in the VM's CPU times (`/proc/stat`) since the previous heartbeat. The api logs it as
+`vm stream`, with `instanceId`, `generation` and `viewers`. The first heartbeat of a run of
+viewers only sets the baseline, and a counter that went back (neko restarted) is left out of
+that interval. It holds counts and rates only, nothing that names a viewer.
+
+| Field | Value |
+| --- | --- |
+| `seconds` | The interval |
+| `levels.<id>.fps`, `.kbps` | Frames and kbit/s that level's encoder produced; only levels that ran |
+| `levels.<id>.starts` | Pipeline starts: a viewer joined the level or switched to it |
+| `nacks`, `lost` | NACKs and packets lost, as viewers' RTCP reported them to neko |
+| `nekoCpuPct` | neko's CPU, its encoders included, in percent of one core |
+| `cpuPct`, `stealPct` | The VM's CPU in percent of all its CPUs, and the share the hypervisor took |
+
+neko captures at a fixed rate whatever the screen shows, so a level's `fps` stays at its own
+(full and high 30, medium 15, low 10) unless the encoder falls behind. A level with `starts` 0
+below about 80% of its rate fell behind: with `cpuPct` near 100 or `stealPct` above a few percent
+the VM ran out of CPU (a burstable instance out of credits, or a busy host), otherwise look at
+capture. `kbps` near the level's cap (3000, 1800, 1200, 800) means a busy picture used the whole
+budget; compare it with the viewer's `double6` for what got through. `nacks` rising with `lost`
+flat is loss that resends repaired; `lost` rising with it is loss they did not.
+
+`scripts/session-trace.mjs` shows each report as a `vm` line in the session's timeline and sums
+them up as `vm:` under its attempts. Agents before 0.7.0 send no `stream`, and the trace says so.
+A new agent reaches a VM at its first boot: the images workflow publishes the agent image from
+`main` when `services/agent` changes, and VMs already running keep theirs.
 
 ### Where the gateway object runs
 

@@ -4,7 +4,7 @@
  * RPC entrypoint of this Worker, reachable only through the gateway's service binding, never from
  * the internet.
  */
-import { AgentFrame, AgentViewerFailureCode, NEVER_SLEEP_TIMEOUT_S, objectLocationHint, type GatewayToAgent, type ObjectLocationHint, type ViewerTokenClaims } from '@cloudbrowser/contracts';
+import { AgentFrame, AgentStreamReport, AgentViewerFailureCode, NEVER_SLEEP_TIMEOUT_S, objectLocationHint, type GatewayToAgent, type ObjectLocationHint, type ViewerTokenClaims } from '@cloudbrowser/contracts';
 import { createDb, eventRow, schema, sha256Hex, unwrapArchiveKey, type Db } from '@cloudbrowser/db';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Env } from './env.js';
@@ -153,6 +153,10 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
         const health = report?.health;
         const lastInputAt = typeof d.lastInputAt === 'string' && !Number.isNaN(Date.parse(d.lastInputAt)) ? new Date(d.lastInputAt) : null;
         const viewers = typeof d.viewers === 'number' ? d.viewers : 0;
+        // Every heartbeat's, before the once-a-minute persistence below: the live view as the
+        // VM saw it (docs/connection-diagnostics.md, "vm stream"). Counts and rates only.
+        const stream = AgentStreamReport.safeParse(d.stream);
+        if (stream.success) console.info('vm stream', { instanceId, generation, viewers, ...stream.data });
         // A transport heartbeat alone is not proof that the local desktop works.
         // Older agents omit this field and retain their existing behavior.
         const desktopReady = typeof d.desktopReady === 'boolean' ? d.desktopReady : undefined;
