@@ -15,7 +15,8 @@ import { setup, signIn } from './helpers.js';
  * is erased; billing records and Terms acceptances stay.
  */
 const SECRET = 'whsec_test';
-const EMAIL = 'leaver@example.com';
+// The underscore is a LIKE wildcard: deleting this address's codes must not match another's.
+const EMAIL = 'lea_ver@example.com';
 const DAY = 86_400_000;
 
 let t: ReturnType<typeof setup>;
@@ -23,6 +24,13 @@ let userId: string;
 const db = () => createDb(t.d1 as never);
 const rows = (q: string, ...params: unknown[]) => t.d1.sqlite.prepare(q).all(...(params as never[])) as Record<string, unknown>[];
 const closure = () => rows('SELECT * FROM account_closures WHERE user_id = ?', userId)[0];
+/** Sign-in codes Better Auth holds for this address and for one that differs only where EMAIL has `_`. */
+function pendingCodes() {
+  for (const [id, address] of [['v-own', EMAIL], ['v-other', EMAIL.replace('_', 'x')]]) {
+    t.d1.sqlite.prepare(`INSERT OR REPLACE INTO verification (id, identifier, value, expires_at, created_at, updated_at) VALUES (?, ?, 'x', 0, 0, 0)`).run(id, `sign-in-otp-${address}`);
+  }
+}
+const codesLeft = () => rows(`SELECT id FROM verification WHERE id IN ('v-own', 'v-other') ORDER BY id`).map((r) => r.id);
 
 /** A paid top-up as the Creem webhook credits it: `net` credit in cents, plus `tax`. */
 async function paid(orderId: string, net: number, tax: number, at = new Date()) {
@@ -131,9 +139,11 @@ describe('closing an account', () => {
     const preview = (await t.call('GET', '/api/v1/account/closure')).body;
     expect(preview.browsers.map((x: { name: string }) => x.name)).toEqual(['Shopping', 'Work']);
 
+    pendingCodes();
     const res = await close(await code(), 'terms');
     expect(res).toMatchObject({ status: 200, body: { browsers: 2 } });
     await t.settle();
+    expect(codesLeft()).toEqual(['v-other']);
     expect(closure()).toMatchObject({ status: 'closing', reason: 'terms', browsers: 2 });
     expect(rows('SELECT id FROM session WHERE user_id = ?', userId)).toHaveLength(0);
     expect(rows('SELECT id FROM passkey WHERE user_id = ?', userId)).toHaveLength(0);
@@ -202,7 +212,9 @@ describe('closing an account', () => {
     expect(rows('SELECT email FROM user WHERE id = ?', userId)).toEqual([{ email: EMAIL }]);
 
     // Day 30: the rest is written off, the address gets one last email, and the data is erased.
+    pendingCodes();
     await sweep(new Date(requested + 30 * DAY));
+    expect(codesLeft()).toEqual(['v-other']);
     expect(closure()).toMatchObject({ status: 'closed', erased_at: expect.any(Number) });
     expect(t.emails.at(-1)).toMatchObject({ to: EMAIL, subject: 'Your Nevazu account data has been erased' });
     expect(t.emails.at(-1)!.text).not.toMatch(/refund/i);

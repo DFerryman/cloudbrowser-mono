@@ -30,7 +30,7 @@ import {
   type ClosureReason,
 } from '@cloudbrowser/contracts';
 import { newId, raiseAlert, schema, sha256Hex, type ClosureOrder, type Db } from '@cloudbrowser/db';
-import { and, desc, eq, gte, inArray, isNotNull, isNull, like, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, ne, or, sql, type SQLWrapper } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { isAdminEmail } from './admin/access.js';
 import { revokeUserClients } from './automation.js';
@@ -55,6 +55,9 @@ const CENT_MICROS = 10_000;
 /** What an erased account's address becomes: unique, and undeliverable (RFC 2606 `.invalid`). */
 export const erasedEmail = (userId: string) => `${userId}@closed.invalid`;
 const codeIdentifier = (userId: string) => `account-closure:${userId}`;
+/** `column LIKE before + literal + after`, with `%`, `_` and `\` in `literal` matching only themselves. */
+const likeLiteral = (column: SQLWrapper, before: string, literal: string, after: string) =>
+  sql`${column} LIKE ${before + literal.replace(/[\\%_]/g, '\\$&') + after} ESCAPE '\\'`;
 
 // ---------------------------------------------------------------------------------------------
 // What closing would do
@@ -180,7 +183,7 @@ export async function closeAccount(c: Context<AppEnv>, input: { code: string; re
   const [recorded] = await db.batch([
     db.insert(accountClosures).values({ userId: u.id, status: 'closing', reason: input.reason ?? null, requestedAt: now, browsers: live.length })
       .onConflictDoNothing().returning({ userId: accountClosures.userId }),
-    db.delete(verification).where(or(eq(verification.id, codeId), like(verification.identifier, `%-otp-${u.email.toLowerCase()}`))),
+    db.delete(verification).where(or(eq(verification.id, codeId), likeLiteral(verification.identifier, '%-otp-', u.email.toLowerCase(), ''))),
     db.delete(session).where(eq(session.userId, u.id)),
     db.delete(passkey).where(eq(passkey.userId, u.id)),
     db.delete(twoFactor).where(eq(twoFactor.userId, u.id)),
@@ -312,10 +315,10 @@ export async function eraseAccount(env: Env, db: Db, row: typeof accountClosures
     db.delete(viewerSessions).where(eq(viewerSessions.userId, row.userId)),
     db.delete(events).where(eq(events.userId, row.userId)),
     db.delete(userNotices).where(eq(userNotices.userId, row.userId)),
-    db.delete(notificationState).where(like(notificationState.key, `user:${row.userId}:%`)),
+    db.delete(notificationState).where(likeLiteral(notificationState.key, 'user:', row.userId, ':%')),
     db.delete(idempotencyKeys).where(eq(idempotencyKeys.userId, row.userId)),
     db.delete(invites).where(eq(invites.email, email)),
-    db.delete(verification).where(or(eq(verification.identifier, codeIdentifier(row.userId)), like(verification.identifier, `%-otp-${email}`))),
+    db.delete(verification).where(or(eq(verification.identifier, codeIdentifier(row.userId)), likeLiteral(verification.identifier, '%-otp-', email, ''))),
     db.delete(session).where(eq(session.userId, row.userId)),
     db.delete(passkey).where(eq(passkey.userId, row.userId)),
     db.delete(twoFactor).where(eq(twoFactor.userId, row.userId)),
