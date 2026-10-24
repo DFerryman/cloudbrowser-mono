@@ -2,7 +2,7 @@ import { createDb, schema } from '@cloudbrowser/db';
 import { createTestD1 } from '@cloudbrowser/db/testing';
 import { eq, sql } from 'drizzle-orm';
 import { expect, it } from 'vitest';
-import { QUOTA_LIMIT_MAX_AGE_MS, REGION_REFRESH_MS, RegionUnusable, quotaLimit, refreshRegions } from '../src/aws-provider.js';
+import { FAILING_REGION_FAILURES, FAILING_REGION_RETRY_MS, QUOTA_LIMIT_MAX_AGE_MS, REGION_REFRESH_MS, RegionUnusable, quotaLimit, refreshRegions } from '../src/aws-provider.js';
 
 const MIN = 60_000;
 
@@ -114,4 +114,19 @@ it('keeps a quota limit Service Quotas could not return from the last snapshot, 
   expect(quotaLimit(null, { limit: 20 }, now - 5 * MIN, now)).toEqual({ limit: 20, limitAt: now - 5 * MIN });
   expect(quotaLimit(null, { limit: 20, limitAt: now - QUOTA_LIMIT_MAX_AGE_MS }, now - MIN, now)).toBeNull();
   expect(quotaLimit(null, undefined, now - MIN, now)).toBeNull();
+});
+
+it('reads a region that keeps failing only every half hour, unless a refresh is forced', async () => {
+  const { db, now, regions, catalog, deps, observedAt } = setup();
+  const [a] = regions;
+  catalog(a!.id, now - 60 * MIN, `UPDATE aws_provider_regions SET sync_failures=${FAILING_REGION_FAILURES}, last_error_at=${now - 5 * MIN} WHERE region_id='${a!.id}';`);
+  const discovered = [{ code: a!.code, optIn: 'opted-in' }];
+  const seen: string[] = [];
+  const observe = (code: string, id: string) => { seen.push(code); return observedAt(Date.now)(code, id); };
+  expect(await refreshRegions(db, discovered, deps(Date.now, observe))).toMatchObject({ resting: [a!.code], refreshed: [] });
+  expect(seen).toEqual([]);
+  expect((await refreshRegions(db, discovered, { ...deps(Date.now, observe), force: true })).refreshed).toHaveLength(1);
+  await db.update(schema.awsProviderRegions).set({ syncFailures: FAILING_REGION_FAILURES, lastErrorAt: new Date(now - FAILING_REGION_RETRY_MS - MIN), checkedAt: new Date(now - 60 * MIN) });
+  expect((await refreshRegions(db, discovered, deps(Date.now, observe))).refreshed).toHaveLength(1);
+  expect(seen).toEqual([a!.code, a!.code]);
 });

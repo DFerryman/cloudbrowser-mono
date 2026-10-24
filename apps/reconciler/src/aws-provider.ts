@@ -25,6 +25,13 @@ const ACCOUNT_LEASE_MS = 5 * 60_000;
  */
 export const RUN_BUDGET_MS = 3 * 60_000;
 const CONCURRENCY = 6;
+/**
+ * A region whose reads failed this many times in a row (a region AWS never answers in time, one
+ * without the browser network) is read again only this often, rather than holding requests every
+ * run. A forced refresh from the operator console still reads it at once.
+ */
+export const FAILING_REGION_FAILURES = 6;
+export const FAILING_REGION_RETRY_MS = 30 * 60_000;
 /** A quota limit Service Quotas could not return is taken from the last snapshot for this long. */
 export const QUOTA_LIMIT_MAX_AGE_MS = 7 * 86_400_000;
 
@@ -118,7 +125,7 @@ export async function syncAwsProvider(env: Env, opts: { force?: boolean; trigger
     const [oldest] = await db.all<{ checked_at: number | null }>(sql`SELECT MIN(a.checked_at) AS checked_at FROM aws_provider_regions a JOIN regions r ON r.id=a.region_id WHERE r.enabled=1 AND a.status='ready'`);
     const summary = {
       runId, trigger: opts.trigger ?? 'manual', force, lagMs, startedAt: now.toISOString(), finishedAt: new Date().toISOString(), ms: Date.now()-now.getTime(),
-      regions: discovered.length, refreshed: outcome.refreshed.length, fresh: outcome.fresh, failed: outcome.failed, taken: outcome.taken, deferred: outcome.deferred,
+      regions: discovered.length, refreshed: outcome.refreshed.length, fresh: outcome.fresh, failed: outcome.failed, taken: outcome.taken, deferred: outcome.deferred, resting: outcome.resting,
       slowest: outcome.refreshed.sort((a,b)=>b.ms-a.ms).slice(0,3),
       oldestReadyAgeMs: oldest?.checked_at ? Date.now()-oldest.checked_at : null,
     };
@@ -150,7 +157,7 @@ export async function refreshRegions(db: Db, discovered: { code: string; optIn: 
   const started = clock();
   const existing = new Map((await db.select().from(regions).where(eq(regions.executor,'aws-ec2'))).map((r)=>[r.providerRegion,r]));
   const known = new Map((await db.select().from(catalog)).map((r)=>[r.providerRegion,r]));
-  const out = { refreshed: [] as { region: string; ms: number }[], failed: [] as { region: string; error: string; failures: number; unusable: boolean }[], fresh: 0, taken: [] as string[], deferred: [] as string[] };
+  const out = { refreshed: [] as { region: string; ms: number }[], failed: [] as { region: string; error: string; failures: number; unusable: boolean }[], fresh: 0, taken: [] as string[], deferred: [] as string[], resting: [] as string[] };
   // Oldest first: when AWS is slow and the budget runs out, the regions closest to expiring were refreshed.
   const pending = [...discovered].sort((a,b)=>(known.get(a.code)?.checkedAt?.getTime() ?? 0)-(known.get(b.code)?.checkedAt?.getTime() ?? 0));
   const refreshAfter = () => clock()-REGION_REFRESH_MS;
@@ -162,6 +169,7 @@ export async function refreshRegions(db: Db, discovered: { code: string; optIn: 
       // A forced refresh, a new region, a changed opt-in and the daily catalog refresh read it even when fresh.
       const due = deps.force || !row || row.optInStatus!==r.optIn || deps.catalogDue;
       if (!due && row.checkedAt && row.checkedAt.getTime() >= refreshAfter()) { out.fresh++; continue; }
+      if (!deps.force && row && row.syncFailures >= FAILING_REGION_FAILURES && row.lastErrorAt && clock()-row.lastErrorAt.getTime() < FAILING_REGION_RETRY_MS) { out.resting.push(r.code); continue; }
       if (clock()-started >= deps.budgetMs) { out.deferred.push(r.code); continue; }
       const began = clock();
       let claimed = false;
