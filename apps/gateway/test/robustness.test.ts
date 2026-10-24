@@ -30,6 +30,8 @@ describe('gateway robustness', () => {
     const agent = await fx.open('agent');
     const viewer = await fx.open('viewer');
     const other = await fx.open('viewer', { 'x-cb-session': 'viewer1' });
+    // A socket accepted before attachments named their browser reads the id from storage, which fails.
+    delete (other.socket.attachment as { instanceId?: string }).instanceId;
     vi.spyOn(fx.ctx.storage, 'get').mockRejectedValueOnce(new Error('storage unavailable'));
     await fx.frame(other.socket, { t: 'ime', text: 'x' });
     expect(other.socket.closed?.code).toBe(1011);

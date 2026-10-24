@@ -301,6 +301,30 @@ describe('gateway revocation', () => {
     expect(viewer.socket.closed).toBeNull();
   });
 
+  it('keeps an active viewer\'s lease renewed between taps, so a tap after a pause waits for no D1 read', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const agent = await open('agent');
+    const viewer = await open('viewer');
+    await frame(viewer.socket, { t: 'neko', data: { event: 'control/buttondown', payload: { code: 1 } } });
+    await frame(viewer.socket, { t: 'neko', data: { event: 'control/buttonup', payload: { code: 1 } } });
+    // A touch screen sends nothing between taps; a mouse would have kept the lease renewed by moving.
+    await vi.advanceTimersByTimeAsync(5_000);
+    const reads = vi.spyOn(d1, 'prepare');
+    const batches = vi.spyOn(d1, 'batch');
+    await frame(viewer.socket, { t: 'neko', data: { event: 'control/buttondown', payload: { code: 1 } } });
+    expect(reads).not.toHaveBeenCalled();
+    expect(batches).not.toHaveBeenCalled();
+    expect(agent.socket.sent.at(-1)).toMatchObject({ t: 'viewer', data: { t: 'neko', data: { event: 'control/buttondown' } } });
+    // Renewed ahead of time only while the viewer is in use: an idle one is left to the alarm.
+    await vi.advanceTimersByTimeAsync(40_000);
+    reads.mockClear();
+    batches.mockClear();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(reads).not.toHaveBeenCalled();
+    expect(batches).not.toHaveBeenCalled();
+    expect(viewer.socket.closed).toBeNull();
+  });
+
   it('closes the viewer when a background renewal finds the session ended', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const start = Date.now();

@@ -41,6 +41,14 @@ const RENEW_BEFORE_MS = 500;
  * transient read error closed a healthy connection.
  */
 const IDLE_RECHECK_MS = 10_000;
+/**
+ * A viewer that sent a frame this recently has its lease renewed ahead of time, as a moving mouse
+ * keeps renewing it with frames inside the lease's last half second. A touch screen sends nothing
+ * between taps, so each tap after a pause waited for authorization reads from D1, in another
+ * region, before it was relayed: half a second or more per tap. Idle viewers are re-checked by the
+ * alarm only, so this costs reads only while someone is using the browser.
+ */
+const ACTIVE_VIEWER_MS = 30_000;
 /** Agent frames that belong to one viewer's relay: that viewer's lease authorizes them. */
 const VIEWER_RELAY_FRAMES = ['viewer', 'viewer_error', 'viewer_stage', 'viewer_file'];
 /**
@@ -84,6 +92,9 @@ export class InstanceGateway extends DurableObject<Env> {
   private inputGrants = new Map<string, InputGrant>();
   private sessionChecks = new Map<string, Promise<boolean>>();
   private renewal: Promise<void> | null = null;
+  /** When each viewer session last sent a frame, and the ahead-of-time renewal waiting for it (ACTIVE_VIEWER_MS). */
+  private viewerActiveAt = new Map<string, number>();
+  private warmLease: { sessionId: string; timer: ReturnType<typeof setTimeout> } | null = null;
   /** The VM's last reported control state; the mode is also persisted by the api. */
   private control: ControlState | null = null;
   private automationActivityAt = 0;
@@ -114,10 +125,14 @@ export class InstanceGateway extends DurableObject<Env> {
     return (await this.ctx.storage.get<string>('instanceId')) ?? '';
   }
 
-  /** The alarm needs the instance id after a wake; it is written once, not on every request. */
+  /**
+   * The alarm needs the instance id after a wake; it is written once, not on every request. After
+   * a wake it is read, not written again: every write waits for durable storage, which is what
+   * failed when Cloudflare's storage reset objects (each reset closed every socket).
+   */
   private async rememberInstance(instanceId: string) {
     if (this.storedInstanceId === instanceId) return;
-    await this.ctx.storage.put('instanceId', instanceId);
+    if ((await this.ctx.storage.get<string>('instanceId')) !== instanceId) await this.ctx.storage.put('instanceId', instanceId);
     this.storedInstanceId = instanceId;
   }
 
@@ -328,6 +343,31 @@ export class InstanceGateway extends DurableObject<Env> {
     })().catch(() => {}).finally(() => { this.renewal = null; });
   }
 
+  /**
+   * An active viewer's lease is renewed when it is about to lapse even with no frame to trigger
+   * it (ACTIVE_VIEWER_MS). The lease and its checks are unchanged; only their timing is.
+   */
+  private keepLeaseWarm(sessionId: string, instanceId: string) {
+    if (this.warmLease?.sessionId === sessionId) return;
+    if (this.warmLease) clearTimeout(this.warmLease.timer);
+    this.warmLease = null;
+    const grant = this.inputGrants.get(sessionId);
+    if (!grant || grant.instanceId !== instanceId) return;
+    const timer = setTimeout(() => {
+      if (this.warmLease?.timer !== timer) return;
+      this.warmLease = null;
+      const active = Date.now() - (this.viewerActiveAt.get(sessionId) ?? -Infinity) < ACTIVE_VIEWER_MS;
+      const open = this.ctx.getWebSockets(`session:${sessionId}`).some((ws) => ws.readyState === WebSocket.OPEN);
+      if (!active || !open) {
+        this.viewerActiveAt.delete(sessionId);
+        return;
+      }
+      this.renewSoon(sessionId, instanceId);
+      void (this.renewal ?? Promise.resolve()).then(() => this.keepLeaseWarm(sessionId, instanceId));
+    }, Math.max(0, grant.until - RENEW_BEFORE_MS - Date.now()));
+    this.warmLease = { sessionId, timer };
+  }
+
   override async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     // Only the gateway's trusted service entrypoint reaches this Durable Object route.
@@ -519,7 +559,9 @@ export class InstanceGateway extends DurableObject<Env> {
     if (ws.readyState !== WebSocket.OPEN) return;
     const epoch = this.revocationEpoch;
     const viewerEpoch = this.viewerEpoch;
-    const instanceId = await this.instanceId();
+    const attachment = ws.deserializeAttachment() as Attachment | null;
+    // The socket's attachment names its browser across hibernation: no storage read per frame.
+    const instanceId = attachment?.instanceId ?? await this.instanceId();
     let raw: unknown;
     try {
       raw = JSON.parse(message);
@@ -527,7 +569,6 @@ export class InstanceGateway extends DurableObject<Env> {
       ws.close(1007, 'invalid json');
       return;
     }
-    const attachment = ws.deserializeAttachment() as Attachment | null;
     const frameType = raw && typeof raw === 'object' && 't' in raw ? String(raw.t) : '';
     const frameSession = raw && typeof raw === 'object' && 'sessionId' in raw && typeof raw.sessionId === 'string' ? raw.sessionId : null;
     const relayedSession = attachment?.role === 'viewer' ? attachment.sessionId
@@ -547,7 +588,11 @@ export class InstanceGateway extends DurableObject<Env> {
     if (relayedSession && relayedSession !== MCP_GRANT) this.renewSoon(relayedSession, instanceId);
     const att = ws.deserializeAttachment() as Attachment;
     if (att.role === 'agent') await this.fromAgent(ws, att, raw);
-    else this.fromViewer(ws, att, raw);
+    else {
+      this.viewerActiveAt.set(att.sessionId, Date.now());
+      this.keepLeaseWarm(att.sessionId, instanceId);
+      this.fromViewer(ws, att, raw);
+    }
   }
 
   override async alarm() {
