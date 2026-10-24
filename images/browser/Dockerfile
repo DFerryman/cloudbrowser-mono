@@ -31,6 +31,9 @@ FROM ghcr.io/m1k1o/neko/google-chrome:3.2.0@sha256:0609ca9ec35a2745a189b3b4934ea
 
 USER root
 # Fixed font set including CJK, so pages render the same on every wake (stable fingerprint, page 4).
+# fonts-noto-core covers the scripts the others lack (Thai, Khmer, Myanmar, Sinhala, Ethiopic and
+# more), which otherwise show as empty boxes; it adds about 19 MB to the image download and 45 MB
+# on disk, and makes Noto Sans and Noto Serif the generic sans-serif and serif fonts (DejaVu before).
 # Chrome is the current stable release at build time, not the one the neko base was built with
 # (neko 3.0.8 shipped Chrome 140 from September 2025): an outdated Chrome lacks security fixes and is
 # flagged by sites. The Images workflow rebuilds weekly to follow each stable release.
@@ -39,7 +42,7 @@ USER root
 ARG CHROME_VERSION=latest
 RUN echo "Chrome stable: ${CHROME_VERSION}" \
  && apt-get update \
- && apt-get install -y --no-install-recommends fonts-noto-cjk fonts-noto-color-emoji fonts-liberation wget \
+ && apt-get install -y --no-install-recommends fonts-noto-cjk fonts-noto-core fonts-noto-color-emoji fonts-liberation wget \
  && wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
  && apt-get install -y --no-install-recommends /tmp/google-chrome.deb \
  && google-chrome --version \
