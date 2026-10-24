@@ -167,7 +167,7 @@ export function closureCodeMessage(appUrl: string, code: string): Message {
   });
 }
 
-/** The closure was accepted: what was deleted, how to ask about a refund, and what is kept. */
+/** The closure was accepted: what was deleted, that the credit is forfeited, and what is kept. */
 export function closureStartedMessage(appUrl: string, input: { browsers: number; eraseDays: number; supportEmail: string }): Message {
   const browsers = `${input.browsers} ${input.browsers === 1 ? 'browser' : 'browsers'}`;
   return renderEmail(appUrl, {
@@ -177,11 +177,11 @@ export function closureStartedMessage(appUrl: string, input: { browsers: number;
     preview: 'You are signed out everywhere and your browsers are being deleted.',
     paragraphs: [
       `As you asked, your Nevazu account is closed. You have been signed out everywhere and ${input.browsers ? `your ${browsers} and their data are being permanently deleted` : 'you had no browsers to delete'}.`,
-      `Closing your account does not refund your credit by itself. To ask about a refund of credit you paid for and have not used, write to ${input.supportEmail} from this address within ${input.eraseDays} days.`,
+      'The credit left on your balance was forfeited when you closed the account, and is not refunded.',
       `After ${input.eraseDays} days your email address and other personal data are erased. We keep billing records and your acceptance of the Terms of Service as the law and our Privacy Policy describe.`,
     ],
     details: [{ label: 'Browsers deleted', value: String(input.browsers) }],
-    note: `If you did not close your account, write to ${input.supportEmail} at once.`,
+    note: `Questions: ${input.supportEmail}. If you did not close your account, write to us at once.`,
   });
 }
 

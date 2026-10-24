@@ -569,8 +569,8 @@ adminRoute.post('/users/:id/unfreeze', async (c) => {
 
 /**
  * Closed accounts, the ones still being deleted first: the balance, the part of it that was paid
- * for, and what refunding it would take per order, for support when a user asks for a refund.
- * Until the data is erased these are read from the ledger now, so a refund support already made
+ * for, and what refunding it would take per order, for support in a special case where a refund
+ * is agreed. Until the data is erased these are read from the ledger now, so a refund support already made
  * is taken off; after, they are what was left at erasure. The email is shown until erasure.
  */
 adminRoute.get('/closures', async (c) => {

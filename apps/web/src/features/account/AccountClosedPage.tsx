@@ -19,7 +19,7 @@ export function AccountClosedPage() {
         <h1 className="mt-6 text-2xl font-semibold tracking-tight">{t('closed.title')}</h1>
         <div className="mt-3 space-y-3 text-sm leading-relaxed text-muted" data-testid="account-closed">
           <p>{t('closed.body')}</p>
-          <p>{rich(t('closed.refundAsk', { days: CLOSURE_ERASE_DAYS }), { email: mail })}</p>
+          <p>{rich(t('closed.forfeit'), { email: mail })}</p>
           <p>{t('closed.erase', { days: CLOSURE_ERASE_DAYS })}</p>
         </div>
         <Button variant="primary" size="lg" className="mt-8" onClick={() => navigate('/')}>

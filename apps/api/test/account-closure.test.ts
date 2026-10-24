@@ -10,10 +10,10 @@ import { accessToken, adminCall, configureAdmin, mockAccessJwks } from './admin-
 import { setup, signIn } from './helpers.js';
 
 /**
- * Closing an account (Terms sections 8 and 9): confirmed with an email code, it signs the user out
- * everywhere and deletes every browser at once. It refunds nothing by itself: the unused paid credit
- * is recorded for support, who refunds it by hand if the user asks. After 30 days the personal data
- * is erased; billing records and Terms acceptances stay.
+ * Closing an account (Terms section 8): confirmed with an email code, it signs the user out
+ * everywhere and deletes every browser at once. The credit is forfeited; the unused paid credit is
+ * shown to support, who refunds it by hand only in a special case agreed by email. After 30 days
+ * the personal data is erased; billing records and Terms acceptances stay.
  */
 const SECRET = 'whsec_test';
 // The underscore is a LIKE wildcard: deleting this address's codes must not match another's.
@@ -158,8 +158,7 @@ describe('closing an account', () => {
     ]);
     expect(rows(`SELECT action FROM audit_log WHERE action = 'account.closure_requested'`)).toHaveLength(1);
     expect(t.emails.at(-1)).toMatchObject({ to: EMAIL, subject: 'Your Nevazu account is closed' });
-    expect(t.emails.at(-1)!.text).toContain('does not refund your credit by itself');
-    expect(t.emails.at(-1)!.text).toContain('write to support@nevazu.com from this address within 30 days');
+    expect(t.emails.at(-1)!.text).toContain('credit left on your balance was forfeited when you closed the account, and is not refunded');
 
     // The address cannot sign in, and no code is sent to it.
     const sent = t.emails.length;

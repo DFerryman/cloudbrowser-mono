@@ -95,7 +95,7 @@ describe('English transactional emails', () => {
     expect(messages[5]!.text).not.toContain('balance is now');
   });
 
-  it('states the closure code, what closing deleted, where to ask about a refund, and the erasure', () => {
+  it('states the closure code, what closing deleted, that the credit is forfeited, and the erasure', () => {
     const code = closureCodeMessage(url, '042917');
     assertEmail(code);
     expect(code.subject).toBe('Your Nevazu account closure code: 042917');
@@ -104,7 +104,7 @@ describe('English transactional emails', () => {
     expect(code.text).toContain('Nothing has changed yet');
     const started = closureStartedMessage(url, { browsers: 2, eraseDays: 30, supportEmail: 'support@nevazu.com' });
     assertEmail(started);
-    for (const fact of ['signed out everywhere', 'your 2 browsers and their data are being permanently deleted', 'does not refund your credit by itself', 'write to support@nevazu.com from this address within 30 days', 'After 30 days']) {
+    for (const fact of ['signed out everywhere', 'your 2 browsers and their data are being permanently deleted', 'credit left on your balance was forfeited', 'Questions: support@nevazu.com', 'After 30 days']) {
       expect(started.text).toContain(fact);
     }
     const none = closureStartedMessage(url, { browsers: 0, eraseDays: 30, supportEmail: 'support@nevazu.com' });

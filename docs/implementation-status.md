@@ -224,13 +224,13 @@ Cloudflare deployment.
   The second step stays at sign-in, before any session exists, rather than when opening the
   dashboard or a browser: a session created after the email code alone could already read billing
   and change settings, and checking once at the entrance keeps opening a browser fast.
-- **Account closure** (Terms sections 8 and 9; `apps/api/src/closure.ts`): Account → Close account
+- **Account closure** (Terms section 8; `apps/api/src/closure.ts`): Account → Close account
   shows the browsers to delete and the balance, then confirms with a 6-digit email code and a
   ticked box. At once every session, passkey and authenticator app is deleted, a trigger refuses
   new sessions (migration `0040`), coding agents are revoked and every browser is permanently
-  deleted. Closing refunds nothing by itself: a user who wants unused paid credit back writes to
-  support, who agrees it and refunds it by hand in Creem; the console's Closures page shows each
-  closed account's final balance and unused paid credit per order. 30 days after the closure the
+  deleted. Closing forfeits the credit, and it is not refunded; only in a special case agreed by
+  email (for example, not accepting updated Terms) does support refund it by hand in Creem. The
+  console's Closures page shows each closed account's balance and unused paid credit per order. 30 days after the closure the
   balance left is written off and the personal data erased: email and name replaced, browser
   names, session logs and agent records deleted. Billing records, Terms acceptances, the audit log
   and the browser ledger stay under the anonymous user id, and the address can sign up again.

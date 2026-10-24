@@ -332,7 +332,7 @@ const orderMoney = (cents: number, currency: string) => {
 };
 const ERASE_DAYS = 30;
 
-/** Closed accounts and their unused paid credit, for support when a user asks for a refund (api closure.ts). */
+/** Closed accounts and their unused paid credit, for support in a special case where a refund is agreed (api closure.ts). */
 export function ClosuresPage() {
   const { t, term } = useT();
   const rows = useAdminPage<ClosureRow>('/closures', ADMIN_PAGE.closures);

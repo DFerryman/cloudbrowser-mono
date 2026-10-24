@@ -58,7 +58,7 @@ accountRoute.openapi(
     method: 'post',
     path: '/account/closure',
     tags: ['account'],
-    description: 'Closes the account: signs out everywhere and permanently deletes every browser. It refunds nothing by itself; a refund of unused paid credit is agreed with support. Personal data is erased after 30 days. This cannot be undone.',
+    description: 'Closes the account: signs out everywhere and permanently deletes every browser. The credit left is forfeited; a refund is only agreed with support by email in special cases. Personal data is erased after 30 days. This cannot be undone.',
     request: { body: { content: { 'application/json': { schema: CloseAccountBody } }, required: true } },
     responses: { 200: json(ClosureResult, 'Closed'), ...refusals },
   }),

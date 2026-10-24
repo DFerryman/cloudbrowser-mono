@@ -74,7 +74,8 @@ test('shows what closing does, then closes with the emailed code and the box tic
   expect(page).toContain('Work');
   expect(page).toContain('Shopping');
   expect(page).toContain('$26.50');
-  expect(page).toContain('Closing does not refund your credit by itself. To ask about a refund of credit you paid for and have not used, write to support@nevazu.com from this email address, before you close or within 30 days after.');
+  expect(page).toContain('Closing forfeits this credit, and it is not refunded, except as the Refund Policy and the law provide. In special cases, for example if you do not accept updated Terms, you can ask about a refund by writing to support@nevazu.com from this email address before you close.');
+  expect(rendered.root.find((n) => n.type === 'a' && n.props.href === '/refunds')).toBeTruthy();
   expect(rendered.root.find((n) => n.type === 'a' && n.props.href === 'mailto:support@nevazu.com')).toBeTruthy();
 
   await act(async () => rendered.root.find((n) => n.type === 'select').props.onChange({ target: { value: 'terms' } }));
@@ -119,8 +120,8 @@ test('refuses here during a dispute hold, and says whom to write to', async () =
   expect(byTestId('close-send-code').props.disabled).toBe(true);
 });
 
-test('the closed page says where to ask about a refund, and when the data is erased', async () => {
+test('the closed page says the credit was forfeited, and when the data is erased', async () => {
   await render(<AccountClosedPage />, '/account-closed');
-  expect(text()).toContain('To ask about a refund of credit you paid for and have not used, write to support@nevazu.com from your account’s email address within 30 days.');
+  expect(text()).toContain('The credit left on your balance was forfeited when you closed the account. Questions: support@nevazu.com.');
   expect(text()).toContain('Your personal data is erased 30 days from now.');
 });

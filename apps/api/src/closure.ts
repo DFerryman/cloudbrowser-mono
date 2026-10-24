@@ -1,5 +1,5 @@
 /**
- * Closing an account (Terms sections 8 and 9). A user closes their own account from the Account
+ * Closing an account (Terms section 8). A user closes their own account from the Account
  * page and confirms with a code sent to their email. Then, in this order:
  *
  *  1. At once: the closure is recorded (`account_closures`, status `closing`); every sign-in
@@ -15,9 +15,10 @@
  *     log and the browser ledger stay, tied to the anonymous user id, and the address can sign up
  *     again.
  *
- * Closing refunds nothing by itself. A user who wants unused paid credit back writes to support,
- * who agrees it with them and refunds it by hand in the provider's dashboard; the provider's
- * refund webhook takes it off the balance as for any refund (billing/ledger.ts).
+ * Closing forfeits the credit; it is not refunded. Only in a special case agreed with the user by
+ * email (for example, closing because they do not accept updated Terms) does support refund unused
+ * paid credit, by hand in the provider's dashboard; the provider's refund webhook takes it off the
+ * balance as for any refund (billing/ledger.ts).
  *
  * Self-serve closure is refused during a payment dispute hold, while an operator has suspended a
  * browser, and for operators' own accounts; support handles those.
@@ -203,7 +204,7 @@ export async function closeAccount(c: Context<AppEnv>, input: { code: string; re
     await deleteBrowserPermanently(c, row, `closure:${row.id}`, `DELETE /v1/instances/${row.id}`, { closure: true })
       .catch((e) => console.error('closure: browser delete deferred to the sweep', row.id, e));
   }
-  await raiseAlert(db, { source: 'billing', severity: 'info', title: `Account ${u.id} was closed by its owner: ${live.length} browsers deleted, $${(credit.paidMicros / 1e6).toFixed(2)} unused paid credit (refunded only if the user asks support)`,
+  await raiseAlert(db, { source: 'billing', severity: 'info', title: `Account ${u.id} was closed by its owner: ${live.length} browsers deleted, $${(credit.paidMicros / 1e6).toFixed(2)} unused paid credit, forfeited (refunded only in a special case agreed with support)`,
     detail: { userId: u.id, browsers: live.length, balanceMicros: credit.balanceMicros, paidMicros: credit.paidMicros } }, now);
   c.executionCtx.waitUntil(sendTo(c.env, u.email, closureStartedMessage(c.env.APP_URL, { browsers: live.length, eraseDays: CLOSURE_ERASE_DAYS, supportEmail: SUPPORT_EMAIL }))
     .catch((e) => console.error('closure email failed', u.id, e)));

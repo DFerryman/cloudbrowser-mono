@@ -15,8 +15,8 @@ import { useMe } from '../instances/hooks.js';
 const REASONS: ClosureReason[] = ['terms', 'price', 'not_needed', 'other'];
 
 /**
- * Closing the account (Terms sections 8 and 9): first what it does (the browsers deleted, where to
- * ask about a refund, what is kept), then a code sent to the account's email and a box the user
+ * Closing the account (Terms section 8): first what it does (the browsers deleted, the credit
+ * forfeited, what is kept), then a code sent to the account's email and a box the user
  * ticks. The api signs the user out everywhere, so success leaves the app for the closed page.
  */
 export function CloseAccount({ className }: { className?: string }) {
@@ -125,7 +125,7 @@ function CloseAccountDialog({ open, onClose }: { open: boolean; onClose: () => v
               <dd className="tabular-nums">{usd(p.balanceMicros)}</dd>
             </div>
           </dl>
-          <p data-testid="close-refund">{rich(t('account.close.refundAsk', { days: CLOSURE_ERASE_DAYS }), { email: link(`mailto:${SUPPORT_EMAIL}`, SUPPORT_EMAIL, false) })}</p>
+          <p data-testid="close-forfeit">{rich(t('account.close.forfeit'), { refunds: link('/refunds', t('footer.refunds')), email: link(`mailto:${SUPPORT_EMAIL}`, SUPPORT_EMAIL, false) })}</p>
           <p className="text-muted">
             {rich(t('account.close.kept', { days: CLOSURE_ERASE_DAYS }), { privacy: link('/privacy', t('footer.privacy')) })}{' '}
             {rich(t('account.close.terms'), { terms: link('/terms', t('footer.terms')) })}
