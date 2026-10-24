@@ -29,6 +29,7 @@ const TITLES: Record<ErrorType, string> = {
   agent_access_off: 'Coding agent access is off',
   agent_key_limit: 'Too many access keys',
   agent_grant_limit: 'Too many sign-ins',
+  terms_required: 'Confirm the Terms of Service',
   internal: 'Something went wrong',
 };
 

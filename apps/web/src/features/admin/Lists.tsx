@@ -1,3 +1,4 @@
+import { TERMS_VERSION } from '@cloudbrowser/contracts';
 import { Button, Dialog, Input, Label, Select, useToast } from '@cloudbrowser/ui';
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
@@ -233,7 +234,8 @@ export function UsersPage() {
         columns={[t('col.email'), t('col.joined'), t('col.balance'), t('col.browsers'), t('col.killSwitch')]}
         cells={(u) => [
           <span>
-            {u.email} {u.admin ? <Pill>{t('users.staff')}</Pill> : null} {u.twoFactorEnabled ? <Pill tone="ok">2FA</Pill> : null}
+            {u.email} {u.admin ? <Pill>{t('users.staff')}</Pill> : null} {u.twoFactorEnabled ? <Pill tone="ok">2FA</Pill> : null}{' '}
+            {u.termsVersion ? <Pill tone={u.termsVersion === TERMS_VERSION ? 'ok' : 'warn'}>{t('users.terms', { version: u.termsVersion })}</Pill> : null}
             <br />
             <Mono>{u.id}</Mono>
             {u.twoFactorEnabled ? (

@@ -166,6 +166,7 @@ const M = {
   'users.balanceSplit': ['可用 {available} · 冻结 {held}', '{available} available · {held} held'],
   'users.frozen': ['已冻结', 'frozen'],
   'users.ranOut': ['余额耗尽', 'ran out'],
+  'users.terms': ['条款 {version}', 'Terms {version}'],
   'users.credit': ['调整余额', 'Credit'],
   'users.unfreeze': ['解除冻结', 'Unfreeze'],
   'users.suspendedCount': ['（{n} 个已停用）', ' ({n} suspended)'],

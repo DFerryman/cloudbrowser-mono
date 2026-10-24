@@ -1,7 +1,9 @@
+import { TERMS_VERSION, termsDocumentPath } from '@cloudbrowser/contracts';
 import { ToastProvider } from '@cloudbrowser/ui';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderToString } from 'react-dom/server';
 import { StaticRouter, useRoutes, type RouteObject } from 'react-router';
+import { termsDocument } from '../content/terms-document.js';
 import { I18nProvider } from '../lib/i18n.js';
 import { ThemeProvider } from '../lib/theme.js';
 import { ContactPage } from '../site/ContactPage.js';
@@ -82,5 +84,6 @@ export function siteFiles({ template, builtAt, modified }: { template: string; b
   files.set('sitemap.xml', sitemapXml(pages, builtAt));
   files.set('llms.txt', llmsTxt());
   files.set('llms-full.txt', llmsFullTxt());
+  files.set(termsDocumentPath(TERMS_VERSION).slice(1), termsDocument());
   return files;
 }

@@ -38,6 +38,7 @@ const {
   billingAccounts,
   balanceTransactions,
   browserReservations,
+  termsAcceptances,
   usageRecords,
   providerPrices,
   regions,
@@ -465,6 +466,12 @@ adminRoute.get('/users', async (c) => {
     .from(browserReservations)
     .where(inArray(browserReservations.userId, ids))
     .groupBy(browserReservations.userId);
+  // The latest Terms version each user accepted: versions are ISO dates, so the greatest is the latest.
+  const terms = await db
+    .select({ userId: termsAcceptances.userId, version: sql<string>`max(${termsAcceptances.termsVersion})` })
+    .from(termsAcceptances)
+    .where(inArray(termsAcceptances.userId, ids))
+    .groupBy(termsAcceptances.userId);
   return c.json(
     rows.map((r) => {
       const n = counts.find((x) => x.userId === r.id);
@@ -482,6 +489,7 @@ adminRoute.get('/users', async (c) => {
         exhaustedAt: a?.exhaustedAt ?? null,
         frozenAt: a?.frozenAt ?? null,
         admin: isAdminEmail(c.env, r.email),
+        termsVersion: terms.find((x) => x.userId === r.id)?.version ?? null,
       };
     }),
   );

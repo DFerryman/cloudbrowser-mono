@@ -984,6 +984,46 @@ export const topupCheckouts = sqliteTable('topup_checkouts', {
 });
 
 /**
+ * The Terms of Service as published for each version (`TERMS_VERSION`), stored the first time a
+ * user accepts that version: `document` is the text in every language exactly as the site served
+ * it, and `sha256` its hash, which the build pins next to the version. Append-only (triggers).
+ */
+export const termsVersions = sqliteTable('terms_versions', {
+  version: text('version').primaryKey(),
+  sha256: text('sha256').notNull(),
+  document: text('document').notNull(),
+  recordedAt: ts('recorded_at').notNull(),
+});
+
+/**
+ * Who accepted which version of the Terms of Service, and when: one row per user and version,
+ * written when they tick "I have read the Terms of Service" before paying. A top-up checkout is
+ * only started for a user with a row for the current version, so a new version asks again.
+ * Append-only (triggers): kept as evidence of the agreement, with where the request came from.
+ */
+export const termsAcceptances = sqliteTable(
+  'terms_acceptances',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id),
+    termsVersion: text('terms_version')
+      .notNull()
+      .references(() => termsVersions.version),
+    /** `checkout`: ticked in the dialog before a top-up. */
+    context: text('context').notNull(),
+    /** The checkout the user went on to start. */
+    topupCheckoutId: text('topup_checkout_id').references(() => topupCheckouts.id),
+    ip: text('ip'),
+    country: text('country'),
+    userAgent: text('user_agent'),
+    acceptedAt: ts('accepted_at').notNull(),
+  },
+  (t) => [uniqueIndex('terms_acceptances_user_version_unique').on(t.userId, t.termsVersion)],
+);
+
+/**
  * Every payment webhook, keyed by its event id (Stripe's prefixed `stripe:`): duplicates are
  * ignored (page 6). Each is processed by its own provider.
  */
