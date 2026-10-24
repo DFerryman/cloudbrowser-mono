@@ -131,7 +131,6 @@ const LONG_TYPED_TEXT = 100;
 const TYPED_ECHO_MS = 3000;
 const encoder = new TextEncoder();
 const modifierKeysym = (sym: number) => sym >= 0xffe1 && sym <= 0xffee;
-const hasRelay = (servers: IceServer[]) => servers.some((s) => s.urls.some((u) => u.startsWith('turn:') || u.startsWith('turns:')));
 const shiftedKeysym = (sym: number) => sym >= 0x61 && sym <= 0x7a ? sym - 0x20 : SHIFTED_KEYSYMS.get(sym) ?? sym;
 
 /**
@@ -196,11 +195,6 @@ export class RemoteBrowser {
   private counters: { lost: number; received: number; freezes: number; frames: number; at: number } | null = null;
   /** The live picture's readings and gateway round trips since the last quality report. */
   private readonly qualityWindow = new QualityWindow();
-  /**
-   * A peer made as soon as the TURN credentials arrive, so its relay is allocated while the socket
-   * opens and neko prepares its offer; the first offer on that socket answers with it (answer).
-   */
-  private warmPeer: { pc: RTCPeerConnection; servers: IceServer[] } | null = null;
   private readonly files: FileTransfers;
   /** Text the remote clipboard last reported (clipboard/updated); null once typing went through it. */
   private remoteClipboard: string | null = null;
@@ -403,7 +397,6 @@ export class RemoteBrowser {
     if (this.stopped || sequence !== this.connectSequence) return;
     this.diagnostic('token_ok');
     this.iceServers = info.iceServers;
-    this.warmUp(info.iceServers);
     this.signalRequested = false;
     const WS = this.opts.WebSocketImpl ?? WebSocket;
     const sep = info.gatewayUrl.includes('?') ? '&' : '?';
@@ -1214,13 +1207,9 @@ export class RemoteBrowser {
       ? this.iceServers
       : (provide.iceservers ?? []).map((s) => ({ ...s, urls: Array.isArray(s.urls) ? s.urls : [s.urls] }));
     // Media goes through the TURN relay when we have one: the VM accepts no inbound connections (page 5).
-    const relayOnly = hasRelay(servers);
-    const warm = this.warmPeer;
-    this.warmPeer = null;
-    // Only an untouched peer made with these same servers: its relay is already allocated.
-    const pc = warm && warm.servers === servers && relayOnly && warm.pc.connectionState === 'new'
-      ? warm.pc
-      : (warm?.pc.close(), new (this.opts.RTCPeerConnectionImpl ?? RTCPeerConnection)({ iceServers: servers, iceTransportPolicy: relayOnly ? 'relay' : 'all' }));
+    const relayOnly = servers.some((s) => s.urls.some((u) => u.startsWith('turn:') || u.startsWith('turns:')));
+    const PC = this.opts.RTCPeerConnectionImpl ?? RTCPeerConnection;
+    const pc = new PC({ iceServers: servers, iceTransportPolicy: relayOnly ? 'relay' : 'all' });
     this.pc = pc;
     const frameSequence = this.frameSequence;
     let mediaStream: MediaStream | null = null;
@@ -1431,27 +1420,6 @@ export class RemoteBrowser {
     } catch { /* Reporting must not affect the viewer. */ }
   }
 
-  /**
-   * Starts allocating the TURN relay as soon as its credentials arrive (iceCandidatePoolSize),
-   * rather than when neko's offer does: the allocation's round trips to the relay then overlap the
-   * socket's handshake and neko's start, instead of delaying the first frame. Each attempt's peer
-   * replaces the last one's.
-   */
-  private warmUp(servers: IceServer[]) {
-    this.closeWarmPeer();
-    if (!hasRelay(servers)) return;
-    try {
-      const PC = this.opts.RTCPeerConnectionImpl ?? RTCPeerConnection;
-      this.warmPeer = { pc: new PC({ iceServers: servers, iceTransportPolicy: 'relay', iceCandidatePoolSize: 1 }), servers };
-    } catch { /* The offer makes its own peer. */ }
-  }
-
-  private closeWarmPeer() {
-    const warm = this.warmPeer;
-    this.warmPeer = null;
-    warm?.pc.close();
-  }
-
   private teardownPeer(preserveCandidates = false) {
     // What this peer's picture measured is reported before its sequence ends.
     this.endQualityWindow();
@@ -1480,11 +1448,7 @@ export class RemoteBrowser {
     this.pc = null;
     pc?.close();
     // A new offer on the same socket keeps the screen applied for it; a new socket starts afresh.
-    if (!preserveCandidates) {
-      this.appliedScreen = '';
-      // An agent that went offline, or a socket that closed, before the offer came.
-      this.closeWarmPeer();
-    }
+    if (!preserveCandidates) this.appliedScreen = '';
   }
 
   // --- liveness (PING) and the media path ---------------------------------------------------

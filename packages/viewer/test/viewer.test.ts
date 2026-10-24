@@ -443,48 +443,19 @@ describe('RemoteBrowser', () => {
     b.disconnect();
   });
 
-  it('starts allocating the TURN relay when the connect info arrives and answers the first offer with that peer', async () => {
+  it('makes the relay-only peer when the offer arrives, not before', async () => {
+    // A peer made earlier to pre-allocate the relay (iceCandidatePoolSize) bought nothing: Chrome
+    // uses that pool only for its own offers, and the viewer answers neko's.
     const turn = [{ urls: ['turn:turn.cloudflare.com:3478?transport=udp'], username: 'u', credential: 'c' }];
     const { b } = setup(turn);
+    const before = FakePC.last;
     await b.connect();
-    const ws = FakeWS.all[0]!;
-    // Before the socket has said anything: the relay is gathered while neko starts.
-    const warm = FakePC.last;
-    expect(warm.config).toEqual({ iceServers: turn, iceTransportPolicy: 'relay', iceCandidatePoolSize: 1 });
-    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    expect(FakePC.last).toBe(before);
+    FakeWS.all[0]!.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
     await tick();
-    expect(FakePC.last).toBe(warm);
-    expect(warm.remote).toEqual({ type: 'offer', sdp: 'offer-sdp' });
-    expect(ws.neko('signal/answer')).toEqual([{ sdp: 'answer-sdp' }]);
-    // A later offer on the same socket (neko renegotiating) gets a peer of its own.
-    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-2' } } });
-    await tick();
-    expect(FakePC.last).not.toBe(warm);
-    expect(warm.closed).toBe(true);
+    expect(FakePC.last).not.toBe(before);
     expect(FakePC.last.config).toEqual({ iceServers: turn, iceTransportPolicy: 'relay' });
     b.disconnect();
-  });
-
-  it('closes a relay peer no offer came for, and makes none without a TURN server', async () => {
-    vi.useFakeTimers();
-    const { b } = setup([{ urls: ['turns:turn.cloudflare.com:443?transport=tcp'], username: 'u', credential: 'c' }]);
-    await b.connect();
-    const warm = FakePC.last;
-    FakeWS.all[0]!.close(1006);
-    expect(warm.closed).toBe(true);
-    await vi.advanceTimersByTimeAsync(600);
-    // The next attempt warms up its own, with its own credentials.
-    expect(FakeWS.all).toHaveLength(2);
-    expect(FakePC.last).not.toBe(warm);
-    expect(FakePC.last.closed).toBe(false);
-    b.disconnect();
-    expect(FakePC.last.closed).toBe(true);
-
-    const before = FakePC.last;
-    const plain = setup([{ urls: ['stun:stun.cloudflare.com:3478'] }]);
-    await plain.b.connect();
-    expect(FakePC.last).toBe(before);
-    plain.b.disconnect();
   });
 
   it('reports a minute of the live picture\'s quality, and what it measured when the page is hidden', async () => {
