@@ -296,7 +296,8 @@ Cloudflare deployment.
   input (pointer, wheel, buttons, keys with X11 keysyms, Cmd→Ctrl on macOS, release-all on blur),
   paired-key IME text and paste (local clipboard → remote, then Ctrl+V)
   and remote clipboard → local, remote cursor drawn locally, remote screen size following the
-  viewport (debounced, at most every 5 s), stats every 2 s with the toolbar indicator, reconnect with
+  viewport (debounced, at most every 5 s; the view's own shape and size, portrait included, on
+  images that list the `square` video, 16:9 modes on older ones), stats every 2 s with the toolbar indicator, reconnect with
   backoff and a fresh single-use token, take-over. HTTP/token and transport waits are bounded;
   stale asynchronous responses cannot overwrite a replacement session. Authorization uses one
   current D1 batch and an existing one-second grant for relay bursts; stop/delete RPC revocation

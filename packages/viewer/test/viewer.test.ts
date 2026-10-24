@@ -1,7 +1,7 @@
 import { TIERS } from '@cloudbrowser/contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { keysymFor, keysymForName } from '../src/keyboard.js';
-import { decode, encode, fitScreen, squarePixels } from '../src/neko.js';
+import { decode, encode, fitScreen, MIN_SCREEN_SIDE, shapedScreen, squarePixels } from '../src/neko.js';
 import { RemoteBrowser, type RemoteBrowserOptions } from '../src/remote-browser.js';
 import { qualityLevel } from '../src/stats.js';
 
@@ -130,6 +130,27 @@ describe('neko data channel encoding', () => {
     expect(fitScreen(1700, 1000, configurations)).toEqual({ width: 1600, height: 900, rate: 25 });
     // A size without a 60 Hz mode stays at its best rate.
     expect(fitScreen(4000, 2500, configurations, 60)).toEqual({ width: 2560, height: 1440, rate: 30 });
+  });
+
+  it('shapes the desktop like the view on an image that streams any shape', () => {
+    const basic = TIERS.basic.maxScreenPixels;
+    // The view's own size, rounded down to multiples of 8, so the page shows at 100% and fills it:
+    // a 1080p monitor's window, and an iPad Air held sideways and upright.
+    expect(shapedScreen(1920, 951, 30, basic)).toEqual({ width: 1920, height: 944, rate: 30 });
+    expect(shapedScreen(1180, 726, 30, basic)).toEqual({ width: 1176, height: 720, rate: 30 });
+    expect(shapedScreen(820, 1086, 30, basic)).toEqual({ width: 816, height: 1080, rate: 30 });
+    expect(shapedScreen(1279.6, 719.6, 30, basic)).toEqual({ width: 1272, height: 712, rate: 30 });
+    // A phone: no side under MIN_SCREEN_SIDE, the desktop larger in proportion and shown scaled down.
+    expect(shapedScreen(393, 660, 30, basic)).toEqual({ width: MIN_SCREEN_SIDE, height: 840, rate: 30 });
+    expect(shapedScreen(852, 300, 30, basic)).toEqual({ width: 1424, height: MIN_SCREEN_SIDE, rate: 30 });
+    expect(shapedScreen(660, 393, 30, basic)).toEqual({ width: 840, height: MIN_SCREEN_SIDE, rate: 30 }); // turned with the view
+    // Over the tier's pixel budget, a smaller desktop of the same shape, shown enlarged.
+    expect(shapedScreen(2560, 1311, 30, basic)).toEqual({ width: 2008, height: 1024, rate: 30 });
+    expect(shapedScreen(2560, 1311, 30, TIERS.premium.maxScreenPixels)).toEqual({ width: 2560, height: 1304, rate: 30 });
+    // Without a budget, at most Premium's pixels.
+    expect(shapedScreen(4000, 2500)).toEqual({ width: 2424, height: 1512, rate: 30 });
+    expect(shapedScreen(0, 600)).toBeNull();
+    expect(shapedScreen(800, Number.NaN)).toBeNull();
   });
 });
 
@@ -1205,6 +1226,47 @@ describe('RemoteBrowser', () => {
     ws.push({ t: 'neko', data: { event: 'system/init', payload: { screen_size: { width: 1280, height: 720, rate: 30 } } } });
     ws.push({ t: 'neko', data: { event: 'system/admin', payload: { screen_sizes_list: NEKO_MODES } } });
     expect(ws.neko('screen/set')).toEqual([{ width: 1920, height: 1080, rate: 30 }]);
+    b.disconnect();
+  });
+
+  it('gives an image that streams any shape a desktop shaped like the view, portrait included', async () => {
+    vi.useFakeTimers();
+    const { b } = setup([], { maxScreenPixels: TIERS.basic.maxScreenPixels });
+    b.setViewport(820, 1086); // an iPad Air held upright
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init', payload: {
+      screen_size: { width: 1920, height: 1080, rate: 30 }, webrtc: { videos: ['full', 'high', 'medium', 'low', 'square'] },
+    } } });
+    ws.push({ t: 'neko', data: { event: 'system/admin', payload: { screen_sizes_list: NEKO_MODES } } });
+    expect(b.anyShapeOffered).toBe(true);
+    // Not one of neko's advertised modes: neko creates it.
+    expect(ws.neko('screen/set')).toEqual([{ width: 816, height: 1080, rate: 30 }]);
+    ws.push({ t: 'neko', data: { event: 'screen/updated', payload: { width: 816, height: 1080, rate: 30 } } });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    FakePC.last.connect();
+    // Turned sideways.
+    b.setViewport(1180, 726);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(ws.neko('screen/set').at(-1)).toEqual({ width: 1176, height: 720, rate: 30 });
+    b.disconnect();
+  });
+
+  it('keeps an image without the square video on 16:9 desktops', async () => {
+    vi.useFakeTimers();
+    const { b } = setup([], { maxScreenPixels: TIERS.basic.maxScreenPixels });
+    b.setViewport(820, 1086);
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init', payload: {
+      screen_size: { width: 1920, height: 1080, rate: 30 }, webrtc: { videos: ['full', 'high', 'medium', 'low'] },
+    } } });
+    ws.push({ t: 'neko', data: { event: 'system/admin', payload: { screen_sizes_list: NEKO_MODES } } });
+    expect(b.anyShapeOffered).toBe(false);
+    expect(ws.neko('screen/set')).toEqual([{ width: 1280, height: 720, rate: 30 }]);
     b.disconnect();
   });
 

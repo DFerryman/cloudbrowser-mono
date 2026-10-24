@@ -401,7 +401,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         `box point ${n(point.x)},${n(point.y)} → remote ${remote ? `${n(remote.x)},${n(remote.y)}` : 'outside the picture'} of ${space.width}×${space.height} (${space.source})`,
         `box ${box.clientWidth}×${box.clientHeight} rect ${n(rect.left)},${n(rect.top)} ${n(rect.width)}×${n(rect.height)} rotated ${rotatedRef.current}`,
         `frame ${frame.width}×${frame.height} from ${frame.source} · element ${video.videoWidth}×${video.videoHeight} · rtp ${stats?.width ?? '?'}×${stats?.height ?? '?'}`,
-        `screen ${mode ? `${mode.width}×${mode.height}@${mode.rate}${squarePixels(mode) ? '' : ' (not 16:9: the stream is tagged with 11:10 pixels)'}` : '?'}`,
+        `screen ${mode ? `${mode.width}×${mode.height}@${mode.rate}${squarePixels(mode) || browserRef.current?.anyShapeOffered ? '' : ' (not 16:9: this image tags the stream with 11:10 pixels)'}` : '?'}`,
         `picture ${n(picture.left)},${n(picture.top)} ${n(picture.width)}×${n(picture.height)} · laid out ${video.offsetLeft},${video.offsetTop} ${video.offsetWidth}×${video.offsetHeight} fit ${getComputedStyle(video).objectFit}`,
         `viewport ${vv ? `offset ${n(vv.offsetLeft)},${n(vv.offsetTop)} page ${n(vv.pageLeft)},${n(vv.pageTop)} ${n(vv.width)}×${n(vv.height)} scale ${vv.scale.toFixed(2)}` : 'none'}`,
         `scroll ${window.scrollX},${window.scrollY} inner ${window.innerWidth}×${window.innerHeight} client ${document.documentElement.clientWidth}×${document.documentElement.clientHeight}`,
