@@ -52,7 +52,8 @@ export function AuthorizePage() {
     queryFn: () => api<OAuthAuthorizeCheck>('POST', '/oauth/authorize/check', { body: { params } }),
     enabled: me.isSuccess,
     retry: false,
-    staleTime: Infinity,
+    // Checked again each time the page is shown: coming back after creating a browser lists it.
+    refetchOnMount: 'always',
     refetchOnWindowFocus: false,
   });
 
@@ -90,7 +91,9 @@ function Refused({ title, description, back }: { title: string; description: str
 
 function Approve({ request: r, params, email }: { request: Approval; params: Record<string, string>; email: string }) {
   const { t, errorMessage, locale } = useI18n();
-  const [instanceId, setInstanceId] = useState(r.browser?.id ?? r.browsers[0]?.id ?? '');
+  const [picked, setPicked] = useState<string | null>(null);
+  // The first browser until the owner picks one, also when the list arrives after the page.
+  const instanceId = r.browser?.id ?? (r.browsers.some((b) => b.id === picked) ? picked : r.browsers[0]?.id) ?? '';
   const [capability, setCapability] = useState(r.capability);
   const [days, setDays] = useState<GrantDays>((r.grantDays.includes(r.defaultGrantDays) ? r.defaultGrantDays : r.grantDays[0]) as GrantDays);
   const [done, setDone] = useState<'allowed' | 'denied' | null>(null);
@@ -147,7 +150,7 @@ function Approve({ request: r, params, email }: { request: Approval; params: Rec
         {r.browser ? (
           <p id="oauth-browser" className="border border-border bg-surface px-3 py-2 text-sm font-medium">{r.browser.name}</p>
         ) : r.browsers.length ? (
-          <Select id="oauth-browser" value={instanceId} onChange={(e) => setInstanceId(e.target.value)}>
+          <Select id="oauth-browser" value={instanceId} onChange={(e) => setPicked(e.target.value)}>
             {r.browsers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </Select>
         ) : (

@@ -37,10 +37,10 @@ function respond(check: OAuthAuthorizeCheck | Error, me: unknown = { user: { ema
   });
 }
 
-async function render() {
+async function render(client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   await act(async () => {
     rendered = create(
-      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <QueryClientProvider client={client}>
         <I18nProvider locale="en">
           <MemoryRouter initialEntries={[`/oauth/authorize${QUERY}`]}>
             <Routes>
@@ -116,6 +116,19 @@ test('denies with no browser to choose from', async () => {
   expect(vi.mocked(api).mock.lastCall?.[2]?.body).toEqual(expect.objectContaining({ approve: false }));
   expect(vi.mocked(api).mock.lastCall?.[2]?.body).not.toHaveProperty('instanceId');
   expect(assign).toHaveBeenCalledWith(expect.stringContaining('http://127.0.0.1:5000/cb'));
+});
+
+test('checks the request again when the owner comes back, with a browser created meanwhile', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  respond({ ...approval, browsers: [] });
+  await render(client);
+  expect(button('Allow').props.disabled).toBe(true);
+  await act(async () => rendered.unmount());
+  respond({ ...approval, browsers: [{ id: 'b3', name: 'New', agentAccess: true }] });
+  await render(client);
+  expect(button('Allow').props.disabled).toBe(false);
+  await act(async () => button('Allow').props.onClick());
+  expect(vi.mocked(api).mock.lastCall?.[2]?.body).toEqual(expect.objectContaining({ approve: true, instanceId: 'b3' }));
 });
 
 test('explains a request it cannot approve, and offers the way back only when the app may be told', async () => {
