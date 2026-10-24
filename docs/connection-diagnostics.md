@@ -8,6 +8,49 @@ Media statistics and automatic quality adjustment start as soon as the peer conn
 while waiting for that first frame. This lets an undecodable stream try a lower quality before
 the original connection deadline; it does not mark the desktop live or enable input early.
 
+## Keeping a live view connected
+
+What the viewer does about a connection that degrades, and what the user is told
+(`packages/viewer/src/remote-browser.ts`, `apps/web/src/features/session/SessionPage.tsx`):
+
+- **Liveness.** With nothing from the gateway for 12 s the viewer sends `{"t":"ping"}`, which the
+  gateway's runtime answers with `{"t":"pong"}` without waking its object
+  (`setWebSocketAutoResponse`; a ping that reaches the object is answered there too). A socket that
+  answers nothing for 8 s after a ping is replaced (`failed` / `transport_stale`): mobile networks
+  drop connections without closing them, and the next tap used to go into the dead socket.
+- **Confirmed input.** Each burst of input is followed by a ping; its pong confirms, in order,
+  every frame the gateway received before it. A drop after confirmation reconnects without asking
+  the user; unconfirmed input asks, however late the close arrives. Failures past the gateway
+  (`agent_offline`, `input_error`) use the time since the input (10 s), since the gateway's
+  confirmation does not cover the VM's relay.
+- **Shown again, or a new network.** A page shown after 3 s hidden, a page whose timers were
+  frozen, the `online` event and a network change (`navigator.connection`) hold input while a ping
+  checks the socket; the pong sends it. Silence for 4 s replaces the socket, and the held input,
+  never sent on the old one, goes once on the new one.
+- **Hidden or offline.** A hidden page cannot draw its first frame, so attempts made while hidden
+  ran into the 20 s deadline until the budget was spent. Hidden or offline pages make no attempts;
+  they reconnect with a whole budget once shown and online.
+- **The picture's path.** A live peer whose ICE state becomes `disconnected` gets 4 s to recover by
+  itself; then (or at once for `failed`) the viewer asks neko for an ICE restart on the same socket
+  (`signal/restart`, milestones `media_restart` and `media_recovered`), keeping the desktop session
+  and the input path, with input held meanwhile. A restart that brings nothing back within 12 s
+  starts over (`failed` / `media_failed`).
+
+Each reconnect and failure carries a cause, recorded as `issue` on `failed` milestones (with the
+WebSocket `closeCode` for a closed transport) and shown in the session overlays:
+
+| `issue` | Meaning | How it is told |
+| --- | --- | --- |
+| `offline` | The device reported no network (`navigator.onLine`) | Always first |
+| `background` | The page was hidden or frozen when the connection dropped | Before network causes |
+| `network` | The picture's own path failed too (ICE disconnected/failed), the socket dropped without a close frame (1006) while no media arrived, or ICE never connected after neko offered | The user's network; three such drops in five minutes are called unstable |
+| `service` | The gateway closed the socket with a code of its own, or the socket dropped while video bytes kept arriving over TURN | Not the user's network |
+| `desktop` | The VM's tunnel went offline, the relay to neko failed (`input_error`), or the desktop never answered | The cloud browser's side |
+
+A round trip above 250 ms for three readings in a row (6 s) shows a closable note that taps and
+typing appear later. Touch taps are marked locally at once, so a tap that is on its way does not
+look like one that went nowhere.
+
 ## Correlating one attempt
 
 The failure overlay displays an attempt UUID. Search the `cloudbrowser` API and

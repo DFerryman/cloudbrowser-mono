@@ -13,13 +13,23 @@ and errors. Changes to inventory policy require a reason and are audited.
 | Display name / country | SSM public global infrastructure parameters | First discovery, daily, or manual refresh |
 | Browser networks | EC2 DescribeVpcs/Subnets/SecurityGroups | Every 5 minutes |
 | Machines and AZ availability | DescribeInstanceTypeOfferings / DescribeInstanceTypes for each tier's types (stored per zone and tier, so a launch never asks a zone for a type it does not offer; a region without a Premium type keeps taking Basic browsers) | Every 5 minutes |
-| Account quotas | Service Quotas GetServiceQuota | Every 5 minutes |
+| Account quotas | Service Quotas GetServiceQuota (a limit that cannot be read keeps the last one observed, for up to a week) | Every 5 minutes |
 | Consumed IPs, CPU, storage, interfaces | Paginated EC2 describe APIs, including non-project resources | Every 5 minutes |
 | Unit prices | AWS Price List GetProducts, including historical machine types | Every 12 hours or manual refresh |
 | Organization / linked accounts / gross cost | Organizations and Cost Explorer | Every 6 hours or manual refresh |
 | Credits | Billing GetCredits, using the management role | Every 6 hours or manual refresh |
 
-Workers use a bounded, request-scoped client pool. Each region is claimed with its own D1 lease
+Workers use a bounded, request-scoped client pool. A Worker invocation keeps at most six connections
+open and queues the rest inside the runtime, where a request's timeout already runs; so all AWS
+requests of a run share one limiter of four in flight (`RequestLimiter`, `MAX_AWS_REQUESTS`), and each
+request's timeout starts when it is sent. Before that, a run reading six regions at once timed requests
+out before they left: Service Quotas reads came back empty ("Required AWS quota is unavailable") and
+Describe calls were "aborted due to timeout", in whichever regions were read together. Service Quotas
+reads retry throttling, timeouts and 5xx like the EC2 reads; a limit that still cannot be read is taken
+from the region's last snapshot (each quota records `limitAt`) for up to a week, logged as
+`aws_sync.quota_fallback`; usage is always read live. A region still without a limit fails with the
+quotas and reasons named, e.g. `Required AWS quota is unavailable: ebs/L-7A658B76: ThrottlingException`.
+Each region is claimed with its own D1 lease
 (`aws_provider_regions.sync_lease_until`), so runs may overlap without reading a region twice and a
 slow region never makes later runs skip the others; billing alone takes the account lease
 (`aws_provider_state.sync_lease_until`). Every 5-minute run refreshes regions whose snapshot is over
@@ -27,9 +37,11 @@ slow region never makes later runs skip the others; billing alone takes the acco
 next run. A region's `checked_at` is when its quota and usage reads began, not when the run started.
 A failed read keeps the last snapshot (`last_error`, `last_error_at`, `sync_failures` record it) until
 it expires; only an answer that the region cannot host browsers (no network, no supported machine)
-withdraws it at once. Each run logs JSON lines (`aws_sync.start` with the cron's start delay,
-`aws_sync.region_failed`, `aws_sync.billing_skipped`, `aws_sync.done` with refreshed, failed, taken
-and deferred regions and the oldest snapshot's age) and stores its summary in
+withdraws it at once. A region whose reads failed six times in a row (one AWS never answers in time,
+one without the browser network) is read again every 30 minutes rather than every run, and at once
+on a forced refresh. Each run logs JSON lines (`aws_sync.start` with the cron's start delay,
+`aws_sync.region_failed`, `aws_sync.billing_skipped`, `aws_sync.done` with refreshed, failed, taken,
+deferred and resting regions and the oldest snapshot's age) and stores its summary in
 `aws_provider_state.last_run`. Manual refreshes run through `cloudbrowser-aws-provider` rather than
 an HTTP request's background lifetime.
 The API reaches the private reconciler through a service binding. There is no public sync URL.
