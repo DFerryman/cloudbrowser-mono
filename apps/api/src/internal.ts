@@ -4,7 +4,7 @@
  * RPC entrypoint of this Worker, reachable only through the gateway's service binding, never from
  * the internet.
  */
-import { AgentFrame, AgentStreamReport, AgentViewerFailureCode, NEVER_SLEEP_TIMEOUT_S, objectLocationHint, type GatewayToAgent, type ObjectLocationHint, type ViewerTokenClaims } from '@cloudbrowser/contracts';
+import { AgentFrame, AgentMemoryReport, AgentStreamReport, AgentViewerFailureCode, NEVER_SLEEP_TIMEOUT_S, objectLocationHint, type GatewayToAgent, type ObjectLocationHint, type ViewerTokenClaims } from '@cloudbrowser/contracts';
 import { createDb, eventRow, schema, sha256Hex, unwrapArchiveKey, type Db } from '@cloudbrowser/db';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Env } from './env.js';
@@ -17,6 +17,12 @@ export type AgentAuth =
   /** `location`: where the browser's gateway object belongs (objectLocationHint), for an agent that reaches it first. */
   | { ok: true; generation: number; credential?: string; location?: ObjectLocationHint }
   | { ok: false; reason: 'unknown_instance' | 'invalid_token' | 'expired' };
+
+/** `{ memory }` for a log line when the agent reported a valid AgentMemoryReport, else nothing. */
+function vmMemory(raw: unknown): { memory?: AgentMemoryReport } {
+  const memory = AgentMemoryReport.safeParse(raw);
+  return memory.success ? { memory: memory.data } : {};
+}
 
 function randomSecret() {
   return [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -190,6 +196,9 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
           set: { ...set, ...(lastInputAt ? { lastInputAt: sql`CASE WHEN ${legacyActivity} THEN max(coalesce(${instanceHealth.lastInputAt}, 0), ${lastInputAt.getTime()}) ELSE ${instanceHealth.lastInputAt} END` } : {}) },
           setWhere: sql`EXISTS (SELECT 1 FROM ${agentCredentials} WHERE ${agentCredentials.instanceId} = ${instanceId} AND ${agentCredentials.generation} = ${generation})`,
         }).returning({ instanceId: instanceHealth.instanceId });
+        // Once a minute, with the persisted heartbeat: whether the VM is running out of memory.
+        const memory = vmMemory(d.memory);
+        if (updated.length && memory.memory) console.info('vm memory', { instanceId, generation, ...memory });
         if (updated.length && desktopReady !== undefined) {
           const code = AgentViewerFailureCode.safeParse(d.desktopFailureCode);
           console.info('desktop readiness', {
@@ -206,13 +215,20 @@ export async function agentMessage(env: Env, db: Db, instanceId: string, generat
           .from(placements)
           .where(and(eq(placements.instanceId, instanceId), eq(placements.status, 'current')));
         const expected = current?.ip ?? (typeof d.expected === 'string' ? d.expected : null);
+        const ok = d.ok === true && !!expected && observed.length > 0 && observed.every((o) => o === expected);
+        // A failed check keeps when one last passed: the engine pauses a browser whose checks see
+        // nothing only once none has passed for a while.
+        const [prev] = ok ? [] : await db.select({ check: instanceHealth.lastIpCheck }).from(instanceHealth).where(eq(instanceHealth.instanceId, instanceId));
+        const okAt = prev?.check?.ok ? prev.check.checkedAt : prev?.check?.okAt;
         const lastIpCheck = {
-          ok: d.ok === true && !!expected && observed.length > 0 && observed.every((o) => o === expected),
+          ok,
           expected,
           observed,
           checkedAt: now.toISOString(),
           ...(typeof d.detail === 'string' ? { detail: d.detail } : {}),
+          ...(okAt ? { okAt } : {}),
         };
+        if (!ok) console.warn('ip check failed', { instanceId, generation, observed, detail: lastIpCheck.detail, ...vmMemory(d.memory) });
         const [inst] = await db.select({ userId: browserInstances.userId }).from(browserInstances).where(eq(browserInstances.id, instanceId));
         await db.batch([
           db.insert(instanceHealth).values({ instanceId, lastIpCheck }).onConflictDoUpdate({ target: instanceHealth.instanceId, set: { lastIpCheck } }),

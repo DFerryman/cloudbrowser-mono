@@ -539,12 +539,21 @@ export function SessionPage() {
       case 'needs_attention':
         overlay =
           i.lastIpCheck && !i.lastIpCheck.ok ? (
+            // A check that saw no address could not run: the browser stopped responding, and a
+            // restart (which starts the VM again) is what brings it back.
             <Overlay
-              message={t('overlay.networkPaused')}
+              message={t(i.lastIpCheck.observed.length ? 'overlay.networkPaused' : 'overlay.notResponding')}
               action={
-                <Button disabled={verify.isPending} onClick={() => verify.mutate(i.id, { onError: failed })}>
-                  {t('overlay.checkStatus')}
-                </Button>
+                <div className="flex flex-wrap justify-center gap-2">
+                  {i.lastIpCheck.observed.length ? null : (
+                    <Button variant="primary" disabled={lifecycle.isPending} onClick={() => restart(i.id)}>
+                      {t('overlay.restart')}
+                    </Button>
+                  )}
+                  <Button disabled={verify.isPending} onClick={() => verify.mutate(i.id, { onError: failed })}>
+                    {t('overlay.checkStatus')}
+                  </Button>
+                </div>
               }
             />
           ) : (

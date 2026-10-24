@@ -119,7 +119,9 @@ func (c *CDP) Call(ctx context.Context, sessionID, method string, params any, ou
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
-		return ctx.Err()
+		// Name the call that Chrome left unanswered: Target.createBrowserContext means Chrome
+		// itself hung, Runtime.evaluate a page or its request.
+		return fmt.Errorf("%s: %w", method, ctx.Err())
 	case resp, ok := <-ch:
 		if !ok {
 			return errors.New("devtools connection closed")
@@ -253,7 +255,7 @@ func (c *Chrome) ObservedIPs(ctx context.Context, echoURLs []string) ([]string, 
 		err = c.CDP.Call(ctx, s.SessionID, "Runtime.evaluate", map[string]any{"expression": expr, "awaitPromise": true, "returnByValue": true}, &r)
 		c.CDP.cleanup("Target.closeTarget", map[string]any{"targetId": targetID})
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("echo %s: %w", u, err)
 		}
 		if r.ExceptionDetails != nil {
 			return out, fmt.Errorf("echo %s failed", u)

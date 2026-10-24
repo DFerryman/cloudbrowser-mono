@@ -712,6 +712,58 @@ describe('real agent through the gateway', () => {
     await periodicIpChecks(w.deps());
     expect((await w.instance()).status).toBe('needs_attention');
   });
+
+  describe('agent reports that fail', () => {
+    let passedAt: string;
+    beforeEach(async () => {
+      const op = await w.newInstance();
+      await runOperation(w.deps(), op);
+      await agentReady();
+      w.advance(3_000);
+      await runOperation(w.deps(), op);
+      await answer('ip_check', { observed: [(await w.placement())!.ipAddress!] });
+      w.advance(3_000);
+      await runOperation(w.deps(), op);
+      expect((await w.instance()).status).toBe('running');
+      passedAt = (await w.db.select().from(schema.instanceHealth))[0]!.lastIpCheck!.checkedAt;
+    });
+    // What the api stores from the agent's ip_check event.
+    const report = (check: Record<string, unknown>) =>
+      w.db.update(schema.instanceHealth).set({ lastIpCheck: { expected: '203.0.113.10', checkedAt: w.clock.toISOString(), ...check } as never });
+
+    it('a check that saw nothing pauses only once none has passed for 15 minutes, and not as an IP incident', async () => {
+      const { periodicIpChecks } = await import('../src/scheduler.js');
+      // Chrome stopped answering: one check, then a second, see nothing.
+      w.advance(5 * 60_000);
+      await report({ ok: false, observed: [], detail: 'Target.createBrowserContext: context deadline exceeded', okAt: passedAt });
+      await periodicIpChecks(w.deps());
+      w.advance(5 * 60_000);
+      await report({ ok: false, observed: [], detail: 'Target.createBrowserContext: context deadline exceeded', okAt: passedAt });
+      await periodicIpChecks(w.deps());
+      expect((await w.instance()).status).toBe('running');
+      expect(await w.db.select().from(schema.alerts)).toEqual([]);
+
+      // The third, 15 minutes after the last that passed: paused, about when the agent closes its firewall.
+      w.advance(5 * 60_000 + 1_000);
+      await report({ ok: false, observed: [], detail: 'Target.createBrowserContext: context deadline exceeded', okAt: passedAt });
+      await periodicIpChecks(w.deps());
+      expect(await w.instance()).toMatchObject({ status: 'needs_attention', statusReason: 'Network paused while we check your dedicated IP.' });
+      expect(await w.db.select().from(schema.alerts)).toEqual([
+        expect.objectContaining({ severity: 'warning', title: expect.stringContaining('No IP check passed') }),
+      ]);
+    });
+
+    it('another address seen by Chrome pauses at once, as an IP incident', async () => {
+      const { periodicIpChecks } = await import('../src/scheduler.js');
+      w.advance(5 * 60_000);
+      await report({ ok: false, observed: ['198.51.100.7'], okAt: passedAt });
+      await periodicIpChecks(w.deps());
+      expect((await w.instance()).status).toBe('needs_attention');
+      expect(await w.db.select().from(schema.alerts)).toEqual([
+        expect.objectContaining({ severity: 'critical', title: expect.stringContaining('IP check failed') }),
+      ]);
+    });
+  });
 });
 
 describe('backups, restore and recover', () => {

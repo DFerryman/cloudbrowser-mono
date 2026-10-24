@@ -477,7 +477,8 @@ alerts.
 | Premium create *Failed* with `UnauthorizedOperation`; Basic still works | engine logs; the runtime policy | The runtime identity may not launch `c7i.xlarge`/`c6i.xlarge`/`c5.xlarge` yet (Premium step 1). Such a refusal does not block the region for Basic |
 | Running, but the live view stays black | browser devtools console; api config | TURN key missing on the api; gateway domain or viewer keys wrong |
 | Chrome fills only part of the desktop, with black space on the right | Browser supervisor configuration and `openbox` process | Preserve the upstream Openbox program when replacing the Chrome configuration; `--start-maximized` needs a window manager |
-| *Needs attention*: "Network paused while we check your dedicated IP" | /admin → the browser → Last IP check | Chrome saw a different IP than the Elastic IP; it stays blocked until checked |
+| *Needs attention*: "Network paused while we check your dedicated IP" | /admin → the browser → Last IP check | Chrome saw a different IP than the Elastic IP (critical alert, paused at once); it stays blocked until checked |
+| Warning alert "No IP check passed … in 15 minutes", Last IP check with no address and a detail such as `Target.createBrowserContext: context deadline exceeded` | api logs `ip check failed` and `vm memory` (agent 0.9.0: available memory and pressure) | Chrome, or the whole VM, stopped answering, so the check could not run; nothing says the IP changed. Little memory available with high pressure is a VM out of memory. The user's Restart browser starts the VM again |
 
 The browser container starts supervisor as root (`--user root` in the systemd Docker command),
 while the supervisor program configurations keep Chrome and neko running as `neko`. Running the

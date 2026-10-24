@@ -416,6 +416,8 @@ export const instanceHealth = sqliteTable('instance_health', {
     observed: string[];
     checkedAt: string;
     detail?: string;
+    /** On a failed check: when a check last passed. */
+    okAt?: string;
   }>('last_ip_check'),
   /** Placement generation of the agent that last reported `ready`, and when. */
   agentReadyGeneration: integer('agent_ready_generation'),

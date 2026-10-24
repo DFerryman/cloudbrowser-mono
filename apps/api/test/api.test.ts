@@ -513,8 +513,14 @@ describe('gateway internal API and live view', () => {
     const lastCheck = () => JSON.parse((t.d1.sqlite.prepare('SELECT last_ip_check AS c FROM instance_health WHERE instance_id = ?').get(id) as { c: string }).c);
     await api.agentMessage(id, 1, { t: 'event', kind: 'ip_check', data: { ok: true, observed: [ip], expected: '' } });
     expect(lastCheck()).toMatchObject({ ok: true, expected: ip });
+    const passedAt = lastCheck().checkedAt;
     await api.agentMessage(id, 1, { t: 'event', kind: 'ip_check', data: { ok: true, observed: ['192.0.2.77'], expected: '' } });
-    expect(lastCheck()).toMatchObject({ ok: false, expected: ip, observed: ['192.0.2.77'] });
+    expect(lastCheck()).toMatchObject({ ok: false, expected: ip, observed: ['192.0.2.77'], okAt: passedAt });
+    // Failed checks keep when one last passed (the engine pauses on that), until one passes again.
+    await api.agentMessage(id, 1, { t: 'event', kind: 'ip_check', data: { ok: false, observed: null, detail: 'Target.createBrowserContext: context deadline exceeded', memory: { totalBytes: 4e9, availableBytes: 1e8 } } });
+    expect(lastCheck()).toMatchObject({ ok: false, observed: [], detail: 'Target.createBrowserContext: context deadline exceeded', okAt: passedAt });
+    await api.agentMessage(id, 1, { t: 'event', kind: 'ip_check', data: { ok: true, observed: [ip] } });
+    expect(lastCheck().okAt).toBeUndefined();
   });
 
   it('hands the gateway the plain archive key only while it exists', async () => {
