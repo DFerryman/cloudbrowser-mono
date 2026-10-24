@@ -235,7 +235,7 @@ const en: Article[] = [
     summary: 'Prepaid balance, per-minute metering, held credit and what happens when credit runs out.',
     blocks: [
       { h: 'Prepaid balance', id: 'prepaid' },
-      { p: 'Nevazu is prepaid, with no subscription. Add credit from Billing & usage; you choose the amount on the payment page. Payments are processed by Stripe, or by Creem as our merchant of record (the payment page shows which), with receipts and any VAT or sales tax. Before your first payment, and again whenever the Terms of Service change, you confirm that you have read them before going to the payment page. Unused credit stays on your balance.' },
+      { p: 'Nevazu is prepaid, with no subscription. Add credit from Billing & usage; you choose the amount on the payment page. Payments are processed by Stripe, or by Creem as our merchant of record (the payment page shows which), with receipts and any VAT or sales tax. Before your first payment, and again whenever the Terms of Service or Privacy Policy change, you agree to the Terms of Service and Privacy Policy, and confirm you are not subject to sanctions, before going to the payment page. Unused credit stays on your balance.' },
       { h: 'What is charged', id: 'items' },
       { ul: [
         'Compute: per minute while the browser is awake, including the minute or so it takes to start Chrome when it wakes and to save your profile and shut down when it sleeps (AWS charges for the machine then too).',
@@ -552,7 +552,7 @@ const zh: Article[] = [
     summary: '预付余额、按分钟计量、冻结金额，以及余额用完时会发生什么。',
     blocks: [
       { h: '预付余额', id: 'prepaid' },
-      { p: 'Nevazu 采用预付费，无需订阅。在“账单与用量”中充值，并在支付页面选择金额。支付由 Stripe 或我们的记录商户 Creem 处理（支付页面会显示是哪一家），并提供收据及适用的增值税或销售税。首次付款前，以及每次服务条款更新后，你需要先确认已阅读服务条款，再前往支付页面。未用完的余额会一直保留。' },
+      { p: 'Nevazu 采用预付费，无需订阅。在“账单与用量”中充值，并在支付页面选择金额。支付由 Stripe 或我们的记录商户 Creem 处理（支付页面会显示是哪一家），并提供收据及适用的增值税或销售税。首次付款前，以及每次服务条款或隐私政策更新后，你需要先同意服务条款和隐私政策，并确认本人不受制裁，再前往支付页面。未用完的余额会一直保留。' },
       { h: '收费项目', id: 'items' },
       { ul: [
         '计算：浏览器运行时按分钟计费，包括唤醒时启动 Chrome、休眠时保存配置档案并关机的大约一分钟（这段时间 AWS 同样对机器计费）。',

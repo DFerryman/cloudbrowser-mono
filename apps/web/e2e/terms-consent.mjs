@@ -1,5 +1,5 @@
 // The Terms of Service dialog before a top-up: shown only until the current Terms version is
-// accepted, Confirm disabled until the box is ticked, the Terms link opening in a new tab, the
+// accepted, Confirm disabled until the box is ticked, the Terms and Privacy links opening in a new tab, the
 // version sent with the checkout, Cancel and Escape closing without paying, a stale tab asked to
 // reload, and screenshots in light, dark and phone width. Real web build, local API fixtures.
 // Build apps/web, then: node apps/web/e2e/terms-consent.mjs   (WEB_DIST, SHOT_DIR, PLAYWRIGHT_PATH optional)
@@ -86,21 +86,23 @@ await check('not yet accepted: the dialog opens, Confirm waits for the box, and 
   await dialog(page).waitFor();
   assert.equal(await dialog(page).getByRole('heading').first().textContent(), 'Before you pay');
   assert.doesNotMatch(await dialog(page).textContent(), /You are adding|secure checkout page/);
-  const box = page.getByRole('checkbox', { name: 'I have read the Terms of Service' });
+  const box = page.getByRole('checkbox', { name: 'I agree to the Terms of Service and Privacy Policy, and confirm I am not subject to sanctions or export controls, nor connecting from a sanctioned location.' });
   // The box is focused first, unticked, and Confirm is disabled until it is ticked.
   assert.equal(await box.evaluate((el) => el === document.activeElement), true);
   assert.equal(await box.isChecked(), false);
   const confirm = page.getByRole('button', { name: 'Confirm and pay' });
   assert.equal(await confirm.isDisabled(), true);
-  // The Terms link opens the Terms page in a new tab and says so.
-  const link = dialog(page).getByRole('link', { name: 'Terms of Service' });
-  assert.equal(await link.getAttribute('href'), '/terms');
-  assert.equal(await link.getAttribute('target'), '_blank');
-  assert.match(await page.locator(`#${await link.getAttribute('aria-describedby').then((id) => id.replace(/:/g, '\\:'))}`).textContent(), /new tab/);
-  const [tab] = await Promise.all([context.waitForEvent('page'), link.click()]);
-  await tab.waitForLoadState();
-  assert.equal(new URL(tab.url()).pathname, '/terms');
-  await tab.close();
+  // Each document opens in a new tab, and says so.
+  for (const [name, path] of [['Terms of Service', '/terms'], ['Privacy Policy', '/privacy']]) {
+    const link = dialog(page).getByRole('link', { name });
+    assert.equal(await link.getAttribute('href'), path);
+    assert.equal(await link.getAttribute('target'), '_blank');
+    assert.match(await page.locator(`#${await link.getAttribute('aria-describedby').then((id) => id.replace(/:/g, '\\:'))}`).textContent(), /new tab/);
+    const [tab] = await Promise.all([context.waitForEvent('page'), link.click()]);
+    await tab.waitForLoadState();
+    assert.equal(new URL(tab.url()).pathname, path);
+    await tab.close();
+  }
   // Following the link does not tick the box, and the dialog is still there as it was.
   assert.equal(await box.isChecked(), false);
   await page.keyboard.press('Tab'); // focus comes back into the dialog
@@ -191,7 +193,7 @@ await check('errors show in the dialog; a stale tab is asked to reload', async (
   // The box stays ticked and Confirm can be tried again.
   assert.equal(await page.getByRole('checkbox').isChecked(), true);
   assert.equal(await page.getByRole('button', { name: 'Confirm and pay' }).isEnabled(), true);
-  answer = [409, { type: 'terms_required', title: 'Confirm the Terms of Service', status: 409, detail: 'The Terms of Service have changed. Reload the page, read them and confirm again.' }];
+  answer = [409, { type: 'terms_required', title: 'Confirm the Terms of Service', status: 409, detail: 'The Terms of Service or Privacy Policy have changed. Reload the page, read them and confirm again.' }];
   await page.getByRole('button', { name: 'Confirm and pay' }).click();
   await alert.getByRole('button', { name: 'Reload' }).waitFor();
   assert.match(await alert.textContent(), /were just updated/);

@@ -984,9 +984,10 @@ export const topupCheckouts = sqliteTable('topup_checkouts', {
 });
 
 /**
- * The Terms of Service as published for each version (`TERMS_VERSION`), stored the first time a
- * user accepts that version: `document` is the text in every language exactly as the site served
- * it, and `sha256` its hash, which the build pins next to the version. Append-only (triggers).
+ * What users agree to before paying, as published for each version (`TERMS_VERSION`), stored the
+ * first time a user accepts that version: `document` is the Terms of Service and Privacy Policy in
+ * every language exactly as the site served them (versions before 2026-10-24.4 hold the Terms
+ * only), and `sha256` its hash, which the build pins next to the version. Append-only (triggers).
  */
 export const termsVersions = sqliteTable('terms_versions', {
   version: text('version').primaryKey(),
@@ -996,8 +997,8 @@ export const termsVersions = sqliteTable('terms_versions', {
 });
 
 /**
- * Who accepted which version of the Terms of Service, and when: one row per user and version,
- * written when they tick "I have read the Terms of Service" before paying. A top-up checkout is
+ * Who accepted which version of the Terms of Service and Privacy Policy, and when: one row per
+ * user and version, written when they tick the box agreeing to both before paying. A top-up checkout is
  * only started for a user with a row for the current version, so a new version asks again.
  * Append-only (triggers): kept as evidence of the agreement, with where the request came from.
  */
