@@ -353,14 +353,16 @@ describe('RemoteBrowser', () => {
     await b.connect();
     const ws = FakeWS.all[0]!;
     await readyInput(ws);
+    // Each boundary commits the half click (or more) left over before it, never after it.
     b.move(10, 20);
     b.scroll(0, 120);
-    b.scroll(0, 15);
+    b.scroll(0, 60);
     b.scroll(0, -1);
-    b.scroll(0, -15);
+    // The reversal's immediate click covers its first 120 px.
+    b.scroll(0, -180);
     b.key(true, { key: 'a', code: 'KeyA' });
     b.scroll(0, 120);
-    b.scroll(0, 15);
+    b.scroll(0, 60);
     b.move(30, 40);
     expect(ws.sent.map((frame: any) => [frame.data.event, frame.data.payload])).toEqual([
       ['control/move', { x: 10, y: 20 }],

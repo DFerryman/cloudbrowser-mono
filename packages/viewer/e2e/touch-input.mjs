@@ -121,6 +121,30 @@ try {
     assert.notEqual(state.active, 'textarea');
     check('native touch swipe: remote scroll without click or keyboard');
 
+    // The page moves as far as the finger did (the picture is 1:1 here), within one wheel click.
+    // Any other message ends a scroll gesture (sendInput), so a swipe that a deferred screen change
+    // landed in is measured again.
+    const swipe = async (distance) => {
+      await page.evaluate(() => window.touchHarness.resetRemote());
+      await clear(page);
+      await sendTouch('touchStart', [[point.x, point.y + 300]]);
+      for (let moved = 20; moved <= distance; moved += 20) {
+        await sendTouch('touchMove', [[point.x, point.y + 300 - moved]]);
+        await settle(page);
+      }
+      await sendTouch('touchEnd');
+      await page.waitForTimeout(150);
+      const after = await snapshot(page);
+      return { scrolled: after.remoteScroll.y, other: after.wire.some((f) => f.event !== 'control/scroll' && f.event !== 'control/move') };
+    };
+    for (const distance of [60, 300, 600]) {
+      let result = await swipe(distance);
+      for (let tries = 1; result.other && tries < 3; tries++) result = await swipe(distance);
+      assert.ok(!result.other, 'A swipe must be measurable without other input in it');
+      assert.ok(Math.abs(result.scrolled - distance) <= 120, `A ${distance} px swipe must scroll about ${distance} px, not ${result.scrolled}`);
+    }
+    check('native touch swipe: the page moves as far as the finger, within one wheel click');
+
     await clear(page);
     await sendTouch('touchStart', [[point.x, point.y]]);
     await sendTouch('touchCancel');
