@@ -168,6 +168,12 @@ export const LiveQualityReport = z.object({
    * still missing, mostly resends. Optional: older viewers do not send it.
    */
   jitterBufferTargetMs: z.number().min(0).max(60_000).nullable().optional(),
+  /**
+   * The least of that target the path's jitter called for, before keeping the picture in step with
+   * the sound (and any delay the viewer asked for). `jitterBufferTargetMs` above it is the browser
+   * holding the picture back to match the sound. Optional: older viewers do not send it.
+   */
+  jitterBufferMinimumMs: z.number().min(0).max(60_000).nullable().optional(),
 }).strict();
 export type LiveQualityReport = z.infer<typeof LiveQualityReport>;
 

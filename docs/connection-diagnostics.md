@@ -167,7 +167,8 @@ gateway's stages for each of its attempts, the VM tunnel's events and what the V
 stream ("What the VM saw" below), its quality reports and the browser's D1 rows (region,
 machine, agent and Chrome version), and ends with what stopped each attempt. It reads only the fields these logs are written with, never request headers.
 Its `delay` line says how long frames waited in the viewer before decoding, and how much of that
-was the browser's smoothing rather than waiting for resends (`double20` below).
+was the browser's smoothing rather than waiting for resends (`double20` below), and how much of
+the smoothing kept the picture in step with the sound (`double21`).
 
 ```sh
 CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… node scripts/session-trace.mjs <id> [--hours 24] [--json]
@@ -211,6 +212,7 @@ browser did not report it; an empty blob means unknown.
 | `double15`, `double16`, `double17` | NACKs sent, retransmitted packets received, picture loss indications sent (repairs that `double7` does not show) |
 | `double18`, `double19` | Keyframes decoded, picture level changes |
 | `double20` | Average delay the browser aimed to hold each frame for (ms): its smoothing, and keeping the picture in step with the sound |
+| `double21` | The least of that target the path's jitter called for (ms), before keeping the picture in step with the sound |
 
 `double15` to `double19` read 0 in reports from viewers older than them; `blob11` is empty in
 those, so tell them apart by it (`blob11 != ''`). `double16` stays 0 with neko, which resends a
@@ -221,8 +223,9 @@ repaired loss. `double7` counts only what was never repaired.
 to. What `double10` has above `double20` is time frames waited for packets still missing, mostly
 resends, each a round trip at least: it grows with loss and with the distance to the VM. Both
 high and close together is the browser's own smoothing of a jittery path. Every frame waits that
-long before it is shown, on top of the round trip. `double20` reads 0 in reports from viewers
-older than it.
+long before it is shown, on top of the round trip. What `double20` has above `double21` is the
+browser holding the picture back to match the sound, which plays from its own, deeper buffer on
+a jittery path. `double20` and `double21` read 0 in reports from viewers older than them.
 
 Median picture round trip and frame rate by region and country over the last day, with the
 [SQL API](https://developers.cloudflare.com/analytics/analytics-engine/sql-api/):

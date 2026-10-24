@@ -830,7 +830,7 @@ v1.openapi(
         measured(r.loss), r.freezes, measured(r.freezeMs), measured(r.jitterBufferMs), measured(r.decodeMs),
         measured(r.framesDropped), measured(r.width), measured(r.height),
         measured(r.nacks), measured(r.retransmits), measured(r.plis), measured(r.keyframes), measured(r.levelChanges),
-        measured(r.jitterBufferTargetMs),
+        measured(r.jitterBufferTargetMs), measured(r.jitterBufferMinimumMs),
       ],
     });
     return c.body(null, 204);

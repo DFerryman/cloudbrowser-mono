@@ -83,7 +83,7 @@ async function quality(column, value, from) {
   const sql = `SELECT timestamp, blob2 AS country, blob3 AS colo, blob5 AS level, blob6 AS candidate, blob7 AS relay, blob10 AS attempt, blob11 AS build,
     double1 AS duration, double3 AS rtt, double4 AS gateway_rtt, double5 AS fps, double6 AS kbps, double7 AS loss, double8 AS freezes,
     double9 AS freeze_ms, double12 AS dropped, double13 AS width, double14 AS height, double15 AS nacks, double16 AS retransmits,
-    double17 AS plis, double18 AS keyframes, double19 AS level_changes, double10 AS held, double20 AS held_target
+    double17 AS plis, double18 AS keyframes, double19 AS level_changes, double10 AS held, double20 AS held_target, double21 AS held_min
     FROM cloudbrowser_live_quality WHERE ${column} = '${value}' AND timestamp > toDateTime(${Math.floor(from / 1000)}) ORDER BY timestamp`;
   try {
     return (await cf('/analytics_engine/sql', sql, true)).data ?? [];
@@ -172,8 +172,11 @@ function waitVerdict(reports) {
   // The excess is taken over the reports that carry a target, never one average against another.
   const target = mean('held_target', aimed), heldAimed = mean('held', aimed);
   const why = heldAimed - target > 50 ? `the other ${heldAimed - target} ms, for lost packets to be resent` : 'little waiting for resends';
-  if (aimed.length === timed.length) return `frames waited ${held} ms on average before decoding; the browser aimed for ${target} ms (${why})`;
-  return `frames waited ${held} ms on average before decoding; in the reports that say what the browser aimed for (${aimed.length} of ${timed.length}), ${heldAimed} ms against ${target} ms (${why})`;
+  // What the path's jitter alone called for, when every report with a target says it too.
+  const sync = aimed.every((r) => r.held_min > 0) ? target - mean('held_min', aimed) : 0;
+  const synced = sync > 50 ? `; ${sync} ms of that target kept the picture in step with the sound` : '';
+  if (aimed.length === timed.length) return `frames waited ${held} ms on average before decoding; the browser aimed for ${target} ms (${why})${synced}`;
+  return `frames waited ${held} ms on average before decoding; in the reports that say what the browser aimed for (${aimed.length} of ${timed.length}), ${heldAimed} ms against ${target} ms (${why})${synced}`;
 }
 function line(e) {
   if (e.message === 'vm stream') return `${time(e.at)}  vm       ${vmBits(e).join(' ')}`;
@@ -276,7 +279,7 @@ for (const { session: s, events, attempts, vm, quality: q } of report.sessions) 
       const v = (x, unit = '') => (x === undefined || x < 0 ? '?' : `${Math.round(x * 100) / 100}${unit}`);
       // Reports from viewers older than these fields read 0 for them, and carry no build.
       if (!r.build) for (const k of ['nacks', 'retransmits', 'plis', 'keyframes', 'level_changes']) r[k] = -1;
-      console.log(`    ${r.timestamp}  ${r.level || '?'} ${v(r.width)}x${v(r.height)}  rtt ${v(r.rtt, 'ms')} input ${v(r.gateway_rtt, 'ms')}  ${v(r.fps)} fps ${v(r.kbps)} kbps  loss ${v(r.loss * 100, '%')}  freezes ${v(r.freezes)} (${v(r.freeze_ms, 'ms')})  held ${v(r.held, 'ms')}${r.held_target > 0 ? ` (aimed ${v(r.held_target, 'ms')})` : ''}  nack ${v(r.nacks)} rtx ${v(r.retransmits)} pli ${v(r.plis)}  level changes ${v(r.level_changes)}  ${r.country}/${r.colo} ${r.candidate}/${r.relay}`);
+      console.log(`    ${r.timestamp}  ${r.level || '?'} ${v(r.width)}x${v(r.height)}  rtt ${v(r.rtt, 'ms')} input ${v(r.gateway_rtt, 'ms')}  ${v(r.fps)} fps ${v(r.kbps)} kbps  loss ${v(r.loss * 100, '%')}  freezes ${v(r.freezes)} (${v(r.freeze_ms, 'ms')})  held ${v(r.held, 'ms')}${r.held_target > 0 ? ` (aimed ${v(r.held_target, 'ms')}${r.held_min > 0 ? `, jitter alone ${v(r.held_min, 'ms')}` : ''})` : ''}  nack ${v(r.nacks)} rtx ${v(r.retransmits)} pli ${v(r.plis)}  level changes ${v(r.level_changes)}  ${r.country}/${r.colo} ${r.candidate}/${r.relay}`);
     }
   }
 }
