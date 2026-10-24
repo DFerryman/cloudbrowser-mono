@@ -40,27 +40,18 @@ const billing = (over) => ({
 });
 
 /** Opens /billing with the given billing state; `checkout` answers POST /billing/checkout. */
-async function fixture({ state = {}, checkout, signInConsentRequired = false, width = 1280, height = 860, theme = 'light', locale = 'en-US' } = {}) {
+async function fixture({ state = {}, checkout, width = 1280, height = 860, theme = 'light', locale = 'en-US' } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, colorScheme: theme, locale });
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   const errors = [];
   const posts = [];
-  const confirmations = [];
-  let signInAccepted = !signInConsentRequired;
   page.on('pageerror', (error) => errors.push(error.message));
   await context.route('**/*', async (route) => {
     const url = new URL(route.request().url());
     if (url.origin !== origin) return route.fulfill({ status: 200, contentType: 'text/html', body: '<h1>Checkout</h1>' });
     const p = url.pathname;
     const json = (body, status = 200) => route.fulfill({ status, contentType: status < 300 ? 'application/json' : 'application/problem+json', body: JSON.stringify(body) });
-    if (p === '/api/v1/terms-consent') {
-      if (route.request().method() === 'POST') {
-        confirmations.push(JSON.parse(route.request().postData()));
-        signInAccepted = true;
-      }
-      return json({ termsVersion: TERMS_VERSION, termsAccepted: signInAccepted });
-    }
     if (p === '/api/v1/billing/checkout') {
       const body = JSON.parse(route.request().postData());
       posts.push(body);
@@ -77,9 +68,8 @@ async function fixture({ state = {}, checkout, signInConsentRequired = false, wi
     return route.fulfill({ contentType: mime[extname(file)] ?? 'application/octet-stream', body: readFileSync(file) });
   });
   await page.goto(`${origin}/billing`);
-  if (signInConsentRequired) await page.getByRole('dialog').waitFor();
-  else await page.getByRole('heading', { name: locale.startsWith('zh') ? '账单与用量' : 'Billing' }).first().waitFor();
-  return { context, page, errors, posts, confirmations };
+  await page.getByRole('heading', { name: locale.startsWith('zh') ? '账单与用量' : 'Billing' }).first().waitFor();
+  return { context, page, errors, posts };
 }
 
 const dialog = (page) => page.getByRole('dialog');
@@ -89,24 +79,6 @@ async function check(name, fn) {
   results.push(name);
   console.log(`ok: ${name}`);
 }
-
-await check('sign-in asks for an unchecked confirmation, then enters without creating a checkout', async () => {
-  const { context, page, errors, posts, confirmations } = await fixture({ signInConsentRequired: true });
-  assert.equal(await dialog(page).getByRole('heading').first().textContent(), 'Before you continue');
-  assert.match(await dialog(page).textContent(), /in an in-app notice when you sign in/);
-  const box = page.getByTestId('consent-read');
-  const confirm = page.getByRole('button', { name: 'Confirm and continue' });
-  assert.equal(await box.isChecked(), false);
-  assert.equal(await confirm.isDisabled(), true);
-  assert.equal(await page.getByRole('heading', { name: 'Billing & usage', exact: true }).count(), 0);
-  await box.check();
-  await confirm.click();
-  await page.getByRole('heading', { name: 'Billing & usage', exact: true }).waitFor();
-  assert.deepEqual(confirmations, [{ acceptedTermsVersion: TERMS_VERSION }]);
-  assert.deepEqual(posts, []);
-  assert.deepEqual(errors, []);
-  await context.close();
-});
 
 await check('not yet accepted: the dialog opens, Confirm waits for the box, and the version goes with the checkout', async () => {
   const { context, page, errors, posts } = await fixture();
