@@ -1,4 +1,3 @@
-import type { PaymentProviderId } from '@cloudbrowser/contracts';
 import { Button, Dialog, Hint } from '@cloudbrowser/ui';
 import { ExternalLink, Loader2 } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
@@ -14,17 +13,12 @@ import { isTermsRequired } from './hooks.js';
  */
 export function TermsConsentDialog({
   open,
-  amount,
-  provider,
   busy,
   error,
   onConfirm,
   onCancel,
 }: {
   open: boolean;
-  /** The top-up, formatted. */
-  amount: string;
-  provider: PaymentProviderId | null;
   /** The checkout is being created, or the browser is on its way to it. */
   busy: boolean;
   error: unknown;
@@ -59,7 +53,6 @@ export function TermsConsentDialog({
       }
     >
       <div className="space-y-4 text-sm">
-        <p>{t('consent.summary', { amount, provider: provider === 'stripe' ? 'Stripe' : 'Creem' })}</p>
         <div className="border border-border bg-surface px-3 py-3">
           <div className="flex items-start gap-3">
             <input

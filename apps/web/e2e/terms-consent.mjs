@@ -85,7 +85,7 @@ await check('not yet accepted: the dialog opens, Confirm waits for the box, and 
   await page.getByRole('button', { name: '$25.00' }).click();
   await dialog(page).waitFor();
   assert.equal(await dialog(page).getByRole('heading').first().textContent(), 'Before you pay');
-  assert.match(await dialog(page).textContent(), /You are adding \$25\.00 of credit\. Next, you pay on Stripe’s secure checkout page\./);
+  assert.doesNotMatch(await dialog(page).textContent(), /You are adding|secure checkout page/);
   const box = page.getByRole('checkbox', { name: 'I have read the Terms of Service' });
   // The box is focused first, unticked, and Confirm is disabled until it is ticked.
   assert.equal(await box.evaluate((el) => el === document.activeElement), true);
