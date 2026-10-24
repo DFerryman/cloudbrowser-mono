@@ -116,6 +116,11 @@ export class TouchGestureController {
       this.lastTap = null;
       if (this.mode === 'tap' || this.mode === null) this.mode = this.pointers.size === 2 ? 'two' : 'scroll';
       else if (this.mode === 'two') this.mode = 'scroll';
+      else if (this.mode === 'scroll' && this.pointers.size === 2 && this.options.zoom) {
+        // A finger added to a scroll can still pinch, or pan a zoomed picture, but no longer taps.
+        this.mode = 'two';
+        this.twoMoved = true;
+      }
     }
     // Adding a finger changes the centroid, but must not itself scroll the page.
     this.anchor = this.centroid();

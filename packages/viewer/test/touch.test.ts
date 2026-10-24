@@ -368,6 +368,34 @@ describe('TouchGestureController with pinch zoom', () => {
     expect(zoomed.zoom.mock.calls.map(([factor, x, y, dx, dy]) => [Number(factor.toFixed(3)), x, y, dx, dy])).toEqual([[1.02, 150, 90, 0, -10], [0.981, 150, 80, 0, -10]]);
   });
 
+  it('pinches, or pans a zoomed picture, with a finger added to a scroll, and never taps after it', () => {
+    const plain = zoomable(false);
+    plain.gestures.pointerDown(pointer(1, 100, 100));
+    plain.gestures.pointerMove(pointer(1, 100, 80));
+    plain.gestures.pointerDown(pointer(2, 200, 80));
+    plain.gestures.pointerMove(pointer(2, 300, 80));
+    expect(plain.scroll.mock.calls).toEqual([[0, 20]]);
+    expect(plain.zoom).toHaveBeenCalledExactlyOnceWith(2, 200, 80, 50, 0);
+    plain.gestures.pointerUp(pointer(2, 300, 80));
+    plain.gestures.pointerUp(pointer(1, 100, 80));
+    expect(plain.button).not.toHaveBeenCalled();
+
+    const zoomed = zoomable(true);
+    zoomed.gestures.pointerDown(pointer(1, 100, 100));
+    zoomed.gestures.pointerMove(pointer(1, 100, 80));
+    zoomed.gestures.pointerDown(pointer(2, 200, 80));
+    zoomed.gestures.pointerUp(pointer(2, 200, 80));
+    zoomed.gestures.pointerUp(pointer(1, 100, 80));
+    expect(zoomed.button).not.toHaveBeenCalled();
+    zoomed.gestures.pointerDown(pointer(3, 100, 100));
+    zoomed.gestures.pointerMove(pointer(3, 100, 80));
+    zoomed.gestures.pointerDown(pointer(4, 200, 80));
+    zoomed.gestures.pointerMove(pointer(3, 100, 60));
+    zoomed.gestures.pointerMove(pointer(4, 200, 60));
+    expect(zoomed.scroll.mock.calls).toEqual([[0, 20], [0, 20]]);
+    expect(zoomed.zoom.mock.calls.map(([, x, y, dx, dy]) => [x, y, dx, dy])).toEqual([[150, 70, 0, -10], [150, 60, 0, -10]]);
+  });
+
   it('still taps, holds and two-finger taps while zoomed in', () => {
     const { gestures, button } = zoomable(true);
     gestures.pointerDown(pointer(1, 20, 30));
