@@ -1024,6 +1024,48 @@ export const termsAcceptances = sqliteTable(
   (t) => [uniqueIndex('terms_acceptances_user_version_unique').on(t.userId, t.termsVersion)],
 );
 
+/** One planned refund of a closed account: credit owed back on one paid order, and what to refund on it. */
+export type ClosureRefund = {
+  orderId: string;
+  /** `creem` | `stripe`: where the operator refunds it. */
+  provider: string;
+  /** Credit (before tax) given back on this order. */
+  creditMicros: number;
+  /** What to refund on the order, tax included, in its currency's smallest unit. */
+  refundCents: number;
+  currency: string;
+};
+
+/**
+ * A closed account (Terms sections 8 and 9; migration 0040): `closing` while its browsers are
+ * deleted, `refund_due` once the unused paid credit is fixed and waits for an operator, `closed`
+ * when nothing more is owed. `erased_at`: the personal data was erased (after the refund, or 30
+ * days at the latest). Sessions cannot be created for a user with a row here (trigger). Owner: api.
+ */
+export const accountClosures = sqliteTable(
+  'account_closures',
+  {
+    userId: text('user_id')
+      .primaryKey()
+      .references(() => user.id),
+    status: text('status').notNull(),
+    /** contracts ClosureReason, when the user picked one. */
+    reason: text('reason'),
+    requestedAt: ts('requested_at').notNull(),
+    /** Browsers the closure deleted. */
+    browsers: integer('browsers').notNull().default(0),
+    refundMicros: integer('refund_micros'),
+    refundPlan: json<ClosureRefund[]>('refund_plan'),
+    refundDueAt: ts('refund_due_at'),
+    refundRecordedAt: ts('refund_recorded_at'),
+    /** `webhook` (the provider's refund events) or `admin:<id>` (refunded another way). */
+    refundRecordedBy: text('refund_recorded_by'),
+    erasedAt: ts('erased_at'),
+    closedAt: ts('closed_at'),
+  },
+  (t) => [index('account_closures_status_idx').on(t.status)],
+);
+
 /**
  * Every payment webhook, keyed by its event id (Stripe's prefixed `stripe:`): duplicates are
  * ignored (page 6). Each is processed by its own provider.

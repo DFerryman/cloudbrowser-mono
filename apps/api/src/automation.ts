@@ -204,7 +204,7 @@ export function revokeInstanceClientsStatements(db: Db, instanceId: string, now:
  * session may have created one. So does "Disconnect all" on the account page. The browsers'
  * gateways close the open agent sessions at once.
  */
-export async function revokeUserClients(db: Db, env: Pick<Env, 'GATEWAY'>, userId: string, now = new Date(), reason: 'sign_out_everywhere' | 'disconnect_all' = 'sign_out_everywhere'): Promise<number> {
+export async function revokeUserClients(db: Db, env: Pick<Env, 'GATEWAY'>, userId: string, now = new Date(), reason: 'sign_out_everywhere' | 'disconnect_all' | 'account_closed' = 'sign_out_everywhere'): Promise<number> {
   // Codes first: an approval not yet exchanged must not become a sign-in after this.
   await db.update(oauthAuthorizationCodes).set({ usedAt: now })
     .where(and(eq(oauthAuthorizationCodes.userId, userId), isNull(oauthAuthorizationCodes.usedAt)));

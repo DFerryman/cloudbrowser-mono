@@ -93,8 +93,10 @@ export function createAuth(env: Env, db: Db, waitUntil: (p: Promise<unknown>) =>
         async sendMagicLink({ email, token, metadata }) {
           const address = email.trim().toLowerCase();
           if (!(await isInvited(db, address))) return;
-          // Registration only: an existing account is never signed in by link.
-          const send = (await findAccount(db, address))
+          // Registration only: an existing account is never signed in by link. A closed one gets nothing.
+          const existing = await findAccount(db, address);
+          if (existing?.closed) return;
+          const send = existing
             ? sendAlreadyRegistered(env, address)
             : sendRegistrationLink(env, address, `${env.APP_URL}/sign-up/complete?token=${encodeURIComponent(token)}`, metadata?.from === 'sign-in');
           waitUntil(send.catch((e) => console.error('registration email failed', e)));
@@ -111,6 +113,8 @@ export function createAuth(env: Env, db: Db, waitUntil: (p: Promise<unknown>) =>
           if (type !== 'sign-in') return;
           // Answer the same way whether or not the address is invited, so invites cannot be probed.
           if (!(await isInvited(db, email))) return;
+          // A closed account cannot sign in (closure.ts); the form says so before asking for a code.
+          if ((await findAccount(db, email.trim().toLowerCase()))?.closed) return;
           waitUntil(sendSignInCode(env, email, otp).catch((e) => console.error('sign-in email failed', e)));
         },
       }),
@@ -118,20 +122,25 @@ export function createAuth(env: Env, db: Db, waitUntil: (p: Promise<unknown>) =>
   });
 }
 
+/** The account with this address, and whether it was closed (closure.ts). */
 async function findAccount(db: Db, email: string) {
-  const [row] = await db.select({ id: schema.user.id }).from(schema.user).where(eq(sql`lower(${schema.user.email})`, email));
-  return row ?? null;
+  const [row] = await db.select({ id: schema.user.id, closedAt: schema.accountClosures.requestedAt }).from(schema.user)
+    .leftJoin(schema.accountClosures, eq(schema.accountClosures.userId, schema.user.id))
+    .where(eq(sql`lower(${schema.user.email})`, email));
+  return row ? { id: row.id, closed: row.closedAt !== null } : null;
 }
 
-export type SignInMethod = 'passkey' | 'code' | 'register';
+export type SignInMethod = 'passkey' | 'code' | 'register' | 'closed';
 
 /**
  * Existing accounts use a passkey or email code. An unknown address is directed to sign-up
- * without sending mail or creating a registration token.
+ * without sending mail or creating a registration token. A closed account is told so: its address
+ * is free again once the personal data is erased, within 30 days.
  */
 export async function checkSignIn(db: Db, email: string): Promise<SignInMethod> {
   const account = await findAccount(db, email);
   if (!account) return 'register';
+  if (account.closed) return 'closed';
   const [passkeys] = await db.select({ n: count() }).from(schema.passkey).where(eq(schema.passkey.userId, account.id));
   return passkeys && passkeys.n > 0 ? 'passkey' : 'code';
 }
@@ -143,9 +152,11 @@ export async function startSignIn(auth: ReturnType<typeof createAuth>, db: Db, e
   return method;
 }
 
-/** New addresses get a registration link; existing accounts continue by email code. */
-export async function startSignUp(auth: ReturnType<typeof createAuth>, db: Db, email: string, headers: Headers): Promise<'registration' | 'code'> {
-  if (await findAccount(db, email)) {
+/** New addresses get a registration link; existing accounts continue by email code; closed ones get nothing. */
+export async function startSignUp(auth: ReturnType<typeof createAuth>, db: Db, email: string, headers: Headers): Promise<'registration' | 'code' | 'closed'> {
+  const existing = await findAccount(db, email);
+  if (existing?.closed) return 'closed';
+  if (existing) {
     await auth.api.sendVerificationOTP({ body: { email, type: 'sign-in' }, headers });
     return 'code';
   }

@@ -3,7 +3,7 @@ import { Languages, LogOut, Shield } from 'lucide-react';
 import { NavLink, Navigate, Route, Routes } from 'react-router';
 import { ApiError } from '../../lib/api.js';
 import { BrandIcon } from '../../app/BrandIcon.js';
-import { AlertsPage, AuditPage, FindingsPage, OperationsPage, UsersPage } from './Lists.js';
+import { AlertsPage, AuditPage, ClosuresPage, FindingsPage, OperationsPage, UsersPage } from './Lists.js';
 import { BrowserDetailPage, BrowsersPage } from './Browsers.js';
 import { LimitsPage } from './Limits.js';
 import { OverviewPage } from './Overview.js';
@@ -71,6 +71,7 @@ const NAV: [string, AdminKey][] = [
   ['operations', 'nav.operations'],
   ['browsers', 'nav.browsers'],
   ['users', 'nav.users'],
+  ['closures', 'nav.closures'],
   ['aws-provider', 'nav.aws'],
   ['pricing', 'nav.pricing'],
   ['promotions', 'nav.promotions'],
@@ -122,6 +123,7 @@ function Console({ session }: { session: AdminSession }) {
           <Route path="browsers" element={<BrowsersPage />} />
           <Route path="browsers/:id" element={<BrowserDetailPage />} />
           <Route path="users" element={<UsersPage />} />
+          <Route path="closures" element={<ClosuresPage />} />
           <Route path="aws-provider" element={<AwsProviderPage />} />
           <Route path="pricing" element={<PricingPage />} />
           <Route path="promotions" element={<PromotionsPage />} />

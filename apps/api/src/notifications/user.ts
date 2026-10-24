@@ -12,6 +12,11 @@
  * | Browser stopped / network paused | The engine stopped a browser or paused its network | Once per event (the engine's notice id) |
  * | Reward credited               | A promotion's reward reached the balance          | One email for all rewards credited together, at most one per REWARD_COOLDOWN_MS |
  * | Coding-agent key created      | The owner created an access key for a browser     | Once per key (keys are rate limited like every API write) |
+ * | Account closure code          | The user asks to close their account              | One a minute at most (closure.ts)                      |
+ * | Account closed / data erased  | The closure is accepted; the personal data is erased | Once each (closure.ts)                              |
+ *
+ * A closed account gets nothing else: sendToUser skips it, and the closure emails go to the address
+ * the account had when they were sent.
  *
  * Security, credit-exhaustion and browser notices are never held back: they are rare and the user
  * must act on them. Only the advisory ones (low balance, rewards) have a cooldown. Funded-time,
@@ -142,6 +147,63 @@ export function agentSignInMessage(appName: string, browserName: string, days: n
     ],
     details: [{ label: 'Browser', value: browserName }, { label: 'App', value: appName }, { label: 'Access lasts', value: until }],
     action: { label: 'Review coding-agent access', url },
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Account closure (closure.ts)
+
+/** The code that confirms closing the account. Sent to the account's address only. */
+export function closureCodeMessage(appUrl: string, code: string): Message {
+  return renderEmail(appUrl, {
+    subject: `Your Nevazu account closure code: ${code}`,
+    category: 'Account security',
+    title: 'Confirm closing your account.',
+    preview: 'Enter this code to close your Nevazu account. It expires in 5 minutes.',
+    paragraphs: ['Enter this code in the Close account dialog to confirm. Closing your account permanently deletes every browser and its data.'],
+    code,
+    codeLabel: 'Your account closure code is',
+    note: 'If you did not ask to close your account, do not share this code with anyone, and sign out everywhere from your account page. Nothing has changed yet.',
+  });
+}
+
+/** The closure was accepted: what was deleted, what is refunded and what is kept. */
+export function closureStartedMessage(appUrl: string, input: { browsers: number; refundMicros: number; refundDays: number; eraseDays: number; supportEmail: string }): Message {
+  const browsers = `${input.browsers} ${input.browsers === 1 ? 'browser' : 'browsers'}`;
+  return renderEmail(appUrl, {
+    subject: 'Your Nevazu account is closed',
+    category: 'Your account',
+    title: 'Your account is closed.',
+    preview: 'We are deleting your browsers and will refund your unused credit.',
+    paragraphs: [
+      `As you asked, your Nevazu account is closed. You have been signed out everywhere and ${input.browsers ? `your ${browsers} and their data are being permanently deleted` : 'you had no browsers to delete'}.`,
+      input.refundMicros > 0
+        ? `We will refund your unused paid credit, about ${usd(input.refundMicros)}, to your original payment method within ${input.refundDays} days. The exact amount is fixed once your browsers are deleted. The payment provider sends the receipt.`
+        : 'You have no unused paid credit to refund. Promotional and signup credit is not refunded.',
+      `Your email address and other personal data are erased once the refund is made, and within ${input.eraseDays} days at the latest. We keep billing records and your acceptance of the Terms of Service as the law and our Privacy Policy describe.`,
+    ],
+    details: [{ label: 'Browsers deleted', value: String(input.browsers) }, { label: 'Refund', value: input.refundMicros > 0 ? `about ${usd(input.refundMicros)}` : 'none' }],
+    note: `If you did not close your account, write to ${input.supportEmail} at once.`,
+  });
+}
+
+/** The last email to the address: the personal data is being erased now. */
+export function closureErasedMessage(appUrl: string, input: { refundMicros: number; refunded: boolean; supportEmail: string }): Message {
+  return renderEmail(appUrl, {
+    subject: 'Your Nevazu account data has been erased',
+    category: 'Your account',
+    title: 'Your data has been erased.',
+    preview: 'This is the last email we send to this address.',
+    paragraphs: [
+      'The closure of your Nevazu account is complete. Your email address and other personal data are erased now, and this is the last email we send to this address.',
+      input.refundMicros <= 0
+        ? 'There was no unused paid credit to refund.'
+        : input.refunded
+          ? `Your refund of ${usd(input.refundMicros)} has been made to your original payment method.`
+          : `Your refund of ${usd(input.refundMicros)} is still being processed and will reach your original payment method. The payment provider sends the receipt.`,
+      'You can create a new account with this address at any time. Nothing from the closed account carries over.',
+    ],
+    note: `Questions about your refund: ${input.supportEmail}.`,
   });
 }
 

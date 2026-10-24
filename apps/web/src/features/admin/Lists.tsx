@@ -2,7 +2,7 @@ import { TERMS_VERSION } from '@cloudbrowser/contracts';
 import { Button, Dialog, Input, Label, Select, useToast } from '@cloudbrowser/ui';
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { ADMIN_PAGE, post, usd, useAdmin, useAdminAction, useAdminPage, when, type AlertRow, type OperationRow, type Row, type UserRow } from './data.js';
+import { ADMIN_PAGE, post, usd, useAdmin, useAdminAction, useAdminPage, when, type AlertRow, type ClosureRow, type OperationRow, type Row, type UserRow } from './data.js';
 import { useT } from './i18n.js';
 import { Json, Mono, PageTitle, Pill, ReasonDialog, StatusPill, Table } from './ui.js';
 
@@ -198,7 +198,7 @@ export function FindingsPage() {
 }
 
 export function UsersPage() {
-  const { t, errorText } = useT();
+  const { t, term, errorText } = useT();
   const toast = useToast();
   const [q, setQ] = useState('');
   const [query, setQuery] = useState('');
@@ -236,6 +236,7 @@ export function UsersPage() {
           <span>
             {u.email} {u.admin ? <Pill>{t('users.staff')}</Pill> : null} {u.twoFactorEnabled ? <Pill tone="ok">2FA</Pill> : null}{' '}
             {u.termsVersion ? <Pill tone={u.termsVersion === TERMS_VERSION ? 'ok' : 'warn'}>{t('users.terms', { version: u.termsVersion })}</Pill> : null}
+            {u.closure ? <Link to="/closures"><Pill tone={u.closure === 'closed' ? 'muted' : 'warn'}>{term(u.closure)}</Pill></Link> : null}
             <br />
             <Mono>{u.id}</Mono>
             {u.twoFactorEnabled ? (
@@ -319,6 +320,85 @@ export function UsersPage() {
         busy={thaw.isPending}
         onClose={() => setUnfreeze(null)}
         onConfirm={(reason) => unfreeze && thaw.mutate({ id: unfreeze.id, reason }, { onSuccess: () => setUnfreeze(null), onError: failed })}
+      />
+    </div>
+  );
+}
+
+/** In what currency an order was paid, in its smallest unit. */
+const orderMoney = (cents: number, currency: string) => {
+  const f = new Intl.NumberFormat('en-US', { style: 'currency', currency });
+  return f.format(cents / 10 ** (f.resolvedOptions().maximumFractionDigits ?? 2));
+};
+const REFUND_OVERDUE_DAYS = 21;
+
+/** Closed accounts and the refunds they are owed (api closure.ts). */
+export function ClosuresPage() {
+  const { t, term, errorText } = useT();
+  const toast = useToast();
+  const rows = useAdminPage<ClosureRow>('/closures', ADMIN_PAGE.closures);
+  const [recording, setRecording] = useState<ClosureRow | null>(null);
+  const record = useAdminAction((v: { id: string; reason: string }) => post(`/closures/${v.id}/refund-recorded`, { reason: v.reason }));
+  return (
+    <div>
+      <PageTitle title={t('nav.closures')} />
+      <p className="mb-3 max-w-3xl text-xs text-muted">{t('closures.note')}</p>
+      <Table
+        rows={rows.rows}
+        pager={rows.pager}
+        rowKey={(r) => r.userId}
+        columns={[t('col.account'), t('col.requested'), t('col.status'), t('col.reason'), t('col.browsers'), t('col.refund'), t('col.refundOrders'), '']}
+        empty={t('closures.empty')}
+        cells={(r) => {
+          const overdue = r.status === 'refund_due' && Date.now() - new Date(r.requestedAt).getTime() > REFUND_OVERDUE_DAYS * 86_400_000;
+          return [
+            <span>
+              {r.email ?? <span className="text-muted">{t('closures.erased', { when: when(r.erasedAt) })}</span>}
+              <br />
+              <Mono>{r.userId}</Mono>
+            </span>,
+            when(r.requestedAt),
+            <span className="flex flex-wrap gap-1">
+              <Pill tone={r.status === 'closed' ? 'muted' : r.status === 'refund_due' ? (overdue ? 'bad' : 'warn') : 'warn'}>{term(r.status)}</Pill>
+              {overdue ? <Pill tone="bad">{t('closures.overdue', { days: REFUND_OVERDUE_DAYS })}</Pill> : null}
+            </span>,
+            r.reason ? t(`closures.reason.${r.reason}`) : '—',
+            r.browsers,
+            r.refundMicros === null ? <span className="text-xs text-muted">{t('closures.pendingPlan')}</span> : r.refundMicros > 0 ? <span className="tabular-nums">{usd(r.refundMicros)}</span> : <span className="text-xs text-muted">{t('closures.noRefund')}</span>,
+            r.refundPlan?.length ? (
+              <ul className="space-y-1">
+                {r.refundPlan.map((o) => (
+                  <li key={o.orderId}>
+                    <span className="font-medium tabular-nums">{orderMoney(o.refundCents, o.currency)}</span> <span className="text-xs text-muted">{o.provider}</span>
+                    <br />
+                    <Mono>{o.orderId}</Mono>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              '—'
+            ),
+            r.status === 'refund_due' ? (
+              <Button size="sm" onClick={() => setRecording(r)}>
+                {t('closures.record')}
+              </Button>
+            ) : r.refundRecordedAt ? (
+              <span className="text-xs text-muted">{t('closures.recordedBy', { by: r.refundRecordedBy ?? '', when: when(r.refundRecordedAt) })}</span>
+            ) : null,
+          ];
+        }}
+      />
+      <ReasonDialog
+        open={recording !== null}
+        title={recording ? t('closures.recordTitle', { email: recording.email ?? recording.userId }) : ''}
+        description={recording ? t('closures.recordHelp', { amount: usd(recording.refundMicros ?? 0) }) : undefined}
+        confirm={t('closures.record')}
+        busy={record.isPending}
+        onClose={() => setRecording(null)}
+        onConfirm={(reason) =>
+          recording &&
+          record.mutate({ id: recording.userId, reason }, { onSuccess: () => { setRecording(null); toast(t('closures.recorded')); }, onError: (e) => toast(errorText(e), 'error') })
+        }
       />
     </div>
   );

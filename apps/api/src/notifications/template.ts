@@ -8,6 +8,8 @@ export type EmailContent = {
   preview: string;
   paragraphs: string[];
   code?: string;
+  /** The text version's words before the code; sign-in codes by default. */
+  codeLabel?: string;
   details?: { label: string; value: string }[];
   afterDetails?: string[];
   action?: { label: string; url: string };
@@ -29,7 +31,7 @@ export function renderEmail(appUrl: string, content: EmailContent): Message & { 
   const details = content.details?.length ? `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:6px 0 24px;border-top:1px solid #e5e5e5">${content.details.map((row) => `<tr><td style="padding:14px 12px 14px 0;border-bottom:1px solid #e5e5e5;color:#525252;font-size:13px;line-height:1.6;vertical-align:top;overflow-wrap:anywhere">${escape(row.label)}</td><td align="right" style="padding:14px 0;border-bottom:1px solid #e5e5e5;color:#0a0a0a;font-size:14px;font-weight:600;line-height:1.6;vertical-align:top;overflow-wrap:anywhere">${escape(row.value)}</td></tr>`).join('')}</table>` : '';
   const text = [
     'Nevazu', content.title, ...content.paragraphs,
-    ...(content.code ? [`Your sign-in code is ${content.code}`, 'Expires in 5 minutes. Do not share this code.'] : []),
+    ...(content.code ? [`${content.codeLabel ?? 'Your sign-in code is'} ${content.code}`, 'Expires in 5 minutes. Do not share this code.'] : []),
     ...(content.details?.map((d) => `${d.label}: ${d.value}`) ?? []),
     ...(content.afterDetails ?? []),
     ...(action ? [`${action.label}\n${action.url}`] : []),

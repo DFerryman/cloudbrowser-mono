@@ -61,7 +61,7 @@ export function useAdmin<T>(path: string, opts: { refetchInterval?: number; enab
 }
 
 /** Page sizes for the console's server-paged lists. */
-export const ADMIN_PAGE = { alerts: 50, operations: 50, browsers: 50, ledger: 100, findings: 50, users: 50, audit: 100 } as const;
+export const ADMIN_PAGE = { alerts: 50, operations: 50, browsers: 50, ledger: 100, findings: 50, users: 50, closures: 50, audit: 100 } as const;
 
 /**
  * One page of a server-paged admin list (`limit`/`offset`). Fetches one row more than it shows
@@ -189,6 +189,28 @@ export type UserRow = {
   admin: boolean;
   /** The latest Terms of Service version the user accepted before paying; null before any. */
   termsVersion: string | null;
+  /** Set once the user closed the account (ClosureRow.status). */
+  closure: ClosureRow['status'] | null;
+};
+
+/** A closed account (api closure.ts): open ones first. */
+export type ClosureRow = {
+  userId: string;
+  /** null once the personal data is erased. */
+  email: string | null;
+  status: 'closing' | 'refund_due' | 'closed';
+  reason: 'terms' | 'price' | 'not_needed' | 'other' | null;
+  requestedAt: string;
+  browsers: number;
+  /** Fixed once every browser is deleted. */
+  refundMicros: number | null;
+  /** What to refund on each paid order, newest first; refundCents is in the order's currency, tax included. */
+  refundPlan: { orderId: string; provider: string; creditMicros: number; refundCents: number; currency: string }[] | null;
+  refundDueAt: string | null;
+  refundRecordedAt: string | null;
+  refundRecordedBy: string | null;
+  erasedAt: string | null;
+  closedAt: string | null;
 };
 
 type RatesRow = { compute: number; ip: number; storage: number; snapshot: number; transfer: number };
