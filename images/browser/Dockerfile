@@ -13,6 +13,10 @@
 # - A desktop size it creates on request (a viewer's own shape) took libxcvt's pixel clock, which
 #   put short ones such as 1424×504 below 29.5 Hz, so XRandR refused them at 30; patched, the
 #   clock is exact (neko/exact-refresh.patch).
+# - It offers, so its ICE agent nominates the pair, and it waited 1 s (peer-reflexive) or 2 s
+#   (relay) for a better pair than the relay one a viewer offers, which cannot come; DTLS then
+#   spent a round trip on a cookie. Patched, the first pair that works is nominated and the cookie
+#   is skipped: the first picture comes about 1 s sooner (neko/faster-handshake.patch).
 # Built as neko's own server/Dockerfile does (Go 1.25 on Debian trixie, the base image's OS);
 # NEKO_BUILD_IMAGE is an argument only so a local build can add a proxy's CA certificate.
 ARG NEKO_BUILD_IMAGE=golang:1.25-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73

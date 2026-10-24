@@ -91,6 +91,17 @@ rate, at least 300 kbit/s). Unpatched, neko resent every packet a viewer reporte
 on a busy path the resends overflowed it again, and through a 2.5 Mbit/s bottleneck in a test no
 frame decoded for 20 s.
 
+**neko's handshake.** `images/browser/neko/faster-handshake.patch` brings the first picture
+about a second sooner. neko offers, so its ICE agent nominates the pair to use, and it waited 1 s
+after checks began before taking a peer-reflexive pair and 2 s before a relay one, for a better
+pair that a relay-only viewer never offers; patched, it nominates the first pair that works. DTLS
+also skips the cookie round trip (HelloVerifyRequest): ICE has already checked the viewer's
+address with its credentials, and pion reads DTLS only from checked candidates. Through a TURN
+relay emulating the delay, with the real viewer (median of 3 new connections, time to first
+frame): 17 ms round trip 1517 → 519 ms, 292 ms round trip 3465 → 2975 ms. A viewer that also
+offers a direct pair would need a short host or srflx wait back, or neko could settle on the
+relay before the direct pair is checked.
+
 **Turning Premium on in an existing deployment.** Premium is off (`premium` cap 0) until all of
 this is done, so nothing below affects Basic browsers:
 
