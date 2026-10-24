@@ -66,10 +66,11 @@ describe('Terms of Service consent before payment', () => {
     expect(rows('terms_acceptances')).toHaveLength(1);
   });
 
-  it('ties each acceptance to the exact text of that version, as the site published it', async () => {
+  it('ties each acceptance to the exact Terms and Privacy Policy text of that version, as the site published it', async () => {
     await checkout({ acceptedTermsVersion: TERMS_VERSION });
     expect(rows('terms_versions')).toEqual([expect.objectContaining({ version: TERMS_VERSION, sha256: TERMS_SHA256, document: termsDocument() })]);
-    expect(JSON.parse(String(rows('terms_versions')[0]!.document)).terms.en.title).toBe('Terms of Service');
+    const document = JSON.parse(String(rows('terms_versions')[0]!.document));
+    expect([document.terms.en.title, document.privacy.en.title]).toEqual(['Terms of Service', 'Privacy Policy']);
   });
 
   it('asks again for a new version: an older acceptance does not count, and a stale tab must reload', async () => {

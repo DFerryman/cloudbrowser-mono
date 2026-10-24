@@ -6,10 +6,11 @@ import { rich } from '../../lib/rich.js';
 import { isTermsRequired } from './hooks.js';
 
 /**
- * Asked before a top-up until the user has accepted the current version of the Terms of Service
- * (TERMS_VERSION): Confirm stays disabled until they tick "I have read the Terms of Service", and
- * only then is the checkout created, with the version they accepted; the api records it and asks
- * again only for a new version. The Terms open in a new tab, so the box stays as the user left it.
+ * Asked before a top-up until the user has accepted the current version (TERMS_VERSION) of the
+ * Terms of Service and Privacy Policy: Confirm stays disabled until they tick the box agreeing to
+ * both and confirming they are not subject to sanctions, and only then is the checkout created,
+ * with the version they accepted; the api records it and asks again only for a new version. Both
+ * documents open in a new tab, so the box stays as the user left it.
  */
 export function TermsConsentDialog({
   open,
@@ -66,18 +67,8 @@ export function TermsConsentDialog({
             />
             <label htmlFor={`${id}-read`} className="cursor-pointer font-medium">
               {rich(t('consent.checkbox'), {
-                terms: (
-                  <a
-                    href="/terms"
-                    target="_blank"
-                    rel="noopener"
-                    aria-describedby={`${id}-tab`}
-                    className="inline-flex items-center gap-1 text-accent underline underline-offset-2 hover:text-fg"
-                  >
-                    {t('footer.terms')}
-                    <ExternalLink className="size-3.5" aria-hidden />
-                  </a>
-                ),
+                terms: <DocumentLink href="/terms" label={t('footer.terms')} hint={`${id}-tab`} />,
+                privacy: <DocumentLink href="/privacy" label={t('footer.privacy')} hint={`${id}-tab`} />,
               })}
             </label>
           </div>
@@ -100,5 +91,15 @@ export function TermsConsentDialog({
         </p>
       </div>
     </Dialog>
+  );
+}
+
+/** A policy, opened in a new tab so the dialog keeps its state; `hint` says so. */
+function DocumentLink({ href, label, hint }: { href: string; label: string; hint: string }) {
+  return (
+    <a href={href} target="_blank" rel="noopener" aria-describedby={hint} className="text-accent underline underline-offset-2 hover:text-fg">
+      {label}
+      <ExternalLink className="ml-0.5 inline size-3.5 align-[-2px]" aria-hidden />
+    </a>
   );
 }

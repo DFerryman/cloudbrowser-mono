@@ -193,11 +193,11 @@ billingRoute.openapi(
     const { productId, acceptedTermsVersion } = c.req.valid('json');
     // A tab still showing older Terms: the user reloads, reads the new ones and confirms again.
     if (acceptedTermsVersion !== undefined && acceptedTermsVersion !== TERMS_VERSION) {
-      throw problem(409, 'terms_required', 'The Terms of Service have changed. Reload the page, read them and confirm again.');
+      throw problem(409, 'terms_required', 'The Terms of Service or Privacy Policy have changed. Reload the page, read them and confirm again.');
     }
     const accepting = acceptedTermsVersion === TERMS_VERSION;
     if (!accepting && !(await acceptedCurrentTerms(db, user.id))) {
-      throw problem(409, 'terms_required', 'Confirm that you have read the Terms of Service before you pay. If the page shows no box to tick, reload it.');
+      throw problem(409, 'terms_required', 'Agree to the Terms of Service and Privacy Policy before you pay. If the page shows no box to tick, reload it.');
     }
     const packs = await offeredTopupPacks(db, provider);
     if (!packs.some((p) => p.productId === productId)) throw problem(400, 'validation_failed', 'Unknown top-up.');

@@ -62,10 +62,11 @@ Cloudflare deployment.
   processed from a queue; refunds and disputes debit the balance and a dispute freezes the
   account. Stripe, unlike Creem, is not a merchant of record, so its checkouts add Stripe Tax,
   collect the billing address and tax ids, issue invoices and ask the buyer to accept the Terms
-  (UK seller obligations). Before checkout, the Billing page asks the user to tick "I have read the
-  Terms of Service" until they have accepted the current `TERMS_VERSION`; the api refuses a checkout
-  without that (`terms_required`) and records each acceptance once per user and version in the
-  append-only `terms_acceptances`, linked to that version's text in `terms_versions`
+  (UK seller obligations). Before checkout, the Billing page asks the user to tick a box agreeing
+  to the Terms of Service and Privacy Policy and confirming they are not subject to sanctions,
+  until they have accepted the current `TERMS_VERSION`; the api refuses a checkout without that
+  (`terms_required`) and records each acceptance once per user and version in the append-only
+  `terms_acceptances`, linked to that version's Terms and Privacy Policy text in `terms_versions`
   (`apps/api/src/billing/terms.ts`, migration 0039). The engine meters every browser per minute into `usage_records` (compute while
   running; IP and provisioned disks while held; data out from the agent's counter). Storage
   GB-months use actual UTC calendar-month fractions; 730 hours is a display projection only.
