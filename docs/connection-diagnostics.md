@@ -107,6 +107,10 @@ agent's `received` milestone supplies the corresponding application acknowledgem
 | Desktop `system/init` | Signaling request/offer/answer and client `peer_connected` |
 | Client `peer_connected` | Client `first_frame`; a peer connection alone is not decoded video |
 
+`first_frame` is a frame the page presented. A hidden page presents none, so there it is a
+decoded frame (its `media.playback.visibility` reads `hidden`); before, a view opened in a
+background tab timed out (`connection_timeout`) and reconnected with its video playing.
+
 An absent milestone alone is not proof of the cause: inspect the terminal timeout/error, the
 other side's acknowledgement and logs from the same relay. Stale relay milestones retain
 their original stage, failure code and duration, with `ignored: true`; they never advance a
@@ -225,7 +229,9 @@ ORDER BY reports DESC
 ```
 
 `double3` includes the viewer's route to its nearest Cloudflare PoP and the backbone onward to
-the VM; `double4` is the route to the browser's gateway object. A high `double3` with a normal
+the VM; `double4` is the route to the browser's gateway object. A shown, live view pings that
+route at least every 15 s; before, only input did, so `double4` read -1 for viewers who only
+watched. A high `double3` with a normal
 `double4` points at the media path (TURN, the VM's network); both high points at the viewer's
 own network, a VPN, or a detour such as mainland China's.
 

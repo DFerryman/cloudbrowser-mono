@@ -107,6 +107,12 @@ const MAX_MEDIA_SAMPLE_AGE_MS = 5000;
 const PING = '{"t":"ping"}';
 /** With nothing from the gateway this long, the viewer pings it (neko's own heartbeat arrives every 10 s while its relay is up). */
 const KEEPALIVE_MS = 12_000;
+/**
+ * A live, shown view pings at least this often, so its quality report has the input route's round
+ * trip (gatewayRttMs) for a viewer who only watches: neko's heartbeat keeps the keepalive from
+ * ever pinging, and input confirmation pings only after input.
+ */
+const RTT_SAMPLE_MS = 15_000;
 /** A socket that answers nothing this long after a ping is dead: mobile networks drop connections without closing them. */
 const PONG_TIMEOUT_MS = 8_000;
 /** How often the socket is checked; a much longer gap between checks means the page was frozen. */
@@ -242,6 +248,7 @@ export class RemoteBrowser {
   private lastHeardAt = 0;
   /** Pings waiting for their pongs, oldest first: the socket answers them in order. */
   private pings: { at: number; frames: number; probe: boolean }[] = [];
+  private pingedAt = 0;
   private lastTickAt = 0;
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
   private ackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -867,6 +874,7 @@ export class RemoteBrowser {
     this.connectionAttempts = 0;
     this.issue = null;
     this.inputReady = true;
+    this.pingedAt = Date.now(); // The first round-trip sample comes one RTT_SAMPLE_MS into the view.
     this.inputQueue.flush();
     if (this.stopped) return; // Queued input could not be delivered (inputFailed).
     this.setState('live');
@@ -1574,7 +1582,7 @@ export class RemoteBrowser {
       this.reconnect(ws, 'transport_stale', { keepQueued: this.holdInput });
       return;
     }
-    if (!oldest && now - this.lastHeardAt > KEEPALIVE_MS) this.sendPing(ws, false);
+    if (!oldest && (now - this.lastHeardAt > KEEPALIVE_MS || (this.state === 'live' && now - this.pingedAt >= RTT_SAMPLE_MS))) this.sendPing(ws, false);
   }
 
   /** The page ran again after a freeze: its socket is checked before input goes into it. */
@@ -1592,7 +1600,8 @@ export class RemoteBrowser {
     } catch {
       return; // A closing socket reports itself.
     }
-    this.pings.push({ at: Date.now(), frames: this.inputQueue.sent, probe });
+    this.pingedAt = Date.now();
+    this.pings.push({ at: this.pingedAt, frames: this.inputQueue.sent, probe });
   }
 
   private pong(ws: WebSocket) {
