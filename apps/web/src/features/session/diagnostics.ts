@@ -75,7 +75,8 @@ export function connectionDiagnosticReporter(
 export function liveQualityReporter(
   sessionId: string,
   send: (report: LiveQualityReport, signal: AbortSignal) => Promise<unknown> = (report, signal) =>
-    api('POST', `/sessions/${encodeURIComponent(sessionId)}/quality`, { body: report, signal }),
+    // keepalive: the last report is often sent as the page goes away.
+    api('POST', `/sessions/${encodeURIComponent(sessionId)}/quality`, { body: report, signal, keepalive: true }),
 ) {
   let disposed = false;
   let active: AbortController | null = null;
@@ -95,10 +96,13 @@ export function liveQualityReporter(
       });
       return true;
     },
+    /**
+     * Refuses reports from the end of this task on. The view reports its last interval as it
+     * disconnects, in a cleanup React runs after the page's: that report is still taken, and it
+     * and one in flight finish within their timeout rather than being cut off.
+     */
     dispose() {
-      disposed = true;
-      active?.abort();
-      active = null;
+      queueMicrotask(() => { disposed = true; });
     },
   };
 }

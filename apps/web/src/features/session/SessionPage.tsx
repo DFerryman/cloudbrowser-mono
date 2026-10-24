@@ -172,10 +172,9 @@ export function SessionPage() {
     if (!session) return;
     const current = { sessionId: session.id, reporter: liveQualityReporter(session.id) };
     quality.current = current;
-    return () => {
-      current.reporter.dispose();
-      if (quality.current === current) quality.current = null;
-    };
+    // The view's last report comes after this cleanup (React cleans up the page before the view
+    // below it): the reporter stays in place to take it, and refuses reports once disposed.
+    return () => current.reporter.dispose();
   }, [session?.id]);
   useEffect(() => {
     if (!session) return;

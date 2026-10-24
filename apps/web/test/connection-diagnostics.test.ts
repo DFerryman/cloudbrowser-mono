@@ -153,11 +153,16 @@ it('sends one quality report at a time, drops one that cannot go now, and gives 
   expect(send.mock.calls.map(([value]) => value.rttMs)).toEqual([290, 310]);
   await vi.advanceTimersByTimeAsync(3000);
   expect(pending[1]!.signal.aborted).toBe(true);
-  expect(reporter.report(quality)).toBe(true);
+  // The page disposes the reporter before the view below it disconnects and sends its last
+  // interval: that report is still taken and not cut off, and nothing is taken after it.
   reporter.dispose();
+  expect(reporter.report(quality)).toBe(true);
   await Promise.resolve();
-  expect(pending[2]!.signal.aborted).toBe(true);
+  expect(pending[2]!.signal.aborted).toBe(false);
+  pending[2]!.resolve();
+  await vi.advanceTimersByTimeAsync(0);
   expect(reporter.report(quality)).toBe(false);
+  expect(send).toHaveBeenCalledTimes(3);
 });
 
 it('drops quality reports outside the contract before any request is sent', async () => {
