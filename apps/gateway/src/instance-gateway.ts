@@ -250,7 +250,13 @@ export class InstanceGateway extends DurableObject<Env> {
     const live = row ?? (await this.readInstance(await this.instanceId()));
     if (!live) return;
     await this.mcp.load();
-    for (const v of viewers) this.send(v, { t: 'automation_status', connected: this.mcp.open, control: this.controlState(live) });
+    const status = this.automationStatus(this.controlState(live));
+    for (const v of viewers) this.send(v, status);
+  }
+
+  /** What viewers are told about a coding agent: its session, who may drive, and its ask for control while the user holds it. Needs `mcp.load()` first. */
+  private automationStatus(control: ControlState): GatewayToViewer {
+    return { t: 'automation_status', connected: this.mcp.open, control, request: this.mcp.controlRequest(control.mode) };
   }
 
   /** A coding agent's action is activity for auto-sleep and the Settings page, recorded at most every 30 s. */
@@ -466,9 +472,10 @@ export class InstanceGateway extends DurableObject<Env> {
       this.control = { controller: mode === 'agent' ? 'none' : 'user', mode, epoch: (this.control?.epoch ?? 0) + 1 };
       for (const agent of this.sockets('agent')) this.send(agent, { t: 'automation_control', mode, access });
       if (!access) await this.mcp.close('access_off');
-      this.mcp.controlChanged();
+      this.mcp.controlChanged(mode);
       await this.mcp.load();
-      for (const v of this.sockets('viewer')) this.send(v, { t: 'automation_status', connected: this.mcp.open, control: this.control });
+      const status = this.automationStatus(this.control);
+      for (const v of this.sockets('viewer')) this.send(v, status);
       return new Response(null, { status: 204 });
     }
     if (url.pathname === '/revoke-automation' && req.method === 'POST') {
@@ -563,7 +570,7 @@ export class InstanceGateway extends DurableObject<Env> {
         connectionLog('viewer_admission_rejected', { ...admission, generation: row.generation, relayId: attachment.relayId, code: 'authorization_rejected', status: 403 });
         return new Response('session revoked', { status: 403 });
       }
-      const agentSession = await this.mcp.load().then((rec) => !!rec, () => false);
+      await this.mcp.load().catch(() => null);
       // One controller at a time: the newest viewer takes over (page 5).
       for (const old of this.sockets('viewer')) {
         const prior = old.deserializeAttachment() as Attachment | null;
@@ -578,7 +585,7 @@ export class InstanceGateway extends DurableObject<Env> {
       this.send(server, agent ? { t: 'agent_online' } : { t: 'agent_offline' });
       if (agent) this.openViewerRelay(agent, server);
       else connectionLog('viewer_agent_offline', { ...this.identity(server), code: 'relay_unavailable' });
-      this.send(server, { t: 'automation_status', connected: agentSession, control: this.controlState(row) });
+      this.send(server, this.automationStatus(this.controlState(row)));
     } else {
       return new Response('forbidden', { status: 403 });
     }
@@ -780,9 +787,10 @@ export class InstanceGateway extends DurableObject<Env> {
       // Who may drive the browser changed inside the VM (a takeover, a hand-back it applied).
       this.control = frame.control;
       connectionLog('control_changed', { ...this.identity(ws), code: frame.reason });
+      this.mcp.controlChanged(frame.control.mode);
       await this.mcp.load();
-      for (const v of this.sockets('viewer')) this.send(v, { t: 'automation_status', connected: this.mcp.open, control: frame.control });
-      this.mcp.controlChanged();
+      const status = this.automationStatus(frame.control);
+      for (const v of this.sockets('viewer')) this.send(v, status);
       await this.agentRpc(ws, att, frame);
       return;
     }

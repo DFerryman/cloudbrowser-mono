@@ -288,6 +288,100 @@ describe('a coding agent\'s session in the Durable Object', () => {
   });
 });
 
+describe('an agent asking for control while the user holds it', () => {
+  const statuses = (viewer: Socket) => viewer.sent.filter((f): f is { t: 'automation_status'; request?: { remainingMs: number } } =>
+    (f as { t?: string }).t === 'automation_status');
+
+  it('tells viewers when an action is refused for the user\'s control, and stops once control is handed back', async () => {
+    const viewer = (await fx.open('viewer')).socket;
+    expect(statuses(viewer).at(-1)!.request).toBeUndefined();
+    fx.d1.sqlite.exec(`UPDATE browser_instances SET agent_control = 'user' WHERE id = 'browser1'`);
+
+    const refused = await fx.call('act', { steps: [{ type: 'wait', ms: 1 }] });
+    expect(refused.text).toContain('refused: control_user');
+    expect(refused.text).toContain('the live view shows them that you are asking for it');
+    await fx.ctx.settle();
+    const asked = statuses(viewer).at(-1)!;
+    expect(asked).toMatchObject({ connected: false, control: { mode: 'user' }, request: { remainingMs: expect.any(Number) } });
+    expect(asked.request!.remainingMs).toBeGreaterThan(25_000);
+    expect(asked.request!.remainingMs).toBeLessThanOrEqual(30_000);
+
+    // Asked again at once: nothing new to tell.
+    const before = statuses(viewer).length;
+    await fx.call('upload_file', { name: 'a.txt', text: 'a' });
+    await fx.ctx.settle();
+    expect(statuses(viewer)).toHaveLength(before);
+
+    // A viewer that connects now is told too.
+    const second = (await fx.open('viewer')).socket;
+    expect(statuses(second).at(-1)!.request).toMatchObject({ remainingMs: expect.any(Number) });
+
+    fx.d1.sqlite.exec(`UPDATE browser_instances SET agent_control = 'agent' WHERE id = 'browser1'`);
+    await internal().automationControl('browser1', 'agent', true);
+    expect(statuses(second).at(-1)).toMatchObject({ control: { mode: 'agent' } });
+    expect(statuses(second).at(-1)!.request).toBeUndefined();
+
+    // A later takeover starts without the old ask.
+    await fx.frame(agent, { t: 'control_state', control: { controller: 'user', mode: 'user', epoch: 5 }, reason: 'user_input' });
+    expect(statuses(second).at(-1)!.request).toBeUndefined();
+  });
+
+  it('counts a get_status wait, for as long as it waits and a while after, but not a quick look or a view-only key', async () => {
+    const viewer = (await fx.open('viewer')).socket;
+    fx.d1.sqlite.exec(`UPDATE browser_instances SET agent_control = 'user' WHERE id = 'browser1'`);
+    await fx.call('get_status');
+    await fx.call('get_status', { waitForControlMs: 50 }, { key: VIEW_KEY });
+    await fx.call('screenshot');
+    await fx.ctx.settle();
+    expect(statuses(viewer).every((s) => !s.request)).toBe(true);
+
+    const waiting = fx.call('get_status', { waitForControlMs: 20_000 });
+    await vi.waitFor(() => expect(statuses(viewer).at(-1)!.request).toBeDefined());
+    expect(statuses(viewer).at(-1)!.request!.remainingMs).toBeGreaterThan(45_000);
+    fx.d1.sqlite.exec(`UPDATE browser_instances SET agent_control = 'agent' WHERE id = 'browser1'`);
+    await fx.frame(agent, { t: 'control_state', control: { controller: 'none', mode: 'agent', epoch: 6 }, reason: 'resumed' });
+    expect((await waiting).text).toContain('mode agent');
+    expect(statuses(viewer).at(-1)!.request).toBeUndefined();
+  });
+
+  it('counts a screenshot refused by a privacy pause, and forgets the ask when access is turned off', async () => {
+    const viewer = (await fx.open('viewer')).socket;
+    fx.d1.sqlite.exec(`UPDATE browser_instances SET agent_control = 'privacy' WHERE id = 'browser1'`);
+    expect((await fx.call('screenshot')).text).toContain('refused: control_privacy');
+    await fx.ctx.settle();
+    expect(statuses(viewer).at(-1)).toMatchObject({ control: { mode: 'privacy' }, request: { remainingMs: expect.any(Number) } });
+    await internal().automationControl('browser1', 'privacy', false);
+    await fx.ctx.settle();
+    expect(statuses(viewer).at(-1)!.request).toBeUndefined();
+  });
+
+  it('ends a key\'s ask when that key is revoked, even without a session', async () => {
+    const viewer = (await fx.open('viewer')).socket;
+    fx.d1.sqlite.exec(`UPDATE browser_instances SET agent_control = 'user' WHERE id = 'browser1'`);
+    await fx.call('act', { steps: [{ type: 'wait', ms: 1 }] }, { key: OTHER_KEY });
+    await fx.ctx.settle();
+    expect(fx.env.API.openAutomationSession).not.toHaveBeenCalled();
+    expect(statuses(viewer).at(-1)!.request).toBeDefined();
+    await internal().revokeAutomation('browser1', 'client1');
+    await fx.ctx.settle();
+    expect(statuses(viewer).at(-1)!.request).toBeDefined();
+    await internal().revokeAutomation('browser1', 'client2');
+    await fx.ctx.settle();
+    expect(statuses(viewer).at(-1)!.request).toBeUndefined();
+  });
+
+  it('lets the ask lapse when the agent stops asking', async () => {
+    const viewer = (await fx.open('viewer')).socket;
+    fx.d1.sqlite.exec(`UPDATE browser_instances SET agent_control = 'user' WHERE id = 'browser1'`);
+    await fx.call('act', { steps: [{ type: 'wait', ms: 1 }] });
+    await fx.ctx.settle();
+    expect(statuses(viewer).at(-1)!.request).toBeDefined();
+    later(31_000);
+    const next = (await fx.open('viewer')).socket;
+    expect(statuses(next).at(-1)!.request).toBeUndefined();
+  });
+});
+
 describe('VmLink', () => {
   it('keeps two requests\' screenshot blobs apart by blob id, whatever order they arrive in', async () => {
     const sent: unknown[] = [];

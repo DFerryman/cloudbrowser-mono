@@ -1,4 +1,4 @@
-import { AUTOMATION_LIMITS, type AgentFrame, type AutomationRequest, type ControlState, type GatewayToAgent } from '@cloudbrowser/contracts';
+import { AUTOMATION_LIMITS, type AgentControlMode, type AgentFrame, type AutomationRequest, type ControlState, type GatewayToAgent } from '@cloudbrowser/contracts';
 import { createDb, prepaidAccess } from '@cloudbrowser/db';
 import type { Env } from '../env.js';
 import { connectionLog } from '../connection-log.js';
@@ -73,6 +73,14 @@ const STATUS_TIMEOUT_MS = 5000;
 const MAX_UPLOAD_SLOTS = 10;
 /** MCP client names learned from `initialize`, per key, until that key opens a session. */
 const MAX_CLIENT_NAMES = 16;
+/**
+ * How long viewers show an agent's ask for control after its last sign of one: a call refused for
+ * the control mode, or the end of a get_status wait. Long enough for the agent to think between
+ * calls, short enough that an agent which gave up is not shown asking for long.
+ */
+export const CONTROL_REQUEST_MS = 30_000;
+/** An ask that only moves its end by less than this is not announced to viewers again. */
+const CONTROL_REQUEST_ANNOUNCE_MS = 5_000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /** JSON-RPC ids are strings or numbers; `1` and `"1"` are different requests. */
@@ -124,6 +132,13 @@ export class CodingAgentSession {
   private lease: { sessionId: string | null; epoch: number; until: number } | null = null;
   private readonly controlWaiters = new Set<() => void>();
   private readonly clientNames = new Map<string, string>();
+  /**
+   * Until when the agent asks for control while the user holds it, as viewers were last told.
+   * In memory only: a restarted object forgets it, and the agent's next call asks again.
+   */
+  private requestedUntil = 0;
+  /** The key that asked last, so revoking it ends its ask even when it holds no session. */
+  private requestedBy: string | null = null;
 
   constructor(private readonly host: SessionHost) {}
 
@@ -227,8 +242,10 @@ export class CodingAgentSession {
     const changesBrowser = tool === 'act' || tool === 'attach_files' || tool === 'upload_file';
     if (changesBrowser && caller.capability === 'view') return refusal('view_only');
     const mode = controlMode(row);
-    if (changesBrowser && mode !== 'agent') return refusal(mode === 'privacy' ? 'control_privacy' : 'control_user');
-    if (tool === 'screenshot' && mode === 'privacy') return refusal('control_privacy');
+    if ((changesBrowser && mode !== 'agent') || (tool === 'screenshot' && mode === 'privacy')) {
+      if (caller.capability === 'control') this.requestControl(caller.clientId, CONTROL_REQUEST_MS, row);
+      return refusal(mode === 'privacy' ? 'control_privacy' : 'control_user');
+    }
 
     let rec = await this.load();
     // A restarted browser has a fresh VM: whatever the old session held is gone.
@@ -333,7 +350,13 @@ export class CodingAgentSession {
   /** Ends the session: the VM drops its files, the api records why, viewers see no agent. Idempotent. */
   async close(reason: string, row?: LiveInstance): Promise<boolean> {
     const rec = await this.load();
-    if (!rec) return false;
+    // Whatever ended the session (access off, revocation, the browser stopping) ends an ask for control too.
+    const asked = this.requestedUntil > Date.now();
+    this.requestedUntil = 0;
+    if (!rec) {
+      if (asked) this.host.statusChanged(row);
+      return false;
+    }
     this.record = null;
     this.lease = null;
     const link = this.link;
@@ -350,10 +373,16 @@ export class CodingAgentSession {
     return true;
   }
 
-  /** The api revoked one key (or, without a client id, all of them): its session ends now. */
+  /** The api revoked one key (or, without a client id, all of them): its session and its ask for control end now. */
   async revoke(clientId: string | null): Promise<boolean> {
     const rec = await this.load();
-    return !!rec && (!clientId || rec.clientId === clientId) && this.close('client_revoked');
+    if (rec && (!clientId || rec.clientId === clientId)) return this.close('client_revoked');
+    // A key may ask without holding the session (its calls were refused before one opened).
+    if (this.requestedUntil > Date.now() && (!clientId || this.requestedBy === clientId)) {
+      this.requestedUntil = 0;
+      this.host.statusChanged();
+    }
+    return false;
   }
 
   /** The MCP client named itself in `initialize`; the owner sees it next to a busy refusal. */
@@ -438,9 +467,28 @@ export class CodingAgentSession {
     else if (frame.data.t !== 'screen') this.linkFor(rec).onFrame(frame.data);
   }
 
-  /** Wakes get_status calls waiting for control to come back. */
-  controlChanged() {
+  /** Wakes get_status calls waiting for control to come back; control back with the agent answers its ask. */
+  controlChanged(mode?: AgentControlMode) {
+    if (mode === 'agent') this.requestedUntil = 0;
     for (const wake of [...this.controlWaiters]) wake();
+  }
+
+  /**
+   * The agent asked for control while the user holds it: viewers show the ask at the robot button
+   * for `holdMs`, unless the user hands control back or the session ends first.
+   */
+  private requestControl(clientId: string, holdMs: number, row: LiveInstance) {
+    const until = Date.now() + holdMs;
+    this.requestedBy = clientId;
+    if (until < this.requestedUntil + CONTROL_REQUEST_ANNOUNCE_MS) return;
+    this.requestedUntil = until;
+    this.host.statusChanged(row);
+  }
+
+  /** The agent's ask for control, for viewers: none while control is the agent's. */
+  controlRequest(mode: AgentControlMode): { remainingMs: number } | undefined {
+    const remainingMs = this.requestedUntil - Date.now();
+    return mode !== 'agent' && remainingMs > 0 ? { remainingMs } : undefined;
   }
 
   private waitForControl(ms: number) {
@@ -596,6 +644,10 @@ export class CodingAgentSession {
   private async status(caller: Caller, instanceId: string, waitMs: number): Promise<ToolResult> {
     const deadline = Date.now() + waitMs;
     let row = await this.host.readInstance(instanceId);
+    // Waiting for control is asking for it: the user sees the ask while the agent waits, and a while after.
+    if (row && waitMs > 0 && caller.capability === 'control' && row.user_id === caller.userId && row.agent_access && controlMode(row) !== 'agent') {
+      this.requestControl(caller.clientId, waitMs + CONTROL_REQUEST_MS, row);
+    }
     // Long poll: woken by the user's hand-back (or any control change), then the row says what is true.
     while (row && controlMode(row) !== 'agent' && Date.now() < deadline) {
       await this.waitForControl(deadline - Date.now());

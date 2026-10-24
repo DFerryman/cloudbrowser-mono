@@ -21,8 +21,15 @@ export type ViewerState = 'connecting' | 'live' | 'reconnecting' | 'agent-offlin
  */
 export type ConnectionIssue = 'offline' | 'background' | 'network' | 'gateway' | 'service' | 'desktop';
 
-/** A coding agent's bridge is connected (or not) and who may drive the browser (docs/agent-access.md). */
-export type AutomationStatus = { connected: boolean; control: ControlState };
+/**
+ * A coding agent's session is open (or not) and who may drive the browser (docs/agent-access.md).
+ * `requestUntil`: while the user holds control, the agent asked for it back; the ask stands until
+ * then (this device's clock), unless a newer status says otherwise.
+ */
+export type AutomationStatus = { connected: boolean; control: ControlState; requestUntil: number | null };
+
+/** The longest ask for control a status may announce: a get_status wait (25 s) and the gateway's 30 s after it. */
+const MAX_CONTROL_REQUEST_MS = 60_000;
 
 export interface ConnectInfo {
   gatewayUrl: string;
@@ -1124,10 +1131,13 @@ export class RemoteBrowser {
       case 'file':
         this.files.handle(frame);
         return;
-      case 'automation_status':
+      case 'automation_status': {
+        const remaining = Number(frame.request?.remainingMs);
+        const requestUntil = remaining > 0 ? Date.now() + Math.min(remaining, MAX_CONTROL_REQUEST_MS) : null;
         try {
-          this.opts.onAutomation?.({ connected: frame.connected, control: frame.control });
+          this.opts.onAutomation?.({ connected: frame.connected, control: frame.control, requestUntil });
         } catch { /* A status callback cannot affect the connection. */ }
+      }
     }
   }
 
