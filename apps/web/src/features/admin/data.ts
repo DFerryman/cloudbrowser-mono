@@ -203,7 +203,7 @@ export type ClosureRow = {
   requestedAt: string;
   browsers: number;
   closedAt: string | null;
-  /** Set once every browser is purged: the final balance, and the part of it that was paid for. */
+  /** Once every browser is purged: the balance and the part of it that was paid for, now (what was left at erasure, once erased). */
   balanceMicros: number | null;
   paidMicros: number | null;
   /** That paid credit per order, newest first: what refunding it in full would be, tax included, in the order's currency. */

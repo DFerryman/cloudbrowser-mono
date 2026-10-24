@@ -238,8 +238,7 @@ export async function closureSweep(env: Env, db: Db, now = new Date()) {
 
 /**
  * A top-up credited after the closure (a checkout paid in another tab, a late webhook, the nightly
- * reconciliation): the user can no longer use it, so support is told to refund it, and a closed
- * account's recorded balance is brought up to date.
+ * reconciliation): the user can no longer use it, so support is told to refund it.
  */
 async function latePayments(db: Db, row: typeof accountClosures.$inferSelect, now: Date): Promise<number> {
   const late = await db.select().from(balanceTransactions)
@@ -252,10 +251,6 @@ async function latePayments(db: Db, row: typeof accountClosures.$inferSelect, no
     if (told) continue;
     await raiseAlert(db, { source: 'billing', severity: 'warning', title: `A payment arrived after account ${row.userId} was closed: $${(p.amountMicros / 1e6).toFixed(2)} credit on order ${p.orderId}; refund it in ${p.actor === 'stripe' ? 'Stripe' : 'Creem'} (console → Closures)`,
       detail: { userId: row.userId, orderId: p.orderId, creditMicros: p.amountMicros, grossAmountCents: p.grossAmountCents, currency: p.currency }, dedupeKey }, now);
-  }
-  if (row.status === 'closed') {
-    const { balanceMicros, paidMicros, orders } = await unusedPaidCredit(db, row.userId);
-    await db.update(accountClosures).set({ balanceMicros, paidMicros, paidOrders: orders }).where(eq(accountClosures.userId, row.userId));
   }
   return late.length;
 }
@@ -295,6 +290,9 @@ export async function eraseAccount(env: Env, db: Db, row: typeof accountClosures
   const [u] = await db.select({ email: user.email }).from(user).where(eq(user.id, row.userId));
   if (!u) return;
   const email = u.email.toLowerCase();
+  // What was left, after any refund support made, is what the closure keeps on record.
+  const left = await unusedPaidCredit(db, row.userId);
+  await db.update(accountClosures).set({ balanceMicros: left.balanceMicros, paidMicros: left.paidMicros, paidOrders: left.orders }).where(eq(accountClosures.userId, row.userId));
   const [acct] = await db.select({ balance: billingAccounts.balanceMicros }).from(billingAccounts).where(eq(billingAccounts.userId, row.userId));
   if (acct && acct.balance > 0) {
     await applyBalance(db, { userId: row.userId, kind: 'adjustment', amountMicros: -acct.balance, reference: `closure:${row.userId}`, description: 'Account closed: credit not refunded', actor: 'closure' }, now);

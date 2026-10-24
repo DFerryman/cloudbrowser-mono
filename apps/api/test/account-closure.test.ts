@@ -244,19 +244,28 @@ describe('closing an account', () => {
     // Nothing for an operator to press: refunds are made in Creem.
     expect((await adminCall(t, token, 'POST', `/api/v1/admin/closures/${userId}/refund-recorded`, { reason: 'x' })).status).toBe(404);
 
+    // Support refunded half; the console shows only what is left, so nobody refunds it twice.
+    await refundWebhook('ref_half', 'ord_1', 500);
+    expect((await adminCall(t, token, 'GET', '/api/v1/admin/closures')).body).toEqual([expect.objectContaining({
+      balanceMicros: 8_000_000, paidMicros: 5_000_000, paidOrders: [expect.objectContaining({ orderId: 'ord_1', creditMicros: 5_000_000, refundCents: 500 })],
+    })]);
+    // A late payment shows too.
+    await paid('ord_late', 1000, 0);
+    expect((await adminCall(t, token, 'GET', '/api/v1/admin/closures')).body[0]).toMatchObject({ paidMicros: 15_000_000 });
+
     await sweep(new Date(requested + 30 * DAY));
-    expect((await adminCall(t, token, 'GET', '/api/v1/admin/closures')).body).toEqual([expect.objectContaining({ userId, email: null, erasedAt: expect.any(String) })]);
+    // After erasure: what was left at that moment, written off.
+    expect((await adminCall(t, token, 'GET', '/api/v1/admin/closures')).body).toEqual([expect.objectContaining({ userId, email: null, erasedAt: expect.any(String), balanceMicros: 18_000_000, paidMicros: 15_000_000 })]);
     expect(rows('SELECT balance_micros FROM billing_accounts WHERE user_id = ?', userId)).toEqual([{ balance_micros: 0 }]);
   });
 
-  it('tells support once of a payment that arrives after the closure, and counts it in the recorded balance', async () => {
+  it('tells support once of a payment that arrives after the closure', async () => {
     await close(await code());
     await sweep();
     expect(closure()).toMatchObject({ status: 'closed', balance_micros: 0, paid_micros: 0 });
     // A checkout left open in another tab is paid after the closure.
     await paid('ord_late', 1000, 200);
     await sweep();
-    expect(closure()).toMatchObject({ balance_micros: 10_000_000, paid_micros: 10_000_000 });
     const alert = () => rows('SELECT severity, title, acknowledged_at FROM alerts WHERE dedupe_key = ?', 'closure-late-payment:ord_late');
     expect(alert()).toEqual([expect.objectContaining({ severity: 'warning', title: expect.stringContaining('$10.00 credit on order ord_late; refund it in Creem') })]);
     t.d1.sqlite.prepare('UPDATE alerts SET acknowledged_at = ? WHERE dedupe_key = ?').run(Date.now(), 'closure-late-payment:ord_late');

@@ -14,6 +14,7 @@ import { acknowledgeAlert } from '../notifications/admin.js';
 import { applyBalance, notifyHub, unfreezeAccount } from '../billing/ledger.js';
 import type { AppEnv } from '../env.js';
 import { systemOperation } from '../ops.js';
+import { unusedPaidCredit } from '../closure.js';
 import { pageQuery } from '../paging.js';
 import { problem } from '../problem.js';
 
@@ -567,9 +568,10 @@ adminRoute.post('/users/:id/unfreeze', async (c) => {
 // --- account closures (../closure.ts) ------------------------------------------------------------
 
 /**
- * Closed accounts, the ones still being deleted first: the final balance, the part of it that was
- * paid for, and what refunding it would take per order, for support when a user asks for a refund.
- * The email is shown until the account's personal data is erased.
+ * Closed accounts, the ones still being deleted first: the balance, the part of it that was paid
+ * for, and what refunding it would take per order, for support when a user asks for a refund.
+ * Until the data is erased these are read from the ledger now, so a refund support already made
+ * is taken off; after, they are what was left at erasure. The email is shown until erasure.
  */
 adminRoute.get('/closures', async (c) => {
   const db = c.get('db');
@@ -581,7 +583,14 @@ adminRoute.get('/closures', async (c) => {
     .orderBy(sql`${accountClosures.status} = 'closed'`, desc(accountClosures.requestedAt))
     .limit(page.limit)
     .offset(page.offset);
-  return c.json(rows.map((r) => ({ ...r.closure, email: r.closure.erasedAt ? null : r.email })));
+  return c.json(await Promise.all(rows.map(async (r) => {
+    const live = r.closure.status === 'closed' && !r.closure.erasedAt ? await unusedPaidCredit(db, r.closure.userId) : null;
+    return {
+      ...r.closure,
+      ...(live ? { balanceMicros: live.balanceMicros, paidMicros: live.paidMicros, paidOrders: live.orders } : {}),
+      email: r.closure.erasedAt ? null : r.email,
+    };
+  })));
 });
 
 // --- pricing and margin (page 6) ---------------------------------------------------------------

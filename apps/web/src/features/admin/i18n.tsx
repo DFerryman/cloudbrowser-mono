@@ -127,7 +127,7 @@ const M = {
   'col.account': ['账户', 'Account'],
   'col.requested': ['申请时间', 'Requested'],
   'col.reason': ['原因', 'Reason'],
-  'col.finalBalance': ['最终余额', 'Final balance'],
+  'col.finalBalance': ['余额', 'Balance'],
   'col.unusedPaid': ['未使用的已付费余额', 'Unused paid credit'],
   'col.paidOrders': ['按订单全额退款', 'Full refund per order'],
   'col.erased': ['个人数据删除', 'Data erased'],
