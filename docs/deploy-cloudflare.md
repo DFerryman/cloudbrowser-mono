@@ -481,15 +481,16 @@ table. It is additive; apply it before deploying, as always: the new api reads t
 Until the three Stripe secrets are set, top-ups keep going to Creem exactly as before.
 
 Migration `0038` adds OAuth sign-in for coding agents (`docs/agent-access.md`, "OAuth sign-in"):
-the `oauth_clients` and `oauth_authorization_codes` tables and five nullable columns on
-`automation_clients`. It is additive; apply it before deploying, as always. Sign-in stays off until
-the gateway's `MCP_OAUTH` var is `on` (with `OAUTH_ISSUER` set to the app's origin): until then the
-gateway's 401 and discovery are unchanged. The api's `OAUTH_LIMITER` rate limit binding is created
-by the deploy. Turning it on also needs the zone's security rule
+the `oauth_clients`, `oauth_authorization_codes` and `oauth_spent_refresh_tokens` tables and three
+nullable columns on `automation_clients`. It is additive; apply it before deploying, as always.
+Sign-in is switched by the `MCP_OAUTH` var of the gateway (discovery, with `OAUTH_ISSUER` set to the
+app's origin) and of the api (the web app offers it); both are `on`. The api's `OAUTH_LIMITER` rate
+limit binding is created by the deploy. Sign-in also needs the zone's security rule
 (`deploy/cloudflare-auth-security.json`) to skip Browser Integrity Check and Security Level for
-`/.well-known/oauth-authorization-server` and `/api/oauth/` on the app host and
-`/.well-known/oauth-protected-resource/` on `connect.<domain>`, so hosted clients such as
-claude.ai can discover and call them. Rollback: set `MCP_OAUTH` back to `off`; existing sign-ins
+`/.well-known/oauth-authorization-server` and `/.well-known/openid-configuration` on the app host
+(`/api/oauth/` is covered by `/api/`) and `/.well-known/oauth-protected-resource/` on
+`connect.<domain>`, so hosted clients such as claude.ai can discover and call them; apply it before
+turning sign-in on. Rollback: set both `MCP_OAUTH` vars back to `off` and deploy; existing sign-ins
 keep working until they end or are disconnected.
 
 The api deploys last: it binds to the gateway's `Internal` entrypoint (to revoke live connections),

@@ -14,7 +14,7 @@
     "MCP_ALLOWED_ORIGINS": "",
     // "on": coding agents may sign in with OAuth (docs/agent-access.md, "OAuth sign-in"); the 401
     // then names /.well-known/oauth-protected-resource/mcp/<id>, which points to OAUTH_ISSUER.
-    "MCP_OAUTH": "off",
+    "MCP_OAUTH": "on",
     "OAUTH_ISSUER": "https://nevazu.com"
   },
   // MCP calls per access key, and failed authentications and upload URL guesses per address.
