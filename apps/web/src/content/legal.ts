@@ -2,7 +2,148 @@ import type { Locale } from '../lib/i18n.js';
 import { SECURITY_EMAIL, SUPPORT_EMAIL } from '../lib/site.js';
 import type { Article } from './types.js';
 
-export type PolicySlug = 'terms' | 'privacy' | 'refunds';
+export type PolicySlug = 'terms' | 'privacy' | 'refunds' | 'dpa';
+
+/**
+ * The Data Processing Addendum for business customers (UK GDPR Article 28). It describes what the
+ * service does today, checked against the code and the live configuration, and says plainly what
+ * is not in place yet rather than promising it. Published in English only.
+ */
+const dpa: Article = {
+  slug: 'dpa',
+  title: 'Data Processing Addendum',
+  summary: 'How we process the personal data in your browsers on your behalf, for business customers under UK or EU data protection law, including what is not in place yet.',
+  blocks: [
+    { p: 'This Data Processing Addendum (“DPA”) applies when you use Nevazu as a business and the personal data in your browsers is covered by UK GDPR, the Data Protection Act 2018 or EU GDPR. It forms part of the Terms of Service between you and Nevazu (“we”, “us”). If this DPA and the Terms conflict about that personal data, this DPA prevails.' },
+    { note: 'This DPA describes what the service does today. Where a safeguard or process is not in place yet, section 11 says so instead of promising it. We will update this DPA as that changes and tell you about material changes before they take effect.' },
+    { h: '1. Roles' },
+    { p: 'For the personal data in your browsers (“your personal data”), you are the controller, or a processor acting for your own controller, and we are your processor.' },
+    { p: 'We are an independent controller for the data we need to run our business: your account and sign-in, billing and payment records, records of your acceptance of the Terms, security and abuse prevention, service logs and live view quality reports, and our audit records. The Privacy Policy covers that data. Annex D lists it too, so you can see the whole picture.' },
+    { h: '2. Your personal data' },
+    { p: 'Your personal data is whatever personal data is stored in or passes through your browsers: the Chrome profile (cookies, sign-ins, history, site storage, saved passwords), downloads, files you upload into a browser, clipboard text, keyboard and pointer input, the live view picture, and screenshots and files exchanged with coding agents you connect. Annex A describes the processing.' },
+    { h: '3. Our obligations' },
+    { ul: [
+      'Instructions: we process your personal data only on your documented instructions. The Terms, this DPA and the way you use the service are those instructions: creating, using, putting to sleep and deleting browsers, choosing each browser’s region, connecting coding agents and uploading files. If the law requires other processing, we tell you first unless the law forbids it.',
+      'We tell you if we believe an instruction breaks data protection law.',
+      'Confidentiality: only people we authorise can access your personal data, and they must keep it confidential. We do not look at the contents of your browsers except to provide the service, when you ask us to for support, or when the law requires it.',
+      'Security: we maintain the measures in Annex B and will not change them in a way that lowers the protection of your personal data.',
+      'Assistance: we help you with requests from individuals (section 7), security and breach notification (section 6), and data protection impact assessments and consultations with a supervisory authority, by giving you the information in this DPA and other reasonable information we hold.',
+    ] },
+    { p: 'You are responsible for having a lawful basis for what you put into your browsers, for following the acceptable use rules in the Terms, and for keeping your sign-in methods and coding-agent access keys secure.' },
+    { h: '4. Sub-processors' },
+    { ul: [
+      'You authorise the sub-processors listed in Annex C.',
+      'We will email your account address at least 30 days before we add or replace a sub-processor, and update Annex C.',
+      `You may object on reasonable data protection grounds within that time. If we cannot resolve the objection, you may delete your browsers and stop using the service; write to ${SUPPORT_EMAIL} about any unused credit.`,
+      'We use our sub-processors under their data protection terms, and we remain responsible to you for their processing of your personal data.',
+    ] },
+    { h: '5. Where your personal data is processed' },
+    { p: 'Your browsers’ virtual machines, their disks and their recovery snapshots stay in the AWS region you choose when you create each browser; a browser’s region cannot change afterwards. The regions on offer are listed in the app; they include the UK, the EU and Switzerland as well as North and South America, Asia-Pacific, Israel and South Africa.' },
+    { p: 'Some of your personal data is stored in the United States whatever region you choose: each time a browser goes to sleep, an encrypted copy of its Chrome profile is stored in Cloudflare R2 in Eastern North America. Our account, browser and billing records are in a Cloudflare database in Eastern North America too.' },
+    { p: 'While you use a browser, the live view picture is relayed through Cloudflare’s TURN service at the Cloudflare location nearest you, and input, clipboard text, files and coding-agent screenshots pass through Cloudflare near your browser’s region. None of these are stored there.' },
+    { p: 'Some regions are in countries without UK or EU adequacy. Your choice of region is your instruction about where your browser data is stored, and you are responsible for choosing a region that fits your obligations. Section 11 explains what is not yet in place for transfers.' },
+    { h: '6. Personal data breaches' },
+    { ul: [
+      'We will tell you without undue delay after we become aware of a personal data breach affecting your personal data, with the information data protection law requires as far as we know it, and add to it as we learn more.',
+      'We will take reasonable steps to contain the breach and reduce its effects, and we will keep a record of it.',
+      'Telling you about a breach is not an admission of fault or liability.',
+    ] },
+    { h: '7. Requests from individuals' },
+    { p: 'You control your personal data directly: you can open a browser and view, change or delete what is in it, and you can delete a browser outright (section 8). That is how you answer requests for access, correction and erasure about data in your browsers.' },
+    { p: 'If someone asks us directly about personal data in your browsers, we will pass the request to you promptly and will not answer it ourselves unless you ask us to. We cannot search inside your browsers for a particular person’s data, and we do not.' },
+    { h: '8. Deletion and return' },
+    { ul: [
+      'When you delete a browser, the deletion is permanent and starts at once. We revoke its access keys and live connections and destroy its archive key, so its encrypted archives can no longer be read. Within minutes a clean-up job deletes the virtual machine, its disks, snapshots and archives and releases its IP address, retrying until the cloud provider confirms each step.',
+      'When your available credit runs out, your browsers stop at once and are kept for seven days. We email you then, after three days and a day before deletion. Unless you add credit, they are then deleted as above.',
+      `To end the service for your whole account, delete your browsers and ask us at ${SUPPORT_EMAIL} to close your account. Account closure is not available in the app yet; we delete the remaining personal data within 30 days of your request, except what the law requires us to keep.`,
+      'We cannot return the contents of your browsers through the service: you can send files into a browser, but there is no channel to download them. Move anything you need out through the browser itself, for example to your own storage, before you delete it, and keep your own copies (Terms section 6).',
+    ] },
+    { p: 'After a browser is deleted, some traces remain:' },
+    { ul: [
+      'A record of the deleted browser (its name, region, settings and dates), its IP address history, and its usage and billing lines stay in our database. Please do not put personal data in browser names.',
+      'Our database can be restored to any point in the last 30 days, so deleted records stay recoverable for up to 30 days.',
+      'Service logs are kept for seven days and live view quality reports for three months (Annex D).',
+      'An archive whose upload started just before the deletion can remain for a short time after its 15-minute upload link expires. It cannot be read, because its key was destroyed first.',
+      'Deleting disks and snapshots completes on AWS’s side under AWS’s own procedures.',
+    ] },
+    { p: 'We keep your personal data longer only where the law requires it, and then protect it under this DPA.' },
+    { h: '9. Information and audits' },
+    { p: 'We will give you the information needed to show that we meet Article 28 of UK GDPR: this DPA, and written answers to a reasonable security questionnaire up to once a year. We do not hold an independent certification and do not offer on-site audits (section 11). Cloudflare and AWS make their own compliance reports available to their customers.' },
+    { h: '10. Liability, term and law' },
+    { ul: [
+      'Liability under this DPA is subject to the limits in section 7 of the Terms, except where the law does not allow liability to be limited.',
+      'This DPA lasts as long as we process your personal data, including the deletion periods in section 8.',
+      'We may update this DPA for changes in the law, the service or our sub-processors, with notice as in section 4. A change that lowers the protection of your personal data needs your agreement.',
+      'This DPA is governed by the law of England and Wales, and the courts of England and Wales have exclusive jurisdiction, as in section 10 of the Terms.',
+    ] },
+    { h: '11. What is not in place yet', id: 'not-yet' },
+    { p: 'We would rather tell you than promise what we cannot do yet. Today:' },
+    { ul: [
+      'Transfers: we have no transfer agreement with you, such as the UK International Data Transfer Agreement or the EU Standard Contractual Clauses, and we have not completed a transfer risk assessment, although encrypted profile archives and our records are stored in the United States (section 5).',
+      'Breaches: we have no written breach response procedure yet. The commitment in section 6 still applies.',
+      'Account closure: not available in the app yet; closures are handled through support (section 8).',
+      'Export: there is no way to download a browser’s files or profile through the service.',
+      'Retention: sign-in sessions, live view session records, coding-agent access records and Terms acceptance records are not deleted automatically yet (Annex D).',
+      'Software updates: Chrome and the operating system inside an existing browser are not updated; a browser keeps the Chrome version it was created with. A new browser gets the current stable Chrome.',
+      'Certification and audits: no independent certification and no on-site audit programme.',
+      'Organisation: no written security policy, staff confidentiality undertakings or access reviews yet.',
+    ] },
+    { h: 'Annex A: Description of the processing', id: 'annex-a' },
+    { ul: [
+      'Subject matter: hosting and running cloud Chrome browsers that you create, view, control and delete, each on its own AWS virtual machine with its own disk and IP address.',
+      'Duration: for as long as you use the service, plus the deletion periods in section 8.',
+      'Nature: storage on the browser’s encrypted disk; transmission of the live view picture, input, clipboard text and files between your devices and the browser; an encrypted archive of the Chrome profile each time a browser goes to sleep; disk snapshots for internal recovery; automated operation by coding agents you connect with your own keys; deletion.',
+      'Purpose: providing the service under the Terms.',
+      'Data subjects: your own users of the service, and anyone whose personal data appears in the websites, accounts and files your users open in your browsers, for example your employees, clients or contacts. You decide who.',
+      'Personal data: whatever you put in your browsers: the Chrome profile (cookies and sign-ins, history, site storage, and saved passwords and autofill if your users save them), downloads, uploaded files and clipboard text; and, in transit only, keyboard and pointer input, the screen picture and coding-agent screenshots.',
+      'Special category data: not needed for the service. It can occur if your use involves it; we apply no measures beyond Annex B, and you decide whether they are enough.',
+      'Frequency: continuous while a browser exists; transmission only while a browser is running and in use.',
+    ] },
+    { h: 'Annex B: Security measures', id: 'annex-b' },
+    { ul: [
+      'Isolation: every browser has its own virtual machine, disk and IP address. The virtual machines accept no inbound connections from the internet, and the browser’s processes cannot reach private, link-local or cloud metadata addresses. Chrome cannot open local files outside its downloads folder, and its debugging port listens only inside the machine.',
+      'Encryption at rest: virtual machine disks and their snapshots are encrypted AWS EBS volumes. Profile archives are encrypted in chunks with AES-256-GCM under a key for each browser, which is stored only in a form wrapped by a master key we keep as a secret. Authenticator secrets and backup codes are encrypted. Inside a browser, Chrome’s own cookie and password encryption uses a fixed key, so their protection at rest relies on the disk encryption.',
+      'Encryption in transit: HTTPS with HSTS for the website and API; secure WebSockets for the live view and coding agents. The live view picture is WebRTC, encrypted between your device and the virtual machine and relayed through TURN. Archives are uploaded over HTTPS links valid for 15 minutes.',
+      'Sign-in: email codes valid for five minutes; optional two-step verification with an authenticator app and backup codes; passkeys; a bot check on requests that send email; rate limits on sign-in and on changes; sessions last 30 days. Live view tokens are single-use and valid for 60 seconds.',
+      'Coding agents: access is per browser and can be turned off. Access keys are 256-bit, shown once and stored only as hashes, can expire or be view-only, can be revoked at once and are revoked when the browser is deleted. OAuth sign-in is an alternative to keys. Any input from you takes control back from the agent.',
+      'Operator access: the operator console is a separate site behind Cloudflare Access with an exact allowlist, and every change made in it is recorded in an audit log. Cloud credentials are split so that the part of the service that creates machines cannot delete them, and the part that deletes them cannot create them.',
+      'Logging: live view diagnostics carry identifiers and fixed stage names only, never tokens, typed text, screenshots or page content. The session gateway does not log requests. API request logs record the IP address, user agent and approximate location, with cookies redacted, and are kept for seven days.',
+      'Recovery: an encrypted archive each time a browser goes to sleep (the last 10, plus one a day for 14 days); automatic recovery to another zone of the same region; database point-in-time recovery for 30 days.',
+      'Section 11 lists the measures that are not in place yet.',
+    ] },
+    { h: 'Annex C: Sub-processors', id: 'annex-c' },
+    { ul: [
+      'Amazon Web Services: the virtual machines, encrypted disks, snapshots and IP addresses of your browsers. Handles everything stored in a browser. Location: the AWS region you choose for each browser.',
+      'Cloudflare, Inc.: hosting of the website, API and session gateway; our database; storage of encrypted profile archives; the live view relay; logs; email delivery. Stores encrypted profile archives, and relays the live view, input, clipboard text, files and coding-agent screenshots without storing them. Location: database and archives in Eastern North America (United States); relays on Cloudflare’s global network.',
+    ] },
+    { p: 'Other parties that receive data but are not sub-processors of your personal data:' },
+    { ul: [
+      'Creem takes payments as merchant of record and receives your account email and payment details at checkout. It acts as a controller for payment data.',
+      'Stripe is integrated but does not take payments today. We will update this list before it does.',
+      'Google: Chrome in your browsers contacts Google services as any Chrome does, for example for Safe Browsing, or Google sign-in if your users choose it. Usage statistics reporting is turned off. This is part of your own use of Chrome; we do not send your data to Google.',
+    ] },
+    { h: 'Annex D: Where data is kept and for how long', id: 'annex-d' },
+    { p: 'Your personal data (we are your processor):' },
+    { ul: [
+      'Chrome profile and downloads: the browser’s encrypted disk, in the region you chose. Kept until you delete the browser, or seven days after your credit runs out.',
+      'Files uploaded into a browser: the browser’s disk. Cleared each time the browser wakes, and after 24 hours.',
+      'Encrypted profile archives: Cloudflare R2, Eastern North America. The last 10, plus one a day for 14 days; made unreadable and then deleted when the browser is deleted.',
+      'Recovery snapshots: AWS, in the browser’s region. Deleted when the recovery ends, within seven days.',
+      'Live view picture, input, clipboard text, files and coding-agent screenshots: Cloudflare, in transit only. Not stored.',
+    ] },
+    { p: 'Our records (we are the controller):' },
+    { ul: [
+      'Account (email address, two-step verification and passkey records): our database in Eastern North America. Kept while the account exists, and deleted within 30 days of a request to close it.',
+      'Sign-in sessions with IP address and user agent; live view session records with country and user agent; coding-agent access records with the last IP address: our database. Not deleted automatically yet.',
+      'Browser records (name, region, settings) and IP address history: our database. Kept after the browser is deleted.',
+      'Billing records, payment references and Terms acceptance records (with IP address, country and user agent): our database. Not deleted automatically; kept at least as long as tax and accounting law requires.',
+      'Operator audit log and alerts: our database. Alerts carry our internal account and browser identifiers, never browser content; critical ones are also emailed to the administrator’s mailbox, which is hosted in China. Not deleted automatically yet.',
+      'API request logs (IP address, user agent, approximate location): Cloudflare. Seven days.',
+      'Live view quality reports (country, network, browser and session identifiers): Cloudflare. Three months.',
+      'Database point-in-time recovery: Cloudflare, Eastern North America. 30 days.',
+    ] },
+  ],
+};
 
 /**
  * The Terms of Service, Privacy Policy and Refund Policy in each supported language.
@@ -133,6 +274,7 @@ const en: Record<PolicySlug, Article> = {
       { p: 'Please contact us before disputing a payment with your bank. While a dispute is open, the account is on hold.' },
     ],
   },
+  dpa,
 };
 
 const zh: Record<PolicySlug, Article> = {
@@ -260,6 +402,13 @@ const zh: Record<PolicySlug, Article> = {
       { h: '拒付', id: 'chargebacks' },
       { p: '在向银行发起支付争议前，请先联系我们。争议处理期间，账户将被暂停。' },
     ],
+  },
+  // The DPA is published in English only; the Chinese site shows the English text under a note.
+  dpa: {
+    ...dpa,
+    title: '数据处理附录',
+    summary: '我们如何代表你处理浏览器中的个人数据，适用于受英国或欧盟数据保护法约束的企业客户，并说明哪些措施尚未到位。',
+    blocks: [{ note: '本数据处理附录仅提供英文版本，以英文版本为准。' }, ...dpa.blocks],
   },
 };
 

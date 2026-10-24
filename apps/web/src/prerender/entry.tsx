@@ -38,6 +38,7 @@ const routes: RouteObject[] = [
       { path: '/terms', element: <LegalPage policy="terms" /> },
       { path: '/privacy', element: <LegalPage policy="privacy" /> },
       { path: '/refunds', element: <LegalPage policy="refunds" /> },
+      { path: '/dpa', element: <LegalPage policy="dpa" /> },
       { path: '/contact', element: <ContactPage /> },
     ],
   },

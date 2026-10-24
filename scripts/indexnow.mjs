@@ -29,7 +29,7 @@ function request(url, body) {
 export function validateUrl(value) {
   const url = new URL(value);
   if (url.origin !== origin || url.username || url.password || url.search || url.hash ||
-      !/^\/(?:pricing|docs(?:\/[a-z0-9-]+)?|terms|privacy|refunds|contact|status)?$/.test(url.pathname)) {
+      !/^\/(?:pricing|docs(?:\/[a-z0-9-]+)?|terms|privacy|refunds|dpa|contact|status)?$/.test(url.pathname)) {
     throw new Error(`Not a public canonical URL: ${value}`);
   }
   return url.href;

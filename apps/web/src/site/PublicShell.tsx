@@ -90,7 +90,7 @@ function Footer() {
   const { t } = useI18n();
   const columns = [
     { title: t('footer.product'), links: [['/pricing', t('nav.pricing')], ['/docs', t('nav.docs')], ['/status', t('nav.status')]] },
-    { title: t('footer.legal'), links: [['/terms', t('footer.terms')], ['/privacy', t('footer.privacy')], ['/refunds', t('footer.refunds')]] },
+    { title: t('footer.legal'), links: [['/terms', t('footer.terms')], ['/privacy', t('footer.privacy')], ['/refunds', t('footer.refunds')], ['/dpa', t('footer.dpa')]] },
     { title: t('footer.company'), links: [['/contact', t('footer.contact')], ['/docs/troubleshooting', t('nav.help')]] },
   ];
   return (

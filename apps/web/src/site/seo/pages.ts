@@ -36,7 +36,7 @@ export function message(key: MessageKey, vars: Record<string, string | number> =
   return s;
 }
 
-export const POLICY_SLUGS: readonly PolicySlug[] = ['terms', 'privacy', 'refunds'];
+export const POLICY_SLUGS: readonly PolicySlug[] = ['terms', 'privacy', 'refunds', 'dpa'];
 
 /**
  * An article's meta description: its summary, and where that is short, its opening paragraph or
