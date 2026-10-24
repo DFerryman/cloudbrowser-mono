@@ -16,6 +16,9 @@ neko_capture_streamsink_frames{codec_name="opus",codec_type="audio",video_id="au
 neko_capture_streamsink_bytes{codec_name="h264",codec_type="video",video_id="full"} 2.74690031e+08
 neko_capture_pipelines_total{codec_name="h264",codec_type="video",submodule="streamsink",video_id="full"} 67
 neko_capture_pipelines_total{codec_name="h264",codec_type="video",submodule="streamsrc",video_id="webcam"} 3
+neko_capture_pipelines_active{codec_name="h264",codec_type="video",submodule="streamsink",video_id="full"} 1
+neko_capture_pipelines_active{codec_name="h264",codec_type="video",submodule="streamsink",video_id="high"} 0
+neko_capture_pipelines_active{codec_name="vp8",codec_type="video",submodule="streamsrc",video_id="webcam"} 1
 neko_capture_pipelines_total{codec_name="opus",codec_type="audio",submodule="streamsink",video_id="audio"} 59
 neko_webrtc_transport_layer_nacks{session_id="admin-1--67pi"} 10009
 neko_webrtc_transport_layer_nacks{session_id="admin-2--x1"} 1
@@ -39,6 +42,9 @@ func TestMetricsReadsLevelsResendsAndCPU(t *testing.T) {
 	}
 	if c.Frames["full"] != 48041 || c.Frames["high"] != 30010 || c.Bytes["full"] != 274690031 || c.Starts["full"] != 67 {
 		t.Fatalf("levels: %+v", c)
+	}
+	if c.Active["full"] != 1 || c.Active["high"] != 0 || len(c.Active) != 2 {
+		t.Fatalf("running levels: %+v", c.Active)
 	}
 	if _, audio := c.Frames["audio"]; audio || c.Starts["webcam"] != 0 || len(c.Starts) != 1 {
 		t.Fatalf("audio and input pipelines must be left out: %+v", c)

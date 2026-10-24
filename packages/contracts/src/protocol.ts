@@ -73,10 +73,11 @@ const streamCount = z.number().nonnegative().max(Number.MAX_SAFE_INTEGER);
 /**
  * heartbeat.stream (agent 0.7.0), while a viewer is connected: what the VM itself saw of the live
  * view since its previous heartbeat, from neko's /metrics and /proc/stat. Per video level the
- * frames per second and kbit/s its encoder produced and the pipelines started (a viewer joining
- * the level or switching to it); NACKs and packets lost as viewers' RTCP reported them; neko's
- * CPU in percent of one core (its encoders included); the VM's in percent of all its CPUs, and
- * the share the hypervisor took (steal: a burstable instance out of credits, or a busy host).
+ * frames per second and kbit/s its encoder produced, the pipelines started (a viewer joining the
+ * level or switching to it) and whether it ran the whole interval (only then is `fps` the
+ * encoder's rate; 0 is a stalled encoder); NACKs and packets lost as viewers' RTCP reported them;
+ * neko's CPU in percent of one core (its encoders included); the VM's in percent of all its CPUs,
+ * and the share the hypervisor took (steal: a burstable instance out of credits, or a busy host).
  */
 export const AgentStreamReport = z.object({
   seconds: z.number().positive().max(3600),
@@ -84,6 +85,7 @@ export const AgentStreamReport = z.object({
     fps: z.number().nonnegative().max(1000),
     kbps: z.number().nonnegative().max(1_000_000),
     starts: z.number().int().nonnegative().max(100_000),
+    whole: z.boolean(),
   }).strict()).refine((levels) => Object.keys(levels).length <= 8).optional(),
   nacks: streamCount.optional(),
   lost: streamCount.optional(),

@@ -132,24 +132,29 @@ const time = (ms) => new Date(ms).toISOString().replace('T', ' ').replace('Z', '
 const LEVEL_FPS = { full: 30, high: 30, medium: 15, low: 10, square: 30 };
 // What the VM saw of the live view over one heartbeat (agent 0.7.0, docs/connection-diagnostics.md).
 function vmBits(e) {
-  const levels = Object.entries(e.levels ?? {}).map(([id, l]) => `${id} ${l.fps}fps/${l.kbps}kbps${l.starts ? ` started ${l.starts}` : ''}`);
-  return [`[encoder ${levels.join(', ') || 'idle'}]`, `[viewers' rtcp nack=${e.nacks ?? '?'} lost=${e.lost ?? '?'}]`,
+  const levels = Object.entries(e.levels ?? {}).map(([id, l]) => `${id} ${l.fps}fps/${l.kbps}kbps${l.starts ? ` started ${l.starts}` : ''}${l.whole ? '' : ' (part)'}`);
+  return [`[encoder ${e.levels === undefined ? 'not read' : levels.join(', ') || 'idle'}]`, `[viewers' rtcp nack=${e.nacks ?? '?'} lost=${e.lost ?? '?'}]`,
     `[cpu neko=${e.nekoCpuPct ?? '?'}% vm=${e.cpuPct ?? '?'}% steal=${e.stealPct ?? '?'}%]`, `viewers=${e.viewers ?? '?'}`];
 }
 /** Where the VM's side fell short over a session: an encoder below its level's frame rate, or CPU. */
 function vmVerdict(reports) {
   if (!reports.length) return null;
   const behind = [];
+  let judged = 0;
   for (const r of reports) {
     for (const [id, l] of Object.entries(r.levels ?? {})) {
-      // A level that started or stopped within the interval ran part of it only.
-      if (!l.starts && LEVEL_FPS[id] && l.fps < 0.8 * LEVEL_FPS[id] && l.fps > 0) behind.push(`${id} ${l.fps}/${LEVEL_FPS[id]} fps`);
+      // Only a level that ran the whole heartbeat shows its encoder's rate; 0 is a stall.
+      if (!l.whole || !LEVEL_FPS[id]) continue;
+      judged++;
+      if (l.fps < 0.8 * LEVEL_FPS[id]) behind.push(`${id} ${l.fps}/${LEVEL_FPS[id]} fps`);
     }
   }
-  const max = (k) => Math.max(...reports.map((r) => r[k] ?? 0));
+  const max = (k) => { const v = reports.map((r) => r[k]).filter((x) => typeof x === 'number'); return v.length ? Math.max(...v) : '?'; };
   const parts = [`${reports.length} heartbeats, CPU up to ${max('cpuPct')}% (neko up to ${max('nekoCpuPct')}% of a core), steal up to ${max('stealPct')}%`];
-  if (behind.length) parts.push(`the encoder fell behind ${behind.length} time(s): ${[...new Set(behind)].slice(0, 4).join(', ')}${max('cpuPct') > 85 || max('stealPct') > 5 ? ' (the VM ran out of CPU)' : ''}`);
-  else parts.push('the encoder kept its frame rate');
+  const starved = max('cpuPct') > 85 || max('stealPct') > 5;
+  if (behind.length) parts.push(`the encoder fell behind ${behind.length} time(s): ${[...new Set(behind)].slice(0, 4).join(', ')}${starved ? ' (the VM ran out of CPU)' : ''}`);
+  else if (judged) parts.push(`the encoder kept its frame rate (${judged} level-heartbeats)`);
+  else parts.push('the encoder\'s frame rate was not measured: no level ran a whole heartbeat, or neko\'s counters were unreadable');
   return parts.join('; ');
 }
 function line(e) {

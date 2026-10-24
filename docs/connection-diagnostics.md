@@ -242,19 +242,22 @@ that interval. It holds counts and rates only, nothing that names a viewer.
 | Field | Value |
 | --- | --- |
 | `seconds` | The interval |
-| `levels.<id>.fps`, `.kbps` | Frames and kbit/s that level's encoder produced; only levels that ran |
+| `levels.<id>.fps`, `.kbps` | Frames and kbit/s that level's encoder produced; only levels that ran or started |
 | `levels.<id>.starts` | Pipeline starts: a viewer joined the level or switched to it |
+| `levels.<id>.whole` | The level ran the whole interval, so `fps` is its encoder's rate |
 | `nacks`, `lost` | NACKs and packets lost, as viewers' RTCP reported them to neko |
 | `nekoCpuPct` | neko's CPU, its encoders included, in percent of one core |
 | `cpuPct`, `stealPct` | The VM's CPU in percent of all its CPUs, and the share the hypervisor took |
 
 neko captures at a fixed rate whatever the screen shows, so a level's `fps` stays at its own
-(full and high 30, medium 15, low 10) unless the encoder falls behind. A level with `starts` 0
-below about 80% of its rate fell behind: with `cpuPct` near 100 or `stealPct` above a few percent
-the VM ran out of CPU (a burstable instance out of credits, or a busy host), otherwise look at
-capture. `kbps` near the level's cap (3000, 1800, 1200, 800) means a busy picture used the whole
-budget; compare it with the viewer's `double6` for what got through. `nacks` rising with `lost`
-flat is loss that resends repaired; `lost` rising with it is loss they did not.
+(full and high 30, medium 15, low 10) unless the encoder falls behind. A level that started or
+stopped within the interval (`whole` false) ran only part of it, and its `fps` says nothing. A
+`whole` level below about 80% of its rate fell behind, and one at 0 stalled: with `cpuPct` near
+100 or `stealPct` above a few percent the VM ran out of CPU (a burstable instance out of credits,
+or a busy host), otherwise look at capture. A report without `levels` could not read neko.
+`kbps` near the level's cap (3000, 1800, 1200, 800) means a busy picture used the whole budget;
+compare it with the viewer's `double6` for what got through. `nacks` rising with `lost` flat is
+loss that resends repaired; `lost` rising with it is loss they did not.
 
 `scripts/session-trace.mjs` shows each report as a `vm` line in the session's timeline and sums
 them up as `vm:` under its attempts. Agents before 0.7.0 send no `stream`, and the trace says so.

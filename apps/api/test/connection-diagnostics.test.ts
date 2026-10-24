@@ -206,7 +206,7 @@ describe('desktop readiness', () => {
 describe('vm stream', () => {
   const stream = {
     seconds: 15,
-    levels: { full: { fps: 29.6, kbps: 1480, starts: 0 }, high: { fps: 0.4, kbps: 20, starts: 1 } },
+    levels: { full: { fps: 29.6, kbps: 1480, starts: 0, whole: true }, high: { fps: 0.4, kbps: 20, starts: 1, whole: false } },
     nacks: 60, lost: 5, nekoCpuPct: 80, cpuPct: 41, stealPct: 3,
   };
 
@@ -224,7 +224,7 @@ describe('vm stream', () => {
 
   it.each([
     { label: 'an unknown field', bad: { ...stream, sessionId: 'admin-1--67pi' } },
-    { label: 'a level name that is not one', bad: { ...stream, levels: { 'http://x': { fps: 1, kbps: 1, starts: 0 } } } },
+    { label: 'a level name that is not one', bad: { ...stream, levels: { 'http://x': { fps: 1, kbps: 1, starts: 0, whole: true } } } },
     { label: 'a share over 100%', bad: { ...stream, cpuPct: 140 } },
     { label: 'a negative count', bad: { ...stream, nacks: -1 } },
   ])('logs nothing for $label, and the heartbeat still counts', async ({ bad }) => {

@@ -7,11 +7,13 @@ import (
 )
 
 // StreamCounters are neko's cumulative counts for the live view (neko.Counters): per video level
-// the frames and bytes encoded and the pipeline starts, viewers' NACKs and losses, neko's CPU.
+// the frames and bytes encoded, the pipeline starts and whether it runs now, viewers' NACKs and
+// losses, neko's CPU.
 type StreamCounters struct {
 	Frames     map[string]float64
 	Bytes      map[string]float64
 	Starts     map[string]float64
+	Active     map[string]float64
 	NACKs      float64
 	Lost       float64
 	CPUSeconds float64
@@ -68,9 +70,11 @@ func (a *Agent) streamReport(ctx context.Context, viewers int, data map[string]a
 }
 
 // streamDelta is the change between two samples: per level the frames per second and kbit/s
-// encoded and the pipelines started, NACKs and packets lost as viewers reported them, neko's CPU
-// (percent of one core) and the VM's (percent of all, and stolen by the hypervisor). A counter
-// that went back (neko restarted) says nothing for this interval.
+// encoded, the pipelines started and whether it ran the whole interval (only then is its frame
+// rate the encoder's), NACKs and packets lost as viewers reported them, neko's CPU (percent of one
+// core) and the VM's (percent of all, and stolen by the hypervisor). A level that ran is reported
+// even with no frame: its encoder stalled. A counter that went back (neko restarted) says nothing
+// for this interval.
 func streamDelta(last, cur streamSample) map[string]any {
 	secs := cur.at.Sub(last.at).Seconds()
 	if secs <= 0 {
@@ -82,11 +86,12 @@ func streamDelta(last, cur streamSample) map[string]any {
 		levels := map[string]any{}
 		for id, frames := range c.Frames {
 			df, ds := frames-l.Frames[id], c.Starts[id]-l.Starts[id]
-			if df < 0 || ds < 0 || (df == 0 && ds == 0) {
+			running := l.Active[id] > 0 && c.Active[id] > 0
+			if df < 0 || ds < 0 || (df == 0 && ds == 0 && !running) {
 				continue
 			}
 			db := math.Max(0, c.Bytes[id]-l.Bytes[id])
-			levels[id] = map[string]any{"fps": round(df/secs, 1), "kbps": math.Round(db * 8 / secs / 1000), "starts": ds}
+			levels[id] = map[string]any{"fps": round(df/secs, 1), "kbps": math.Round(db * 8 / secs / 1000), "starts": ds, "whole": running && ds == 0}
 		}
 		report["levels"] = levels
 		if d := c.NACKs - l.NACKs; d >= 0 {

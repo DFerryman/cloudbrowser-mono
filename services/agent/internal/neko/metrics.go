@@ -19,6 +19,8 @@ type Counters struct {
 	Bytes  map[string]float64
 	// Starts counts the level's pipeline starts: one per viewer joining it or switching to it.
 	Starts map[string]float64
+	// Active is 1 while the level's pipeline runs (a viewer watches it), else 0.
+	Active map[string]float64
 	// NACKs and Lost are what viewers' RTCP reported, summed over every session neko has had.
 	NACKs float64
 	Lost  float64
@@ -50,7 +52,7 @@ func (r *Relay) Metrics(ctx context.Context) (Counters, error) {
 }
 
 func parseMetrics(body io.Reader) (Counters, error) {
-	c := Counters{Frames: map[string]float64{}, Bytes: map[string]float64{}, Starts: map[string]float64{}}
+	c := Counters{Frames: map[string]float64{}, Bytes: map[string]float64{}, Starts: map[string]float64{}, Active: map[string]float64{}}
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 64<<10), 64<<10)
 	for sc.Scan() {
@@ -63,9 +65,9 @@ func parseMetrics(body io.Reader) (Counters, error) {
 			continue
 		}
 		switch name {
-		case "neko_capture_streamsink_frames", "neko_capture_streamsink_bytes", "neko_capture_pipelines_total":
+		case "neko_capture_streamsink_frames", "neko_capture_streamsink_bytes", "neko_capture_pipelines_total", "neko_capture_pipelines_active":
 			// Video levels only: audio has its own pipeline, and the webcam ones take input.
-			if labels["codec_type"] != "video" || (name == "neko_capture_pipelines_total" && labels["submodule"] != "streamsink") {
+			if labels["codec_type"] != "video" || (strings.HasPrefix(name, "neko_capture_pipelines_") && labels["submodule"] != "streamsink") {
 				continue
 			}
 			id := labels["video_id"]
@@ -77,6 +79,8 @@ func parseMetrics(body io.Reader) (Counters, error) {
 				c.Frames[id] = value
 			case "neko_capture_streamsink_bytes":
 				c.Bytes[id] = value
+			case "neko_capture_pipelines_active":
+				c.Active[id] = value
 			default:
 				c.Starts[id] = value
 			}
