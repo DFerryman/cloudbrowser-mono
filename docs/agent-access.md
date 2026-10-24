@@ -234,13 +234,24 @@ so a reconnect or restart never silently returns control to the agent; only an e
 - **The gateway terminates TLS** and is inside the trust boundary, exactly as for the Viewer.
 - **Rate limits are approximate**: Workers Rate Limiting counts per location, and the
   failed-attempt block is per isolate.
-- **Clients without custom headers**: claude.ai and Claude Desktop connectors need OAuth. Until
-  then Claude Desktop can use a local `mcp-remote` (Node) with the header, which is an install.
+- **Clients without custom headers**: claude.ai and Claude Desktop connectors sign in (OAuth
+  sign-in, below); with a key, Claude Desktop needs a local `mcp-remote` (Node), which is an install.
 
 ## Client setup
 
-The agent sets itself up; the user handles only the secret
-(`apps/web/src/features/instances/agent-setup.ts`, shown in the Coding agent panel):
+The Coding agent panel offers two ways, **Sign in with browser** (shown first) and **Access key**,
+each with a handoff for the agent and the per-client steps folded under **Set it up by hand**
+(`apps/web/src/features/instances/agent-setup.ts`).
+
+**Signing in** (`signInHandoff`, `signInSetups`): the handoff is a standard `mcpServers` entry with
+the URL and no header, pointing to the "Signing in instead of a key" section of
+`https://nevazu.com/docs/agent-setup.md`. The agent adds the server by URL (Claude Code
+`claude mcp add --transport http --scope user <name> <url>`; the Claude apps a custom connector;
+Codex `[mcp_servers.<name>]` with `url`, then `codex mcp login <name>`; Cursor, VS Code, Windsurf,
+Gemini CLI and OpenCode their usual entry without headers), and the client's own OAuth sign-in
+does the rest (OAuth sign-in, below). Nothing secret is stored by the user.
+
+**With a key**, the agent sets itself up and the user handles only the secret:
 
 1. The user creates a key and saves it in an environment variable named after the browser,
    `NEVAZU_<BROWSER>_KEY` (`echo 'export …' >> ~/.zshrc`, or `setx` on Windows).
@@ -268,7 +279,7 @@ folded **Set it up by hand** section, filled in for the browser.
 - **Windsurf** (`~/.codeium/windsurf/mcp_config.json`): `{"mcpServers": {"<name>": {"serverUrl": "<url>", "headers": {"Authorization": "Bearer ${env:<ENV>}"}}}}`
 - **Gemini CLI** (`~/.gemini/settings.json`): `{"mcpServers": {"<name>": {"httpUrl": "<url>", "headers": {"Authorization": "Bearer ${<ENV>}"}}}}`
 - **OpenCode** (`~/.config/opencode/opencode.json`): `{"mcp": {"<name>": {"type": "remote", "url": "<url>", "enabled": true, "oauth": false, "headers": {"Authorization": "Bearer {env:<ENV>}"}}}}`
-- **Claude Desktop**: until OAuth, `claude_desktop_config.json` with
+- **Claude Desktop** with a key (a connector signs in instead): `claude_desktop_config.json` with
   `{"mcpServers": {"<name>": {"command": "npx", "args": ["-y", "mcp-remote", "<url>", "--header", "Authorization:Bearer <key>"]}}}`.
 - **Any other client** (Streamable HTTP): the URL and the header. A quick check that lists the tools:
   `curl -s <url> -H "Authorization: Bearer $<ENV>" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
@@ -282,11 +293,16 @@ browser's MCP URL with no key, and its MCP client opens nevazu.com, where the ow
 Nothing secret is written to a configuration file, and claude.ai and Claude Desktop connectors
 work without `mcp-remote`. It follows the MCP authorization spec (OAuth 2.1).
 
-It is behind a switch: the gateway's `MCP_OAUTH` var. While it is `off` (the default), the 401
+It is behind a switch, `MCP_OAUTH`, which is `on` in both Workers' `wrangler.jsonc`. On the
+gateway it turns discovery on (with `OAUTH_ISSUER`, the app's origin); on the api it makes the web
+app offer sign-in (`signIn` in the automation status). While the gateway's is `off`, the 401
 challenge stays `Bearer realm="nevazu"` and the gateway serves no metadata, so no client offers a
-sign-in; the api's endpoints answer but nothing points to them. `on` (with `OAUTH_ISSUER`, the
-app's origin) turns discovery on. The Cloudflare WAF must let `/.well-known/oauth-authorization-server`
-on the app host and `/.well-known/oauth-protected-resource/` on the gateway host through unchallenged.
+sign-in; the api's endpoints answer but nothing points to them. Turning both `off` is the rollback:
+no new sign-in starts, and existing ones work until they end or are disconnected. The zone's skip
+rule (`deploy/cloudflare-auth-security.json`) lets `/.well-known/oauth-authorization-server` (and
+`/.well-known/openid-configuration`, which answers 404) on the app host and
+`/.well-known/oauth-protected-resource/` on the gateway host through Browser Integrity Check and
+Security Level, for `GET`, `HEAD` and `OPTIONS`; `/api/oauth/` is already covered by `/api/`.
 
 - **Discovery.** A request without a key (or with an expired sign-in token) gets
   `WWW-Authenticate: Bearer realm="nevazu", resource_metadata="https://connect.<domain>/.well-known/oauth-protected-resource/mcp/<id>", scope="browser:control"`
