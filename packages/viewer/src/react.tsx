@@ -1,12 +1,13 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type CSSProperties } from 'react';
 import { isMac } from './keyboard.js';
-import { elementPoint, pictureRect, remoteSpace, toRemotePoint, unrotate, type PositionedEvent } from './mapping.js';
+import { elementPoint, pictureRect, remotePerPixel, remoteSpace, rotate, toRemotePoint, unrotate, type PositionedEvent } from './mapping.js';
 import { squarePixels } from './neko.js';
 import type { ConnectionDiagnostic, LiveQualityReport, VideoQuality } from '@cloudbrowser/contracts';
 import type { VideoPreference } from './quality.js';
 import { RemoteBrowser, type AutomationStatus, type ConnectInfo, type ConnectionIssue, type ViewerState } from './remote-browser.js';
 import type { ViewerStats } from './stats.js';
 import { TouchGestureController } from './touch.js';
+import { PictureZoom } from './zoom.js';
 import { TextInputController } from './text-input.js';
 import type { InputFailure } from './input-queue.js';
 import { pastedFiles, type TransferUpdate } from './file-transfer.js';
@@ -35,18 +36,21 @@ async function asPng(file: File): Promise<File> {
 
 /**
  * Marks a tap where the finger lifted, at once: the remote page answers a round trip later, and a
- * tap with nothing to show for a third of a second looked like one that went nowhere.
+ * tap with nothing to show for a third of a second looked like one that went nowhere. A finger
+ * held long enough to right-click or drag gets a larger mark that stays a moment longer.
  */
-function showTap(box: HTMLElement, x: number, y: number) {
+function showTap(box: HTMLElement, x: number, y: number, held = false) {
+  const size = held ? 56 : 32;
   const mark = document.createElement('div');
   mark.setAttribute('aria-hidden', 'true');
   Object.assign(mark.style, {
-    position: 'absolute', left: `${x - 16}px`, top: `${y - 16}px`, width: '32px', height: '32px', borderRadius: '50%',
+    position: 'absolute', left: `${x - size / 2}px`, top: `${y - size / 2}px`, width: `${size}px`, height: `${size}px`, borderRadius: '50%',
     border: '2px solid rgba(255, 255, 255, 0.9)', boxShadow: '0 0 0 1px rgba(0, 0, 0, 0.35)', pointerEvents: 'none', opacity: '0',
   });
   box.appendChild(mark);
-  mark.animate?.([{ opacity: 0.9, transform: 'scale(0.55)' }, { opacity: 0, transform: 'scale(1.1)' }], { duration: 420, easing: 'ease-out' });
-  setTimeout(() => mark.remove(), 460);
+  const duration = held ? 700 : 420;
+  mark.animate?.([{ opacity: 0.9, transform: 'scale(0.55)' }, { opacity: 0, transform: 'scale(1.1)' }], { duration, easing: 'ease-out' });
+  setTimeout(() => mark.remove(), duration + 40);
 }
 
 export interface RemoteBrowserHandle {
@@ -137,6 +141,13 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   debugRef.current = debug;
   const [debugInfo, setDebugInfo] = useState<{ x: number; y: number; lines: string[] } | null>(null);
   const statsRef = useRef<ViewerStats | null>(null);
+  /** The picture pinched bigger on this device; the remote screen keeps its size. */
+  const zoomRef = useRef(new PictureZoom());
+  const zoomLayerRef = useRef<HTMLDivElement>(null);
+  const touchRef = useRef<TouchGestureController | null>(null);
+  const applyZoom = () => {
+    if (zoomLayerRef.current) zoomLayerRef.current.style.transform = zoomRef.current.transform;
+  };
   const callbacks = useRef({ getConnectInfo, onState, onDiagnostic, onStats, onQualityReport, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation, onMutedChange });
   callbacks.current = { getConnectInfo, onState, onDiagnostic, onStats, onQualityReport, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation, onMutedChange };
   /** Plays the current stream again if it is paused; a pointer press calls it, as a user gesture. */
@@ -319,12 +330,18 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       const size = { width: entry.contentRect.width, height: entry.contentRect.height };
       setBoxSize(size);
       fitViewport(size);
+      zoomRef.current.clamp(rotatedRef.current ? { width: size.height, height: size.width } : size);
+      applyZoom();
     });
     ro.observe(box);
     return () => ro.disconnect();
   }, []);
   useEffect(() => {
     if (boxSize) fitViewport(boxSize);
+    // Turning maps the same spot on the screen elsewhere: a tap after it never pairs with one before.
+    touchRef.current?.reset();
+    zoomRef.current.reset();
+    applyZoom();
   }, [rotated]);
 
   /**
@@ -344,7 +361,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     return { x, y, frame };
   };
   const remoteAt = (x: number, y: number, frame: { left: number; top: number; width: number; height: number }) => {
-    return toRemotePoint(x, y, frame, pictureSizeRef.current, browserRef.current?.screenSize ?? null);
+    const shown = zoomRef.current.unzoom(x - frame.left, y - frame.top);
+    return toRemotePoint(frame.left + shown.x, frame.top + shown.y, frame, pictureSizeRef.current, browserRef.current?.screenSize ?? null);
   };
   const toRemote = (event: PositionedEvent) => {
     const point = elementPoint(event, boxRef.current!);
@@ -369,15 +387,33 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     const touch = new TouchGestureController({
       mapPoint: (x, y) => remoteAt(x, y, toLocal(0, 0).frame),
       move: (x, y) => browserRef.current?.move(x, y),
-      button: (down, x, y) => {
+      button: (down, x, y, domButton) => {
         if (down && lifted) showTap(box, lifted.x, lifted.y);
-        browserRef.current?.button(down, 0, x, y);
+        browserRef.current?.button(down, domButton ?? 0, x, y);
       },
       scroll: (dx, dy) => {
-        browserRef.current?.scroll(dx, dy);
+        // The page moves as far as the finger did over it, however small or zoomed the picture is.
+        const frame = toLocal(0, 0).frame;
+        const k = remotePerPixel(frame, pictureSizeRef.current, browserRef.current?.screenSize ?? null) / zoomRef.current.scale;
+        browserRef.current?.scroll(dx * k, dy * k);
+      },
+      zoom: (factor, x, y, dx, dy) => {
+        const frame = toLocal(0, 0).frame;
+        zoomRef.current.pinch(factor, x - frame.left, y - frame.top, dx, dy, frame);
+        applyZoom();
+      },
+      zoomEnd: () => {
+        zoomRef.current.settle();
+        applyZoom();
+      },
+      zoomed: () => zoomRef.current.zoomed,
+      held: (x, y) => {
+        const at = rotatedRef.current ? rotate(x, y, boxFrame()) : { x, y };
+        showTap(box, at.x, at.y, true);
       },
       activity: () => callbacks.current.onInput?.(),
     });
+    touchRef.current = touch;
     const capture = (e: PointerEvent) => {
       try { box.setPointerCapture(e.pointerId); } catch { /* A synthetic or already-ended pointer. */ }
     };
@@ -402,7 +438,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
         `box ${box.clientWidth}×${box.clientHeight} rect ${n(rect.left)},${n(rect.top)} ${n(rect.width)}×${n(rect.height)} rotated ${rotatedRef.current}`,
         `frame ${frame.width}×${frame.height} from ${frame.source} · element ${video.videoWidth}×${video.videoHeight} · rtp ${stats?.width ?? '?'}×${stats?.height ?? '?'}`,
         `screen ${mode ? `${mode.width}×${mode.height}@${mode.rate}${squarePixels(mode) || browserRef.current?.anyShapeOffered ? '' : ' (not 16:9: this image tags the stream with 11:10 pixels)'}` : '?'}`,
-        `picture ${n(picture.left)},${n(picture.top)} ${n(picture.width)}×${n(picture.height)} · laid out ${video.offsetLeft},${video.offsetTop} ${video.offsetWidth}×${video.offsetHeight} fit ${getComputedStyle(video).objectFit}`,
+        `picture ${n(picture.left)},${n(picture.top)} ${n(picture.width)}×${n(picture.height)} · laid out ${video.offsetLeft},${video.offsetTop} ${video.offsetWidth}×${video.offsetHeight} fit ${getComputedStyle(video).objectFit} · zoom ${zoomRef.current.scale.toFixed(2)}`,
         `viewport ${vv ? `offset ${n(vv.offsetLeft)},${n(vv.offsetTop)} page ${n(vv.pageLeft)},${n(vv.pageTop)} ${n(vv.width)}×${n(vv.height)} scale ${vv.scale.toFixed(2)}` : 'none'}`,
         `scroll ${window.scrollX},${window.scrollY} inner ${window.innerWidth}×${window.innerHeight} client ${document.documentElement.clientWidth}×${document.documentElement.clientHeight}`,
       ] });
@@ -672,12 +708,15 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
           ? { position: 'absolute', left: '50%', top: '50%', width: boxSize.height, height: boxSize.width, transform: 'translate(-50%, -50%) rotate(90deg)', pointerEvents: 'none' }
           : { position: 'absolute', inset: 0, pointerEvents: 'none' }}
       >
-        {/* Share the input mapping's fit instead of letting the video compositor choose a
-            separate intrinsic fit during a WebRTC resize. */}
-        <video ref={videoRef} autoPlay playsInline muted={muted} style={{ position: 'absolute', display: 'block', ...(fitted ? { left: fitted.left, top: fitted.top, width: fitted.width, height: fitted.height } : { inset: 0, width: '100%', height: '100%' }), maxWidth: 'none', objectFit: 'fill', pointerEvents: 'none' }} />
-        {/* Input diagnostics: the rectangle input is mapped to. A picture painted smaller than it
-            (bars inside the outline) means the compositor fitted the frame a second time. */}
-        {debug && fitted ? <div aria-hidden data-testid="input-picture" style={{ position: 'absolute', left: fitted.left, top: fitted.top, width: fitted.width, height: fitted.height, boxSizing: 'border-box', border: '1px dashed #ff2fd0', pointerEvents: 'none' }} /> : null}
+        {/* Pinch zoom: its transform is set directly (applyZoom), not on each render. */}
+        <div ref={zoomLayerRef} style={{ position: 'absolute', inset: 0, transformOrigin: '0 0', pointerEvents: 'none' }}>
+          {/* Share the input mapping's fit instead of letting the video compositor choose a
+              separate intrinsic fit during a WebRTC resize. */}
+          <video ref={videoRef} autoPlay playsInline muted={muted} style={{ position: 'absolute', display: 'block', ...(fitted ? { left: fitted.left, top: fitted.top, width: fitted.width, height: fitted.height } : { inset: 0, width: '100%', height: '100%' }), maxWidth: 'none', objectFit: 'fill', pointerEvents: 'none' }} />
+          {/* Input diagnostics: the rectangle input is mapped to. A picture painted smaller than it
+              (bars inside the outline) means the compositor fitted the frame a second time. */}
+          {debug && fitted ? <div aria-hidden data-testid="input-picture" style={{ position: 'absolute', left: fitted.left, top: fitted.top, width: fitted.width, height: fitted.height, boxSizing: 'border-box', border: '1px dashed #ff2fd0', pointerEvents: 'none' }} /> : null}
+        </div>
       </div>
       {dragging ? <div aria-hidden style={{ position: 'absolute', inset: 0, pointerEvents: 'none', outline: '2px dashed currentColor', outlineOffset: -6, opacity: 0.6 }} /> : null}
       {debug && debugInfo ? (
