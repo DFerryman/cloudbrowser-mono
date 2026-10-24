@@ -82,10 +82,10 @@ index 1a0c71e..a5e1343 100644
  	if manager.config.Estimator.Enabled {
 diff --git a/server/internal/webrtc/retransmit.go b/server/internal/webrtc/retransmit.go
 new file mode 100644
-index 0000000..49bdbf9
+index 0000000..a197e04
 --- /dev/null
 +++ b/server/internal/webrtc/retransmit.go
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,110 @@
 +package webrtc
 +
 +import (
@@ -106,9 +106,14 @@ index 0000000..49bdbf9
 +// 2.5 Mbit/s bottleneck, no frame was decoded for 20 s. Within the budget a loss is repaired as
 +// before; beyond it a resend is skipped, and the viewer asks again or, once the frame is too old,
 +// asks for a keyframe instead.
++//
++// A quarter, not half: the viewer steps down to the lowest level (800 kbit/s) on a slow link, and
++// half of it with a 300 kbit/s floor let the stream and its resends reach 1.2 Mbit/s, more than a
++// 1 Mbit/s link carries, so after an overload the picture stayed frozen at that level for 4-16 s.
++// A quarter with a 100 kbit/s floor keeps the lowest level and its resends to 1 Mbit/s at most.
 +const (
-+	retransmitShare   = 0.5
-+	retransmitMinRate = 300_000 / 8 // bytes per second
++	retransmitShare   = 0.25
++	retransmitMinRate = 100_000 / 8 // bytes per second
 +	retransmitBurst   = 12_000      // bytes, about ten packets
 +	rateWindow        = 500 * time.Millisecond
 +)
@@ -193,10 +198,10 @@ index 0000000..49bdbf9
 +}
 diff --git a/server/internal/webrtc/retransmit_test.go b/server/internal/webrtc/retransmit_test.go
 new file mode 100644
-index 0000000..1fff068
+index 0000000..9a05ee0
 --- /dev/null
 +++ b/server/internal/webrtc/retransmit_test.go
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,74 @@
 +package webrtc
 +
 +import (
@@ -230,7 +235,7 @@ index 0000000..1fff068
 +		t.Fatalf("resent %d of 100 packets at once, want about ten", resent)
 +	}
 +
-+	// half the stream's rate (1 Mbit/s = 125 kB/s) refills it: 100 ms allows another ten
++	// a quarter of the stream's rate (500 kbit/s = 62.5 kB/s) refills it: 100 ms allows another five
 +	now = now.Add(100 * time.Millisecond)
 +	resent = 0
 +	for seq := uint16(50); seq < 150; seq++ {
@@ -238,8 +243,23 @@ index 0000000..1fff068
 +			resent++
 +		}
 +	}
-+	if resent < 9 || resent > 11 {
-+		t.Fatalf("resent %d after 100 ms, want about ten", resent)
++	if resent < 4 || resent > 6 {
++		t.Fatalf("resent %d after 100 ms, want about five", resent)
++	}
++
++	// a stream gone still keeps the floor (100 kbit/s = 12.5 kB/s): 120 ms allows one
++	now = now.Add(2 * time.Second)
++	b.allow(packet(50), 1250, now)
++	b.tokens = 0
++	now = now.Add(120 * time.Millisecond)
++	resent = 0
++	for seq := uint16(50); seq < 60; seq++ {
++		if b.allow(packet(seq), 1250, now) {
++			resent++
++		}
++	}
++	if resent != 1 {
++		t.Fatalf("resent %d of a still stream after 120 ms, want one", resent)
 +	}
 +
 +	// new packets are never held back by resends, across the sequence number wrap too
