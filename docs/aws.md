@@ -111,11 +111,12 @@ offers a direct pair would need a short host or srflx wait back, or neko could s
 relay before the direct pair is checked.
 
 **Chrome's playout delay.** `images/browser/neko/playout-delay.patch` puts the RTP playout-delay
-header extension on every video packet. On a short path (the shortest round trip in the viewer's
-last 20 receiver reports under 150 ms) it asks for a minimum and maximum of 0, which turns on
-Chrome's low-latency renderer: each frame shows as soon as it is decoded. On a longer path it
-sends 0 and 1 s, which leaves Chrome its usual smoothing; until the first report, frames are
-smoothed. Chrome keeps the last value it received, so the extension is never left out. Without it
+header extension with a minimum and maximum of 0 on every video packet while the path is short
+(the shortest round trip in the viewer's last 20 receiver reports under 150 ms), which turns on
+Chrome's low-latency renderer: each frame shows as soon as it is decoded. A longer path, and
+every connection until its first report, gets no extension, so Chrome smooths as it always did.
+Chrome keeps the last value it received, so a connection whose path turns long after being short
+(a new route) is sent 0 and 1 s instead, which on the pipeline rig behaved like no extension. Without it
 Chrome holds frames in a jitter buffer sized for smooth playback, which on a clean path grew over
 the first minutes (a frame's wait from arrival to display went from 20 to 83 ms). With the real
 viewer through a TURN relay, scrolling a 1080p page, median glass-to-glass delay: clean 60 ms path

@@ -17,10 +17,10 @@ index db21f4f..2dc8df9 100644
  	if manager.config.Estimator.Enabled {
 diff --git a/server/internal/webrtc/playoutdelay.go b/server/internal/webrtc/playoutdelay.go
 new file mode 100644
-index 0000000..779dec1
+index 0000000..38a7f80
 --- /dev/null
 +++ b/server/internal/webrtc/playoutdelay.go
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,159 @@
 +package webrtc
 +
 +import (
@@ -33,11 +33,11 @@ index 0000000..779dec1
 +	"github.com/pion/rtp"
 +)
 +
-+// Every video packet carries the playout-delay header extension. On a short path it asks for a
-+// minimum and maximum of 0, so a viewer shows each frame as soon as it is decoded (Chrome's
-+// low-latency renderer); on a long one it lets Chrome smooth playback as it would without the
-+// extension. Chrome keeps the last value it received, so the long-path value is sent, not the
-+// extension left out.
++// On a short path every video packet carries the playout-delay header extension with a minimum
++// and maximum of 0, so a viewer shows each frame as soon as it is decoded (Chrome's low-latency
++// renderer). A long path gets no extension, and Chrome smooths playback as it always did; only
++// one that was short before (a new route) gets 0 and 1 s instead, since Chrome keeps the last
++// value it received.
 +//
 +// Without it, Chrome holds frames in a jitter buffer sized for smooth playback, and keeps them in
 +// step with the audio of the same stream: delay the user feels on every keystroke. Measured with
@@ -66,7 +66,7 @@ index 0000000..779dec1
 +// minimum and maximum delay, 12 bits each in units of 10 ms
 +var (
 +	playoutDelayNow    = []byte{0, 0, 0}    // 0 and 0: show each frame as soon as it is decoded
-+	playoutDelaySmooth = []byte{0, 0, 0x64} // 0 and 1 s: Chrome's own smoothing
++	playoutDelaySmooth = []byte{0, 0, 0x64} // 0 and 1 s: Chrome's own smoothing, after 0 and 0
 +)
 +
 +type playoutDelayFactory struct{}
@@ -86,6 +86,9 @@ index 0000000..779dec1
 +	// shortPath: the shortest recent round trip is below playoutDelayShortPath. Until the first
 +	// report, frames are smoothed.
 +	shortPath atomic.Bool
++	// shown: packets have asked to show frames at once, which Chrome goes on doing until told
++	// otherwise.
++	shown atomic.Bool
 +}
 +
 +func (i *playoutDelayInterceptor) BindRTCPReader(reader interceptor.RTCPReader) interceptor.RTCPReader {
@@ -162,22 +165,27 @@ index 0000000..779dec1
 +		return writer
 +	}
 +	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, attributes interceptor.Attributes) (int, error) {
-+		delay := playoutDelaySmooth
++		var delay []byte
 +		if i.shortPath.Load() {
++			i.shown.Store(true)
 +			delay = playoutDelayNow
++		} else if i.shown.Load() {
++			delay = playoutDelaySmooth
 +		}
-+		if err := header.SetExtension(id, delay); err != nil {
-+			return 0, err
++		if delay != nil {
++			if err := header.SetExtension(id, delay); err != nil {
++				return 0, err
++			}
 +		}
 +		return writer.Write(header, payload, attributes)
 +	})
 +}
 diff --git a/server/internal/webrtc/playoutdelay_test.go b/server/internal/webrtc/playoutdelay_test.go
 new file mode 100644
-index 0000000..c1db150
+index 0000000..c65d0dd
 --- /dev/null
 +++ b/server/internal/webrtc/playoutdelay_test.go
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,109 @@
 +package webrtc
 +
 +import (
@@ -245,9 +253,14 @@ index 0000000..c1db150
 +		now = now.Add(time.Second)
 +	}
 +
-+	// before any report: smoothed
-+	if d := send(); !bytes.Equal(d, playoutDelaySmooth) {
++	// before any report: no extension, Chrome's smoothing as without the patch
++	if d := send(); d != nil {
 +		t.Fatalf("before a report: %v", d)
++	}
++	// a long path from the start: still none
++	report(230 * time.Millisecond)
++	if d := send(); d != nil {
++		t.Fatalf("long path: %v", d)
 +	}
 +	// a short path: shown at once
 +	report(60 * time.Millisecond)
@@ -261,12 +274,13 @@ index 0000000..c1db150
 +	if d := send(); !bytes.Equal(d, playoutDelayNow) {
 +		t.Fatalf("a full queue: %v", d)
 +	}
-+	// a long path, once the short round trips left the window: smoothed again
++	// a long route after a short one, once the short round trips left the window: Chrome is told
++	// to smooth again, since it keeps the last value
 +	for range playoutDelayWindow {
 +		report(230 * time.Millisecond)
 +	}
 +	if d := send(); !bytes.Equal(d, playoutDelaySmooth) {
-+		t.Fatalf("long path: %v", d)
++		t.Fatalf("long route after a short one: %v", d)
 +	}
 +
 +	// a stream that did not negotiate the extension passes unchanged
