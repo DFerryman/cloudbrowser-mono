@@ -45,6 +45,25 @@ describe('PictureZoom', () => {
     zoom.clamp({ width: 300, height: 600 });
     expect([zoom.x, zoom.y]).toEqual([-300, -600]);
   });
+
+  it('keeps a letterboxed picture centred until it fills the frame, and its edges inside after', () => {
+    // A 16:9 desktop on an upright phone: painted 400×225 across the middle of a 400×800 frame.
+    const picture = { left: 0, top: 287.5, width: 400, height: 225 };
+    const zoom = new PictureZoom();
+    zoom.pinch(2, 200, 400, 0, 0, frame, picture);
+    // 800×450 shown: wider than the frame, still shorter, so centred vertically.
+    expect([zoom.x, zoom.y]).toEqual([-200, -400]);
+    zoom.pinch(1, 200, 400, 0, -300, frame, picture);
+    expect(zoom.y).toBe(-400);
+    zoom.pinch(1, 200, 400, 5000, 0, frame, picture);
+    expect(zoom.x).toBe(0);
+    zoom.pinch(2, 200, 400, 0, 0, frame, picture);
+    // 1600×900 shown: taller than the frame, so its top and bottom edges never come inside it.
+    zoom.pinch(1, 200, 400, 0, 5000, frame, picture);
+    expect(zoom.y).toBe(-4 * 287.5);
+    zoom.pinch(1, 200, 400, 0, -5000, frame, picture);
+    expect(zoom.y).toBe(800 - 4 * 512.5);
+  });
 });
 
 describe('remotePerPixel', () => {

@@ -112,6 +112,8 @@ export class TouchGestureController {
       this.startHold();
     } else {
       this.cancelHold();
+      // Anything but a plain tap ends a run of taps: the next one clicks where it lands.
+      this.lastTap = null;
       if (this.mode === 'tap' || this.mode === null) this.mode = this.pointers.size === 2 ? 'two' : 'scroll';
       else if (this.mode === 'two') this.mode = 'scroll';
     }
@@ -140,6 +142,7 @@ export class TouchGestureController {
     if (this.mode === 'tap') {
       if (moved <= this.threshold) return;
       this.cancelHold();
+      this.lastTap = null;
       this.mode = 'scroll';
     } else if (this.mode === 'held') {
       if (moved <= this.threshold) return;
@@ -153,8 +156,6 @@ export class TouchGestureController {
       if (moved > this.threshold || pinched > this.threshold) this.twoMoved = true;
       if (this.options.zoom && (pinched > this.threshold * PINCH_SLACK || (this.options.zoomed?.() && moved > this.threshold))) {
         this.mode = 'zoom';
-        // Zooming maps the same spot on the screen elsewhere: the next tap is a new one.
-        this.lastTap = null;
       } else if (moved > this.threshold && (!this.options.zoom || pinched < moved)) {
         this.mode = 'scroll';
       } else {
@@ -222,14 +223,12 @@ export class TouchGestureController {
         this.click(tap);
       }
     } else if (this.mode === 'held' && lastFinger && this.pressAt) {
-      this.lastTap = null;
       this.click(this.pressAt, 2);
     } else if (this.mode === 'drag' && this.pressAt) {
       this.options.button(false, this.pressAt.x, this.pressAt.y);
       this.pressAt = null;
       this.options.activity?.();
     } else if (this.mode === 'two' && lastFinger && this.twoAt && !this.twoMoved && Date.now() - this.startedAt <= TWO_FINGER_TAP_MS) {
-      this.lastTap = null;
       this.click(this.twoAt, 2);
     }
     this.remove(event.pointerId);
@@ -276,6 +275,7 @@ export class TouchGestureController {
       const remote = this.options.mapPoint(anchor.x, anchor.y);
       if (!remote) return;
       this.mode = 'held';
+      this.lastTap = null;
       this.pressAt = remote;
       this.options.held?.(anchor.x, anchor.y);
       this.options.activity?.();

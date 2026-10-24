@@ -281,6 +281,28 @@ describe('TouchGestureController with time', () => {
     expect(downs).toEqual([[200, 200], [200, 200], [200, 200], [220, 208], [600, 200]]);
   });
 
+  it('clicks where a tap lands when a scroll or a hold came between it and the last one', () => {
+    const { gestures, button } = setup();
+    const tap = (id: number, x: number, y: number) => {
+      gestures.pointerDown(pointer(id, x, y));
+      gestures.pointerUp(pointer(id, x, y));
+    };
+    tap(1, 100, 100);
+    gestures.pointerDown(pointer(2, 110, 100));
+    gestures.pointerMove(pointer(2, 110, 80));
+    gestures.pointerUp(pointer(2, 110, 80));
+    tap(3, 110, 100);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS + 1);
+    tap(4, 100, 100);
+    gestures.pointerDown(pointer(5, 100, 100));
+    gestures.pointerDown(pointer(6, 140, 100));
+    gestures.pointerUp(pointer(6, 140, 100));
+    gestures.pointerUp(pointer(5, 100, 100));
+    tap(7, 104, 100);
+    const downs = button.mock.calls.filter(([down]) => down).map(([, x, y]) => [x, y]);
+    expect(downs).toEqual([[200, 200], [220, 200], [200, 200], [240, 200], [208, 200]]);
+  });
+
   it('does not right-click two fingers that stayed down long or moved', () => {
     const { gestures, button } = setup();
     gestures.pointerDown(pointer(1, 40, 100));

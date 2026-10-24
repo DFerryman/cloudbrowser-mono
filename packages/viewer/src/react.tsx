@@ -148,6 +148,11 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
   const applyZoom = () => {
     if (zoomLayerRef.current) zoomLayerRef.current.style.transform = zoomRef.current.transform;
   };
+  /** Keeps the zoomed picture over the view (frame: the picture's unturned frame). */
+  const fitZoom = (frame: { width: number; height: number }) => {
+    zoomRef.current.clamp(frame, pictureRect({ left: 0, top: 0, ...frame }, pictureSizeRef.current));
+    applyZoom();
+  };
   const callbacks = useRef({ getConnectInfo, onState, onDiagnostic, onStats, onQualityReport, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation, onMutedChange });
   callbacks.current = { getConnectInfo, onState, onDiagnostic, onStats, onQualityReport, onInput, onKeyboardChange, onInputError, onVideo, onTransfer, onAutomation, onMutedChange };
   /** Plays the current stream again if it is paused; a pointer press calls it, as a user gesture. */
@@ -330,8 +335,7 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       const size = { width: entry.contentRect.width, height: entry.contentRect.height };
       setBoxSize(size);
       fitViewport(size);
-      zoomRef.current.clamp(rotatedRef.current ? { width: size.height, height: size.width } : size);
-      applyZoom();
+      fitZoom(rotatedRef.current ? { width: size.height, height: size.width } : size);
     });
     ro.observe(box);
     return () => ro.disconnect();
@@ -343,6 +347,10 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
     zoomRef.current.reset();
     applyZoom();
   }, [rotated]);
+  // A picture of another shape is painted elsewhere in the frame.
+  useEffect(() => {
+    if (boxSize) fitZoom(rotated ? { width: boxSize.height, height: boxSize.width } : boxSize);
+  }, [pictureSize.width, pictureSize.height]);
 
   /**
    * Input is mapped in the box's own coordinates (elementPoint), never through client coordinates
@@ -399,7 +407,8 @@ export const RemoteBrowserView = forwardRef<RemoteBrowserHandle, RemoteBrowserVi
       },
       zoom: (factor, x, y, dx, dy) => {
         const frame = toLocal(0, 0).frame;
-        zoomRef.current.pinch(factor, x - frame.left, y - frame.top, dx, dy, frame);
+        const picture = pictureRect({ left: 0, top: 0, width: frame.width, height: frame.height }, pictureSizeRef.current);
+        zoomRef.current.pinch(factor, x - frame.left, y - frame.top, dx, dy, frame, picture);
         applyZoom();
       },
       zoomEnd: () => {
