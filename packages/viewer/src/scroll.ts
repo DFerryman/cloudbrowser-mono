@@ -3,7 +3,10 @@
 const PIXELS_PER_TICK = 120;
 const GESTURE_GAP_MS = 250;
 
-/** Keep precision-trackpad fractions between frames, with an immediate first wheel click. */
+/**
+ * Keep precision-trackpad fractions between frames, with an immediate first wheel click that the
+ * movement after it pays for: a gesture scrolls as far as it moved, within half a click.
+ */
 export class ScrollAccumulator {
   private x = 0;
   private y = 0;
@@ -34,8 +37,10 @@ export class ScrollAccumulator {
       // Reversing direction must not first pay back a previous movement's remainder.
       const changed = direction !== 0 && direction !== Math.sign(delta);
       const sum = (changed ? 0 : remainder) + delta;
-      const ticks = Math.trunc(sum / PIXELS_PER_TICK);
-      if (!ticks && (first || changed)) return { remainder: 0, ticks: Math.sign(delta) };
+      let ticks = Math.trunc(sum / PIXELS_PER_TICK);
+      // Sent at once, the first click is owed by the remainder: forgiving it gained every gesture a
+      // click, and rounding the end up another (a 60 px swipe moved the page 240 px).
+      if (!ticks && (first || changed)) ticks = Math.sign(delta);
       return { remainder: sum - ticks * PIXELS_PER_TICK, ticks };
     };
     const x = axis(this.x, dx, this.directionX);
@@ -55,9 +60,25 @@ export class ScrollAccumulator {
     this.directionX = this.directionY = 0;
   }
 
+  /**
+   * A pause: commit the partial click now, as finish does, but keep the gesture, so movement that
+   * resumes soon pays for that click instead of starting with another free one.
+   */
+  settle(): { x: number; y: number } {
+    // Half a click or more in the direction of travel is one click; less, or what the first
+    // click still owes, none.
+    const click = (remainder: number, direction: number) =>
+      direction !== 0 && Math.sign(remainder) === direction && Math.abs(remainder) >= PIXELS_PER_TICK / 2 ? direction : 0;
+    const x = click(this.x, this.directionX);
+    const y = click(this.y, this.directionY);
+    this.x -= x * PIXELS_PER_TICK;
+    this.y -= y * PIXELS_PER_TICK;
+    return { x: x ? -x : 0, y: y ? -y : 0 };
+  }
+
   /** Commit the last partial click before the target, modifier, or input kind changes. */
   finish(): { x: number; y: number } {
-    const result = { x: this.x ? -Math.sign(this.x) : 0, y: this.y ? -Math.sign(this.y) : 0 };
+    const result = this.settle();
     this.reset();
     return result;
   }

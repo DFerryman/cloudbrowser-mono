@@ -577,7 +577,11 @@ export class RemoteBrowser {
     const ticks = this.scrollAccumulator.consume(dx, dy, controlKey);
     if (ticks.x || ticks.y) this.sendInput({ event: EV.CONTROL_SCROLL, payload: { delta_x: ticks.x, delta_y: ticks.y, control_key: controlKey } });
     if (this.scrollTimer) clearTimeout(this.scrollTimer);
-    this.scrollTimer = setTimeout(() => this.finishScroll(), 100);
+    this.scrollTimer = setTimeout(() => {
+      this.scrollTimer = null;
+      const settled = this.scrollAccumulator.settle();
+      if (settled.x || settled.y) this.sendInput({ event: EV.CONTROL_SCROLL, payload: { delta_x: settled.x, delta_y: settled.y, control_key: this.scrollControl } });
+    }, 100);
   }
 
   finishScroll(): void {
