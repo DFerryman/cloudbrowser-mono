@@ -6,7 +6,7 @@ index db21f4f..2dc8df9 100644
  	// bound resends (retransmit.go); first, so that it sits below the NACK responder
  	registry.Add(retransmitLimiterFactory{})
  
-+	// show each frame as soon as it is decoded (playoutdelay.go)
++	// on a short path, show each frame as soon as it is decoded (playoutdelay.go)
 +	if err := engine.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: playoutDelayURI}, webrtc.RTPCodecTypeVideo); err != nil {
 +		return nil, nil, err
 +	}
@@ -17,47 +17,141 @@ index db21f4f..2dc8df9 100644
  	if manager.config.Estimator.Enabled {
 diff --git a/server/internal/webrtc/playoutdelay.go b/server/internal/webrtc/playoutdelay.go
 new file mode 100644
-index 0000000..3b56d74
+index 0000000..779dec1
 --- /dev/null
 +++ b/server/internal/webrtc/playoutdelay.go
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,151 @@
 +package webrtc
 +
 +import (
++	"sync"
++	"sync/atomic"
++	"time"
++
 +	"github.com/pion/interceptor"
++	"github.com/pion/rtcp"
 +	"github.com/pion/rtp"
 +)
 +
-+// Every video packet carries the playout-delay header extension with a minimum and maximum of 0,
-+// so a viewer shows each frame as soon as it is decoded (Chrome's low-latency renderer).
++// Every video packet carries the playout-delay header extension. On a short path it asks for a
++// minimum and maximum of 0, so a viewer shows each frame as soon as it is decoded (Chrome's
++// low-latency renderer); on a long one it lets Chrome smooth playback as it would without the
++// extension. Chrome keeps the last value it received, so the long-path value is sent, not the
++// extension left out.
 +//
 +// Without it, Chrome holds frames in a jitter buffer sized for smooth playback, and keeps them in
 +// step with the audio of the same stream: delay the user feels on every keystroke. Measured with
 +// the real viewer through a TURN relay, 1080p page scrolling, median glass-to-glass delay:
-+// - clean path, 60 ms round trip, 2 minutes: 178 ms without, 123 ms with. Without, the time from
-+//   a frame's arrival to its display grew from 20 to 83 ms; with, it stayed at 6-30 ms.
-+// - 2 Mbit/s, 200 ms queue: 323-326 ms without, 150-169 ms with; frozen time the same.
-+// - 230 ms round trip with 60 ms of jitter and 1% loss: 276-365 ms without, 246-270 ms with, but
-+//   a fifth to a third more time frozen (Chrome's count, 10.5-10.9 s a minute without, 12.7-14.7 s
-+//   with): a frame that waits for a resend is no longer hidden behind a longer buffer.
-+// A lost packet still holds its frame until it is resent: only the wait for frames that already
-+// arrived goes. A viewer that does not offer the extension is unaffected.
++//   - clean path, 60 ms round trip, 2 minutes: 178 ms without, 123 ms with. Without, the time from
++//     a frame's arrival to its display grew from 20 to 83 ms; with, it stayed at 6-30 ms.
++//   - 2 Mbit/s, 200 ms queue: 321-333 ms without, 129-169 ms with; frozen time the same.
++//   - 230 ms round trip with 60 ms of jitter and 1% loss: frozen (gaps over 0.3 s) 10-15 s a minute
++//     with 0,0 against 2-4 s without, and the 90th percentile of delay worse (408-525 against
++//     341-392 ms): a frame that waits for a resend is no longer hidden behind the buffer, and a
++//     resend takes a round trip. A maximum of 1 s behaved there like no extension.
++//
++// The path is told by its shortest round trip (playoutDelayWindow), from the viewer's receiver
++// reports: a queue that fills on a slow link lengthens the round trip, but not the path.
++// A viewer that does not offer the extension is unaffected.
 +const playoutDelayURI = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay"
 +
-+// minimum and maximum delay, 12 bits each in units of 10 ms: both 0
-+var playoutDelayZero = []byte{0, 0, 0}
++const (
++	// playoutDelayShortPath is the longest round trip for which frames are shown at once.
++	playoutDelayShortPath = 150 * time.Millisecond
++	// playoutDelayWindow is how many receiver reports (about one a second) the shortest round
++	// trip is taken over.
++	playoutDelayWindow = 20
++)
++
++// minimum and maximum delay, 12 bits each in units of 10 ms
++var (
++	playoutDelayNow    = []byte{0, 0, 0}    // 0 and 0: show each frame as soon as it is decoded
++	playoutDelaySmooth = []byte{0, 0, 0x64} // 0 and 1 s: Chrome's own smoothing
++)
 +
 +type playoutDelayFactory struct{}
 +
 +func (playoutDelayFactory) NewInterceptor(_ string) (interceptor.Interceptor, error) {
-+	return &playoutDelayInterceptor{}, nil
++	return &playoutDelayInterceptor{now: time.Now}, nil
 +}
 +
++// playoutDelayInterceptor is one peer connection's: it reads the round trip from the viewer's
++// receiver reports, and sets each video packet's playout delay from it.
 +type playoutDelayInterceptor struct {
 +	interceptor.NoOp
++	now func() time.Time
++
++	mu    sync.Mutex
++	trips []time.Duration // the last playoutDelayWindow round trips
++	// shortPath: the shortest recent round trip is below playoutDelayShortPath. Until the first
++	// report, frames are smoothed.
++	shortPath atomic.Bool
 +}
 +
-+func (*playoutDelayInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
++func (i *playoutDelayInterceptor) BindRTCPReader(reader interceptor.RTCPReader) interceptor.RTCPReader {
++	return interceptor.RTCPReaderFunc(func(b []byte, a interceptor.Attributes) (int, interceptor.Attributes, error) {
++		n, a, err := reader.Read(b, a)
++		if err != nil {
++			return n, a, err
++		}
++		if a == nil {
++			a = make(interceptor.Attributes)
++		}
++		packets, perr := a.GetRTCPPackets(b[:n])
++		if perr != nil {
++			return n, a, nil
++		}
++		arrived := i.now()
++		for _, p := range packets {
++			var reports []rtcp.ReceptionReport
++			switch p := p.(type) {
++			case *rtcp.ReceiverReport:
++				reports = p.Reports
++			case *rtcp.SenderReport:
++				reports = p.Reports
++			}
++			for _, r := range reports {
++				if trip, ok := roundTrip(arrived, r); ok {
++					i.observe(trip)
++				}
++			}
++		}
++		return n, a, nil
++	})
++}
++
++// roundTrip is the round trip a reception report tells (RFC 3550, 6.4.1): from the sender report
++// it names to the report's arrival, less the time the viewer held it.
++func roundTrip(arrived time.Time, r rtcp.ReceptionReport) (time.Duration, bool) {
++	if r.LastSenderReport == 0 {
++		return 0, false
++	}
++	// the middle 32 bits of the NTP time: units of 1/65536 s
++	s := float64(arrived.UnixNano())/1e9 + 2208988800
++	now := uint32(uint64(s*65536) & 0xFFFFFFFF)
++	units := now - r.LastSenderReport - r.Delay
++	trip := time.Duration(uint64(units) * uint64(time.Second) / 65536)
++	if units >= 1<<31 || trip > 10*time.Second {
++		return 0, false // a clock step, or a report from before one
++	}
++	return trip, true
++}
++
++func (i *playoutDelayInterceptor) observe(trip time.Duration) {
++	i.mu.Lock()
++	defer i.mu.Unlock()
++	i.trips = append(i.trips, trip)
++	if len(i.trips) > playoutDelayWindow {
++		i.trips = i.trips[len(i.trips)-playoutDelayWindow:]
++	}
++	shortest := i.trips[0]
++	for _, t := range i.trips[1:] {
++		shortest = min(shortest, t)
++	}
++	i.shortPath.Store(shortest < playoutDelayShortPath)
++}
++
++func (i *playoutDelayInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
 +	var id uint8
 +	for _, e := range info.RTPHeaderExtensions {
 +		if e.URI == playoutDelayURI {
@@ -68,7 +162,11 @@ index 0000000..3b56d74
 +		return writer
 +	}
 +	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, attributes interceptor.Attributes) (int, error) {
-+		if err := header.SetExtension(id, playoutDelayZero); err != nil {
++		delay := playoutDelaySmooth
++		if i.shortPath.Load() {
++			delay = playoutDelayNow
++		}
++		if err := header.SetExtension(id, delay); err != nil {
 +			return 0, err
 +		}
 +		return writer.Write(header, payload, attributes)
@@ -76,43 +174,110 @@ index 0000000..3b56d74
 +}
 diff --git a/server/internal/webrtc/playoutdelay_test.go b/server/internal/webrtc/playoutdelay_test.go
 new file mode 100644
-index 0000000..419c8cf
+index 0000000..c1db150
 --- /dev/null
 +++ b/server/internal/webrtc/playoutdelay_test.go
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,103 @@
 +package webrtc
 +
 +import (
 +	"bytes"
 +	"testing"
++	"time"
 +
 +	"github.com/pion/interceptor"
++	"github.com/pion/rtcp"
 +	"github.com/pion/rtp"
 +)
 +
-+func TestPlayoutDelayOnNegotiatedStreams(t *testing.T) {
-+	var got *rtp.Header
++// compactNTP is the middle 32 bits of t's NTP time, as a sender report's echo carries it.
++func compactNTP(t time.Time) uint32 {
++	s := float64(t.UnixNano())/1e9 + 2208988800
++	return uint32(uint64(s*65536) & 0xFFFFFFFF)
++}
++
++func TestRoundTripFromReceptionReport(t *testing.T) {
++	sent := time.Unix(1792850000, 250_000_000)
++	arrived := sent.Add(330 * time.Millisecond)
++	// the viewer held the sender report 100 ms before reporting: 230 ms on the path
++	trip, ok := roundTrip(arrived, rtcp.ReceptionReport{LastSenderReport: compactNTP(sent), Delay: 65536 / 10})
++	if !ok || trip < 229*time.Millisecond || trip > 231*time.Millisecond {
++		t.Fatalf("round trip %v %v", trip, ok)
++	}
++	// no sender report yet
++	if _, ok := roundTrip(arrived, rtcp.ReceptionReport{}); ok {
++		t.Fatal("a report without a sender report told a round trip")
++	}
++	// a report naming a sender report from after its arrival (a clock step)
++	if _, ok := roundTrip(sent, rtcp.ReceptionReport{LastSenderReport: compactNTP(arrived)}); ok {
++		t.Fatal("a negative round trip was taken")
++	}
++}
++
++func TestPlayoutDelayFollowsTheShortestRoundTrip(t *testing.T) {
++	now := time.Unix(1792850000, 0)
++	i := &playoutDelayInterceptor{now: func() time.Time { return now }}
++	var got []byte
 +	sink := interceptor.RTPWriterFunc(func(header *rtp.Header, _ []byte, _ interceptor.Attributes) (int, error) {
-+		got = header
++		got = header.GetExtension(5)
 +		return 0, nil
 +	})
-+	i := &playoutDelayInterceptor{}
-+
-+	// negotiated: every packet carries min 0, max 0
 +	w := i.BindLocalStream(&interceptor.StreamInfo{RTPHeaderExtensions: []interceptor.RTPHeaderExtension{{URI: playoutDelayURI, ID: 5}}}, sink)
-+	if _, err := w.Write(&rtp.Header{}, nil, nil); err != nil {
-+		t.Fatal(err)
++	send := func() []byte {
++		if _, err := w.Write(&rtp.Header{}, nil, nil); err != nil {
++			t.Fatal(err)
++		}
++		return got
 +	}
-+	if ext := got.GetExtension(5); !bytes.Equal(ext, []byte{0, 0, 0}) {
-+		t.Fatalf("extension %v", ext)
++	var reports [][]byte
++	r := i.BindRTCPReader(interceptor.RTCPReaderFunc(func(b []byte, a interceptor.Attributes) (int, interceptor.Attributes, error) {
++		return copy(b, reports[0]), a, nil
++	}))
++	report := func(trip time.Duration) {
++		raw, err := (&rtcp.ReceiverReport{SSRC: 1, Reports: []rtcp.ReceptionReport{{SSRC: 2, LastSenderReport: compactNTP(now.Add(-trip))}}}).Marshal()
++		if err != nil {
++			t.Fatal(err)
++		}
++		reports = [][]byte{raw}
++		if _, _, err := r.Read(make([]byte, 1500), nil); err != nil {
++			t.Fatal(err)
++		}
++		now = now.Add(time.Second)
 +	}
 +
-+	// not negotiated: packets pass unchanged
-+	w = i.BindLocalStream(&interceptor.StreamInfo{}, sink)
-+	if _, err := w.Write(&rtp.Header{}, nil, nil); err != nil {
-+		t.Fatal(err)
++	// before any report: smoothed
++	if d := send(); !bytes.Equal(d, playoutDelaySmooth) {
++		t.Fatalf("before a report: %v", d)
 +	}
-+	if got.Extension {
-+		t.Fatalf("extension added to a stream that did not negotiate it")
++	// a short path: shown at once
++	report(60 * time.Millisecond)
++	if d := send(); !bytes.Equal(d, playoutDelayNow) {
++		t.Fatalf("short path: %v", d)
++	}
++	// a queue filling on the same path does not count as a long one
++	for range 5 {
++		report(400 * time.Millisecond)
++	}
++	if d := send(); !bytes.Equal(d, playoutDelayNow) {
++		t.Fatalf("a full queue: %v", d)
++	}
++	// a long path, once the short round trips left the window: smoothed again
++	for range playoutDelayWindow {
++		report(230 * time.Millisecond)
++	}
++	if d := send(); !bytes.Equal(d, playoutDelaySmooth) {
++		t.Fatalf("long path: %v", d)
++	}
++
++	// a stream that did not negotiate the extension passes unchanged
++	got = nil
++	plain := i.BindLocalStream(&interceptor.StreamInfo{}, interceptor.RTPWriterFunc(func(header *rtp.Header, _ []byte, _ interceptor.Attributes) (int, error) {
++		if header.Extension {
++			t.Fatal("extension added to a stream that did not negotiate it")
++		}
++		return 0, nil
++	}))
++	if _, err := plain.Write(&rtp.Header{}, nil, nil); err != nil {
++		t.Fatal(err)
 +	}
 +}
