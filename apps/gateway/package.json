@@ -7,7 +7,7 @@
     "dev": "wrangler dev --port 8790 --persist-to ../../.wrangler/state",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "deploy": "wrangler deploy"
+    "deploy": "node ../../scripts/deploy-api-main.mjs --check && node ../../scripts/deploy-workers.mjs --only cloudbrowser-gateway"
   },
   "dependencies": {
     "@cloudbrowser/contracts": "workspace:*",
