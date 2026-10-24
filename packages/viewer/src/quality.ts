@@ -51,9 +51,26 @@ const SEVERE_LOSS = 0.2;
  */
 const FIT_SHARE = 0.9;
 const UPGRADE_AFTER_MS = 12_000;
-/** A step up that turns bad this soon was too much: wait twice as long before the next one. */
+/**
+ * A level on trial (a step up, or the level a stream starts at) that turns bad this soon was too
+ * much; a step up then waits twice as long before that level is tried again.
+ */
 const PROBATION_MS = 20_000;
 const MAX_UPGRADE_WAIT_MS = 120_000;
+/**
+ * Where a stream starts when this device has held no level recently (levelMemory): one below
+ * full. It is the same full-size picture at the same 30 fps on 1.8 instead of 3 Mbit/s, so a path
+ * that carries about 2 Mbit/s starts without the 6–7 s of frozen picture full gave it before the
+ * first step down (2 Mbit/s and 60 ms locally); a good path gets full after the usual quiet spell.
+ */
+export const START_QUALITY: VideoQuality = 'high';
+/** A level carried this long without trouble, outside any trial, is the one a device holds. */
+const HOLD_MS = 20_000;
+/** A device moves between networks: what it held stands for its next stream for an hour. */
+const MEMORY_MS = 60 * 60_000;
+const MEMORY_KEY = 'cloudbrowser.viewer.level';
+/** How often an unchanged held level is written again, to keep it from expiring. */
+const MEMORY_REFRESH_MS = 60_000;
 const LOSS_LIMIT = 0.06;
 const FPS_SHARE = 0.5;
 /**
@@ -88,6 +105,35 @@ const ILLEGIBLE_READINGS = 2;
  */
 const SCREEN_SETTLE_MS = 10_000;
 
+/** The level a stream starts at: what this device held last (levelMemory), else START_QUALITY; never above the preference. */
+export function startingQuality(preferred: VideoQuality, held: VideoQuality | null): VideoQuality {
+  return VIDEO_QUALITIES[Math.max(VIDEO_QUALITIES.indexOf(preferred), VIDEO_QUALITIES.indexOf(held ?? START_QUALITY))]!;
+}
+
+let lastHeld: { quality: VideoQuality; at: number } | null = null;
+
+/** The level this device last held (QualityController.held), in localStorage where there is one. */
+export const levelMemory = {
+  read(now: number): VideoQuality | null {
+    try {
+      const saved = JSON.parse(globalThis.localStorage?.getItem(MEMORY_KEY) ?? 'null') as { quality?: unknown; at?: unknown } | null;
+      if (!saved || typeof saved.at !== 'number' || !(VIDEO_QUALITIES as readonly unknown[]).includes(saved.quality)) return null;
+      return now - saved.at >= 0 && now - saved.at < MEMORY_MS ? saved.quality as VideoQuality : null;
+    } catch {
+      return null; // Storage blocked or unreadable: the stream starts at START_QUALITY.
+    }
+  },
+  write(quality: VideoQuality, now: number) {
+    if (lastHeld?.quality === quality && now - lastHeld.at < MEMORY_REFRESH_MS) return;
+    lastHeld = { quality, at: now };
+    try {
+      globalThis.localStorage?.setItem(MEMORY_KEY, JSON.stringify({ quality, at: now }));
+    } catch {
+      // Not remembered: the next stream starts at START_QUALITY.
+    }
+  },
+};
+
 /**
  * Chooses the live view's picture level from what the viewer receives. neko 3.0.8's own
  * estimator compares its bandwidth estimate in bits with the stream rate in bytes, so it only
@@ -96,7 +142,9 @@ const SCREEN_SETTLE_MS = 10_000;
  * lowers the sharpest level allowed (STREAM.latency.caps). Below that, it steps down after a
  * few seconds of dropped frames, loss, stutter or growing delay (sooner when nothing decodes at
  * all), and probes one level up again after a quiet period, never above the preferred level or
- * the path's cap; a probe the path cannot carry is undone at its first bad reading. It never goes below
+ * the path's cap. A level on trial (a probe, or the level a stream starts at) that the path
+ * plainly cannot carry ends at its first reading, settling or not, and a failed probe's level
+ * waits longer before it is tried again. It never goes below
  * the lowest level whose picture keeps text readable (MIN_LEGIBLE_SCALE): a clear picture at a
  * lower frame rate is worth more than a smooth one nobody can read.
  */
@@ -106,8 +154,10 @@ export class QualityController {
   private bad = 0;
   private goodSince: number | null = null;
   private settleUntil: number;
-  private upgradeWait = UPGRADE_AFTER_MS;
-  private lastUpgradeAt: number | null = null;
+  /** How long a level waits, after a quiet spell begins, before it is tried: by index into VIDEO_QUALITIES. */
+  private readonly waits = VIDEO_QUALITIES.map(() => UPGRADE_AFTER_MS);
+  /** The level on trial since `at`: a step up (probe), or the level a stream started at. */
+  private trial: { at: number; probe: boolean } | null;
   private rtts: number[] = [];
   /** Index into VIDEO_QUALITIES of the sharpest level the path's round trip allows; 0 is no cap. */
   private latencyCap = 0;
@@ -123,19 +173,30 @@ export class QualityController {
     this.max = VIDEO_QUALITIES.indexOf(maxQuality);
     this.level = Math.max(this.max, VIDEO_QUALITIES.indexOf(current));
     this.settleUntil = now + SETTLE_MS;
+    this.trial = { at: now, probe: false };
   }
 
   get quality(): VideoQuality {
     return VIDEO_QUALITIES[this.level]!;
   }
 
-  /** The stream restarted (a new connection): give it time before judging it. */
+  /** The stream restarted (a new connection): give it time before judging it, and try its level again. */
   restart(now: number) {
     this.rtts = [];
     this.bad = 0;
     this.carried = null;
     this.goodSince = null;
     this.settleUntil = now + SETTLE_MS;
+    this.trial = { at: now, probe: false };
+  }
+
+  /**
+   * The level this stream has carried without trouble for HOLD_MS, outside any trial; null
+   * otherwise, and while a lower preference holds it there: the path may carry more.
+   */
+  held(now: number): VideoQuality | null {
+    if (this.level === this.max && this.max > 0) return null;
+    return this.trial === null && this.goodSince !== null && now - this.goodSince >= HOLD_MS ? this.quality : null;
   }
 
   /** The remote desktop changed size (or a new session reported its own): see SCREEN_SETTLE_MS. */
@@ -149,7 +210,16 @@ export class QualityController {
     const bestRtt = this.rtts.length ? Math.min(...this.rtts) : null;
     if (s.rttMs !== null) this.rtts = [...this.rtts, s.rttMs].slice(-RTT_WINDOW);
     this.updateLatencyCap();
-    if (s.at < this.settleUntil) return null;
+    const trial = this.trial !== null && s.at - this.trial.at < PROBATION_MS ? this.trial : null;
+    // Far more sent than arrives: the shaper drops a fifth of it, or its queue keeps growing.
+    const overloaded = s.lossRate > SEVERE_LOSS || this.queueBuilding(s.rttMs, bestRtt);
+    if (s.at < this.settleUntil) {
+      // A level on trial that the path plainly cannot carry ends now: waiting out the settling
+      // time only keeps its picture frozen (about 6 s per failed probe of full at 2 Mbit/s).
+      if (!trial || !overloaded) return null;
+      if (s.kbps != null && s.kbps > 0) this.carried = Math.min(this.carried ?? Infinity, s.kbps);
+      return this.stepDown(s.at);
+    }
     const scale = s.at < this.scaleSettleUntil ? null : s.scale;
     if (scale != null && scale < MIN_LEGIBLE_SCALE && this.level > 0) {
       if (++this.illegible >= ILLEGIBLE_READINGS) {
@@ -175,26 +245,39 @@ export class QualityController {
       const congested = s.lossRate > LOSS_LIMIT || this.queueBuilding(s.rttMs, bestRtt);
       if (congested && s.kbps != null && s.kbps > 0) this.carried = Math.min(this.carried ?? Infinity, s.kbps);
       // A step up still on probation goes back at the first bad reading: it was too much, and
-      // every reading spent above what the path carries is a stalled picture.
-      const onProbation = this.lastUpgradeAt !== null && s.at - this.lastUpgradeAt < PROBATION_MS;
-      const needed = onProbation ? 1 : severe ? SEVERE_READINGS : BAD_READINGS;
-      const lowest = Math.max(this.max, this.floor);
-      if (++this.bad < needed || this.level >= lowest) return null;
-      this.stepUpFailed(s.at);
-      return this.move(Math.min(lowest, this.fitting(this.carried)), s.at);
+      // every reading spent above what the path carries is a stalled picture. So does a starting
+      // level the path plainly cannot carry.
+      const needed = trial && (trial.probe || overloaded) ? 1 : severe ? SEVERE_READINGS : BAD_READINGS;
+      if (++this.bad < needed) return null;
+      return this.stepDown(s.at);
     }
     this.bad = 0;
     this.carried = null;
     this.goodSince ??= s.at;
-    if (this.lastUpgradeAt !== null && s.at - this.lastUpgradeAt >= PROBATION_MS) {
-      this.lastUpgradeAt = null;
-      this.upgradeWait = UPGRADE_AFTER_MS;
+    if (this.trial && !trial) {
+      // The level held: a probe of it that later fails waits the usual time again.
+      if (this.trial.probe) this.waits[this.level] = UPGRADE_AFTER_MS;
+      this.trial = null;
     }
-    if (this.level > ceiling && s.at - this.goodSince >= this.upgradeWait) {
-      this.lastUpgradeAt = s.at;
-      return this.move(this.level - 1, s.at);
+    if (this.level > ceiling && s.at - this.goodSince >= this.waits[this.level - 1]!) {
+      this.move(this.level - 1, s.at);
+      this.trial = { at: s.at, probe: true };
+      return this.quality;
     }
     return null;
+  }
+
+  /**
+   * Down to the sharpest level that fits what the path carried, or one below. A failed probe goes
+   * no further back than the level it came from unless that does not fit either: right after
+   * the try, its backlog of resends and keyframes needs room (back to high from full at 2 Mbit/s
+   * stayed frozen another 6 s; medium recovered within a reading).
+   */
+  private stepDown(at: number): VideoQuality | null {
+    const lowest = Math.max(this.max, this.floor);
+    if (this.level >= lowest) return null;
+    this.stepUpFailed(at);
+    return this.move(Math.min(lowest, this.fitting(this.carried)), at);
   }
 
   /** One level down, or further: the sharpest level whose bitrate fits what the path carried. */
@@ -211,10 +294,16 @@ export class QualityController {
     return !!rising && rttMs !== null && bestRtt !== null && rttMs > bestRtt + Math.max(rising.minMs, bestRtt * rising.factor);
   }
 
-  /** A step down this soon after a step up means it was too much: wait twice as long next time. */
+  /**
+   * A step down this soon after a step up means it was too much: that level waits twice as long
+   * before its next try, however the levels below it fare. Any step down ends the trial.
+   */
   private stepUpFailed(at: number) {
-    if (this.lastUpgradeAt !== null && at - this.lastUpgradeAt < PROBATION_MS) this.upgradeWait = Math.min(this.upgradeWait * 2, MAX_UPGRADE_WAIT_MS);
-    this.lastUpgradeAt = null; // that step up is over; only a surviving one resets the wait
+    const trial = this.trial;
+    if (trial?.probe && at - trial.at < PROBATION_MS) {
+      this.waits[this.level] = Math.min(this.waits[this.level]! * 2, MAX_UPGRADE_WAIT_MS);
+    }
+    this.trial = null;
   }
 
   private updateLatencyCap() {
@@ -236,6 +325,7 @@ export class QualityController {
     this.carried = null;
     this.goodSince = null;
     this.settleUntil = now + SETTLE_MS;
+    this.trial = null;
     return this.quality;
   }
 }

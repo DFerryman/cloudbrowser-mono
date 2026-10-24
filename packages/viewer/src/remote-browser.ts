@@ -1,7 +1,7 @@
 import type { ControlState, GatewayToViewer, IceServer, LiveQualityReport } from '@cloudbrowser/contracts';
 import { ConnectionDiagnostic, ConnectionMediaSnapshot, STREAM, VIDEO_QUALITIES, type VideoQuality } from '@cloudbrowser/contracts';
 import { ANY_SHAPE_VIDEO, decode, EV, fitScreen, sameScreen, screenOf, shapedScreen, x11Button, type NekoMessage, type ScreenConfiguration, type SignalCandidate, type SignalProvide } from './neko.js';
-import { QualityController, type VideoPreference } from './quality.js';
+import { levelMemory, QualityController, startingQuality, type VideoPreference } from './quality.js';
 import { KEYSYM, keyIdentity, keysymFor, keysymForName, matchingKeyIdentity, unidentifiedKey, type KeyIdentityEvent } from './keyboard.js';
 import { readStats, type ViewerStats } from './stats.js';
 import { QualityWindow } from './quality-report.js';
@@ -61,7 +61,7 @@ export interface RemoteBrowserOptions {
   onAutomation?: (status: AutomationStatus) => void;
   /** Map Cmd → Ctrl and Option → Alt (macOS default, page 5). */
   macToPc?: boolean;
-  /** Picture quality; the sharpest level by default, adapting to the connection. */
+  /** Picture quality; the sharpest level by default, adapting to the connection (starting where this device held last, or one below). */
   video?: VideoPreference;
   /** The level neko streams now, whenever it changes. */
   onVideo?: (quality: VideoQuality) => void;
@@ -1027,8 +1027,11 @@ export class RemoteBrowser {
       this.sendNeko({ event: EV.SIGNAL_REQUEST, payload: { video: {}, audio: {} } });
       return;
     }
-    // The viewer chooses the level itself (QualityController); neko's estimator stays out.
-    if (this.video.auto) this.qualityController ??= new QualityController(this.video.quality, Date.now(), this.video.quality);
+    // The viewer chooses the level itself (QualityController); neko's estimator stays out. A new
+    // view starts where this device held last, or one below full (startingQuality).
+    if (this.video.auto) {
+      this.qualityController ??= new QualityController(this.video.quality, Date.now(), startingQuality(this.video.quality, levelMemory.read(Date.now())));
+    }
     this.qualityController?.restart(Date.now());
     const id = this.qualityController?.quality ?? this.video.quality;
     this.sendNeko({ event: EV.SIGNAL_REQUEST, payload: { video: { selector: { id, type: 'exact' }, auto: false }, audio: {} } });
@@ -1343,11 +1346,15 @@ export class RemoteBrowser {
     const ws = this.ws;
     const frameSequence = this.frameSequence;
     if (!pc || !ws || !this.mediaConnected || this.statsTimer || (!this.opts.onStats && !this.opts.onDiagnostic && !this.opts.onQualityReport && !this.video.auto)) return;
-    let previous: { bytes: number; at: number } | null = null;
+    // Readings start when the peer connects, before which no media can flow (DTLS): the first is
+    // a change from nothing, so the quality controller judges a starting level 2 s in, not 4 s,
+    // knowing what arrived (a 1 Mbit/s path goes straight to low).
+    const connectedAt = Date.now();
+    let previous: { bytes: number; at: number } | null = { bytes: 0, at: connectedAt };
     let pending = false;
     const interval = this.opts.statsIntervalMs ?? 2000;
     const current = () => this.pc === pc && this.ws === ws && this.frameSequence === frameSequence && this.mediaConnected;
-    this.counters = null;
+    this.counters = { lost: 0, received: 0, freezes: 0, frames: 0, at: connectedAt };
     this.statsTimer = setInterval(async () => {
       if (pending || !current()) return;
       pending = true;
@@ -1406,6 +1413,8 @@ export class RemoteBrowser {
       scale: stats.width && this.remoteScreen?.width ? stats.width / this.remoteScreen.width : null,
     });
     if (next) this.selectVideo(next);
+    const held = this.qualityController.held(at);
+    if (held) levelMemory.write(held, at);
   }
 
   /** A live, shown picture's reading goes into the quality report, sent once it covers the interval. */

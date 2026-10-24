@@ -107,8 +107,12 @@ function verdict(attempt) {
   const shown = attempt.viewer.some((e) => e.stage === 'first_frame');
   if (shown && !failed.length) return 'picture shown';
   if (shown) {
+    // An agent tunnel that drops and returns keeps the attempt: a picture after the last failure
+    // (events are in time order) is a recovery, not a loss.
     const f = failed.at(-1);
-    return `picture shown, then lost: ${f.code ?? 'unknown'}${f.issue ? ` (shown to the user as ${f.issue})` : ''}`;
+    const lost = `${f.code ?? 'unknown'}${f.issue ? ` (shown to the user as ${f.issue})` : ''}`;
+    const again = attempt.viewer.slice(attempt.viewer.indexOf(f) + 1).find((e) => e.stage === 'first_frame');
+    return again ? `picture shown, lost (${lost}), then shown again${again.peerSequence !== undefined ? ` on peer ${again.peerSequence}` : ''}` : `picture shown, then lost: ${lost}`;
   }
   if (!failed.length) return attempt.viewer.some((e) => e.stage === 'closed') ? `closed after ${reached.at(-1) ?? 'start'}` : `no failure reported (last stage ${reached.at(-1) ?? 'none'})`;
   const f = failed.at(-1);

@@ -1952,7 +1952,9 @@ describe('RemoteBrowser', () => {
       const ws = FakeWS.all[0]!;
       ws.push({ t: 'agent_online' });
       ws.push({ t: 'neko', data: { event: 'system/init', payload: { webrtc: { videos: ['full', 'high', 'medium', 'low'] } } } });
-      ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp', video: { id: 'full' } } } });
+      // A view starts one below full (startingQuality).
+      expect(ws.neko('signal/request')).toEqual([{ video: { selector: { id: 'high', type: 'exact' }, auto: false }, audio: {} }]);
+      ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer-sdp', video: { id: 'high' } } } });
       await vi.advanceTimersByTimeAsync(0);
       // The decoder waits for a keyframe: packets keep coming, frames do not (no framesPerSecond either).
       let received = 0;
@@ -1963,10 +1965,69 @@ describe('RemoteBrowser', () => {
       FakePC.last.connect();
       await vi.advanceTimersByTimeAsync(10_000);
       // Another level starts with a keyframe; a browser that reports no frame counts is left alone.
-      expect(ws.neko('signal/video')).toEqual(framesDecoded === 0 ? [{ selector: { id: 'high', type: 'exact' }, auto: false }] : []);
+      expect(ws.neko('signal/video')).toEqual(framesDecoded === 0 ? [{ selector: { id: 'medium', type: 'exact' }, auto: false }] : []);
       expect(b.currentState).toBe(requireFirstFrame ? 'connecting' : 'live');
       b.disconnect();
     }
+  });
+
+  it('starts a view one below full, or at the level this device held in the last hour, and remembers what holds', async () => {
+    vi.useFakeTimers();
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) });
+    const start = async () => {
+      const { b } = setup([], { video: { quality: 'full', auto: true } });
+      await b.connect();
+      const ws = FakeWS.all[0]!;
+      ws.push({ t: 'agent_online' });
+      ws.push({ t: 'neko', data: { event: 'system/init', payload: { webrtc: { videos: ['full', 'high', 'medium', 'low'] } } } });
+      return { b, ws, level: (ws.neko('signal/request')[0] as { video: { selector: { id: string } } }).video.selector.id };
+    };
+    try {
+      const first = await start();
+      expect(first.level).toBe('high');
+      first.ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer', video: { id: 'high' } } } });
+      await vi.advanceTimersByTimeAsync(0);
+      let frames = 0;
+      FakePC.last.getStats = async () => {
+        frames += 60;
+        return new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', packetsReceived: frames * 10, packetsLost: 0, bytesReceived: frames * 12_000, framesDecoded: frames, framesPerSecond: 30 }]]);
+      };
+      FakePC.last.connect();
+      // A healthy path: full after the quiet spell, held once it has carried it for 20 s past its trial.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(first.ws.neko('signal/video')).toEqual([{ selector: { id: 'full', type: 'exact' }, auto: false }]);
+      expect(JSON.parse(store.get('cloudbrowser.viewer.level')!)).toEqual({ quality: 'full', at: expect.any(Number) });
+      first.b.disconnect();
+      expect((await start()).level).toBe('full');
+      store.set('cloudbrowser.viewer.level', JSON.stringify({ quality: 'low', at: Date.now() - 30 * 60_000 }));
+      expect((await start()).level).toBe('low');
+      // A level held over an hour ago, or anything unreadable, says nothing about today's path.
+      store.set('cloudbrowser.viewer.level', JSON.stringify({ quality: 'low', at: Date.now() - 61 * 60_000 }));
+      expect((await start()).level).toBe('high');
+      store.set('cloudbrowser.viewer.level', '{');
+      expect((await start()).level).toBe('high');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('judges the starting level from its first reading, 2 s after the peer connects', async () => {
+    vi.useFakeTimers();
+    const { b } = setup([], { video: { quality: 'full', auto: true } });
+    await b.connect();
+    const ws = FakeWS.all[0]!;
+    ws.push({ t: 'agent_online' });
+    ws.push({ t: 'neko', data: { event: 'system/init', payload: { webrtc: { videos: ['full', 'high', 'medium', 'low'] } } } });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer', video: { id: 'high' } } } });
+    await vi.advanceTimersByTimeAsync(0);
+    // A 1 Mbit/s path under high: three in four packets lost in the first 2 s, 0.96 Mbit/s
+    // arriving. Medium (1.2) does not fit; low does.
+    FakePC.last.getStats = async () => new Map([['v', { id: 'v', type: 'inbound-rtp', kind: 'video', packetsReceived: 200, packetsLost: 600, bytesReceived: 240_000, framesDecoded: 4 }]]);
+    FakePC.last.connect();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(ws.neko('signal/video')).toEqual([{ selector: { id: 'low', type: 'exact' }, auto: false }]);
+    b.disconnect();
   });
 
   it('recovers picture quality before the first frame without enabling input or reporting live early', async () => {
@@ -1978,7 +2039,7 @@ describe('RemoteBrowser', () => {
     const ws = FakeWS.all[0]!;
     ws.push({ t: 'agent_online' });
     ws.push({ t: 'neko', data: { event: 'system/init', payload: { webrtc: { videos: ['full', 'high', 'medium', 'low'] } } } });
-    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer', video: { id: 'full' } } } });
+    ws.push({ t: 'neko', data: { event: 'signal/provide', payload: { sdp: 'offer', video: { id: 'high' } } } });
     await vi.advanceTimersByTimeAsync(0);
     const pc = FakePC.last;
     let received = 0;
@@ -1990,7 +2051,7 @@ describe('RemoteBrowser', () => {
     pc.ontrack({ streams: [{ getTracks: () => [track] }], track });
     pc.connect();
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(ws.neko('signal/video')).toEqual([{ selector: { id: 'high', type: 'exact' }, auto: false }]);
+    expect(ws.neko('signal/video')).toEqual([{ selector: { id: 'medium', type: 'exact' }, auto: false }]);
     expect(pc.getStats).toHaveBeenCalledTimes(5);
     expect(onStats).toHaveBeenCalledTimes(5);
     expect(states).not.toContain('live');
@@ -2023,7 +2084,9 @@ describe('RemoteBrowser', () => {
     await vi.advanceTimersByTimeAsync(connectDelay);
     FakePC.last.connect();
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(ws.neko('signal/video')).toHaveLength(1);
+    // Nothing decodes: a step down after two readings, and once the start has settled (a late
+    // peer), another after the next two.
+    expect(ws.neko('signal/video')).toHaveLength(connectDelay ? 2 : 1);
     await vi.advanceTimersByTimeAsync(10_000 - connectDelay - 1);
     expect(states.at(-1)).toBe('connecting');
     await vi.advanceTimersByTimeAsync(1);

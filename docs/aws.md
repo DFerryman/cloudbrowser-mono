@@ -80,8 +80,12 @@ round trip risen 300 ms above the path's best of the last minute) goes straight 
 level whose constant bitrate fits 90% of what actually arrived, instead of one level per few
 seconds; dropped frames or freezes alone step down one level. Nothing decoding or a fifth of the
 packets lost counts after two readings, anything else after three. A step up is tried after a
-quiet spell and undone at its first bad reading. The lowest level keeps the full resolution, so
-text stays readable.
+quiet spell and undone at its first bad reading; one the path plainly cannot carry (a fifth of
+the packets lost, or a growing queue) is undone at its first reading even while the new level
+settles, and that level then waits twice as long (12 s up to 2 min) before its next try, however
+the levels below it fare. A view starts at the level this device last held for 20 s, if within
+the hour, else at high, one below full: on a 2 Mbit/s path full froze the first 6–7 s. The
+lowest level keeps the full resolution, so text stays readable.
 
 **neko's resends and keyframes.** The browser image rebuilds neko's server from the pinned
 release with `images/browser/neko/keyframes-and-resends.patch`, for every browser: a viewer's
