@@ -235,6 +235,36 @@ watched. A high `double3` with a normal
 `double4` points at the media path (TURN, the VM's network); both high points at the viewer's
 own network, a VPN, or a detour such as mainland China's.
 
+### Relay transport test
+
+Viewers in mainland China (China Mobile, ASN 56048) reach Cloudflare's TURN in London or Seattle,
+even for a browser in `us-west-1`. On 24 October their picture was frozen 7-9% of the time against
+under 1% in Britain. Frames waited 0.3-0.7 s on average in the jitter buffer, mostly for resends
+of packets lost on the UDP leg to the relay. To see whether TCP or TLS to the relay does better,
+`GET /api/v1/sessions/{id}/connect` offers half of the view sessions from `CN` only the
+`?transport=tcp` and `turns:` relay addresses (`apps/api/src/turn.ts`). A session is in the TCP
+half when its id's last character, read as a base-36 digit, is odd. The web app's hex ids end in
+`1 3 5 7 9 b d f`, and a session keeps its half when it reconnects. Other countries are unchanged.
+
+`blob7` can't tell the halves apart, because some browsers leave the relay protocol out of their
+stats, so split by `blob9`:
+
+```sql
+SELECT if(substring(blob9, length(blob9), 1) IN ('1','3','5','7','9','b','d','f'), 'tcp', 'udp') AS half,
+  SUM(_sample_interval) AS reports,
+  quantileExactWeighted(0.5, double3, _sample_interval) AS rtt_ms,
+  SUM(double9 * _sample_interval) / SUM(double1 * _sample_interval) AS frozen,
+  quantileExactWeighted(0.5, double10, _sample_interval) AS jitter_buffer_ms,
+  quantileExactWeighted(0.5, double5, _sample_interval) AS fps
+FROM cloudbrowser_live_quality
+WHERE timestamp > NOW() - INTERVAL '1' DAY AND blob2 = 'CN' AND double3 >= 0 AND double9 >= 0
+GROUP BY half
+```
+
+Before the test, both halves were on UDP. Over 24 October they read 9.2% and 6.7% frozen, which
+is the noise to beat. If TCP or TLS wins, offer it to every viewer in the country. If it loses,
+remove the country from `TCP_RELAY_TEST_COUNTRIES`.
+
 ### What the VM saw
 
 A viewer's report says what arrived; the VM's side says whether the picture was made and sent at
